@@ -4,27 +4,59 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import type { Spawner } from '../spawner/index.js';
 import type { Session } from '../orchestrator/session.js';
 import type { Orchestrator } from '../orchestrator/index.js';
+import { WorkerCapError } from '../orchestrator/index.js';
+import {
+  sendMessage,
+  broadcast,
+  readInbox,
+  MessageError,
+  type MessagingDefaults,
+} from '../orchestrator/messaging.js';
+import { validateCwdUnderWorkspace } from '../../http/validation.js';
+import type { Config, EffortLevel, PermissionMode } from '../../config.js';
 
 /**
  * MCP team-comms tools (plan §10).
  *
- * Phase 2 implements the read-only tools (`team.whoami`, `team.list`) and
- * registers the rest as **explicit "not implemented" placeholders** so a
- * curious agent invoking `team.spawn_worker` etc. gets a clear, actionable
- * MCP error instead of a confusing "tool not found" / method-not-found.
+ * Phase 3 implements the full set:
+ *
+ *  - read tools (`team.whoami`, `team.list`)
+ *  - mailbox (`team.send_message`, `team.read_inbox`, `team.broadcast`)
+ *  - lead-only worker control (`team.spawn_worker`, `team.kill_worker`,
+ *    `team.kill_all_workers`)
  *
  * Authentication: every call is bound to a Session via `(orchestrator,
- * session)` resolved by `McpServer.routeRequest()` from the path
+ * session)` resolved by `McpServer.handle()` from the path
  * `/mcp/:orch_id/:session_secret`. Tool callbacks never see the secret.
+ *
+ * Lead-only enforcement: implemented in `requireLead(ctx)` which throws
+ * `McpError(InvalidRequest, 'PERMISSION_DENIED: ...')` when the calling
+ * session is not the orchestrator's lead. The lead-vs-worker check uses
+ * `ctx.session.id === ctx.orchestrator.leadSessionId` — same predicate as
+ * `team.whoami`'s `is_lead`.
  */
+
+const VALID_EFFORTS: ReadonlySet<string> = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
+const VALID_PERMS: ReadonlySet<string> = new Set([
+  'auto',
+  'acceptEdits',
+  'bypassPermissions',
+  'default',
+  'dontAsk',
+  'plan',
+]);
 
 export interface ToolContext {
   orchestrator: Orchestrator;
   session: Session;
   spawner: Spawner;
+  /** Server-wide config — needed for cwd validation and worker defaults. */
+  config: Config;
+  /** Messaging defaults derived from config — passed once for clarity. */
+  messagingDefaults: MessagingDefaults;
 }
 
-/** Active sessions only (plan §10). Mirrors Spawner.counters() classification. */
+/** Active sessions only (plan §10). */
 function isActive(s: Session): boolean {
   return s.status === 'running' || s.status === 'starting' || s.status === 'waiting';
 }
@@ -93,12 +125,20 @@ function ok<T extends object>(payload: T): {
   };
 }
 
-/** Phase 3 placeholder — explicit error, never a silent no-op. */
-function notImplementedPhase3(toolName: string): never {
-  throw new McpError(
-    ErrorCode.MethodNotFound,
-    `tool ${toolName} is registered but not implemented in Phase 2 — wired in Phase 3 (workers + mailbox)`,
-  );
+/**
+ * Throw a clean MCP `PERMISSION_DENIED` for a worker that calls a lead-only
+ * tool. We use `ErrorCode.InvalidRequest` (the SDK doesn't have a dedicated
+ * permission code in 1.29) and prefix the message with `PERMISSION_DENIED:`
+ * so the client can pattern-match without inspecting the numeric code.
+ */
+function requireLead(ctx: ToolContext, toolName: string): void {
+  const isLead = ctx.session.id === ctx.orchestrator.leadSessionId;
+  if (!isLead) {
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      `PERMISSION_DENIED: tool ${toolName} is lead-only; calling session ${ctx.session.id} is a worker`,
+    );
+  }
 }
 
 /**
@@ -121,6 +161,17 @@ function logCall(tool: string, ctx: ToolContext, ok: boolean, err?: string): voi
 }
 
 /**
+ * Translate a `MessageError` into an MCP error. Size violations map to
+ * `InvalidParams` (the SDK's closest equivalent to HTTP 413), and other
+ * validation failures to `InvalidRequest`.
+ */
+function throwAsMcp(err: MessageError): never {
+  const code =
+    err.code === 'MESSAGE_TOO_LARGE' ? ErrorCode.InvalidParams : ErrorCode.InvalidRequest;
+  throw new McpError(code, `${err.code}: ${err.message}`);
+}
+
+/**
  * Register all team-comms tools on a freshly-constructed `McpServer`.
  * `ctxResolver` returns the per-call ToolContext (a thunk because the same
  * SDK server may eventually be reused across requests in a future Phase).
@@ -129,7 +180,7 @@ export function registerTeamCommsTools(
   server: McpServer,
   ctxResolver: () => ToolContext,
 ): void {
-  // ---- team.whoami (Phase 2) -------------------------------------------
+  // ---- team.whoami -----------------------------------------------------
   server.registerTool(
     'team.whoami',
     {
@@ -153,7 +204,7 @@ export function registerTeamCommsTools(
     },
   );
 
-  // ---- team.list (Phase 2) ---------------------------------------------
+  // ---- team.list -------------------------------------------------------
   server.registerTool(
     'team.list',
     {
@@ -180,112 +231,298 @@ export function registerTeamCommsTools(
     },
   );
 
-  // ---- Phase 3 placeholders --------------------------------------------
-  // Each is registered with a real schema so `tools/list` advertises the
-  // contract Phase 3 will fulfill. The handler always throws an explicit
-  // McpError so an agent gets a usable, actionable response.
-
+  // ---- team.send_message -----------------------------------------------
   server.registerTool(
     'team.send_message',
     {
-      title: 'Send a direct message to a teammate (Phase 3)',
+      title: 'Send a direct message to a teammate',
       description:
-        '[NOT IMPLEMENTED — Phase 3] Pushes a message into the recipient\'s in-memory mailbox and pings their PTY if idle.',
+        'Pushes content into the recipient\'s in-memory mailbox. Idle recipients receive a short signal in their PTY. Bounded queue: oldest message is dropped past the cap.',
       inputSchema: {
-        to: z.string().describe('Recipient session id'),
+        to: z.string().describe('Recipient session id (use team.list to discover ids)'),
         content: z.string(),
       },
+      outputSchema: {
+        delivered: z.boolean(),
+        queue_size: z.number(),
+        dropped: z.boolean(),
+      },
     },
-    () => {
+    (args) => {
       const ctx = ctxResolver();
-      logCall('team.send_message', ctx, false, 'NOT_IMPLEMENTED_PHASE_3');
-      notImplementedPhase3('team.send_message');
+      const a = args as { to: string; content: string };
+      try {
+        const out = sendMessage(
+          {
+            orchestrator: ctx.orchestrator,
+            mailbox: ctx.orchestrator.mailbox,
+            defaults: ctx.messagingDefaults,
+          },
+          ctx.session.id,
+          a.to,
+          a.content,
+        );
+        logCall('team.send_message', ctx, true);
+        return ok({
+          delivered: out.delivered,
+          queue_size: out.queueSize,
+          dropped: out.dropped,
+        });
+      } catch (err) {
+        logCall(
+          'team.send_message',
+          ctx,
+          false,
+          err instanceof Error ? err.message : String(err),
+        );
+        if (err instanceof MessageError) throwAsMcp(err);
+        throw err;
+      }
     },
   );
 
+  // ---- team.read_inbox -------------------------------------------------
   server.registerTool(
     'team.read_inbox',
     {
-      title: 'Read and clear the calling session\'s inbox (Phase 3)',
+      title: 'Read and clear the calling session\'s inbox',
       description:
-        '[NOT IMPLEMENTED — Phase 3] Returns and atomically clears the calling session\'s in-memory mailbox.',
+        'Returns and atomically clears every message queued for the calling session. Returns an empty array if the inbox is empty.',
       inputSchema: {},
-    },
-    () => {
-      const ctx = ctxResolver();
-      logCall('team.read_inbox', ctx, false, 'NOT_IMPLEMENTED_PHASE_3');
-      notImplementedPhase3('team.read_inbox');
-    },
-  );
-
-  server.registerTool(
-    'team.broadcast',
-    {
-      title: 'Broadcast a message to all teammates (Phase 3)',
-      description:
-        '[NOT IMPLEMENTED — Phase 3] Pushes content into every teammate\'s mailbox (excluding sender).',
-      inputSchema: {
-        content: z.string(),
+      outputSchema: {
+        messages: z.array(
+          z.object({
+            id: z.string(),
+            from: z.string(),
+            content: z.string(),
+            ts: z.string(),
+          }),
+        ),
       },
     },
     () => {
       const ctx = ctxResolver();
-      logCall('team.broadcast', ctx, false, 'NOT_IMPLEMENTED_PHASE_3');
-      notImplementedPhase3('team.broadcast');
+      const messages = readInbox(
+        {
+          orchestrator: ctx.orchestrator,
+          mailbox: ctx.orchestrator.mailbox,
+          defaults: ctx.messagingDefaults,
+        },
+        ctx.session.id,
+      );
+      logCall('team.read_inbox', ctx, true);
+      return ok({ messages });
     },
   );
 
+  // ---- team.broadcast --------------------------------------------------
+  server.registerTool(
+    'team.broadcast',
+    {
+      title: 'Broadcast a message to all teammates',
+      description:
+        'Pushes the content into every active teammate\'s mailbox (excluding the sender). Idle recipients are signalled.',
+      inputSchema: {
+        content: z.string(),
+      },
+      outputSchema: {
+        delivered_to: z.array(z.string()),
+      },
+    },
+    (args) => {
+      const ctx = ctxResolver();
+      const a = args as { content: string };
+      try {
+        const out = broadcast(
+          {
+            orchestrator: ctx.orchestrator,
+            mailbox: ctx.orchestrator.mailbox,
+            defaults: ctx.messagingDefaults,
+          },
+          ctx.session.id,
+          a.content,
+        );
+        logCall('team.broadcast', ctx, true);
+        return ok({ delivered_to: out.delivered_to });
+      } catch (err) {
+        logCall(
+          'team.broadcast',
+          ctx,
+          false,
+          err instanceof Error ? err.message : String(err),
+        );
+        if (err instanceof MessageError) throwAsMcp(err);
+        throw err;
+      }
+    },
+  );
+
+  // ---- team.spawn_worker (lead-only) -----------------------------------
   server.registerTool(
     'team.spawn_worker',
     {
-      title: 'Spawn a new worker session (lead-only, Phase 3)',
+      title: 'Spawn a new worker session (lead-only)',
       description:
-        '[NOT IMPLEMENTED — Phase 3] Lead-only. Spawns a new claude PTY worker with its own mcp.json.',
+        'Lead-only. Spawns a new claude PTY worker with its own mcp.json. Returns the new session metadata. cwd defaults to the lead\'s cwd; model/effort/permissionMode default to the orchestrator\'s defaults.',
       inputSchema: {
         name: z.string(),
         role: z.string(),
         prompt: z.string(),
         cwd: z.string().optional(),
         model: z.string().optional(),
+        effort: z.string().optional(),
         permissionMode: z.string().optional(),
       },
+      outputSchema: {
+        session: z.object({
+          id: z.string(),
+          name: z.string(),
+          role: z.string(),
+          type: z.enum(['lead', 'worker']),
+          status: z.string(),
+          cwd: z.string(),
+          model: z.string(),
+          effort: z.string(),
+          permissionMode: z.string(),
+        }),
+      },
     },
-    () => {
+    async (args) => {
       const ctx = ctxResolver();
-      logCall('team.spawn_worker', ctx, false, 'NOT_IMPLEMENTED_PHASE_3');
-      notImplementedPhase3('team.spawn_worker');
+      requireLead(ctx, 'team.spawn_worker');
+      const a = args as {
+        name: string;
+        role: string;
+        prompt: string;
+        cwd?: string;
+        model?: string;
+        effort?: string;
+        permissionMode?: string;
+      };
+      // Prompt size cap (same envelope as the REST orchestrator-create
+      // surface, plan §13).
+      const promptBytes = Buffer.byteLength(a.prompt, 'utf8');
+      if (promptBytes > ctx.config.maxPromptSizeBytes) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `PROMPT_TOO_LARGE: ${promptBytes} bytes > ${ctx.config.maxPromptSizeBytes}`,
+        );
+      }
+      // Validate optional model/effort/permissionMode strings up-front so
+      // the agent gets a clean MCP error rather than a vague spawn failure.
+      if (a.effort != null && !VALID_EFFORTS.has(a.effort)) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `INVALID_EFFORT: must be one of ${[...VALID_EFFORTS].join('|')}`,
+        );
+      }
+      if (a.permissionMode != null && !VALID_PERMS.has(a.permissionMode)) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `INVALID_PERMISSION_MODE: must be one of ${[...VALID_PERMS].join('|')}`,
+        );
+      }
+      // cwd validation — reuse the same realpath check as the REST surface
+      // (plan §14). Defaults to the lead's cwd if omitted.
+      const cwdInput = a.cwd ?? ctx.orchestrator.lead?.cwd ?? null;
+      if (!cwdInput) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          'INVALID_CWD: lead has no cwd to inherit; pass cwd explicitly',
+        );
+      }
+      let resolvedCwd: string;
+      try {
+        resolvedCwd = await validateCwdUnderWorkspace(cwdInput, ctx.config.workspaceRoot);
+      } catch (err) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `INVALID_CWD: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+
+      try {
+        const worker = ctx.orchestrator.addWorker({
+          name: a.name,
+          role: a.role,
+          prompt: a.prompt,
+          cwd: resolvedCwd,
+          model: a.model,
+          effort: a.effort as EffortLevel | undefined,
+          permissionMode: a.permissionMode as PermissionMode | undefined,
+        });
+        logCall('team.spawn_worker', ctx, true);
+        const v = worker.toView();
+        return ok({
+          session: {
+            id: v.id,
+            name: v.name,
+            role: v.role,
+            type: v.type,
+            status: v.status,
+            cwd: v.cwd,
+            model: v.model,
+            effort: v.effort,
+            permissionMode: v.permissionMode,
+          },
+        });
+      } catch (err) {
+        logCall(
+          'team.spawn_worker',
+          ctx,
+          false,
+          err instanceof Error ? err.message : String(err),
+        );
+        if (err instanceof WorkerCapError) {
+          throw new McpError(ErrorCode.InvalidRequest, `${err.code}: ${err.message}`);
+        }
+        throw err;
+      }
     },
   );
 
+  // ---- team.kill_worker (lead-only) ------------------------------------
   server.registerTool(
     'team.kill_worker',
     {
-      title: 'Kill a worker session (lead-only, Phase 3)',
+      title: 'Kill a worker session (lead-only)',
       description:
-        '[NOT IMPLEMENTED — Phase 3] Lead-only. SIGTERM, 5s grace, SIGKILL.',
+        'Lead-only. SIGTERM, 5s grace, SIGKILL. Idempotent — unknown ids return { killed: false } rather than an error.',
       inputSchema: {
         id: z.string(),
+      },
+      outputSchema: {
+        killed: z.boolean(),
+      },
+    },
+    (args) => {
+      const ctx = ctxResolver();
+      requireLead(ctx, 'team.kill_worker');
+      const a = args as { id: string };
+      const killed = ctx.orchestrator.killWorker(a.id);
+      logCall('team.kill_worker', ctx, true);
+      return ok({ killed });
+    },
+  );
+
+  // ---- team.kill_all_workers (lead-only) -------------------------------
+  server.registerTool(
+    'team.kill_all_workers',
+    {
+      title: 'Kill all workers in the team (lead-only)',
+      description:
+        'Lead-only. Sweeps every worker, leaving the lead alone. Returns the array of session ids that were targeted.',
+      inputSchema: {},
+      outputSchema: {
+        killed: z.array(z.string()),
       },
     },
     () => {
       const ctx = ctxResolver();
-      logCall('team.kill_worker', ctx, false, 'NOT_IMPLEMENTED_PHASE_3');
-      notImplementedPhase3('team.kill_worker');
-    },
-  );
-
-  server.registerTool(
-    'team.kill_all_workers',
-    {
-      title: 'Kill all workers in the team (lead-only, Phase 3)',
-      description:
-        '[NOT IMPLEMENTED — Phase 3] Lead-only. Sweeps every worker, leaving the lead alone.',
-      inputSchema: {},
-    },
-    () => {
-      const ctx = ctxResolver();
-      logCall('team.kill_all_workers', ctx, false, 'NOT_IMPLEMENTED_PHASE_3');
-      notImplementedPhase3('team.kill_all_workers');
+      requireLead(ctx, 'team.kill_all_workers');
+      const killed = ctx.orchestrator.killAllWorkers();
+      logCall('team.kill_all_workers', ctx, true);
+      return ok({ killed });
     },
   );
 }

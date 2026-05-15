@@ -26,6 +26,12 @@ export type SessionStatus =
   | 'failed';
 
 export interface SessionInit {
+  /**
+   * Pre-minted session id. Optional — if absent, the constructor mints a
+   * fresh UUID v4. The Orchestrator pre-mints to be able to bake the id
+   * into the preamble before constructing the Session.
+   */
+  id?: string;
   orchestratorId: string;
   name: string;
   role: string;
@@ -151,7 +157,7 @@ export class Session extends EventEmitter {
 
   constructor(init: SessionInit) {
     super();
-    this.id = crypto.randomUUID();
+    this.id = init.id ?? crypto.randomUUID();
     this.sessionSecret = crypto.randomUUID();
     this.orchestratorId = init.orchestratorId;
     this.name = init.name;
@@ -242,6 +248,36 @@ export class Session extends EventEmitter {
   writeInput(data: string): void {
     if (!this.agent) return;
     this.agent.write(data);
+  }
+
+  /**
+   * Inject a short, single-line signal into the PTY (Phase 3 mailbox).
+   *
+   * Wrapped in `\n…\n` so it always lands on its own line — claude can be
+   * mid-write at any column. Best-effort: if the underlying agent has
+   * exited or the write throws, we swallow and log; the mailbox push is
+   * the source of truth, the signal is just a wake-up hint.
+   *
+   * Also written to the session log so a human attaching after the fact
+   * can see why the agent suddenly checked its inbox.
+   */
+  notifySignal(text: string): void {
+    if (!this.agent) {
+      // skipSpawn / no-process sessions still get the signal in their log
+      // for testability.
+      this._appendLog(`\n${text}\n`);
+      return;
+    }
+    const payload = `\n${text}\n`;
+    try {
+      this.agent.write(payload);
+    } catch (err) {
+      console.error('[swarm-os] notifySignal write failed:', err);
+    }
+    // Also append to the log so it shows up in replays / log dumps. We do
+    // NOT bump lastActivityAt here: the signal is server-injected, not
+    // agent-produced output, so it must not extend the busy window.
+    this._appendLog(payload);
   }
 
   resize(cols: number, rows: number): void {

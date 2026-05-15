@@ -3,6 +3,8 @@ import { eventBus } from '../../events.js';
 import type { Config } from '../../config.js';
 import type { Session } from '../orchestrator/session.js';
 
+export type { OrchestratorInit, StartOptions };
+
 export class SpawnerError extends Error {
   constructor(
     message: string,

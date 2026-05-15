@@ -27,7 +27,7 @@ const handle = startServer(config, spawner);
 // Boot ordering: main HTTP first (so /health is up if a healthcheck is
 // already pointed at us), then MCP. If MCP fails to bind we shut down
 // the main listener too — the system is non-functional without MCP.
-const mcp = new McpServer(spawner, config.mcpPort);
+const mcp = new McpServer(spawner, config.mcpPort, config);
 mcp.start().catch(async (err) => {
   console.error('[swarm-os] MCP server failed to start:', err);
   try {

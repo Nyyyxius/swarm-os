@@ -100,6 +100,13 @@ async function request<T>(
   return parsed as T;
 }
 
+export interface MailMessageView {
+  id: string;
+  from: string;
+  content: string;
+  ts: string;
+}
+
 export const api = {
   health: () => request<HealthView>('GET', '/health', undefined, { auth: false }),
   info: () => request<InfoView>('GET', '/info', undefined, { auth: false }),
@@ -123,6 +130,25 @@ export const api = {
   getSession: (id: string) => request<SessionView>('GET', `/sessions/${id}`),
   postSessionInput: (id: string, data: string) =>
     request<{ ok: boolean; bytes: number }>('POST', `/sessions/${id}/input`, { data }),
+  /**
+   * Phase 3: human → all sessions broadcast (`from: 'human'` mailbox push,
+   * idle PTY signal). Body `{ content }`.
+   */
+  broadcastToOrchestrator: (id: string, content: string) =>
+    request<{ delivered_to: string[] }>(
+      'POST',
+      `/orchestrators/${id}/broadcast`,
+      { content },
+    ),
+  /**
+   * Phase 3 (dev/UI): non-destructive peek at a session's mailbox. Used for
+   * the inbox-count badge on the OrchestratorView.
+   */
+  peekInbox: (orchestratorId: string, sessionId: string) =>
+    request<{ count: number; messages: MailMessageView[] }>(
+      'GET',
+      `/orchestrators/${orchestratorId}/sessions/${sessionId}/inbox`,
+    ),
   getWsTicket: (sessionId: string) =>
     request<{ ticket: string; ttlMs: number; kind: string; sessionId: string }>(
       'GET',

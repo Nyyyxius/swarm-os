@@ -6,6 +6,8 @@ import type { Spawner } from '../spawner/index.js';
 import type { Session } from '../orchestrator/session.js';
 import type { Orchestrator } from '../orchestrator/index.js';
 import { registerTeamCommsTools, type ToolContext } from './tools.js';
+import type { Config } from '../../config.js';
+import type { MessagingDefaults } from '../orchestrator/messaging.js';
 
 /**
  * Loopback addresses we accept for the MCP listen() bind. Plan §14 makes
@@ -55,11 +57,23 @@ function redactSecret(secret: string): string {
  */
 export class McpServer {
   private http: Server | null = null;
+  private readonly messagingDefaults: MessagingDefaults;
 
   constructor(
     private readonly spawner: Spawner,
     private readonly mcpPort: number,
-  ) {}
+    /**
+     * Optional. When omitted (test paths that pre-date Phase 3) we fall
+     * back to plan-default values so the listener still boots. Production
+     * code in `index.ts` always passes the loaded `Config`.
+     */
+    private readonly config?: Config,
+  ) {
+    this.messagingDefaults = {
+      maxMessageSizeBytes: this.config?.maxMessageSizeBytes ?? 16 * 1024,
+      idleThresholdMs: this.config?.idleThresholdMs ?? 2000,
+    };
+  }
 
   start(): Promise<void> {
     return new Promise((resolve, reject) => {
@@ -259,7 +273,20 @@ export class McpServer {
       }
     }
     if (!session) return null;
-    return { orchestrator: orch, session, spawner: this.spawner };
+    // Phase 3: thread `config` and `messagingDefaults` so worker tools can
+    // reuse the workspace-cwd validator and the mailbox helpers without
+    // looking at module-level globals.
+    return {
+      orchestrator: orch,
+      session,
+      spawner: this.spawner,
+      // We synthesise a minimal Config-shaped object when running the
+      // pre-Phase-3 test fixtures that didn't pass one in. The worker tools
+      // need the workspaceRoot + caps to honour the same envelopes as the
+      // REST surface — so production code MUST always pass `config`.
+      config: this.config ?? ({} as Config),
+      messagingDefaults: this.messagingDefaults,
+    };
   }
 }
 

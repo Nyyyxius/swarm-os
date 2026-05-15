@@ -5,8 +5,29 @@ import { api, getToken, setToken, type HealthView, type InfoView } from './api/c
 
 type Route = { kind: 'list' } | { kind: 'detail'; id: string };
 
+/**
+ * Parse the current URL hash into a Route. We use the URL fragment so deep
+ * links work without needing server-side rewrites:
+ *
+ *   #/orchestrators/<id>  → detail view
+ *   #/                    → list (also: empty hash)
+ */
+function parseHash(): Route {
+  const h = window.location.hash;
+  const m = /^#\/orchestrators\/([a-zA-Z0-9-]+)$/.exec(h);
+  if (m && m[1]) return { kind: 'detail', id: m[1] };
+  return { kind: 'list' };
+}
+
+function setHashRoute(route: Route): void {
+  const target = route.kind === 'list' ? '#/' : `#/orchestrators/${route.id}`;
+  if (window.location.hash !== target) {
+    window.location.hash = target;
+  }
+}
+
 export default function App() {
-  const [route, setRoute] = useState<Route>({ kind: 'list' });
+  const [route, setRoute] = useState<Route>(() => parseHash());
   const [token, setTokenState] = useState<string>(getToken());
   const [showSettings, setShowSettings] = useState(false);
   const [health, setHealth] = useState<HealthView | null>(null);
@@ -20,6 +41,19 @@ export default function App() {
   useEffect(() => {
     setTokenState(getToken());
   }, [showSettings]);
+
+  // Keep the hash in sync with state, AND honour back/forward navigation.
+  useEffect(() => {
+    setHashRoute(route);
+  }, [route]);
+
+  useEffect(() => {
+    function onHashChange() {
+      setRoute(parseHash());
+    }
+    window.addEventListener('hashchange', onHashChange);
+    return () => window.removeEventListener('hashchange', onHashChange);
+  }, []);
 
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">

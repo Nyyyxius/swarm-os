@@ -38,6 +38,19 @@ export interface Config {
    * with mode `0600` and unlinks on exit.
    */
   mcpRuntimeDir: string;
+  /** Phase 3: cap on workers per orchestrator. Lead is not counted. */
+  maxWorkersPerOrch: number;
+  /** Phase 3: cap on `team.send_message` content size. Bytes. */
+  maxMessageSizeBytes: number;
+  /** Phase 3: cap on per-session inbox queue length. Oldest dropped over cap. */
+  maxInboxSize: number;
+  /**
+   * Phase 3: idle threshold (ms) before a recipient session gets a PTY signal
+   * after a `team.send_message`. If `(now - lastActivityAt) >= this`, we
+   * inject the short signal; otherwise we stay silent so we don't garble the
+   * agent's current output stream.
+   */
+  idleThresholdMs: number;
   token: string;
   startedAt: string;
   version: string;
@@ -120,6 +133,15 @@ export function loadConfig(): Config {
   const maxPromptSizeKb = intEnv('SWARM_OS_MAX_PROMPT_SIZE_KB', 64);
   const claudeStartTimeoutS = intEnv('SWARM_OS_CLAUDE_START_TIMEOUT_S', 30);
 
+  // Phase 3 envelopes (plan §13).
+  const maxWorkersPerOrch = intEnv('SWARM_OS_MAX_WORKERS_PER_ORCH', 20);
+  const maxMessageSizeKb = intEnv('SWARM_OS_MAX_MESSAGE_SIZE_KB', 16);
+  const maxInboxSize = intEnv('SWARM_OS_MAX_INBOX_SIZE', 100);
+  // Idle detection threshold in ms. Plan §11 fixes the canonical value at
+  // 2000 ms ; we expose it as an env so tests can drop it to ~50 ms without
+  // racing.
+  const idleThresholdMs = intEnv('SWARM_OS_IDLE_THRESHOLD_MS', 2000);
+
   const workspaceRoot = path.resolve(process.env.SWARM_OS_WORKSPACE_ROOT ?? '/workspace');
   const dataDir = path.resolve(process.env.SWARM_OS_DATA_DIR ?? '/data');
 
@@ -161,9 +183,13 @@ export function loadConfig(): Config {
     dataDir,
     logsDir,
     mcpRuntimeDir,
+    maxWorkersPerOrch,
+    maxMessageSizeBytes: maxMessageSizeKb * 1024,
+    maxInboxSize,
+    idleThresholdMs,
     token,
     startedAt: new Date().toISOString(),
-    version: '0.2.0-phase2',
+    version: '0.3.0-phase3',
   };
   return cached;
 }

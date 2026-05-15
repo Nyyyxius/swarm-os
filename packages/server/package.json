@@ -8,7 +8,8 @@
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
     "start": "node dist/index.js",
-    "verify:phase2": "tsx scripts/verify-phase-2.ts"
+    "verify:phase2": "tsx scripts/verify-phase-2.ts",
+    "verify:phase3": "tsx scripts/verify-phase-3.ts"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

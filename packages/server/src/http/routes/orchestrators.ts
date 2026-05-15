@@ -2,6 +2,10 @@ import { Router, type Request, type Response } from 'express';
 import { Spawner, SpawnerError } from '../../modules/spawner/index.js';
 import { validateCwdUnderWorkspace } from '../validation.js';
 import type { Config, EffortLevel, PermissionMode } from '../../config.js';
+import {
+  broadcast as messagingBroadcast,
+  MessageError,
+} from '../../modules/orchestrator/messaging.js';
 
 const VALID_EFFORTS: ReadonlySet<string> = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const VALID_PERMS: ReadonlySet<string> = new Set([
@@ -175,6 +179,76 @@ export function createOrchestratorsRouter(spawner: Spawner, config: Config): Rou
     }
     res.json({ sessions: orch.listSessions().map((s) => s.toView()) });
   });
+
+  /**
+   * POST /orchestrators/:id/broadcast — push a `from: 'human'` message into
+   * every active teammate's mailbox (plan §9 + §11). The body is `{ content }`.
+   * Idle recipients get the same PTY signal as a peer-to-peer broadcast.
+   */
+  router.post(
+    '/orchestrators/:id/broadcast',
+    (req: Request<{ id: string }>, res: Response) => {
+      const orch = spawner.get(req.params.id);
+      if (!orch) {
+        res.status(404).json({ error: 'not found' });
+        return;
+      }
+      const body = (req.body ?? {}) as { content?: unknown };
+      if (typeof body.content !== 'string' || body.content.length === 0) {
+        res.status(400).json({ error: 'body.content must be a non-empty string' });
+        return;
+      }
+      try {
+        const out = messagingBroadcast(
+          {
+            orchestrator: orch,
+            mailbox: orch.mailbox,
+            defaults: {
+              maxMessageSizeBytes: config.maxMessageSizeBytes,
+              idleThresholdMs: config.idleThresholdMs,
+            },
+          },
+          'human',
+          body.content,
+        );
+        res.json({ delivered_to: out.delivered_to });
+      } catch (err) {
+        if (err instanceof MessageError) {
+          res.status(err.httpStatus).json({ error: err.message, code: err.code });
+          return;
+        }
+        res.status(500).json({
+          error: 'broadcast failed',
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+  );
+
+  /**
+   * GET /orchestrators/:id/sessions/:sid/inbox — non-destructive peek into a
+   * session's mailbox (plan §9, dev/UI helper). Returns `{ count, messages }`.
+   * Auth is the standard X-Auth-Token header on the parent router. Used by
+   * the OrchestratorView UI to surface "you have N unread" badges per
+   * session.
+   */
+  router.get(
+    '/orchestrators/:id/sessions/:sid/inbox',
+    (req: Request<{ id: string; sid: string }>, res: Response) => {
+      const orch = spawner.get(req.params.id);
+      if (!orch) {
+        res.status(404).json({ error: 'not found' });
+        return;
+      }
+      const session = orch.getSession(req.params.sid);
+      if (!session) {
+        res.status(404).json({ error: 'session not found in this orchestrator' });
+        return;
+      }
+      const messages = orch.mailbox.peek(req.params.sid);
+      res.json({ count: messages.length, messages });
+    },
+  );
 
   return router;
 }

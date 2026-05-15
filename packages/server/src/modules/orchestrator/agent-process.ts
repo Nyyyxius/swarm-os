@@ -127,42 +127,62 @@ export class PtyAgentProcess implements AgentProcess {
 }
 
 /**
- * Stub fake implementation. Phase 7 will turn this into a deterministic
- * scriptable agent for tests; for Phase 1 this exists only so the rest of
- * the codebase can depend on the abstraction without importing node-pty
- * in non-runtime contexts.
+ * Deterministic fake `AgentProcess` for Phase 3 tests + verify scripts.
  *
- * TODO(phase-7): implement scriptable output, exit codes, idle/active modes.
+ * - `_emitData(text)` lets a test pretend the underlying claude printed.
+ * - Every write the orchestrator made into the PTY is recorded in `writes`
+ *   so a test can assert that the mailbox PTY signal actually arrived.
+ * - `_simulateExit({ exitCode, signal })` reproduces a crash WITHOUT going
+ *   through `kill()` — the Session distinguishes user-requested stops from
+ *   crashes via `_stopRequested`, so we have to bypass `kill()` to drive
+ *   the worker-exit-anomaly path.
  */
+export interface FakeAgentOptions extends SpawnAgentOptions {
+  pid?: number;
+}
+
 export class FakeAgentProcess implements AgentProcess {
   private readonly dataListeners = new Set<(data: string) => void>();
   private readonly exitListeners = new Set<(info: AgentExitInfo) => void>();
-  private _pid = 1; // placeholder
+  private _pid: number;
   private exited = false;
+  /** Public test-only history of every write() the orchestrator made. */
+  readonly writes: string[] = [];
 
-  constructor(_opts: SpawnAgentOptions) {
-    // intentionally unused in Phase 1
+  constructor(opts: FakeAgentOptions) {
+    this._pid = opts.pid ?? 1;
   }
 
   get pid(): number {
     return this._pid;
   }
 
-  write(_data: string): void {
-    // no-op
+  write(data: string): void {
+    if (this.exited) return;
+    this.writes.push(data);
   }
 
   resize(_cols: number, _rows: number): void {
     // no-op
   }
 
-  kill(_signal?: NodeJS.Signals | number): void {
+  kill(signal?: NodeJS.Signals | number): void {
     if (this.exited) return;
     this.exited = true;
-    const info: AgentExitInfo = { exitCode: 143, signal: 15 };
-    for (const cb of this.exitListeners) cb(info);
-    this.dataListeners.clear();
-    this.exitListeners.clear();
+    const sig = typeof signal === 'string' ? signal : 'SIGTERM';
+    const info: AgentExitInfo =
+      sig === 'SIGKILL' ? { exitCode: 137, signal: 9 } : { exitCode: 143, signal: 15 };
+    setImmediate(() => {
+      for (const cb of this.exitListeners) {
+        try {
+          cb(info);
+        } catch (err) {
+          console.error('[swarm-os] FakeAgentProcess exit cb threw:', err);
+        }
+      }
+      this.dataListeners.clear();
+      this.exitListeners.clear();
+    });
   }
 
   onData(cb: (data: string) => void): Disposable {
@@ -182,5 +202,25 @@ export class FakeAgentProcess implements AgentProcess {
   /** Test helper — emit data as if the underlying process produced it. */
   _emitData(data: string): void {
     for (const cb of this.dataListeners) cb(data);
+  }
+
+  /**
+   * Test helper — simulate an arbitrary exit (e.g. crash with non-zero
+   * code) WITHOUT going through `kill()`.
+   */
+  _simulateExit(info: AgentExitInfo): void {
+    if (this.exited) return;
+    this.exited = true;
+    setImmediate(() => {
+      for (const cb of this.exitListeners) {
+        try {
+          cb(info);
+        } catch (err) {
+          console.error('[swarm-os] FakeAgentProcess exit cb threw:', err);
+        }
+      }
+      this.dataListeners.clear();
+      this.exitListeners.clear();
+    });
   }
 }
