@@ -1,0 +1,55 @@
+# swarm-os — single-project docker-compose example.
+#
+# Plan refs: §13 (containerisation), §14 (security — bind 127.0.0.1, no-root,
+# RO `/claude-source`).
+#
+# Usage:
+#   1. Adjust the host paths below to point at YOUR project + state dirs.
+#   2. (Optional) export FYREL_DISCORD_WEBHOOK in your shell or a .env file.
+#   3. docker compose -f examples/docker-compose.single.yml up -d
+#
+# The web UI is reachable at http://127.0.0.1:8787 from the host (and via
+# Tailscale on this loopback when MagicDNS exposes the host on its tailnet).
+
+services:
+  swarm-fyrel-cc-app:
+    image: swarm-os:latest
+    container_name: swarm-fyrel-cc-app
+    # init: true → Docker injects tini as PID 1 to reap zombies. The image
+    # also has its own tini ENTRYPOINT — both layered is harmless and keeps
+    # the contract explicit at the orchestration layer (plan §13).
+    init: true
+    restart: unless-stopped
+    ports:
+      # Bind on the host loopback ONLY. Tailscale exposes 127.0.0.1 of the
+      # host on the tailnet; never write 0.0.0.0 here. Plan §14 critical.
+      - "127.0.0.1:8787:8787"
+      # MCP port 8788 is INTENTIONALLY NOT mapped — intra-container only.
+    volumes:
+      # The project the agents will work in. RW.
+      - ${HOME}/dev/fyrel-cc-app:/workspace
+      # Host ~/.claude credentials + state, RO. Boot-time copy lands at
+      # /data/.claude-runtime — this RO mount is never written to.
+      - ${HOME}/.claude:/claude-source:ro
+      # Per-project state dir. Holds: SQLite db, token, hook-token, logs/,
+      # .claude-runtime/ (writable copy of /claude-source).
+      - ${HOME}/.swarm-os/fyrel-cc-app:/data
+    environment:
+      SWARM_OS_PROJECT_NAME: fyrel-cc-app
+      SWARM_OS_DISCORD_WEBHOOK_URL: ${FYREL_DISCORD_WEBHOOK:-}
+      # Public URL is used for Discord embed deep-links (no token included).
+      # Set to your Tailscale name or whatever URL the user reaches the UI at.
+      SWARM_OS_PUBLIC_URL: ${SWARM_OS_PUBLIC_URL:-https://swarm.tail-xyz.ts.net:8787}
+      # Optional overrides (defaults shown):
+      # SWARM_OS_DEFAULT_MODEL: claude-opus-4-7
+      # SWARM_OS_DEFAULT_EFFORT: xhigh
+      # SWARM_OS_DEFAULT_PERMISSION_MODE: bypassPermissions
+      # SWARM_OS_MAX_ORCHESTRATORS: 10
+      # SWARM_OS_MAX_WORKERS_PER_ORCH: 20
+      # SWARM_OS_LOG_LEVEL: info
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

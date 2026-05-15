@@ -6,6 +6,7 @@ import { initRootLogger, withModule } from './logger.js';
 import { SwarmDb } from './modules/db/index.js';
 import { DbPersistence } from './modules/orchestrator/persistence.js';
 import { DiscordWebhookNotifier, NoOpNotifier, type Notifier } from './modules/notify/index.js';
+import { initClaudeRuntime } from './runtime/claude-init.js';
 
 const config = loadConfig();
 const rootLog = initRootLogger(config);
@@ -21,9 +22,27 @@ log.info({
   workspaceRoot: config.workspaceRoot,
   dataDir: config.dataDir,
   mcpRuntimeDir: config.mcpRuntimeDir,
+  claudeSourceDir: config.claudeSourceDir,
+  claudeRuntimeDir: config.claudeRuntimeDir,
   discord: config.discordWebhookUrl ? 'configured' : 'no-op',
   publicUrl: config.publicUrl ?? '<unset>',
   // token, hookToken, sessionSecret etc. intentionally redacted by pino
+});
+
+// ---- Phase 5: claude runtime materialisation ------------------------------
+// Must happen BEFORE the HTTP server accepts traffic so no orchestrator can
+// race against the copy. No-op outside containers (when /claude-source is
+// not mounted) — Claude then falls back to the dev's host ~/.claude.
+const claudeInit = initClaudeRuntime({
+  sourceDir: config.claudeSourceDir,
+  runtimeDir: config.claudeRuntimeDir,
+});
+log.info({
+  event: 'boot.claude_init',
+  initialized: claudeInit.initialized,
+  copied: claudeInit.copied,
+  skipReason: claudeInit.skipReason ?? null,
+  entriesCopied: claudeInit.entriesCopied ?? null,
 });
 
 // ---- Phase 4: SQLite persistence + crash recovery -------------------------

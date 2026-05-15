@@ -1,0 +1,64 @@
+# swarm-os — multi-project docker-compose example.
+#
+# Two services run side by side, one container per project. Each one has its
+# own state dir, its own host port (still on 127.0.0.1), and its own Discord
+# webhook so notifications route to distinct channels. The host's `~/.claude`
+# is shared as a RO mount — every container materialises its own writable
+# copy at boot under /data/.claude-runtime/, so concurrent containers do NOT
+# corrupt the host state (plan §13/§14).
+#
+# Usage:
+#   1. Edit host paths + env vars below.
+#   2. (Optional) export FYREL_DISCORD_WEBHOOK + GRAP_DISCORD_WEBHOOK in
+#      your shell or a .env file.
+#   3. docker compose -f examples/docker-compose.multi.yml up -d
+#
+# Reach each instance from the host (or via Tailscale on its loopback):
+#   - fyrel: http://127.0.0.1:8787
+#   - grap : http://127.0.0.1:8797
+
+services:
+  swarm-fyrel-cc-app:
+    image: swarm-os:latest
+    container_name: swarm-fyrel-cc-app
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - ${HOME}/dev/fyrel-cc-app:/workspace
+      - ${HOME}/.claude:/claude-source:ro
+      - ${HOME}/.swarm-os/fyrel-cc-app:/data
+    environment:
+      SWARM_OS_PROJECT_NAME: fyrel-cc-app
+      SWARM_OS_DISCORD_WEBHOOK_URL: ${FYREL_DISCORD_WEBHOOK:-}
+      SWARM_OS_PUBLIC_URL: ${FYREL_PUBLIC_URL:-https://swarm.tail-xyz.ts.net:8787}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+
+  swarm-grap-server:
+    image: swarm-os:latest
+    container_name: swarm-grap-server
+    init: true
+    restart: unless-stopped
+    ports:
+      # Distinct host port; the in-container port stays at 8787. Plan §13.
+      - "127.0.0.1:8797:8787"
+    volumes:
+      - ${HOME}/dev/grap-server:/workspace
+      - ${HOME}/.claude:/claude-source:ro
+      - ${HOME}/.swarm-os/grap-server:/data
+    environment:
+      SWARM_OS_PROJECT_NAME: grap-server
+      SWARM_OS_DISCORD_WEBHOOK_URL: ${GRAP_DISCORD_WEBHOOK:-}
+      SWARM_OS_PUBLIC_URL: ${GRAP_PUBLIC_URL:-https://swarm.tail-xyz.ts.net:8797}
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

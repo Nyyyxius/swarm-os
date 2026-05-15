@@ -1,0 +1,57 @@
+# Build context exclusions for Dockerfile.
+# Keep this lean — every byte sent to the daemon costs build time.
+
+# Source control & tooling
+.git
+.gitignore
+.github
+.vscode
+.idea
+.editorconfig
+
+# Node + pnpm
+node_modules
+**/node_modules
+.pnpm-store
+
+# Build outputs (rebuilt inside the container)
+dist
+**/dist
+.vite
+**/.vite
+
+# Local dev state
+.dev-data
+/data
+/tmp/swarm-os
+
+# Archives & secrets
+archives
+*.log
+*.env
+.env
+.env.*
+!.env.example
+
+# OS junk
+.DS_Store
+Thumbs.db
+
+# Docker artefacts (compose files in examples/ ARE copied into builder if
+# referenced — but they aren't, so this is fine)
+docker-compose*.yml
+**/docker-compose*.yml
+.dockerignore
+Dockerfile.*
+
+# Docs / plans not needed at build time
+*.md
+!packages/server/src/modules/preambles/*.md
+docs
+
+# Verify scripts are useful inside the container for smoke testing — keep them
+# (they're under packages/server/scripts which is COPYed explicitly).
+
+# Local Claude Code config (host) — we copy at runtime via /claude-source mount
+.claude
+.claude.json

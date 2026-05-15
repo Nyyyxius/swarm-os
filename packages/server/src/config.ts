@@ -38,6 +38,22 @@ export interface Config {
    * with mode `0600` and unlinks on exit.
    */
   mcpRuntimeDir: string;
+  /**
+   * Phase 5: source directory for the host `~/.claude` mount (RO inside
+   * container — `/claude-source` by default). When the path doesn't exist
+   * (typical of local dev outside Docker), the boot-time `claude-init`
+   * step is a no-op and Claude falls back to the developer's host
+   * `~/.claude`. Configurable via `SWARM_OS_CLAUDE_SOURCE_DIR`.
+   */
+  claudeSourceDir: string;
+  /**
+   * Phase 5: writable runtime root for the per-container Claude state.
+   * Boot-time `claude-init` copies `claudeSourceDir` here so concurrent
+   * containers don't corrupt the shared `~/.claude` host. Per-session
+   * `CLAUDE_CONFIG_DIR=<claudeRuntimeDir>/sessions/<sid>/` is derived
+   * from this root. Defaults to `<dataDir>/.claude-runtime`.
+   */
+  claudeRuntimeDir: string;
   /** Phase 3: cap on workers per orchestrator. Lead is not counted. */
   maxWorkersPerOrch: number;
   /** Phase 3: cap on `team.send_message` content size. Bytes. */
@@ -207,6 +223,23 @@ export function loadConfig(): Config {
   const logsDir = path.join(dataDir, 'logs');
   ensureDir(logsDir);
 
+  // Phase 5 — claude source (RO mount or host dir for dev) and runtime root
+  // (RW per-container copy). The runtime dir is created here so downstream
+  // modules can rely on its existence; the actual content copy happens in
+  // `runtime/claude-init.ts` at boot.
+  const claudeSourceDir = path.resolve(
+    process.env.SWARM_OS_CLAUDE_SOURCE_DIR ?? '/claude-source',
+  );
+  const claudeRuntimeDir = path.resolve(
+    process.env.SWARM_OS_CLAUDE_RUNTIME_DIR ?? path.join(dataDir, '.claude-runtime'),
+  );
+  ensureDir(claudeRuntimeDir);
+  try {
+    fs.chmodSync(claudeRuntimeDir, 0o700);
+  } catch {
+    /* best-effort: filesystem may not honour chmod */
+  }
+
   const token = loadOrCreateToken(dataDir);
   const hookToken = loadOrCreateHookToken(dataDir);
 
@@ -264,6 +297,8 @@ export function loadConfig(): Config {
     dataDir,
     logsDir,
     mcpRuntimeDir,
+    claudeSourceDir,
+    claudeRuntimeDir,
     maxWorkersPerOrch,
     maxMessageSizeBytes: maxMessageSizeKb * 1024,
     maxInboxSize,
@@ -275,7 +310,7 @@ export function loadConfig(): Config {
     logLevel,
     logPretty,
     startedAt: new Date().toISOString(),
-    version: '0.4.0-phase4',
+    version: '0.5.0-phase5',
   };
   return cached;
 }

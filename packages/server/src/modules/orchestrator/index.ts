@@ -194,7 +194,7 @@ export class Orchestrator {
       // hookToken + main HTTP port so the hook command can POST back.
       hookToken: this.config.hookToken,
       mainHttpPort: this.config.port,
-      claudeConfigRoot: this.config.dataDir,
+      claudeConfigRoot: this.config.claudeRuntimeDir,
     });
 
     this._leadSessionId = lead.id;
@@ -275,7 +275,7 @@ export class Orchestrator {
       onStateChange: (s, force) => this._onSessionState(s, force),
       hookToken: this.config.hookToken,
       mainHttpPort: this.config.port,
-      claudeConfigRoot: this.config.dataDir,
+      claudeConfigRoot: this.config.claudeRuntimeDir,
     });
 
     this.sessions.set(worker.id, worker);
