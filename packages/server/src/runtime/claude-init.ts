@@ -163,11 +163,16 @@ function liftClaudeJson(opts: {
   }
   const dest = path.join(opts.runtimeDir, '.claude.json');
   // Cache check: compare source mtime against existing dest mtime.
+  // We compare at integer-second resolution because `cpSync` with
+  // `preserveTimestamps: true` can round-trip with sub-ms drift on some
+  // filesystems (FAT32 = 2 s, NFS varies), which would defeat a strict
+  // ms-level compare. Per-second is plenty for "did the source change
+  // since we last copied?". See `claude-init.test.ts` for the regression.
   const destStat = statSafe(dest);
   if (
     destStat &&
     destStat.isFile() &&
-    Math.floor(destStat.mtimeMs) === Math.floor(chosenStat.mtimeMs)
+    Math.floor(destStat.mtimeMs / 1000) === Math.floor(chosenStat.mtimeMs / 1000)
   ) {
     return { result: 'cache-hit', source: chosen };
   }
@@ -275,7 +280,9 @@ export function initClaudeRuntime(opts: {
   if (
     marker &&
     marker.sourceDir === sourceDir &&
-    Math.floor(marker.sourceMtimeMs) === Math.floor(sourceMtimeMs)
+    // Compare at integer-second resolution — see `liftClaudeJson` for the
+    // rationale (FS mtime resolution varies, sub-ms drift is real).
+    Math.floor(marker.sourceMtimeMs / 1000) === Math.floor(sourceMtimeMs / 1000)
   ) {
     log.info({
       event: 'claude_init.cache_hit',

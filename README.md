@@ -11,8 +11,8 @@ comes from the Docker container, not the runtime. The web UI lets a single
 operator supervise/intervene from a phone via Tailscale; Discord webhooks push
 notifications when a session goes idle or an orchestrator ends.
 
-Status: Phase 6 (Polish) — half-day. Phases 0–5 implemented (see
-`docs/`). Phase 7 (Tests) is the remaining roadmap item before v0.1.
+Status: **MVP implementation-complete.** Phases 0–7 implemented (see
+`docs/`). The next roadmap items are post-MVP items listed in `plan.md` §16.
 
 ---
 
@@ -77,10 +77,26 @@ no-ops. See `docs/phase-1-spawner-lead.md` for the full local-dev wiring.
 
 ---
 
-## Verify scripts
+## Tests
 
-Each phase ships a deterministic verify harness. They are spike-style
-end-to-end checks (real HTTP/MCP servers, fake `AgentProcess` for sessions).
+Phase 7 ships a Vitest-based suite alongside the spike-style verify scripts.
+The two layers serve different purposes:
+
+- **Unit + integration tests (`pnpm test`)** — fast (<10 s), isolated, use
+  `FakeAgentProcess` exclusively (never spawn a real `claude`). Covers
+  config parsing, mailbox semantics, messaging, preamble templating,
+  Discord embed shape, persistence round-trips, REST + MCP end-to-end,
+  WebSocket terminal/events, hooks, boot recovery, plus the load-bearing
+  web bits.
+- **Verify harnesses (`pnpm --filter server verify:phase{2,3,4}`)** —
+  spike-style smoke harnesses against the real HTTP/MCP stack. Slower,
+  noisier, kept as a sanity gate for live env behaviour.
+
+```sh
+pnpm test               # single run (~15s wall, 7s test time)
+pnpm test:watch         # vitest in watch mode
+pnpm test:coverage      # generates coverage/ + thresholds (50% lines/funcs)
+```
 
 | Script | Checks | Coverage |
 |---|---|---|
@@ -88,9 +104,22 @@ end-to-end checks (real HTTP/MCP servers, fake `AgentProcess` for sessions).
 | `pnpm --filter server verify:phase3` | 23 / 23 | Workers, mailbox, send/read/broadcast, signal injection |
 | `pnpm --filter server verify:phase4` | 25 / 25 | Notifier, Discord embed, hook auth, persistence, recovery |
 
-Total: **63 / 63** checks across phases 2–4. Phase 0 bis (Claude Code spike)
-runs separately via `pnpm verify:claude` and produces
+Total verify checks: **63 / 63** across phases 2–4. Phase 0 bis (Claude Code
+spike) runs separately via `pnpm verify:claude` and produces
 `scripts/verify-claude-code.report.md`.
+
+### Docker smoke (MANUAL)
+
+`scripts/smoke-docker.sh` builds the production image, boots a container
+against a temp workspace, hits `/health` + a few REST endpoints with the
+auth token, and tears down. **Manual** because it needs a working Docker
+daemon and the build can take minutes on a cold cache:
+
+```sh
+bash scripts/smoke-docker.sh
+```
+
+Exit codes: `0` PASS, `1` FAIL, `2` prerequisites missing.
 
 ---
 

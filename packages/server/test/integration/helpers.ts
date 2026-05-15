@@ -1,0 +1,193 @@
+/**
+ * Phase 7 — integration test helpers.
+ *
+ * Boots a fully-wired server stack against a fresh tmp dir + ephemeral ports.
+ * Mirrors what `index.ts` does at boot, minus the signal handlers and the
+ * Discord notifier (we wire `NoOpNotifier` plus a recording test double when
+ * the test wants to assert on Notifier calls).
+ *
+ * Returns a teardown function that closes the HTTP server, the MCP server,
+ * the SQLite handle, and removes the tmp dir. Tests MUST always call it in
+ * `afterEach` (we don't try to leak-detect — vitest is fine with leftover
+ * state, the flakiness comes from the file system races on log writes).
+ */
+
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
+import { createServer, type Server as HttpServer } from 'node:http';
+import { Spawner } from '../../src/modules/spawner/index.js';
+import { McpServer } from '../../src/modules/mcp/server.js';
+import { SwarmDb } from '../../src/modules/db/index.js';
+import { DbPersistence } from '../../src/modules/orchestrator/persistence.js';
+import { createApp, startServer } from '../../src/http/main.js';
+import { loadConfig, _resetConfigCacheForTesting } from '../../src/config.js';
+import type { Config } from '../../src/config.js';
+import type { Notifier, NotificationInput } from '../../src/modules/notify/index.js';
+import { NoOpNotifier } from '../../src/modules/notify/null.js';
+
+export interface TestStackOptions {
+  /** Override the notifier (defaults to NoOpNotifier). */
+  notifier?: Notifier;
+  /** Skip starting the MCP listener (for tests that don't need it). */
+  skipMcp?: boolean;
+  /** Skip starting the main HTTP listener (for tests that just need the express app via supertest-style fetch). */
+  skipMainHttp?: boolean;
+  /** Override the idle threshold (default 50 ms — keeps tests fast). */
+  idleThresholdMs?: number;
+}
+
+export interface TestStack {
+  config: Config;
+  spawner: Spawner;
+  mcp: McpServer | null;
+  /** Real http.Server when not skipMainHttp; otherwise just an unbound app. */
+  http: HttpServer | null;
+  /** Resolved port the main HTTP listener bound to (when started). */
+  mainPort: number | null;
+  db: SwarmDb;
+  persistence: DbPersistence;
+  workspaceRoot: string;
+  dataDir: string;
+  /** Tear everything down. Must be called from afterEach. */
+  teardown: () => Promise<void>;
+}
+
+/** Recording notifier double — captures every call for assertions. */
+export class RecordingNotifier implements Notifier {
+  readonly events: NotificationInput[] = [];
+  async notify(input: NotificationInput): Promise<void> {
+    this.events.push(input);
+  }
+}
+
+/** Pick an unused port — let the kernel choose. */
+function ephemeralPort(): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const s = createServer();
+    s.listen(0, '127.0.0.1', () => {
+      const addr = s.address();
+      const port = addr && typeof addr === 'object' ? addr.port : 0;
+      s.close(() => resolve(port));
+    });
+    s.on('error', reject);
+  });
+}
+
+export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestStack> {
+  const tmpRoot = fs.mkdtempSync(path.join(os.tmpdir(), 'swarm-int-'));
+  const dataDir = path.join(tmpRoot, 'data');
+  const workspaceRoot = path.join(tmpRoot, 'workspace');
+  const mcpRuntimeDir = path.join(tmpRoot, 'mcp-runtime');
+  fs.mkdirSync(dataDir, { recursive: true });
+  fs.mkdirSync(workspaceRoot, { recursive: true });
+  fs.mkdirSync(mcpRuntimeDir, { recursive: true });
+
+  const mcpPort = await ephemeralPort();
+  const mainPort = await ephemeralPort();
+
+  // Set env vars for loadConfig — wipe SWARM_OS_* so we get a fresh build.
+  for (const k of Object.keys(process.env)) {
+    if (k.startsWith('SWARM_OS_') || k === 'HOOK_TOKEN') delete process.env[k];
+  }
+  process.env.SWARM_OS_TOKEN = 'test-token';
+  process.env.HOOK_TOKEN = 'test-hook';
+  process.env.SWARM_OS_DATA_DIR = dataDir;
+  process.env.SWARM_OS_WORKSPACE_ROOT = workspaceRoot;
+  process.env.SWARM_OS_MCP_RUNTIME_DIR = mcpRuntimeDir;
+  process.env.SWARM_OS_MCP_PORT = String(mcpPort);
+  process.env.SWARM_OS_PORT = String(mainPort);
+  process.env.SWARM_OS_IDLE_THRESHOLD_MS = String(opts.idleThresholdMs ?? 50);
+  process.env.SWARM_OS_LOG_LEVEL = 'fatal';
+  process.env.SWARM_OS_LOG_PRETTY = '0';
+  process.env.SWARM_OS_HOST = '127.0.0.1';
+  process.env.SWARM_OS_CLAUDE_SOURCE_DIR = path.join(tmpRoot, 'claude-source-missing');
+  process.env.SWARM_OS_CLAUDE_RUNTIME_DIR = path.join(dataDir, '.claude-runtime');
+  _resetConfigCacheForTesting();
+
+  const config = loadConfig();
+  const db = new SwarmDb(dataDir);
+  const persistence = new DbPersistence(db);
+  // Default to no-op so a notifier wasn't passed
+  const notifier = opts.notifier ?? new NoOpNotifier();
+  const spawner = new Spawner(config, { notifier, persistence });
+
+  let mcp: McpServer | null = null;
+  if (!opts.skipMcp) {
+    mcp = new McpServer(spawner, config.mcpPort, config);
+    await mcp.start();
+  }
+
+  let http: HttpServer | null = null;
+  if (!opts.skipMainHttp) {
+    const handle = startServer(config, spawner);
+    http = handle.http;
+    // Wait until the listener is actually accepting connections.
+    await new Promise<void>((resolve) => {
+      if (http?.listening) {
+        resolve();
+        return;
+      }
+      http?.once('listening', () => resolve());
+    });
+    return {
+      config,
+      spawner,
+      mcp,
+      http,
+      mainPort: config.port,
+      db,
+      persistence,
+      workspaceRoot,
+      dataDir,
+      teardown: async () => {
+        spawner.shutdownAll('test-shutdown');
+        await new Promise((r) => setTimeout(r, 50));
+        if (mcp) await mcp.stop();
+        await handle.close();
+        db.close();
+        try {
+          fs.rmSync(tmpRoot, { recursive: true, force: true });
+        } catch {
+          /* best-effort */
+        }
+      },
+    };
+  }
+  // skipMainHttp path — no real listener, return a stack without the http handle.
+  return {
+    config,
+    spawner,
+    mcp,
+    http: null,
+    mainPort: null,
+    db,
+    persistence,
+    workspaceRoot,
+    dataDir,
+    teardown: async () => {
+      spawner.shutdownAll('test-shutdown');
+      await new Promise((r) => setTimeout(r, 50));
+      if (mcp) await mcp.stop();
+      db.close();
+      try {
+        fs.rmSync(tmpRoot, { recursive: true, force: true });
+      } catch {
+        /* best-effort */
+      }
+    },
+  };
+}
+
+/** Convenience — spin up a standalone express app + http server (no MCP). */
+export async function bootHttpOnly(opts: TestStackOptions = {}): Promise<TestStack> {
+  return bootTestStack({ ...opts, skipMcp: true });
+}
+
+/** Build authenticated REST URL helpers. */
+export function authHeaders(token: string): Record<string, string> {
+  return { 'X-Auth-Token': token, 'Content-Type': 'application/json' };
+}
+
+/** Re-export so test files don't all need the same import dance. */
+export { createApp };

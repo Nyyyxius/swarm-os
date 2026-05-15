@@ -260,7 +260,7 @@ Livrable : `scripts/verify-claude-code.ts` qui vérifie dans un container minima
 - PWA manifest + service worker minimal pour install mobile
 - README agent-readable
 
-### Phase 7 — Tests (1 jour)
+### Phase 7 — Tests (1 jour) [x]
 
 - **Fake `AgentProcess`** : implémente l'interface sans lancer claude (scripts d'output déterministes)
 - **Unitaires** : validation config, validation `cwd` (realpath + traversal), permissions lead-only, format messages, mailbox bornée
