@@ -97,6 +97,11 @@ export class Orchestrator {
       effort: this.defaultEffort,
       permissionMode: this.defaultPermissionMode,
       logsDir: this.config.logsDir,
+      mcpRuntimeDir: this.config.mcpRuntimeDir,
+      // MCP server is hardcoded to loopback (plan §14). The host string
+      // here is intentionally not configurable — only the port is.
+      mcpHost: '127.0.0.1',
+      mcpPort: this.config.mcpPort,
       skipSpawn: opts.skipSpawn,
     });
 

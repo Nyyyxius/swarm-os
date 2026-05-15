@@ -1,6 +1,7 @@
 import { loadConfig } from './config.js';
 import { Spawner } from './modules/spawner/index.js';
 import { startServer } from './http/main.js';
+import { McpServer } from './modules/mcp/server.js';
 
 const config = loadConfig();
 
@@ -11,14 +12,31 @@ console.log(
     version: config.version,
     host: config.host,
     port: config.port,
+    mcpPort: config.mcpPort,
     workspaceRoot: config.workspaceRoot,
     dataDir: config.dataDir,
+    mcpRuntimeDir: config.mcpRuntimeDir,
     // token intentionally omitted
   }),
 );
 
 const spawner = new Spawner(config);
 const handle = startServer(config, spawner);
+
+// Start MCP HTTP listener on its own port (loopback only, plan §14).
+// Boot ordering: main HTTP first (so /health is up if a healthcheck is
+// already pointed at us), then MCP. If MCP fails to bind we shut down
+// the main listener too — the system is non-functional without MCP.
+const mcp = new McpServer(spawner, config.mcpPort);
+mcp.start().catch(async (err) => {
+  console.error('[swarm-os] MCP server failed to start:', err);
+  try {
+    await handle.close();
+  } catch {
+    /* ignore */
+  }
+  process.exit(1);
+});
 
 let shuttingDown = false;
 async function shutdown(signal: string): Promise<void> {
@@ -27,6 +45,9 @@ async function shutdown(signal: string): Promise<void> {
   console.log(JSON.stringify({ event: 'shutdown.start', signal }));
   try {
     spawner.shutdownAll(`signal:${signal}`);
+    // Stop MCP first (per-request transport instances will tear down with
+    // their sockets) then the main HTTP listener.
+    await mcp.stop();
     await handle.close();
   } catch (err) {
     console.error('[swarm-os] shutdown error:', err);

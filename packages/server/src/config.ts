@@ -14,6 +14,14 @@ export type PermissionMode =
 export interface Config {
   port: number;
   host: string;
+  /**
+   * MCP HTTP listener port — separate from `port`. The MCP server binds to
+   * the loopback interface ONLY (hardcoded `127.0.0.1`, see plan §14): no
+   * env var lets it leak onto the network. The port is configurable via
+   * `SWARM_OS_MCP_PORT` purely so it can be moved off a conflict, never
+   * to change the bind address.
+   */
+  mcpPort: number;
   projectName: string;
   defaultModel: string;
   defaultEffort: EffortLevel;
@@ -24,6 +32,12 @@ export interface Config {
   workspaceRoot: string;
   dataDir: string;
   logsDir: string;
+  /**
+   * Directory under `/tmp` where per-session `mcp.json` files live.
+   * Each session writes `<mcpRuntimeDir>/orch-<orch_id>/session-<session_id>/mcp.json`
+   * with mode `0600` and unlinks on exit.
+   */
+  mcpRuntimeDir: string;
   token: string;
   startedAt: string;
   version: string;
@@ -81,6 +95,7 @@ export function loadConfig(): Config {
 
   const port = intEnv('SWARM_OS_PORT', 8787);
   const host = process.env.SWARM_OS_HOST ?? '127.0.0.1';
+  const mcpPort = intEnv('SWARM_OS_MCP_PORT', 8788);
 
   // Project name is technically required, but for `pnpm dev` convenience we default to 'dev'.
   const projectName = process.env.SWARM_OS_PROJECT_NAME ?? 'dev';
@@ -115,9 +130,26 @@ export function loadConfig(): Config {
 
   const token = loadOrCreateToken(dataDir);
 
+  // Per-session mcp.json runtime dir. Lives under /tmp so it disappears with
+  // the container; per-session files are mode 0600 and per-session/orch dirs
+  // are mode 0700 (see mcp-config.ts). The runtime root itself is also
+  // tightened to 0700 so other users on the host can't enumerate orch ids by
+  // listing the directory — defence in depth on top of the per-orch/dir
+  // perms (plan §14).
+  const mcpRuntimeDir = path.resolve(
+    process.env.SWARM_OS_MCP_RUNTIME_DIR ?? '/tmp/swarm-os',
+  );
+  fs.mkdirSync(mcpRuntimeDir, { recursive: true, mode: 0o700 });
+  try {
+    fs.chmodSync(mcpRuntimeDir, 0o700);
+  } catch {
+    /* best-effort: directory may be on a filesystem that doesn't honour chmod */
+  }
+
   cached = {
     port,
     host,
+    mcpPort,
     projectName,
     defaultModel,
     defaultEffort,
@@ -128,9 +160,10 @@ export function loadConfig(): Config {
     workspaceRoot,
     dataDir,
     logsDir,
+    mcpRuntimeDir,
     token,
     startedAt: new Date().toISOString(),
-    version: '0.1.0-phase1',
+    version: '0.2.0-phase2',
   };
   return cached;
 }

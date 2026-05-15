@@ -205,7 +205,7 @@ Livrable : `scripts/verify-claude-code.ts` qui vérifie dans un container minima
 - Page web : bouton "Nouvel orchestrateur", form (name, role, cwd, prompt), terminal qui apparaît
 - Validation : lance, on tape, claude répond. Pas encore de MCP, pas encore de container.
 
-### Phase 2 — MCP HTTP serveur via SDK officiel (1 jour)
+### Phase 2 — MCP HTTP serveur via SDK officiel (1 jour) [x]
 
 - Module `McpServer` qui écoute sur 127.0.0.1:8788 via `@modelcontextprotocol/sdk`
 - Routing par path : `POST /mcp/:orch_id/:session_secret` (Streamable HTTP transport)
