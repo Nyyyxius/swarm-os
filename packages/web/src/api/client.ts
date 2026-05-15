@@ -27,6 +27,8 @@ export interface OrchestratorView {
   endedAt: string | null;
   lastError: string | null;
   sessions: SessionView[];
+  /** Phase 4: present on history rows so UI can show "interrupted (server-restart)" etc. */
+  stopReason?: string | null;
 }
 
 export interface SessionView {

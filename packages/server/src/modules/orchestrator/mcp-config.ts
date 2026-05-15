@@ -1,5 +1,8 @@
 import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { withModule } from '../../logger.js';
+
+const log = withModule('mcp.config');
 
 /**
  * Per-session MCP config file generation.
@@ -107,13 +110,11 @@ export function removeSessionMcpConfig(input: {
   } catch (err) {
     const code = (err as NodeJS.ErrnoException).code;
     if (code !== 'ENOENT') {
-      console.warn(
-        JSON.stringify({
-          event: 'mcp.config.unlink_failed',
-          path: filePath,
-          err: err instanceof Error ? err.message : String(err),
-        }),
-      );
+      log.warn({
+        event: 'mcp.config.unlink_failed',
+        path: filePath,
+        err: err instanceof Error ? err.message : String(err),
+      });
     }
   }
   // Remove the now-empty per-session dir; ignore ENOTEMPTY in case some

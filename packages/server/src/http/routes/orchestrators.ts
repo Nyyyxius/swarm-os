@@ -6,6 +6,12 @@ import {
   broadcast as messagingBroadcast,
   MessageError,
 } from '../../modules/orchestrator/messaging.js';
+import {
+  rowToOrchView,
+  rowToSessionView,
+} from '../../modules/orchestrator/persistence.js';
+
+const RECENT_HISTORY_LIMIT = 50;
 
 const VALID_EFFORTS: ReadonlySet<string> = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const VALID_PERMS: ReadonlySet<string> = new Set([
@@ -152,17 +158,60 @@ export function createOrchestratorsRouter(spawner: Spawner, config: Config): Rou
     }
   });
 
+  /**
+   * Phase 4 — list active orchestrators PLUS up to 50 recently-terminated
+   * orchestrators from SQLite, sorted by `endedAt desc`. The response shape
+   * is unchanged from Phase 1 (an `orchestrators` array of views), so
+   * existing clients keep working — they just see history rows now.
+   *
+   * In-memory rows take precedence over DB rows when both exist for the
+   * same id (the in-memory snapshot has live PIDs / activity timestamps).
+   */
   router.get('/orchestrators', (_req: Request, res: Response) => {
-    res.json({ orchestrators: spawner.listActive().map((o) => o.toView()) });
+    const liveActive = spawner.listActive().map((o) => o.toView());
+    const liveIds = new Set(liveActive.map((v) => v.id));
+    let history: ReturnType<typeof rowToOrchView>[] = [];
+    try {
+      const rows = spawner.persistence.db.listRecentlyTerminatedOrchestrators(
+        RECENT_HISTORY_LIMIT,
+      );
+      history = rows
+        .filter((r) => !liveIds.has(r.id))
+        .map((r) => {
+          const sessions = spawner.persistence.db
+            .listSessions(r.id)
+            .map(rowToSessionView);
+          return rowToOrchView(r, sessions);
+        });
+    } catch {
+      /* DB unavailable — return live-only */
+    }
+    res.json({ orchestrators: [...liveActive, ...history] });
   });
 
+  /**
+   * Phase 4 — single orchestrator. Falls back to SQLite if the in-memory
+   * Map no longer carries the row (server restart, history lookup).
+   */
   router.get('/orchestrators/:id', (req: Request<{ id: string }>, res: Response) => {
     const orch = spawner.get(req.params.id);
-    if (!orch) {
-      res.status(404).json({ error: 'not found' });
+    if (orch) {
+      res.json(orch.toView());
       return;
     }
-    res.json(orch.toView());
+    try {
+      const row = spawner.persistence.db.getOrchestrator(req.params.id);
+      if (!row) {
+        res.status(404).json({ error: 'not found' });
+        return;
+      }
+      const sessions = spawner.persistence.db
+        .listSessions(req.params.id)
+        .map(rowToSessionView);
+      res.json(rowToOrchView(row, sessions));
+    } catch {
+      res.status(404).json({ error: 'not found' });
+    }
   });
 
   router.delete('/orchestrators/:id', (req: Request<{ id: string }>, res: Response) => {

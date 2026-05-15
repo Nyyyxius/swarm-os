@@ -14,6 +14,9 @@ import {
 } from '../orchestrator/messaging.js';
 import { validateCwdUnderWorkspace } from '../../http/validation.js';
 import type { Config, EffortLevel, PermissionMode } from '../../config.js';
+import { withModule } from '../../logger.js';
+
+const log = withModule('mcp.tool');
 
 /**
  * MCP team-comms tools (plan §10).
@@ -147,17 +150,14 @@ function requireLead(ctx: ToolContext, toolName: string): void {
  * even in scope here — McpServer drops it before invoking tools).
  */
 function logCall(tool: string, ctx: ToolContext, ok: boolean, err?: string): void {
-  // Structured stdout (pino arrives in Phase 4).
-  console.log(
-    JSON.stringify({
-      event: 'mcp.call',
-      tool,
-      sid: ctx.session.id,
-      orch: ctx.orchestrator.id,
-      ok,
-      ...(err ? { err } : {}),
-    }),
-  );
+  log.info({
+    event: 'mcp.call',
+    tool,
+    sid: ctx.session.id,
+    orch: ctx.orchestrator.id,
+    ok,
+    ...(err ? { err } : {}),
+  });
 }
 
 /**

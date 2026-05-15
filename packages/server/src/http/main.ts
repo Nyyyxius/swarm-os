@@ -6,8 +6,12 @@ import { makeAuthMiddleware, consumeTicket } from './auth.js';
 import { createOrchestratorsRouter } from './routes/orchestrators.js';
 import { createSessionsRouter } from './routes/sessions.js';
 import { createWsTicketRouter } from './routes/ws-ticket.js';
+import { createHooksRouter } from './routes/hooks.js';
 import { TerminalHub } from './ws/terminal.js';
 import { EventsHub } from './ws/events.js';
+import { withModule } from '../logger.js';
+
+const log = withModule('http');
 
 export interface ServerHandle {
   http: Server;
@@ -26,7 +30,7 @@ export function createApp(config: Config, spawner: Spawner): { app: express.Expr
   const bodyLimitKb = Math.max(64, Math.ceil(config.maxPromptSizeBytes / 1024) + 64);
   app.use(express.json({ limit: `${bodyLimitKb}kb` }));
 
-  // Public: health & info & hooks notification (latter not implemented this phase).
+  // Public: health & info.
   app.get('/health', (_req: Request, res: Response) => {
     const c = spawner.counters();
     res.json({
@@ -47,11 +51,15 @@ export function createApp(config: Config, spawner: Spawner): { app: express.Expr
     });
   });
 
+  // Phase 4: hook endpoint — Bearer-auth, NOT X-Auth-Token. Mounted before
+  // the X-Auth-Token middleware so the user-facing token never leaks here.
+  app.use(createHooksRouter(spawner, config.hookToken, spawner.notifier));
+
   // Authenticated routes.
   const auth = makeAuthMiddleware(config.token);
   app.use(auth);
   app.use(createOrchestratorsRouter(spawner, config));
-  app.use(createSessionsRouter(spawner));
+  app.use(createSessionsRouter(spawner, config));
   app.use(createWsTicketRouter(spawner));
 
   // JSON error handler — must be the LAST middleware. Without this, body-parser
@@ -134,7 +142,7 @@ export function startServer(config: Config, spawner: Spawner): ServerHandle {
       socket.write('HTTP/1.1 404 Not Found\r\n\r\n');
       socket.destroy();
     } catch (err) {
-      console.error('[swarm-os] upgrade error:', err);
+      log.error({ event: 'ws.upgrade_failed', error: err instanceof Error ? err.message : String(err) });
       try {
         socket.destroy();
       } catch {
@@ -145,9 +153,12 @@ export function startServer(config: Config, spawner: Spawner): ServerHandle {
 
   // Bind 127.0.0.1 unless explicitly overridden via SWARM_OS_HOST.
   http.listen(config.port, config.host, () => {
-    console.log(
-      `[swarm-os] listening on http://${config.host}:${config.port} (project=${config.projectName})`,
-    );
+    log.info({
+      event: 'http.listen',
+      host: config.host,
+      port: config.port,
+      project: config.projectName,
+    });
   });
 
   return {

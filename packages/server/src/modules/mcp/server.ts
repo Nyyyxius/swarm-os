@@ -8,6 +8,9 @@ import type { Orchestrator } from '../orchestrator/index.js';
 import { registerTeamCommsTools, type ToolContext } from './tools.js';
 import type { Config } from '../../config.js';
 import type { MessagingDefaults } from '../orchestrator/messaging.js';
+import { withModule } from '../../logger.js';
+
+const log = withModule('mcp');
 
 /**
  * Loopback addresses we accept for the MCP listen() bind. Plan §14 makes
@@ -81,7 +84,10 @@ export class McpServer {
         // Wrap to swallow handler errors so an exception in one request
         // doesn't bring the listener down.
         this.handle(req, res).catch((err) => {
-          console.error('[swarm-os.mcp] unhandled handler error:', err);
+          log.error({
+            event: 'mcp.handler_failed',
+            error: err instanceof Error ? err.message : String(err),
+          });
           if (!res.headersSent) {
             res.statusCode = 500;
             res.end('internal error');
@@ -110,26 +116,26 @@ export class McpServer {
         if (!LOOPBACK_BINDS.has(actualHost)) {
           // Hard runtime assertion: we MUST be on loopback once listening.
           // Crash loudly rather than serve MCP on a public interface.
-          console.error(
-            `[swarm-os.mcp] FATAL: MCP server is listening on non-loopback address ${actualHost}:${actualPort}`,
-          );
+          log.fatal({
+            event: 'mcp.bind_check_failed',
+            host: actualHost,
+            port: actualPort,
+          });
           http.close();
           reject(new Error(`MCP bind verification failed: ${actualHost}`));
           return;
         }
-        console.log(
-          JSON.stringify({
-            event: 'mcp.listen',
-            host: actualHost,
-            port: actualPort,
-          }),
-        );
+        log.info({
+          event: 'mcp.listen',
+          host: actualHost,
+          port: actualPort,
+        });
         this.http = http;
         // Once we're successfully listening, stop using the constructor's
         // reject(): subsequent `error` events should just be logged.
         http.removeAllListeners('error');
         http.on('error', (err) => {
-          console.error('[swarm-os.mcp] server error:', err);
+          log.error({ event: 'mcp.server_error', error: err.message });
         });
         resolve();
       });
@@ -164,13 +170,11 @@ export class McpServer {
     // doesn't match — so we don't leak orch existence.
     const ctx = this.resolveContext(orchId, secret);
     if (!ctx) {
-      console.log(
-        JSON.stringify({
-          event: 'mcp.auth_fail',
-          orch: orchId,
-          secret: redactSecret(secret),
-        }),
-      );
+      log.warn({
+        event: 'mcp.auth_fail',
+        orch: orchId,
+        secret: redactSecret(secret),
+      });
       res.statusCode = 404;
       res.end('not found');
       return;
@@ -232,19 +236,20 @@ export class McpServer {
         !(parsedBody instanceof Error) &&
         isInitializeRequest(parsedBody);
       if (isInit) {
-        console.log(
-          JSON.stringify({
-            event: 'mcp.initialize',
-            sid: ctx.session.id,
-            orch: ctx.orchestrator.id,
-          }),
-        );
+        log.info({
+          event: 'mcp.initialize',
+          sid: ctx.session.id,
+          orch: ctx.orchestrator.id,
+        });
       }
       const bodyForTransport =
         parsedBody instanceof Error ? undefined : parsedBody;
       await transport.handleRequest(req, res, bodyForTransport);
     } catch (err) {
-      console.error('[swarm-os.mcp] transport.handleRequest threw:', err);
+      log.error({
+        event: 'mcp.transport_failed',
+        error: err instanceof Error ? err.message : String(err),
+      });
       if (!res.headersSent) {
         res.statusCode = 500;
         res.end('internal error');

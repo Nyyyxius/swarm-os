@@ -369,17 +369,21 @@ async function main(): Promise<void> {
   orchestrator.mailbox.read(cappedSid);
   const cap = config.maxInboxSize;
   let lastWarn = 0;
-  // Spy on console.warn to count drop events. Save the original.
-  const originalWarn = console.warn;
-  console.warn = (...args: unknown[]) => {
-    const text = args.map((a) => (typeof a === 'string' ? a : JSON.stringify(a))).join(' ');
-    if (text.includes('mail.dropped')) lastWarn++;
-    // Suppress in test output to keep it readable.
-  };
+  // Phase 4: pino is configured to write through process.stdout (logger.ts
+  // passes it explicitly), so a process.stdout.write spy catches the
+  // structured warnings.
+  const originalWrite = process.stdout.write.bind(process.stdout);
+  process.stdout.write = ((chunk: string | Uint8Array, ...rest: unknown[]) => {
+    const text =
+      typeof chunk === 'string' ? chunk : Buffer.from(chunk).toString('utf8');
+    if (text.includes('"event":"mail.dropped"')) lastWarn++;
+    return originalWrite(chunk as string, ...(rest as []));
+  }) as typeof process.stdout.write;
   try {
     for (let i = 0; i < cap + 5; i++) {
       orchestrator.mailbox.push(cappedSid, { from: 'system', content: `m${i}` });
     }
+    await new Promise((r) => setTimeout(r, 50));
     const peeked = orchestrator.mailbox.peek(cappedSid);
     record(
       `mailbox bounded at ${cap}: pushing ${cap + 5} keeps exactly ${cap}`,
@@ -399,7 +403,7 @@ async function main(): Promise<void> {
       `warnings observed=${lastWarn}`,
     );
   } finally {
-    console.warn = originalWarn;
+    process.stdout.write = originalWrite;
   }
 
   // ---- (9) message size cap ----

@@ -3,8 +3,15 @@ import { Session, type SessionView } from './session.js';
 import { Mailbox } from './mailbox.js';
 import { buildPreamble } from './preamble.js';
 import { eventBus } from '../../events.js';
+import { withModule } from '../../logger.js';
 import type { AgentProcess } from './agent-process.js';
 import type { Config, EffortLevel, PermissionMode } from '../../config.js';
+import type { Notifier } from '../notify/index.js';
+import { NoOpNotifier } from '../notify/null.js';
+import type { Persistence } from './persistence.js';
+import { NoOpPersistence } from './persistence.js';
+
+const log = withModule('orchestrator');
 
 export type OrchestratorStatus = 'starting' | 'running' | 'stopping' | 'stopped' | 'failed';
 
@@ -38,6 +45,14 @@ export interface OrchestratorView {
   endedAt: string | null;
   lastError: string | null;
   sessions: SessionView[];
+  /** Phase 4: surfaced so UI can show "interrupted (server-restart)" etc. */
+  stopReason?: string | null;
+}
+
+/** Phase 4: optional dependencies wired by the Spawner. */
+export interface OrchestratorDeps {
+  notifier?: Notifier;
+  persistence?: Persistence;
 }
 
 export interface StartOptions {
@@ -97,6 +112,10 @@ export class Orchestrator {
   private _lastError: string | null = null;
   private _leadSessionId: string | null = null;
   private _stopReason: string | null = null;
+  private _endNotified = false;
+
+  readonly notifier: Notifier;
+  readonly persistence: Persistence;
 
   /** All sessions, including terminated ones, indexed by id. */
   private readonly sessions = new Map<string, Session>();
@@ -104,6 +123,7 @@ export class Orchestrator {
   constructor(
     private readonly init: OrchestratorInit,
     private readonly config: Config,
+    deps: OrchestratorDeps = {},
   ) {
     this.id = crypto.randomUUID();
     this.name = init.name;
@@ -115,6 +135,13 @@ export class Orchestrator {
     this.workerPreamble = init.workerPreamble;
     this.createdAt = new Date().toISOString();
     this.mailbox = new Mailbox({ maxSize: this.config.maxInboxSize });
+    this.notifier = deps.notifier ?? new NoOpNotifier();
+    this.persistence = deps.persistence ?? new NoOpPersistence();
+  }
+
+  /** Public Phase 4 accessor — needed by persistence to write `stop_reason`. */
+  get stopReason(): string | null {
+    return this._stopReason;
   }
 
   // --- Lifecycle ---------------------------------------------------------
@@ -160,6 +187,14 @@ export class Orchestrator {
       mcpPort: this.config.mcpPort,
       skipSpawn: opts.skipSpawn,
       agentProcessOverride: opts.agentProcessOverride,
+      onStateChange: (s, force) => this._onSessionState(s, force),
+      // Phase 4: lead session writes a per-session settings.json injecting
+      // the Notification hook. The CLAUDE_CONFIG_DIR sub-tree lives under
+      // <dataDir>/.claude-runtime/sessions/<id>/. We pass the resolved
+      // hookToken + main HTTP port so the hook command can POST back.
+      hookToken: this.config.hookToken,
+      mainHttpPort: this.config.port,
+      claudeConfigRoot: this.config.dataDir,
     });
 
     this._leadSessionId = lead.id;
@@ -237,6 +272,10 @@ export class Orchestrator {
       mcpPort: this.config.mcpPort,
       skipSpawn: spec.skipSpawn,
       agentProcessOverride: spec.agentProcessOverride,
+      onStateChange: (s, force) => this._onSessionState(s, force),
+      hookToken: this.config.hookToken,
+      mainHttpPort: this.config.port,
+      claudeConfigRoot: this.config.dataDir,
     });
 
     this.sessions.set(worker.id, worker);
@@ -248,11 +287,27 @@ export class Orchestrator {
       payload: worker.toView(),
     });
 
+    // Persist immediately so the worker row exists before any exit event.
+    this.persistence.writeSession(worker, { force: true });
+
     // Worker exit handling — distinct from lead exit. Abnormal exit fires
     // a synthetic mailbox message + signal to the lead.
     worker.once('exit', () => this._onWorkerExit(worker));
 
     return worker;
+  }
+
+  /** Phase 4: every session state change funnels through here. */
+  private _onSessionState(session: Session, force: boolean): void {
+    try {
+      this.persistence.writeSession(session, { force });
+    } catch (err) {
+      log.warn({
+        event: 'persistence.session_failed',
+        sessionId: session.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /**
@@ -356,6 +411,7 @@ export class Orchestrator {
       endedAt: this._endedAt,
       lastError: this._lastError,
       sessions: this.listSessions().map((s) => s.toView()),
+      stopReason: this._stopReason,
     };
   }
 
@@ -373,6 +429,61 @@ export class Orchestrator {
       orchestratorId: this.id,
       payload: { status: s },
     });
+    // Phase 4: persist + maybe notify on terminal transitions.
+    try {
+      this.persistence.writeOrchestrator(this);
+    } catch (err) {
+      log.warn({
+        event: 'persistence.orch_failed',
+        orchId: this.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    if ((s === 'stopped' || s === 'failed') && !this._endNotified) {
+      this._endNotified = true;
+      const lead = this.lead;
+      const message =
+        s === 'stopped'
+          ? `Orchestrator ${this.name} stopped cleanly${this._stopReason ? ` (${this._stopReason})` : ''}.`
+          : `Orchestrator ${this.name} failed${this._lastError ? `: ${this._lastError}` : ''}.`;
+      // Fire-and-forget — `Notifier.notify` already wraps in try/catch and
+      // is timeout-bounded, but we wrap once more so a buggy notifier can't
+      // crash the orchestrator.
+      void this.notifier
+        .notify({
+          kind: 'orchestrator.ended',
+          orchestrator: {
+            id: this.id,
+            name: this.name,
+            role: this.role,
+            status: s,
+          },
+          session: lead
+            ? {
+                id: lead.id,
+                name: lead.name,
+                role: lead.role,
+                type: lead.type,
+                status: lead.status,
+                exitCode: lead.exitCode,
+                stopReason: lead.stopReason,
+              }
+            : undefined,
+          message,
+          extra: {
+            exitCode: lead?.exitCode ?? null,
+            stopReason: this._stopReason,
+          },
+        })
+        .catch((err) => {
+          log.warn({
+            event: 'notify.dispatch_failed',
+            kind: 'orchestrator.ended',
+            orchId: this.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        });
+    }
   }
 
   private _onLeadExit(): void {
@@ -452,14 +563,44 @@ export class Orchestrator {
     } catch {
       /* best-effort */
     }
-    console.log(
-      JSON.stringify({
-        event: 'worker.exit_anomaly',
-        orchId: this.id,
-        workerId: worker.id,
-        status,
-        exitCode: code,
-      }),
-    );
+    log.warn({
+      event: 'worker.exit_anomaly',
+      orchId: this.id,
+      workerId: worker.id,
+      status,
+      exitCode: code,
+    });
+
+    // Phase 4: in addition to the synthetic mail to the lead, fire a Discord
+    // notification so a human can intervene without watching the UI.
+    void this.notifier
+      .notify({
+        kind: 'session.exit_anomaly',
+        orchestrator: {
+          id: this.id,
+          name: this.name,
+          role: this.role,
+          status: this._status,
+        },
+        session: {
+          id: worker.id,
+          name: worker.name,
+          role: worker.role,
+          type: worker.type,
+          status: worker.status,
+          exitCode: worker.exitCode,
+          stopReason: worker.stopReason,
+        },
+        message: `Worker ${worker.name} exited abnormally (exit_code=${code}, status=${status}).`,
+        extra: { exitCode: code },
+      })
+      .catch((err) => {
+        log.warn({
+          event: 'notify.dispatch_failed',
+          kind: 'session.exit_anomaly',
+          workerId: worker.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
   }
 }

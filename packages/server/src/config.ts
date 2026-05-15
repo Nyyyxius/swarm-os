@@ -52,6 +52,34 @@ export interface Config {
    */
   idleThresholdMs: number;
   token: string;
+  /**
+   * Phase 4: separate token used by Claude Code's `Notification` hook to
+   * authenticate against `/hooks/notification`. **Distinct** from `token`
+   * (the user-facing X-Auth-Token) per plan §13/§14. Read from `HOOK_TOKEN`
+   * env, otherwise generated and persisted at `<dataDir>/hook-token` (mode 0600).
+   */
+  hookToken: string;
+  /**
+   * Phase 4: Discord webhook URL. Optional — when absent the notifier is a
+   * no-op (only logs). Plan §13 marks this as the only switch between
+   * `DiscordWebhookNotifier` and `NoOpNotifier`.
+   */
+  discordWebhookUrl: string | null;
+  /**
+   * Phase 4: public URL of the swarm-os UI (e.g. `https://swarm.tail-xyz.ts.net:8787`).
+   * Optional — used for Discord embed deep-links. **Never** carries any token.
+   */
+  publicUrl: string | null;
+  /**
+   * Phase 4: log level for pino — `debug|info|warn|error`. Default `info`.
+   */
+  logLevel: 'trace' | 'debug' | 'info' | 'warn' | 'error' | 'fatal';
+  /**
+   * Phase 4: when true, pino emits human-readable lines via `pino-pretty`
+   * (dev only). Otherwise structured JSON. Defaults to true if NODE_ENV !==
+   * 'production' AND stdout is a TTY.
+   */
+  logPretty: boolean;
   startedAt: string;
   version: string;
 }
@@ -85,6 +113,35 @@ function loadOrCreateToken(dataDir: string): string {
   if (explicit && explicit.length > 0) return explicit;
 
   const tokenPath = path.join(dataDir, 'token');
+  try {
+    const existing = fs.readFileSync(tokenPath, 'utf8').trim();
+    if (existing.length > 0) return existing;
+  } catch {
+    /* fall through */
+  }
+  const fresh = crypto.randomUUID();
+  fs.writeFileSync(tokenPath, fresh + '\n', { mode: 0o600 });
+  try {
+    fs.chmodSync(tokenPath, 0o600);
+  } catch {
+    /* best-effort */
+  }
+  return fresh;
+}
+
+/**
+ * Phase 4: separate hook token (plan §13/§14). MUST NOT collapse with
+ * `SWARM_OS_TOKEN` — the Notification hook payload travels through Claude's
+ * `settings.json` which lives on disk and is read by the claude subprocess;
+ * keeping the user token out of that path is a defence-in-depth requirement.
+ *
+ * Persisted at `<dataDir>/hook-token` (mode 0600).
+ */
+function loadOrCreateHookToken(dataDir: string): string {
+  const explicit = process.env.HOOK_TOKEN;
+  if (explicit && explicit.length > 0) return explicit;
+
+  const tokenPath = path.join(dataDir, 'hook-token');
   try {
     const existing = fs.readFileSync(tokenPath, 'utf8').trim();
     if (existing.length > 0) return existing;
@@ -151,6 +208,30 @@ export function loadConfig(): Config {
   ensureDir(logsDir);
 
   const token = loadOrCreateToken(dataDir);
+  const hookToken = loadOrCreateHookToken(dataDir);
+
+  // Phase 4 — Discord webhook + public URL (plan §12/§13).
+  const discordWebhookUrl =
+    process.env.SWARM_OS_DISCORD_WEBHOOK_URL && process.env.SWARM_OS_DISCORD_WEBHOOK_URL.length > 0
+      ? process.env.SWARM_OS_DISCORD_WEBHOOK_URL
+      : null;
+  const publicUrl =
+    process.env.SWARM_OS_PUBLIC_URL && process.env.SWARM_OS_PUBLIC_URL.length > 0
+      ? process.env.SWARM_OS_PUBLIC_URL
+      : null;
+
+  // Phase 4 — pino log config.
+  const VALID_LOG_LEVELS = new Set(['trace', 'debug', 'info', 'warn', 'error', 'fatal']);
+  const rawLogLevel = process.env.SWARM_OS_LOG_LEVEL ?? process.env.LOG_LEVEL ?? 'info';
+  if (!VALID_LOG_LEVELS.has(rawLogLevel)) {
+    throw new Error(`SWARM_OS_LOG_LEVEL must be one of trace|debug|info|warn|error|fatal, got: ${rawLogLevel}`);
+  }
+  const logLevel = rawLogLevel as Config['logLevel'];
+  const logPrettyEnv = process.env.SWARM_OS_LOG_PRETTY;
+  let logPretty: boolean;
+  if (logPrettyEnv === '1' || logPrettyEnv === 'true') logPretty = true;
+  else if (logPrettyEnv === '0' || logPrettyEnv === 'false') logPretty = false;
+  else logPretty = process.env.NODE_ENV !== 'production' && Boolean(process.stdout.isTTY);
 
   // Per-session mcp.json runtime dir. Lives under /tmp so it disappears with
   // the container; per-session files are mode 0600 and per-session/orch dirs
@@ -188,8 +269,13 @@ export function loadConfig(): Config {
     maxInboxSize,
     idleThresholdMs,
     token,
+    hookToken,
+    discordWebhookUrl,
+    publicUrl,
+    logLevel,
+    logPretty,
     startedAt: new Date().toISOString(),
-    version: '0.3.0-phase3',
+    version: '0.4.0-phase4',
   };
   return cached;
 }

@@ -10,7 +10,10 @@ import {
 } from './agent-process.js';
 import { writeSessionMcpConfig, removeSessionMcpConfig } from './mcp-config.js';
 import { eventBus } from '../../events.js';
+import { withModule } from '../../logger.js';
 import type { EffortLevel, PermissionMode } from '../../config.js';
+
+const log = withModule('session');
 
 const LOG_CAP_BYTES = 50 * 1024 * 1024; // 50 MB per plan §15
 const RING_BUFFER_LINES = 200;
@@ -53,6 +56,22 @@ export interface SessionInit {
   skipSpawn?: boolean;
   /** Inject a preconstructed AgentProcess (tests). */
   agentProcessOverride?: AgentProcess;
+  /**
+   * Phase 4: callback fired on every status / activity / exit transition.
+   * The `force` flag tells the persistence layer to bypass throttling for
+   * status / exit transitions. The Orchestrator wires this into its
+   * `Persistence.writeSession`.
+   */
+  onStateChange?: (session: Session, force: boolean) => void;
+  /**
+   * Phase 4: hook token + main HTTP port. When both are set, `Session`
+   * writes a per-session `settings.json` under `claudeConfigRoot/.claude-runtime/sessions/<id>/`
+   * and exports `CLAUDE_CONFIG_DIR` to the PTY env.
+   */
+  hookToken?: string;
+  mainHttpPort?: number;
+  /** Phase 4: dataDir root — `<root>/.claude-runtime/sessions/<id>/` is the per-session config dir. */
+  claudeConfigRoot?: string;
 }
 
 export interface SessionView {
@@ -155,6 +174,11 @@ export class Session extends EventEmitter {
   private _agentDataDisp: Disposable | null = null;
   private _agentExitDisp: Disposable | null = null;
 
+  /** Phase 4 — set during construction, fired on every state mutation. */
+  private readonly _onStateChange: ((session: Session, force: boolean) => void) | null;
+  /** Phase 4 — initial prompt is needed by persistence (not normally exposed). */
+  readonly initialPromptRaw: string | null;
+
   constructor(init: SessionInit) {
     super();
     this.id = init.id ?? crypto.randomUUID();
@@ -165,6 +189,7 @@ export class Session extends EventEmitter {
     this.type = init.type;
     this.cwd = init.cwd;
     this.initialPrompt = init.initialPrompt;
+    this.initialPromptRaw = init.initialPrompt;
     this.model = init.model;
     this.effort = init.effort;
     this.permissionMode = init.permissionMode;
@@ -172,13 +197,106 @@ export class Session extends EventEmitter {
     this._lastActivityAt = this.startedAt;
     this._idleSince = Date.now();
     this.mcpRuntimeDir = init.mcpRuntimeDir;
+    this._onStateChange = init.onStateChange ?? null;
 
     const orchLogDir = path.join(init.logsDir, this.orchestratorId);
     fs.mkdirSync(orchLogDir, { recursive: true });
     this.logPath = path.join(orchLogDir, `${this.id}.log`);
 
+    // Phase 4: write per-session settings.json injecting the Notification hook.
+    // The CLAUDE_CONFIG_DIR is exported when the PTY is spawned.
+    this._claudeConfigDir = this._maybeWriteSessionSettings(init);
+
     this._openLog();
     this._spawn(init);
+  }
+
+  /**
+   * Phase 4: per-session `CLAUDE_CONFIG_DIR` (`<dataDir>/.claude-runtime/sessions/<id>/`)
+   * with a `settings.json` injecting the `Notification` hook (plan §13, spike H6).
+   *
+   * The hook payload arrives on stdin per Anthropic's Claude Code spec
+   * (`{ session_id, transcript_path, cwd, hook_event_name, message }` — see
+   * spike report §5). We read stdin via `cat` then re-encode it in JSON to
+   * a single-line POST body that includes our orch_id / session_id (the ones
+   * Claude doesn't know about — Anthropic's session_id is its own internal id).
+   *
+   * Returns the path of the config dir (or null if not configured).
+   */
+  private _maybeWriteSessionSettings(init: SessionInit): string | null {
+    if (!init.hookToken || !init.mainHttpPort || !init.claudeConfigRoot) return null;
+    try {
+      const cfgDir = path.join(
+        init.claudeConfigRoot,
+        '.claude-runtime',
+        'sessions',
+        this.id,
+      );
+      fs.mkdirSync(cfgDir, { recursive: true, mode: 0o700 });
+      try {
+        fs.chmodSync(cfgDir, 0o700);
+      } catch {
+        /* best-effort */
+      }
+      // Build the hook command. Claude streams the JSON event on stdin per
+      // the spike H6 confirmation. We pipe stdin into jq if present; if not,
+      // we fall back to a minimal awk-based pass-through. Practically:
+      // re-emit the raw stdin verbatim and wrap our context around it. To
+      // keep the command simple we send only our orch_id/session_id +
+      // `message` as a separate field — Claude's stdin event is opaque on
+      // the wire (we don't try to parse it inside the shell).
+      //
+      // The shell runs `cat` to capture stdin (Claude's hook payload), then
+      // POSTs a minimal JSON envelope. Curl is mandatory — claude-code
+      // images include it (verified in the Phase 0 bis spike).
+      const hookUrl = `http://127.0.0.1:${init.mainHttpPort}/hooks/notification`;
+      // shell command — heredoc-style, single-quoted to avoid Node-side
+      // escape soup. The actual claude payload travels in the message
+      // field (we send the raw stdin string verbatim, JSON-escaped via
+      // python3 if available, else sed).
+      const shellCmd =
+        `payload=$(cat); ` +
+        `msg=$(printf '%s' "$payload" | python3 -c 'import json,sys; sys.stdout.write(json.dumps(sys.stdin.read()))' 2>/dev/null) || ` +
+        `msg=$(printf '"%s"' "$(printf '%s' "$payload" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g; s/\\n/\\\\n/g')"); ` +
+        `body=$(printf '{"orch_id":"%s","session_id":"%s","kind":"session.waiting","message":%s}' '${this.orchestratorId}' '${this.id}' "$msg"); ` +
+        `curl -s -X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer ${init.hookToken}' -d "$body" '${hookUrl}' >/dev/null 2>&1 || true`;
+      const settings = {
+        hooks: {
+          Notification: [
+            {
+              matcher: '',
+              hooks: [
+                {
+                  type: 'command',
+                  command: shellCmd,
+                },
+              ],
+            },
+          ],
+        },
+      };
+      const settingsPath = path.join(cfgDir, 'settings.json');
+      fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), { mode: 0o600 });
+      try {
+        fs.chmodSync(settingsPath, 0o600);
+      } catch {
+        /* best-effort */
+      }
+      return cfgDir;
+    } catch (err) {
+      log.warn({
+        event: 'session.settings_failed',
+        sessionId: this.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  }
+
+  private _claudeConfigDir: string | null = null;
+  /** Phase 4: public read-only accessor — used by tests / dev tooling. */
+  get claudeConfigDir(): string | null {
+    return this._claudeConfigDir;
   }
 
   // --- Public API --------------------------------------------------------
@@ -272,7 +390,11 @@ export class Session extends EventEmitter {
     try {
       this.agent.write(payload);
     } catch (err) {
-      console.error('[swarm-os] notifySignal write failed:', err);
+      log.error({
+        event: 'notifySignal.write_failed',
+        sessionId: this.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
     // Also append to the log so it shows up in replays / log dumps. We do
     // NOT bump lastActivityAt here: the signal is server-injected, not
@@ -350,7 +472,11 @@ export class Session extends EventEmitter {
       // Non-fatal in Phase 2 if /tmp is read-only (very unlikely): we'd
       // rather still let the session run without MCP than crash the spawn.
       // Log and continue with mcpConfigPath=null.
-      console.error('[swarm-os] failed to write session mcp.json:', err);
+      log.error({
+        event: 'session.mcp_config_write_failed',
+        sessionId: this.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
       this.mcpConfigPath = null;
     }
 
@@ -379,10 +505,13 @@ export class Session extends EventEmitter {
           preamble: init.preamble,
           mcpConfigPath: this.mcpConfigPath,
         });
+        const env: NodeJS.ProcessEnv = {};
+        if (this._claudeConfigDir) env.CLAUDE_CONFIG_DIR = this._claudeConfigDir;
         agent = new PtyAgentProcess({
           command: init.claudeBin ?? 'claude',
           args,
           cwd: this.cwd,
+          env,
         });
       }
     } catch (err) {
@@ -408,9 +537,26 @@ export class Session extends EventEmitter {
       this._lastActivityAt = new Date().toISOString();
       this._idleSince = Date.now();
       this._appendLog(d);
+      // Phase 4: throttled persistence write so the lastActivityAt freshens
+      // ~1× per second without hammering SQLite on chatty PTY data.
+      this._notifyState(false);
     });
 
     this._agentExitDisp = agent.onExit((info) => this._handleExit(info));
+  }
+
+  /** Phase 4: invoke the orchestrator's state-change callback (throttled). */
+  private _notifyState(force: boolean): void {
+    if (!this._onStateChange) return;
+    try {
+      this._onStateChange(this, force);
+    } catch (err) {
+      log.warn({
+        event: 'session.state_callback_failed',
+        sessionId: this.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   private _handleExit(info: AgentExitInfo): void {
@@ -452,6 +598,8 @@ export class Session extends EventEmitter {
       sessionId: this.id,
       payload: { exitCode: info.exitCode, signal: info.signal, status: this._status },
     });
+    // Phase 4: final, forced persistence write so endedAt/exitCode land.
+    this._notifyState(true);
     this.emit('exit', info);
     // Drop EventEmitter listeners — TerminalRoom registers `.once('exit')` so
     // this is mainly defensive against subscribers that might forget to
@@ -468,6 +616,8 @@ export class Session extends EventEmitter {
       sessionId: this.id,
       payload: { status: s },
     });
+    // Phase 4: status changes always force a write — no throttling.
+    this._notifyState(true);
   }
 
   private _cleanupMcpConfig(): void {

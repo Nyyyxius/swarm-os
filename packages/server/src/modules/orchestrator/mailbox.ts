@@ -1,4 +1,7 @@
 import * as crypto from 'node:crypto';
+import { withModule } from '../../logger.js';
+
+const log = withModule('mailbox');
 
 /**
  * In-memory mailbox for an orchestrator (plan §11).
@@ -81,14 +84,12 @@ export class Mailbox {
       dropped = true;
       // Structured log so an operator can spot a runaway inbox without
       // grepping. We never log the message body (plan §15).
-      console.warn(
-        JSON.stringify({
-          event: 'mail.dropped',
-          to,
-          evictedId: evicted?.id,
-          maxSize: this.maxSize,
-        }),
-      );
+      log.warn({
+        event: 'mail.dropped',
+        to,
+        evictedId: evicted?.id,
+        maxSize: this.maxSize,
+      });
     }
     return { dropped, queueSize: q.length };
   }

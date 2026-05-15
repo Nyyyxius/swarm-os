@@ -1,6 +1,9 @@
 import type { Message, Mailbox } from './mailbox.js';
 import type { Session } from './session.js';
 import type { Orchestrator } from './index.js';
+import { withModule } from '../../logger.js';
+
+const log = withModule('messaging');
 
 /**
  * High-level messaging helpers (plan §11).
@@ -111,7 +114,11 @@ function injectSignal(session: Session): boolean {
     session.notifySignal(SIGNAL_TEXT);
     return true;
   } catch (err) {
-    console.error('[swarm-os] notifySignal failed:', err);
+    log.error({
+      event: 'notifySignal.failed',
+      sessionId: session.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
     return false;
   }
 }
@@ -157,16 +164,14 @@ export function sendMessage(
   const result = deps.mailbox.push(toSid, { from: fromSid, content });
 
   // Structured log — body is intentionally NOT included (plan §15).
-  console.log(
-    JSON.stringify({
-      event: 'mail.send',
-      from: fromSid,
-      to: toSid,
-      len: sizeCheck.bytes,
-      queueSize: result.queueSize,
-      dropped: result.dropped,
-    }),
-  );
+  log.info({
+    event: 'mail.send',
+    from: fromSid,
+    to: toSid,
+    len: sizeCheck.bytes,
+    queueSize: result.queueSize,
+    dropped: result.dropped,
+  });
 
   let signalled = false;
   if (isIdle(recipient, Date.now(), deps.defaults.idleThresholdMs)) {
@@ -220,15 +225,13 @@ export function broadcast(
     delivered.push(s.id);
   }
 
-  console.log(
-    JSON.stringify({
-      event: 'mail.broadcast',
-      from: fromSid,
-      delivered: delivered.length,
-      skipped: skipped.length,
-      len: sizeCheck.bytes,
-    }),
-  );
+  log.info({
+    event: 'mail.broadcast',
+    from: fromSid,
+    delivered: delivered.length,
+    skipped: skipped.length,
+    len: sizeCheck.bytes,
+  });
 
   return { delivered_to: delivered, skipped };
 }
@@ -239,12 +242,10 @@ export function broadcast(
  */
 export function readInbox(deps: MessagingDeps, sid: string): Message[] {
   const msgs = deps.mailbox.read(sid);
-  console.log(
-    JSON.stringify({
-      event: 'mail.read',
-      sid,
-      count: msgs.length,
-    }),
-  );
+  log.info({
+    event: 'mail.read',
+    sid,
+    count: msgs.length,
+  });
   return msgs;
 }

@@ -1,6 +1,7 @@
 import { useEffect, useState } from 'react';
 import { OrchestratorList } from './components/OrchestratorList';
 import { OrchestratorView } from './components/OrchestratorView';
+import { NotificationPanel } from './components/NotificationPanel';
 import { api, getToken, setToken, type HealthView, type InfoView } from './api/client';
 
 type Route = { kind: 'list' } | { kind: 'detail'; id: string };
@@ -123,6 +124,10 @@ export default function App() {
           />
         )}
       </main>
+
+      <NotificationPanel
+        onOpenOrchestrator={(id) => setRoute({ kind: 'detail', id })}
+      />
     </div>
   );
 }

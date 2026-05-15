@@ -1,4 +1,7 @@
 import * as pty from 'node-pty';
+import { withModule } from '../../logger.js';
+
+const log = withModule('agent-process');
 
 export interface AgentExitInfo {
   exitCode: number;
@@ -56,7 +59,7 @@ export class PtyAgentProcess implements AgentProcess {
           cb(d);
         } catch (err) {
           // Never let a bad listener kill the PTY pump.
-          console.error('[swarm-os] agent onData listener threw:', err);
+          log.error({ event: 'agent.onData_listener_failed', error: err instanceof Error ? err.message : String(err) });
         }
       }
     });
@@ -70,7 +73,7 @@ export class PtyAgentProcess implements AgentProcess {
         try {
           cb(out);
         } catch (err) {
-          console.error('[swarm-os] agent onExit listener threw:', err);
+          log.error({ event: 'agent.onExit_listener_failed', error: err instanceof Error ? err.message : String(err) });
         }
       }
       this.dataListeners.clear();
@@ -106,7 +109,7 @@ export class PtyAgentProcess implements AgentProcess {
           : ((signal ?? 'SIGTERM') as unknown as string);
       this.proc.kill(sig);
     } catch (err) {
-      console.error('[swarm-os] kill failed:', err);
+      log.error({ event: 'agent.kill_failed', error: err instanceof Error ? err.message : String(err) });
     }
   }
 
@@ -177,7 +180,7 @@ export class FakeAgentProcess implements AgentProcess {
         try {
           cb(info);
         } catch (err) {
-          console.error('[swarm-os] FakeAgentProcess exit cb threw:', err);
+          log.error({ event: 'fake_agent.exit_cb_failed', error: err instanceof Error ? err.message : String(err) });
         }
       }
       this.dataListeners.clear();
@@ -216,7 +219,7 @@ export class FakeAgentProcess implements AgentProcess {
         try {
           cb(info);
         } catch (err) {
-          console.error('[swarm-os] FakeAgentProcess exit cb threw:', err);
+          log.error({ event: 'fake_agent.exit_cb_failed', error: err instanceof Error ? err.message : String(err) });
         }
       }
       this.dataListeners.clear();
