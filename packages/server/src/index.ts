@@ -1,41 +1,49 @@
-import { createServer } from 'node:http';
-import express, { type Request, type Response } from 'express';
-import { WebSocketServer, type WebSocket } from 'ws';
+import { loadConfig } from './config.js';
+import { Spawner } from './modules/spawner/index.js';
+import { startServer } from './http/main.js';
 
-const PORT = Number(process.env.SWARM_OS_PORT ?? 8787);
-// Bind to localhost by default; container/Tailscale handles external access (see plan §14).
-const HOST = process.env.SWARM_OS_HOST ?? '127.0.0.1';
+const config = loadConfig();
 
-const app = express();
+console.log(
+  JSON.stringify({
+    event: 'boot',
+    project: config.projectName,
+    version: config.version,
+    host: config.host,
+    port: config.port,
+    workspaceRoot: config.workspaceRoot,
+    dataDir: config.dataDir,
+    // token intentionally omitted
+  }),
+);
 
-app.get('/health', (_req: Request, res: Response) => {
-  res.json({ status: 'ok', uptime: process.uptime() });
-});
+const spawner = new Spawner(config);
+const handle = startServer(config, spawner);
 
-const httpServer = createServer(app);
-
-// Placeholder WS endpoint at /ws/events: accept and echo any inbound message.
-const wss = new WebSocketServer({ noServer: true });
-
-wss.on('connection', (ws: WebSocket) => {
-  ws.send(JSON.stringify({ event: 'hello', ts: new Date().toISOString() }));
-  ws.on('message', (data) => {
-    // Echo back as-is.
-    ws.send(data);
-  });
-});
-
-httpServer.on('upgrade', (req, socket, head) => {
-  const url = new URL(req.url ?? '/', `http://${req.headers.host ?? 'localhost'}`);
-  if (url.pathname === '/ws/events') {
-    wss.handleUpgrade(req, socket, head, (ws) => {
-      wss.emit('connection', ws, req);
-    });
-  } else {
-    socket.destroy();
+let shuttingDown = false;
+async function shutdown(signal: string): Promise<void> {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  console.log(JSON.stringify({ event: 'shutdown.start', signal }));
+  try {
+    spawner.shutdownAll(`signal:${signal}`);
+    await handle.close();
+  } catch (err) {
+    console.error('[swarm-os] shutdown error:', err);
   }
-});
+  console.log(JSON.stringify({ event: 'shutdown.done' }));
+  process.exit(0);
+}
 
-httpServer.listen(PORT, HOST, () => {
-  console.log(`[swarm-os] server listening on ${HOST}:${PORT}`);
+process.on('SIGINT', () => {
+  void shutdown('SIGINT');
+});
+process.on('SIGTERM', () => {
+  void shutdown('SIGTERM');
+});
+process.on('uncaughtException', (err) => {
+  console.error('[swarm-os] uncaughtException:', err);
+});
+process.on('unhandledRejection', (err) => {
+  console.error('[swarm-os] unhandledRejection:', err);
 });

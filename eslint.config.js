@@ -11,6 +11,23 @@ export default [
   js.configs.recommended,
   ...tseslint.configs.recommended,
   {
+    rules: {
+      // Allow `_`-prefixed identifiers as the convention for intentionally-unused
+      // params/vars (e.g. interface-required signature args, stub methods).
+      '@typescript-eslint/no-unused-vars': [
+        'error',
+        {
+          args: 'after-used',
+          argsIgnorePattern: '^_',
+          varsIgnorePattern: '^_',
+          caughtErrorsIgnorePattern: '^_',
+          destructuredArrayIgnorePattern: '^_',
+        },
+      ],
+      'no-unused-vars': 'off',
+    },
+  },
+  {
     files: ['packages/server/**/*.{ts,tsx}'],
     languageOptions: {
       globals: {
