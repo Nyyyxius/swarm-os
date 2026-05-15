@@ -124,6 +124,17 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
                 </option>
               ))}
             </select>
+            {/* Phase 6 — explicit warning when the operator picks (or keeps the
+                default) bypassPermissions. The plan defaults to bypass per §3,
+                §17 because isolation comes from the container; outside that
+                container this would be wildly unsafe. */}
+            {perm === 'bypassPermissions' && (
+              <p className="mt-1 text-[11px] leading-snug text-amber-300">
+                bypassPermissions disables Claude&apos;s permission prompts. Safe
+                inside the swarm-os container; do NOT use outside isolated
+                environments.
+              </p>
+            )}
           </Field>
         </div>
         {error && <div className="mt-3 text-sm text-red-400 break-words">{error}</div>}

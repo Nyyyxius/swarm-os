@@ -54,6 +54,11 @@ COPY packages/server/src packages/server/src
 COPY packages/server/scripts packages/server/scripts
 COPY packages/web/tsconfig.json packages/web/tsconfig.app.json packages/web/tsconfig.node.json packages/web/vite.config.ts packages/web/index.html packages/web/
 COPY packages/web/src packages/web/src
+# Phase 6: Vite copies packages/web/public/* verbatim into dist/ at build
+# time. Holds: manifest.webmanifest, sw.js, icon-{192,512,maskable-512}.png,
+# apple-touch-icon.png. Without this COPY the static file middleware in the
+# server still serves index.html + assets/* but the PWA install + SW fail.
+COPY packages/web/public packages/web/public
 
 RUN pnpm -r build
 

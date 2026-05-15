@@ -31,6 +31,13 @@ services:
       # Host ~/.claude credentials + state, RO. Boot-time copy lands at
       # /data/.claude-runtime — this RO mount is never written to.
       - ${HOME}/.claude:/claude-source:ro
+      # optional: lift theme/auth state from host. Without this mount Claude
+      # logs "configuration file not found" and runs the interactive theme
+      # picker on the first spawn (which wedges the PTY). The file is RO from
+      # the container's perspective — boot-time claude-init copies it to
+      # /data/.claude-runtime/.claude.json (RW). Override the source path via
+      # SWARM_OS_CLAUDE_JSON_SOURCE if your home layout differs.
+      - ${HOME}/.claude.json:/claude-source.json:ro
       # Per-project state dir. Holds: SQLite db, token, hook-token, logs/,
       # .claude-runtime/ (writable copy of /claude-source).
       - ${HOME}/.swarm-os/fyrel-cc-app:/data

@@ -43,6 +43,20 @@ export interface ClaudeInitResult {
   sourceMtimeMs?: number;
   /** Bytes copied (rough estimate via top-level entries when copied). */
   entriesCopied?: number;
+  /**
+   * Phase 6 — `.claude.json` lift result. The file lives in `$HOME` (sibling
+   * of `~/.claude/`), holds OAuth account state + theme picker bit, and
+   * **must** be writable. We support either:
+   *   - implicit: `<sourceDir>.json` (e.g. `/claude-source.json`) — works
+   *     with the second optional mount line in compose examples.
+   *   - explicit: env `SWARM_OS_CLAUDE_JSON_SOURCE` (path to the source file).
+   * Result is `'absent'` when neither path resolves to a file (typical of
+   * dev mode), `'lifted'` when we copied it on this boot, `'cache-hit'`
+   * when the runtime copy is already in sync with the source mtime.
+   */
+  claudeJson?: 'absent' | 'lifted' | 'cache-hit';
+  /** Source path actually used for the `.claude.json` lift, if any. */
+  claudeJsonSource?: string;
 }
 
 const MARKER_FILENAME = '.swarm-os-initialized';
@@ -108,11 +122,91 @@ function readDirSafe(p: string): fs.Dirent[] | null {
 }
 
 /**
+ * Phase 6 — lift the host `~/.claude.json` (sibling of `~/.claude/`) into the
+ * per-container runtime root. Returns the lift result so the caller can log
+ * which path was used.
+ *
+ * Resolution order for the source:
+ *   1. `claudeJsonSource` (from `SWARM_OS_CLAUDE_JSON_SOURCE` env)
+ *   2. `<sourceDir>.json` (implicit sibling — e.g. `/claude-source.json`,
+ *      matches the optional second mount line in compose examples)
+ *
+ * If neither is a regular file, we return `'absent'` (dev mode no-op).
+ * Otherwise we copy it to `<runtimeDir>/.claude.json` (mode 0600). Idempotent
+ * via mtime comparison against the marker tracked by `initClaudeRuntime`.
+ *
+ * Why this matters: without `~/.claude.json`, claude prints
+ * "configuration file not found" and runs the interactive theme picker on
+ * the first spawn, which wedges the PTY and blocks orchestrators. Phase 5
+ * known issue, doc'd in `docs/phase-5-containerisation.md` §11.
+ */
+function liftClaudeJson(opts: {
+  sourceDir: string;
+  runtimeDir: string;
+  claudeJsonSource: string | null;
+}): { result: 'absent' | 'lifted' | 'cache-hit'; source?: string } {
+  const explicit = opts.claudeJsonSource;
+  const implicit = `${opts.sourceDir}.json`;
+  const candidates = [explicit, implicit].filter((p): p is string => Boolean(p && p.length));
+  let chosen: string | null = null;
+  let chosenStat: fs.Stats | null = null;
+  for (const c of candidates) {
+    const st = statSafe(c);
+    if (st && st.isFile()) {
+      chosen = c;
+      chosenStat = st;
+      break;
+    }
+  }
+  if (!chosen || !chosenStat) {
+    return { result: 'absent' };
+  }
+  const dest = path.join(opts.runtimeDir, '.claude.json');
+  // Cache check: compare source mtime against existing dest mtime.
+  const destStat = statSafe(dest);
+  if (
+    destStat &&
+    destStat.isFile() &&
+    Math.floor(destStat.mtimeMs) === Math.floor(chosenStat.mtimeMs)
+  ) {
+    return { result: 'cache-hit', source: chosen };
+  }
+  try {
+    fs.cpSync(chosen, dest, {
+      force: true,
+      preserveTimestamps: true,
+      dereference: true,
+      errorOnExist: false,
+    });
+    try {
+      fs.chmodSync(dest, 0o600);
+    } catch {
+      /* best-effort */
+    }
+    return { result: 'lifted', source: chosen };
+  } catch (err) {
+    log.warn({
+      event: 'claude_init.json_lift_failed',
+      source: chosen,
+      dest,
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return { result: 'absent', source: chosen };
+  }
+}
+
+/**
  * Run the claude-init step. See module doc.
  */
 export function initClaudeRuntime(opts: {
   sourceDir: string;
   runtimeDir: string;
+  /**
+   * Phase 6 — explicit override for the `.claude.json` source path. When
+   * unset, falls back to `<sourceDir>.json` (sibling). When neither
+   * resolves to a file, the lift is a silent no-op.
+   */
+  claudeJsonSource?: string | null;
 }): ClaudeInitResult {
   const { sourceDir, runtimeDir } = opts;
 
@@ -124,6 +218,20 @@ export function initClaudeRuntime(opts: {
   } catch {
     /* best-effort */
   }
+
+  // Phase 6: try to lift `.claude.json` regardless of whether the dir source
+  // exists — both mounts are independent in compose. Captured here so all
+  // return paths can include the result.
+  const jsonLift = liftClaudeJson({
+    sourceDir,
+    runtimeDir,
+    claudeJsonSource: opts.claudeJsonSource ?? null,
+  });
+  log.info({
+    event: 'claude_init.json_lift',
+    result: jsonLift.result,
+    source: jsonLift.source ?? null,
+  });
 
   const sourceStat = statSafe(sourceDir);
   if (!sourceStat || !sourceStat.isDirectory()) {
@@ -139,6 +247,8 @@ export function initClaudeRuntime(opts: {
       sourceDir,
       runtimeDir,
       skipReason: 'source-missing',
+      claudeJson: jsonLift.result,
+      claudeJsonSource: jsonLift.source,
     };
   }
 
@@ -155,6 +265,8 @@ export function initClaudeRuntime(opts: {
       sourceDir,
       runtimeDir,
       skipReason: 'source-unreadable',
+      claudeJson: jsonLift.result,
+      claudeJsonSource: jsonLift.source,
     };
   }
 
@@ -179,6 +291,8 @@ export function initClaudeRuntime(opts: {
       runtimeDir,
       skipReason: 'cache-hit',
       sourceMtimeMs,
+      claudeJson: jsonLift.result,
+      claudeJsonSource: jsonLift.source,
     };
   }
 
@@ -242,5 +356,7 @@ export function initClaudeRuntime(opts: {
     runtimeDir,
     sourceMtimeMs,
     entriesCopied: copied,
+    claudeJson: jsonLift.result,
+    claudeJsonSource: jsonLift.source,
   };
 }

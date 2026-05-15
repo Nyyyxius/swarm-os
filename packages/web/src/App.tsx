@@ -1,8 +1,15 @@
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useState } from 'react';
 import { OrchestratorList } from './components/OrchestratorList';
 import { OrchestratorView } from './components/OrchestratorView';
 import { NotificationPanel } from './components/NotificationPanel';
-import { api, getToken, setToken, type HealthView, type InfoView } from './api/client';
+import {
+  api,
+  getToken,
+  setToken,
+  HttpError,
+  type HealthView,
+  type InfoView,
+} from './api/client';
 
 type Route = { kind: 'list' } | { kind: 'detail'; id: string };
 
@@ -33,15 +40,41 @@ export default function App() {
   const [showSettings, setShowSettings] = useState(false);
   const [health, setHealth] = useState<HealthView | null>(null);
   const [info, setInfo] = useState<InfoView | null>(null);
+  // Phase 6: surface a clear "token required" prompt when the stored token
+  // is empty or every authenticated probe returns 401. We probe by calling
+  // listOrchestrators (cheap auth-gated GET) and surface the result through
+  // the settings panel so the operator knows where to grab the first-boot
+  // token without having to find it in container logs.
+  const [authState, setAuthState] = useState<'unknown' | 'ok' | 'missing' | 'invalid'>('unknown');
+
+  const probeAuth = useCallback(async () => {
+    if (!getToken()) {
+      setAuthState('missing');
+      return;
+    }
+    try {
+      await api.listOrchestrators();
+      setAuthState('ok');
+    } catch (err) {
+      if (err instanceof HttpError && err.status === 401) setAuthState('invalid');
+      else setAuthState('ok'); // network/server errors: don't pin as auth issue
+    }
+  }, []);
 
   useEffect(() => {
     void api.health().then(setHealth).catch(() => undefined);
     void api.info().then(setInfo).catch(() => undefined);
-  }, []);
+    void probeAuth();
+  }, [probeAuth]);
 
   useEffect(() => {
     setTokenState(getToken());
   }, [showSettings]);
+
+  // Auto-open settings when no token is stored or it's been rejected.
+  useEffect(() => {
+    if (authState === 'missing' || authState === 'invalid') setShowSettings(true);
+  }, [authState]);
 
   // Keep the hash in sync with state, AND honour back/forward navigation.
   useEffect(() => {
@@ -83,6 +116,19 @@ export default function App() {
 
       {showSettings && (
         <div className="border-b border-slate-800 p-4 bg-slate-900">
+          {(authState === 'missing' || authState === 'invalid') && (
+            <div className="mb-3 rounded border border-amber-700 bg-amber-950/40 p-3 text-xs text-amber-200">
+              <div className="font-semibold mb-1">
+                {authState === 'missing' ? 'Token required' : 'Token rejected (401)'}
+              </div>
+              <div className="leading-relaxed">
+                Paste your <code className="text-amber-100">SWARM_OS_TOKEN</code> below.
+                The first-boot token is auto-generated and persisted in the
+                container at <code className="text-amber-100">/data/token</code>. Retrieve it with:
+                <pre className="mt-1 p-2 bg-black/30 rounded font-mono text-[11px] overflow-x-auto">docker exec &lt;container&gt; cat /data/token</pre>
+              </div>
+            </div>
+          )}
           <label className="block text-xs text-slate-400 mb-1">X-Auth-Token (stored in localStorage)</label>
           <input
             className="w-full max-w-xl bg-slate-950 border border-slate-700 rounded px-2 py-1 text-sm font-mono"
@@ -97,6 +143,7 @@ export default function App() {
               onClick={() => {
                 setToken(token.trim());
                 setShowSettings(false);
+                void probeAuth();
               }}
             >
               Save
@@ -106,6 +153,7 @@ export default function App() {
               onClick={() => {
                 setToken('');
                 setTokenState('');
+                setAuthState('missing');
               }}
             >
               Clear

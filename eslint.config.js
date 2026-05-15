@@ -77,4 +77,13 @@ export default [
       },
     },
   },
+  {
+    // Phase 6 — service worker (runs in ServiceWorkerGlobalScope, not window).
+    files: ['packages/web/public/sw.js'],
+    languageOptions: {
+      globals: {
+        ...globals.serviceworker,
+      },
+    },
+  },
 ];

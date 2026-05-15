@@ -1,3 +1,4 @@
+import * as path from 'node:path';
 import { loadConfig } from './config.js';
 import { Spawner } from './modules/spawner/index.js';
 import { startServer } from './http/main.js';
@@ -29,13 +30,36 @@ log.info({
   // token, hookToken, sessionSecret etc. intentionally redacted by pino
 });
 
+// Phase 6 — first-boot token UX. The values are NEVER logged; only the
+// path + length so the operator knows where to retrieve them and can
+// recognise the difference between `SWARM_OS_TOKEN` (user-facing) and
+// `HOOK_TOKEN` (internal hook). When either token was supplied via env,
+// the file may not exist — log accordingly so this isn't misleading.
+log.info({
+  event: 'boot.tokens',
+  swarmTokenSource: process.env.SWARM_OS_TOKEN ? 'env' : 'file',
+  swarmTokenPath: process.env.SWARM_OS_TOKEN ? null : path.join(config.dataDir, 'token'),
+  swarmTokenLen: config.token.length,
+  hookTokenSource: process.env.HOOK_TOKEN ? 'env' : 'file',
+  hookTokenPath: process.env.HOOK_TOKEN ? null : path.join(config.dataDir, 'hook-token'),
+  hookTokenLen: config.hookToken.length,
+  hint: process.env.SWARM_OS_TOKEN
+    ? 'SWARM_OS_TOKEN supplied via env — paste it into the web UI Token panel'
+    : `first-boot token written to ${path.join(config.dataDir, 'token')}; copy it into the web UI Token panel (or run: docker exec <container> cat /data/token)`,
+});
+
 // ---- Phase 5: claude runtime materialisation ------------------------------
 // Must happen BEFORE the HTTP server accepts traffic so no orchestrator can
 // race against the copy. No-op outside containers (when /claude-source is
 // not mounted) — Claude then falls back to the dev's host ~/.claude.
+//
+// Phase 6 also lifts `~/.claude.json` (sibling of `~/.claude/`) so the
+// theme picker / "configuration file not found" warning don't wedge the
+// first PTY spawn.
 const claudeInit = initClaudeRuntime({
   sourceDir: config.claudeSourceDir,
   runtimeDir: config.claudeRuntimeDir,
+  claudeJsonSource: config.claudeJsonSource,
 });
 log.info({
   event: 'boot.claude_init',
@@ -43,6 +67,8 @@ log.info({
   copied: claudeInit.copied,
   skipReason: claudeInit.skipReason ?? null,
   entriesCopied: claudeInit.entriesCopied ?? null,
+  claudeJson: claudeInit.claudeJson ?? null,
+  claudeJsonSource: claudeInit.claudeJsonSource ?? null,
 });
 
 // ---- Phase 4: SQLite persistence + crash recovery -------------------------
@@ -82,10 +108,17 @@ mcp.start().catch(async (err) => {
   } catch {
     /* ignore */
   }
+  // Use the unified shutdown so DB/spawner/etc. flush together.
+  await shutdown('mcp.start_failed').catch(() => undefined);
   process.exit(1);
 });
 
 let shuttingDown = false;
+/**
+ * Tear down the active server stack. Returns once everything is flushed —
+ * **does not call `process.exit`**; the caller is responsible for picking
+ * the exit code (signals → 0, uncaughtException → 1). Idempotent.
+ */
 async function shutdown(signal: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
@@ -104,19 +137,45 @@ async function shutdown(signal: string): Promise<void> {
     });
   }
   log.info({ event: 'shutdown.done' });
-  process.exit(0);
 }
 
 process.on('SIGINT', () => {
-  void shutdown('SIGINT');
+  void shutdown('SIGINT').finally(() => process.exit(0));
 });
 process.on('SIGTERM', () => {
-  void shutdown('SIGTERM');
+  void shutdown('SIGTERM').finally(() => process.exit(0));
 });
+
+// Phase 6 carry-over: treat uncaughtException as fatal. The classic case is
+// EADDRINUSE during `http.listen` (port collision) — Node fires the error
+// asynchronously off the listen callback, so without this handler it just
+// gets logged and the process keeps running with a half-open server. We
+// attempt a graceful shutdown first (so orchestrators get SIGTERM and
+// flushable state lands on disk), then hard-exit with code 1 after a short
+// guard timeout so we never hang.
 process.on('uncaughtException', (err) => {
-  rootLog.error({ event: 'uncaughtException', error: err.message, stack: err.stack });
+  rootLog.fatal({
+    event: 'uncaughtException',
+    fatal: true,
+    error: err.message,
+    code: (err as NodeJS.ErrnoException).code ?? null,
+    stack: err.stack,
+  });
+  // Bound the graceful path: if shutdown stalls (e.g. SQLite holding a lock,
+  // hub teardown wedged), we MUST still exit so the container restarts.
+  const guard = setTimeout(() => {
+    rootLog.fatal({ event: 'uncaughtException.guard_exit' });
+    process.exit(1);
+  }, 5000);
+  guard.unref();
+  void shutdown('uncaughtException').finally(() => {
+    process.exit(1);
+  });
 });
 process.on('unhandledRejection', (err) => {
+  // unhandledRejection stays a warn (vs fatal) — most are non-fatal Promise
+  // chains we forgot to catch. Add to the fatal handler if a specific kind
+  // ever surfaces as actually-fatal in production.
   rootLog.error({
     event: 'unhandledRejection',
     error: err instanceof Error ? err.message : String(err),

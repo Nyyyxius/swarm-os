@@ -1,4 +1,7 @@
 import { createServer, type Server } from 'node:http';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import { fileURLToPath } from 'node:url';
 import express, { type Request, type Response, type NextFunction } from 'express';
 import { Spawner } from '../modules/spawner/index.js';
 import type { Config } from '../config.js';
@@ -12,6 +15,32 @@ import { EventsHub } from './ws/events.js';
 import { withModule } from '../logger.js';
 
 const log = withModule('http');
+
+/**
+ * Phase 6 — locate the built web bundle. Returns null if not found (typical
+ * of `pnpm dev` where Vite serves the bundle on :5173 with HMR).
+ *
+ * Candidate roots, in order:
+ *   1. `../web` relative to `dist/http/` (Docker layout — Dockerfile copies
+ *      the bundle to `/home/node/app/web/`)
+ *   2. `<repo>/packages/web/dist` (monorepo source layout)
+ */
+function findWebRoot(): string | null {
+  const here = path.dirname(fileURLToPath(import.meta.url));
+  const candidates = [
+    path.resolve(here, '..', '..', 'web'),
+    path.resolve(here, '..', '..', '..', 'web', 'dist'),
+    path.resolve(here, '..', '..', '..', 'packages', 'web', 'dist'),
+  ];
+  for (const c of candidates) {
+    try {
+      if (fs.statSync(path.join(c, 'index.html')).isFile()) return c;
+    } catch {
+      /* not present */
+    }
+  }
+  return null;
+}
 
 export interface ServerHandle {
   http: Server;
@@ -54,6 +83,41 @@ export function createApp(config: Config, spawner: Spawner): { app: express.Expr
   // Phase 4: hook endpoint — Bearer-auth, NOT X-Auth-Token. Mounted before
   // the X-Auth-Token middleware so the user-facing token never leaks here.
   app.use(createHooksRouter(spawner, config.hookToken, spawner.notifier));
+
+  // Phase 6: serve the built web bundle (PWA shell + JS/CSS + manifest +
+  // icons + sw.js) WITHOUT auth so it can install as a PWA. Authenticated
+  // REST routes still gate via X-Auth-Token below; the static assets carry
+  // no secrets (the auth token lives in localStorage, set via the UI). When
+  // the bundle isn't found (dev mode), this is a no-op and the developer
+  // hits Vite on :5173 directly.
+  //
+  // Important: mounted BEFORE the X-Auth-Token middleware so anonymous
+  // browsers can fetch /, /assets/*, /manifest.webmanifest, /sw.js, /icon-*.
+  // The SPA fallback (also unauth'd) handles deep-link navigations like
+  // `/?#/orchestrators/<id>` — the actual REST calls from JS still gate on
+  // the token.
+  const webRoot = findWebRoot();
+  if (webRoot) {
+    log.info({ event: 'http.serve_web', root: webRoot });
+    app.use(
+      express.static(webRoot, {
+        // index.html is served explicitly via the SPA fallback below.
+        index: false,
+        setHeaders: (res, filePath) => {
+          if (filePath.includes(`${path.sep}assets${path.sep}`)) {
+            res.setHeader('Cache-Control', 'public, max-age=31536000, immutable');
+          } else {
+            res.setHeader('Cache-Control', 'public, max-age=0, must-revalidate');
+          }
+        },
+      }),
+    );
+    // SPA shell at `/` — needs to land BEFORE the auth middleware so the
+    // browser can load the app on a fresh tab without a token already set.
+    app.get('/', (_req, res) => res.sendFile(path.join(webRoot, 'index.html')));
+  } else {
+    log.warn({ event: 'http.no_web_bundle', note: 'dev mode — Vite serves the bundle on its own port' });
+  }
 
   // Authenticated routes.
   const auth = makeAuthMiddleware(config.token);

@@ -28,6 +28,9 @@ services:
     volumes:
       - ${HOME}/dev/fyrel-cc-app:/workspace
       - ${HOME}/.claude:/claude-source:ro
+      # optional: lift theme/auth state from host (silences first-spawn
+      # theme picker — see docker-compose.single.yml for details).
+      - ${HOME}/.claude.json:/claude-source.json:ro
       - ${HOME}/.swarm-os/fyrel-cc-app:/data
     environment:
       SWARM_OS_PROJECT_NAME: fyrel-cc-app
@@ -51,6 +54,9 @@ services:
     volumes:
       - ${HOME}/dev/grap-server:/workspace
       - ${HOME}/.claude:/claude-source:ro
+      # optional: lift theme/auth state from host (silences first-spawn
+      # theme picker — see docker-compose.single.yml for details).
+      - ${HOME}/.claude.json:/claude-source.json:ro
       - ${HOME}/.swarm-os/grap-server:/data
     environment:
       SWARM_OS_PROJECT_NAME: grap-server

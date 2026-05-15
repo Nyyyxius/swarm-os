@@ -54,6 +54,15 @@ export interface Config {
    * from this root. Defaults to `<dataDir>/.claude-runtime`.
    */
   claudeRuntimeDir: string;
+  /**
+   * Phase 6: explicit override for the host `~/.claude.json` source path.
+   * Optional. When unset, `claude-init` falls back to `<claudeSourceDir>.json`
+   * (sibling — typically `/claude-source.json` if the second optional mount
+   * is configured). When neither path exists, the lift is a silent no-op
+   * and Claude will use its default-config / theme-picker flow.
+   * Configurable via `SWARM_OS_CLAUDE_JSON_SOURCE`.
+   */
+  claudeJsonSource: string | null;
   /** Phase 3: cap on workers per orchestrator. Lead is not counted. */
   maxWorkersPerOrch: number;
   /** Phase 3: cap on `team.send_message` content size. Bytes. */
@@ -239,6 +248,11 @@ export function loadConfig(): Config {
   } catch {
     /* best-effort: filesystem may not honour chmod */
   }
+  // Phase 6 — `.claude.json` lift source override (optional).
+  const claudeJsonSource =
+    process.env.SWARM_OS_CLAUDE_JSON_SOURCE && process.env.SWARM_OS_CLAUDE_JSON_SOURCE.length > 0
+      ? path.resolve(process.env.SWARM_OS_CLAUDE_JSON_SOURCE)
+      : null;
 
   const token = loadOrCreateToken(dataDir);
   const hookToken = loadOrCreateHookToken(dataDir);
@@ -299,6 +313,7 @@ export function loadConfig(): Config {
     mcpRuntimeDir,
     claudeSourceDir,
     claudeRuntimeDir,
+    claudeJsonSource,
     maxWorkersPerOrch,
     maxMessageSizeBytes: maxMessageSizeKb * 1024,
     maxInboxSize,
@@ -310,7 +325,7 @@ export function loadConfig(): Config {
     logLevel,
     logPretty,
     startedAt: new Date().toISOString(),
-    version: '0.5.0-phase5',
+    version: '0.6.0-phase6',
   };
   return cached;
 }

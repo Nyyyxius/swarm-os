@@ -348,6 +348,12 @@ export class Session extends EventEmitter {
     // settings.json (the writeFileSync below removes the symlink first).
     const SHARED_ENTRIES = [
       '.credentials.json',
+      // Phase 6: lifted from the host home (sibling of ~/.claude). Claude
+      // reads this from `$HOME` OR `CLAUDE_CONFIG_DIR/.claude.json` when the
+      // env var is set — symlinking it into the per-session config dir makes
+      // both code paths work and silences the "configuration file not found"
+      // warning + theme-picker prompt at first spawn (Phase 5 known issue).
+      '.claude.json',
       '.last-cleanup',
       'backups',
       'cache',
@@ -521,7 +527,15 @@ export class Session extends EventEmitter {
 
   /** Begin shutdown. SIGTERM, then SIGKILL after grace ms if still alive. */
   stop(reason: string, graceMs = 5000): void {
-    if (this._status === 'exited' || this._status === 'killed' || this._status === 'failed') {
+    // Phase 6 carry-over: also early-return on `interrupted`. That state is
+    // set on boot recovery (DbPersistence.recoverFromCrash) — calling stop on
+    // an already-interrupted session is a no-op (no PTY to signal anyway).
+    if (
+      this._status === 'exited' ||
+      this._status === 'killed' ||
+      this._status === 'failed' ||
+      this._status === 'interrupted'
+    ) {
       return;
     }
     this._stopReason ??= reason;
