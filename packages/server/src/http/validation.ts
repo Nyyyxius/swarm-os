@@ -2,6 +2,23 @@ import * as fs from 'node:fs/promises';
 import * as path from 'node:path';
 
 /**
+ * REST-only convenience: interpret a user-supplied `cwd` as workspace-relative
+ * when it isn't already under `workspaceRoot`. Lets the dialog accept `/` or
+ * `/reviewer` from a human who doesn't know the container's mount layout, while
+ * scripts/agents that already send `/workspace/foo` keep working unchanged.
+ *
+ * Not applied to the MCP `spawn_worker` path — agents run inside the container
+ * and see real paths.
+ */
+export function normalizeWorkspaceRelativeCwd(cwd: string, workspaceRoot: string): string {
+  if (cwd === workspaceRoot || cwd.startsWith(workspaceRoot + path.sep)) {
+    return cwd;
+  }
+  const trimmed = cwd.replace(/^\/+/, '');
+  return trimmed.length === 0 ? workspaceRoot : path.join(workspaceRoot, trimmed);
+}
+
+/**
  * Validate that `cwd` resolves under `workspaceRoot` after symlink resolution.
  * Throws an Error with a descriptive message if not.
  *

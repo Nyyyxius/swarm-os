@@ -1,0 +1,33 @@
+# swarm-os — local test setup against an empty workspace.
+#
+# Usage:
+#   docker compose -f docker-compose.test.yml up -d
+#   open http://127.0.0.1:8787
+#
+# Mounts:
+#   /workspace    ← ~/projets/test         (empty, RW — agents work here)
+#   /claude-source ← ~/.claude            (RO; copied to /data/.claude-runtime at boot)
+#   /data         ← ~/.swarm-os/test       (SQLite, token, logs)
+
+services:
+  swarm-os-test:
+    image: swarm-os:latest
+    container_name: swarm-os-test
+    init: true
+    restart: unless-stopped
+    ports:
+      - "127.0.0.1:8787:8787"
+    volumes:
+      - ${HOME}/projets/test:/workspace
+      - ${HOME}/.claude:/claude-source:ro
+      - ${HOME}/.claude.json:/claude-source.json:ro
+      - ${HOME}/.swarm-os/test:/data
+    environment:
+      SWARM_OS_PROJECT_NAME: test
+      SWARM_OS_PUBLIC_URL: https://vps-00b690bc.tail240b2d.ts.net:8787
+    healthcheck:
+      test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/health"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s

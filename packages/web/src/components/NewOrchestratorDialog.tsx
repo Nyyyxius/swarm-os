@@ -70,10 +70,10 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
               onChange={(e) => setRole(e.target.value)}
             />
           </Field>
-          <Field label="cwd (must resolve under workspace root)" wide>
+          <Field label="cwd (workspace-relative, ex: / ou /mon-projet)" wide>
             <input
               className={inputCls}
-              placeholder="/workspace/some-project"
+              placeholder="/mon-projet"
               value={cwd}
               onChange={(e) => setCwd(e.target.value)}
             />

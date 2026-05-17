@@ -266,6 +266,12 @@ export class Session extends EventEmitter {
       // is known to look at (spike H7 inventory). Best-effort: if the
       // shared dir doesn't have a given subentry, we skip the symlink.
       this._linkSharedClaudeState(init.claudeConfigRoot, cfgDir);
+      // Pre-accept the trust + project-onboarding dialogs for this cwd so
+      // the PTY doesn't wedge on first spawn. Must run AFTER the symlink
+      // pass (which is now scoped to skip `.claude.json`) and BEFORE any
+      // settings.json write so the dialog state is in place before the
+      // claude CLI reads it.
+      this._seedClaudeJsonTrust(cfgDir, init.claudeConfigRoot);
       // Build the hook command. Claude streams the JSON event on stdin per
       // the spike H6 confirmation. We pipe stdin into jq if present; if not,
       // we fall back to a minimal awk-based pass-through. Practically:
@@ -288,7 +294,18 @@ export class Session extends EventEmitter {
         `msg=$(printf '"%s"' "$(printf '%s' "$payload" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g; s/\\n/\\\\n/g')"); ` +
         `body=$(printf '{"orch_id":"%s","session_id":"%s","kind":"session.waiting","message":%s}' '${this.orchestratorId}' '${this.id}' "$msg"); ` +
         `curl -s -X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer ${init.hookToken}' -d "$body" '${hookUrl}' >/dev/null 2>&1 || true`;
+      // Pre-accept the "bypass permissions mode" disclaimer at the
+      // user-settings level. claude-code 2.1.143 migrates the legacy
+      // `.claude.json#bypassPermissionsModeAccepted` flag into
+      // `userSettings.skipDangerousModePermissionPrompt` on first launch
+      // and then deletes the source field — the runtime check that opens
+      // the interactive disclaimer widget reads ONLY the user/local/flag/
+      // policy settings (`qu()` in the bundled CLI). Setting it directly
+      // here makes the pre-acceptance survive the migration and keeps
+      // the per-session `.claude.json` seed effective as a fallback for
+      // older builds.
       const settings = {
+        skipDangerousModePermissionPrompt: true,
         hooks: {
           Notification: [
             {
@@ -348,12 +365,13 @@ export class Session extends EventEmitter {
     // settings.json (the writeFileSync below removes the symlink first).
     const SHARED_ENTRIES = [
       '.credentials.json',
-      // Phase 6: lifted from the host home (sibling of ~/.claude). Claude
-      // reads this from `$HOME` OR `CLAUDE_CONFIG_DIR/.claude.json` when the
-      // env var is set — symlinking it into the per-session config dir makes
-      // both code paths work and silences the "configuration file not found"
-      // warning + theme-picker prompt at first spawn (Phase 5 known issue).
-      '.claude.json',
+      // Phase 6 NOTE — `.claude.json` was previously symlinked here so the
+      // session inherited `hasCompletedOnboarding` + theme + userID from the
+      // lifted host copy. It is now owned per-session by
+      // `_seedClaudeJsonTrust` (which reads the runtime copy, merges in
+      // `projects[<cwd>].hasTrustDialogAccepted`, and writes a real file).
+      // Leaving the symlink in place would let our writeFileSync follow it
+      // and clobber the shared runtime copy.
       '.last-cleanup',
       'backups',
       'cache',
@@ -407,6 +425,102 @@ export class Session extends EventEmitter {
           error: err instanceof Error ? err.message : String(err),
         });
       }
+    }
+  }
+
+  /**
+   * Pre-accept the trust dialog and project-onboarding prompts for this
+   * session's `cwd` by writing a per-session `.claude.json` under
+   * `<cfgDir>/.claude.json`. Without this, the claude CLI opens the
+   * interactive "Do you trust the files in this folder?" widget on first
+   * spawn into a never-before-seen cwd and wedges the PTY.
+   *
+   * Strategy: read the lifted runtime `.claude.json` so we preserve
+   * `hasCompletedOnboarding`, `userID`, theme, etc., merge in
+   * `projects[<this.cwd>]` with the trust flags set, then write the result
+   * as a REGULAR file (not a symlink) into the per-session config dir.
+   * If the runtime file is missing or unreadable we fall back to a
+   * minimal seed sufficient to silence the prompt.
+   *
+   * Why a per-session file (not a one-shot edit of the runtime copy):
+   *   - We don't want claude's mid-session writes (lastSessionId, lastCost,
+   *     etc.) leaking across sessions through the shared file.
+   *   - Avoids racing with concurrent spawns also mutating the same path.
+   */
+  private _seedClaudeJsonTrust(cfgDir: string, runtimeDir: string): void {
+    const dest = path.join(cfgDir, '.claude.json');
+    const src = path.join(runtimeDir, '.claude.json');
+
+    let base: Record<string, unknown>;
+    try {
+      const raw = fs.readFileSync(src, 'utf8');
+      const parsed: unknown = JSON.parse(raw);
+      base =
+        parsed && typeof parsed === 'object' && !Array.isArray(parsed)
+          ? (parsed as Record<string, unknown>)
+          : { hasCompletedOnboarding: true };
+    } catch {
+      // Missing or unreadable lifted file (dev mode without claude-init,
+      // or a partial container). The minimal seed below is enough — claude
+      // will create the rest of its state on its own.
+      base = { hasCompletedOnboarding: true };
+    }
+
+    // Pre-accept the global "bypass permissions mode disclaimer" so the
+    // CLI doesn't open an interactive disclaimer widget on first spawn
+    // under `--permission-mode bypassPermissions`. The field is a top-level
+    // boolean in `.claude.json` checked by the CLI before launching in
+    // bypass mode (verified against claude-code 2.1.143 — the binary
+    // references `E$().bypassPermissionsModeAccepted` from its arg parser).
+    // We set it unconditionally: the flag means "the user has seen the
+    // disclaimer once"; it's a no-op for other modes.
+    base.bypassPermissionsModeAccepted = true;
+
+    const projectsRaw = base.projects;
+    const projects: Record<string, Record<string, unknown>> =
+      projectsRaw && typeof projectsRaw === 'object' && !Array.isArray(projectsRaw)
+        ? (projectsRaw as Record<string, Record<string, unknown>>)
+        : {};
+    const existing = projects[this.cwd];
+    const cwdEntry: Record<string, unknown> =
+      existing && typeof existing === 'object' && !Array.isArray(existing)
+        ? { ...existing }
+        : {};
+    cwdEntry.hasTrustDialogAccepted = true;
+    cwdEntry.hasCompletedProjectOnboarding = true;
+    cwdEntry.hasClaudeMdExternalIncludesApproved = true;
+    if (existing == null) {
+      // Brand-new project entry — populate the empty containers claude
+      // expects so it doesn't re-run any per-project initialisation.
+      cwdEntry.allowedTools = [];
+      cwdEntry.mcpContextUris = [];
+      cwdEntry.mcpServers = {};
+      cwdEntry.enabledMcpjsonServers = [];
+      cwdEntry.disabledMcpjsonServers = [];
+    }
+    projects[this.cwd] = cwdEntry;
+    base.projects = projects;
+
+    // Remove any pre-existing entry at `dest` (typically nothing now that
+    // `.claude.json` is excluded from SHARED_ENTRIES, but be defensive in
+    // case a stale symlink from a previous server version is around — a
+    // writeFileSync onto a symlink would follow it and corrupt the shared
+    // runtime file).
+    try {
+      fs.unlinkSync(dest);
+    } catch {
+      /* nothing to remove */
+    }
+    try {
+      fs.writeFileSync(dest, JSON.stringify(base, null, 2), { mode: 0o600 });
+      fs.chmodSync(dest, 0o600);
+    } catch (err) {
+      log.warn({
+        event: 'session.claude_json_seed_failed',
+        sessionId: this.id,
+        cwd: this.cwd,
+        error: err instanceof Error ? err.message : String(err),
+      });
     }
   }
 

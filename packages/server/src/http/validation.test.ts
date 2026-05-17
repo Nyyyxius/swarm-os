@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { validateCwdUnderWorkspace } from './validation.js';
+import { normalizeWorkspaceRelativeCwd, validateCwdUnderWorkspace } from './validation.js';
 
 /**
  * Phase 7 — `cwd` validation.
@@ -102,6 +102,36 @@ describe('validateCwdUnderWorkspace', () => {
   it('rejects a fully-qualified path outside the workspace', async () => {
     await expect(validateCwdUnderWorkspace(outsideRoot, workspaceRoot)).rejects.toThrow(
       /not under workspace root/,
+    );
+  });
+});
+
+describe('normalizeWorkspaceRelativeCwd', () => {
+  const root = '/workspace';
+
+  it('maps "/" to the workspace root itself', () => {
+    expect(normalizeWorkspaceRelativeCwd('/', root)).toBe(root);
+  });
+
+  it('maps "/reviewer" to "/workspace/reviewer"', () => {
+    expect(normalizeWorkspaceRelativeCwd('/reviewer', root)).toBe('/workspace/reviewer');
+  });
+
+  it('maps a bare name "reviewer" to "/workspace/reviewer"', () => {
+    expect(normalizeWorkspaceRelativeCwd('reviewer', root)).toBe('/workspace/reviewer');
+  });
+
+  it('keeps a path already under the workspace root as-is (backward compat)', () => {
+    expect(normalizeWorkspaceRelativeCwd('/workspace/foo', root)).toBe('/workspace/foo');
+  });
+
+  it('keeps the workspace root itself as-is', () => {
+    expect(normalizeWorkspaceRelativeCwd(root, root)).toBe(root);
+  });
+
+  it('does NOT match a sibling that shares a prefix (e.g. /workspace2)', () => {
+    expect(normalizeWorkspaceRelativeCwd('/workspace2/foo', root)).toBe(
+      '/workspace/workspace2/foo',
     );
   });
 });

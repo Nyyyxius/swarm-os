@@ -1,6 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { Spawner, SpawnerError } from '../../modules/spawner/index.js';
-import { validateCwdUnderWorkspace } from '../validation.js';
+import { normalizeWorkspaceRelativeCwd, validateCwdUnderWorkspace } from '../validation.js';
 import type { Config, EffortLevel, PermissionMode } from '../../config.js';
 import {
   broadcast as messagingBroadcast,
@@ -118,7 +118,8 @@ export function createOrchestratorsRouter(spawner: Spawner, config: Config): Rou
     // cwd realpath validation under workspace root
     let resolvedCwd: string;
     try {
-      resolvedCwd = await validateCwdUnderWorkspace(lead.cwd, config.workspaceRoot);
+      const normalized = normalizeWorkspaceRelativeCwd(lead.cwd, config.workspaceRoot);
+      resolvedCwd = await validateCwdUnderWorkspace(normalized, config.workspaceRoot);
     } catch (err) {
       res.status(400).json({
         error: 'lead.cwd validation failed',
