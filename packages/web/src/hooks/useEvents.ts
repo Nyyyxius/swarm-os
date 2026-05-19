@@ -7,6 +7,11 @@ import { api } from '../api/client';
  *
  * The hook auto-reconnects with backoff if the WS drops. Tickets expire
  * after 10 s so a fresh one is fetched per (re)connect attempt.
+ *
+ * Toasts are deduplicated by `sessionId` — repeated waiting events for the
+ * same session refresh the existing notice (newer ts, reset auto-dismiss)
+ * instead of stacking. Each notice also auto-dismisses after 30 s so a
+ * burst of unattended sessions can't fill the viewport indefinitely.
  */
 
 export interface SwarmEvent {
@@ -25,6 +30,8 @@ export interface WaitingNotice {
   reason?: string;
 }
 
+const AUTO_DISMISS_MS = 30_000;
+
 export function useEvents(): {
   connected: boolean;
   waiting: WaitingNotice[];
@@ -35,14 +42,42 @@ export function useEvents(): {
   const [waiting, setWaiting] = useState<WaitingNotice[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
   const closedRef = useRef(false);
+  const timersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
 
-  const dismiss = (id: string): void => setWaiting((w) => w.filter((n) => n.id !== id));
-  const clear = (): void => setWaiting([]);
+  const cancelTimer = (id: string): void => {
+    const t = timersRef.current.get(id);
+    if (t !== undefined) {
+      clearTimeout(t);
+      timersRef.current.delete(id);
+    }
+  };
+
+  const dismiss = (id: string): void => {
+    cancelTimer(id);
+    setWaiting((w) => w.filter((n) => n.id !== id));
+  };
+
+  const clear = (): void => {
+    for (const t of timersRef.current.values()) clearTimeout(t);
+    timersRef.current.clear();
+    setWaiting([]);
+  };
 
   useEffect(() => {
     let cancelled = false;
     let backoff = 1000;
     closedRef.current = false;
+    const timers = timersRef.current;
+
+    const scheduleAutoDismiss = (id: string): void => {
+      const existing = timers.get(id);
+      if (existing !== undefined) clearTimeout(existing);
+      const t = setTimeout(() => {
+        timers.delete(id);
+        setWaiting((w) => w.filter((n) => n.id !== id));
+      }, AUTO_DISMISS_MS);
+      timers.set(id, t);
+    };
 
     async function connect() {
       while (!cancelled) {
@@ -71,16 +106,23 @@ export function useEvents(): {
                   ev.kind === 'session.status_changed' &&
                   (ev.payload as { status?: string })?.status === 'waiting'
                 ) {
-                  setWaiting((w) => [
-                    ...w,
-                    {
-                      id: `${ev.ts}-${ev.sessionId ?? 'unknown'}`,
-                      ts: ev.ts,
-                      orchestratorId: ev.orchestratorId,
-                      sessionId: ev.sessionId,
-                      reason: (ev.payload as { reason?: string })?.reason,
-                    },
-                  ]);
+                  // Dedupe key: one toast per session. Falls back to ts when
+                  // sessionId is absent so unknown-session events still surface
+                  // individually instead of collapsing into a single phantom.
+                  const id = ev.sessionId ?? `unknown-${ev.ts}`;
+                  const notice: WaitingNotice = {
+                    id,
+                    ts: ev.ts,
+                    orchestratorId: ev.orchestratorId,
+                    sessionId: ev.sessionId,
+                    reason: (ev.payload as { reason?: string })?.reason,
+                  };
+                  setWaiting((w) => {
+                    const filtered = w.filter((n) => n.id !== id);
+                    filtered.push(notice);
+                    return filtered;
+                  });
+                  scheduleAutoDismiss(id);
                 }
               } catch {
                 /* drop malformed frames */
@@ -102,6 +144,8 @@ export function useEvents(): {
       } catch {
         /* ignore */
       }
+      for (const t of timers.values()) clearTimeout(t);
+      timers.clear();
     };
   }, []);
 

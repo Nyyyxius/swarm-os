@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { useEvents, type WaitingNotice } from '../hooks/useEvents';
 
 interface Props {
@@ -5,20 +6,24 @@ interface Props {
   onOpenOrchestrator?: (id: string) => void;
 }
 
+const MAX_VISIBLE = 5;
+
 /**
  * Phase 4 — surfaces `session.waiting` events from `/ws/events` as a stack
  * of toasts in the bottom-right of the viewport. Each toast carries:
  *
  *   - the orch id (clickable when `onOpenOrchestrator` is provided)
  *   - the session id (mono font for copy-paste)
- *   - a dismiss button (also auto-dismissed after 30 s by useEvents — TODO)
+ *   - a dismiss button (toast also auto-dismisses after 30 s in useEvents)
  *
- * Plumbed via a fixed-position container so it never shifts the underlying
- * layout. The hook itself is purely client-state — no API call beyond the
- * /ws-ticket fetch on (re)connect.
+ * Dedupe + cap behavior keeps the panel from drowning the UI when many
+ * sessions ping at once: the hook collapses repeat events per session, and
+ * this component caps visible toasts at MAX_VISIBLE with a `+N older`
+ * expander for the rest.
  */
 export function NotificationPanel({ onOpenOrchestrator }: Props) {
   const { waiting, dismiss, clear, connected } = useEvents();
+  const [expanded, setExpanded] = useState(false);
 
   if (waiting.length === 0) {
     return (
@@ -31,15 +36,36 @@ export function NotificationPanel({ onOpenOrchestrator }: Props) {
     );
   }
 
+  // waiting is oldest→newest; keep the newest at the bottom (closest to the
+  // anchor) and hide older ones behind the expander when over the cap.
+  const visible = expanded ? waiting : waiting.slice(-MAX_VISIBLE);
+  const hidden = waiting.length - visible.length;
+
   return (
-    <div className="fixed bottom-4 right-4 flex flex-col gap-2 max-w-sm z-50">
-      <div className="flex items-center justify-between text-xs text-slate-400">
+    <div className="fixed bottom-4 right-4 flex flex-col gap-2 max-w-sm z-50 max-h-[80vh] overflow-y-auto">
+      <div className="flex items-center justify-between text-xs text-slate-400 sticky top-0 bg-slate-950/80 backdrop-blur-sm py-1 px-1">
         <span>{waiting.length} session(s) waiting</span>
         <button className="hover:text-slate-100" onClick={clear}>
           clear all
         </button>
       </div>
-      {waiting.map((n) => (
+      {!expanded && hidden > 0 && (
+        <button
+          className="self-start text-xs text-slate-300 bg-slate-800/80 hover:bg-slate-700 rounded px-2 py-1"
+          onClick={() => setExpanded(true)}
+        >
+          +{hidden} older
+        </button>
+      )}
+      {expanded && waiting.length > MAX_VISIBLE && (
+        <button
+          className="self-start text-xs text-slate-300 bg-slate-800/80 hover:bg-slate-700 rounded px-2 py-1"
+          onClick={() => setExpanded(false)}
+        >
+          collapse
+        </button>
+      )}
+      {visible.map((n) => (
         <Toast
           key={n.id}
           notice={n}
