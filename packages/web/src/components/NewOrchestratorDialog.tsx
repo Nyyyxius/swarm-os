@@ -14,6 +14,11 @@ interface Props {
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 const PERMS = ['auto', 'acceptEdits', 'bypassPermissions', 'default', 'dontAsk', 'plan'] as const;
+const MODELS = [
+  { value: 'claude-opus-4-7', label: 'Opus 4.7 (claude-opus-4-7)' },
+  { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6 (claude-sonnet-4-6)' },
+  { value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5 (claude-haiku-4-5-20251001)' },
+] as const;
 
 export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
   const [name, setName] = useState('smoke');
@@ -93,11 +98,17 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
             />
           </Field>
           <Field label="model">
-            <input
+            <select
               className={inputCls}
               value={model}
               onChange={(e) => setModel(e.target.value)}
-            />
+            >
+              {MODELS.map((m) => (
+                <option key={m.value} value={m.value}>
+                  {m.label}
+                </option>
+              ))}
+            </select>
           </Field>
           <Field label="effort">
             <select
