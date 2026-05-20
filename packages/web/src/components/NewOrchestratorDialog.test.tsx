@@ -58,7 +58,7 @@ describe('NewOrchestratorDialog', () => {
     render(
       <NewOrchestratorDialog open={true} onClose={() => undefined} onCreate={makeOnCreate()} />,
     );
-    const cwdInput = screen.getByPlaceholderText('/workspace/some-project');
+    const cwdInput = screen.getByPlaceholderText('/mon-projet');
     fireEvent.change(cwdInput, { target: { value: '/workspace/x' } });
     const createBtn = screen.getByRole('button', { name: /Create/i });
     expect(createBtn).not.toBeDisabled();
@@ -69,7 +69,7 @@ describe('NewOrchestratorDialog', () => {
     render(
       <NewOrchestratorDialog open={true} onClose={() => undefined} onCreate={onCreate} />,
     );
-    const cwdInput = screen.getByPlaceholderText('/workspace/some-project');
+    const cwdInput = screen.getByPlaceholderText('/mon-projet');
     fireEvent.change(cwdInput, { target: { value: '/workspace/x' } });
     fireEvent.click(screen.getByRole('button', { name: /Create/i }));
     // Wait one microtask for the async submit to fire.

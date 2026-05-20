@@ -10,6 +10,8 @@ import { createOrchestratorsRouter } from './routes/orchestrators.js';
 import { createSessionsRouter } from './routes/sessions.js';
 import { createWsTicketRouter } from './routes/ws-ticket.js';
 import { createHooksRouter } from './routes/hooks.js';
+import { createRolesRouter } from './routes/roles.js';
+import type { RoleStore } from '../modules/roles/index.js';
 import { TerminalHub } from './ws/terminal.js';
 import { EventsHub } from './ws/events.js';
 import { withModule } from '../logger.js';
@@ -48,7 +50,11 @@ export interface ServerHandle {
   close(): Promise<void>;
 }
 
-export function createApp(config: Config, spawner: Spawner): { app: express.Express } {
+export function createApp(
+  config: Config,
+  spawner: Spawner,
+  roleStore: RoleStore,
+): { app: express.Express } {
   const app = express();
   app.disable('x-powered-by');
   // Body-parser limit gets the prompt cap PLUS headroom for JSON envelope
@@ -125,6 +131,7 @@ export function createApp(config: Config, spawner: Spawner): { app: express.Expr
   app.use(createOrchestratorsRouter(spawner, config));
   app.use(createSessionsRouter(spawner, config));
   app.use(createWsTicketRouter(spawner));
+  app.use(createRolesRouter(roleStore, config));
 
   // JSON error handler — must be the LAST middleware. Without this, body-parser
   // failures (entity.too.large, malformed JSON) return Express' default HTML
@@ -150,8 +157,12 @@ export function createApp(config: Config, spawner: Spawner): { app: express.Expr
   return { app };
 }
 
-export function startServer(config: Config, spawner: Spawner): ServerHandle {
-  const { app } = createApp(config, spawner);
+export function startServer(
+  config: Config,
+  spawner: Spawner,
+  roleStore: RoleStore,
+): ServerHandle {
+  const { app } = createApp(config, spawner, roleStore);
   const http = createServer(app);
 
   const terminalHub = new TerminalHub(spawner);

@@ -1,16 +1,21 @@
-import { useState } from 'react';
-import type { OrchestratorView } from '../api/client';
+import { useEffect, useMemo, useState } from 'react';
+import type { OrchestratorView, RoleView } from '../api/client';
+import { useRoles } from '../hooks/useRoles';
+import { RoleDialog } from './RoleDialog';
 
 interface Props {
   open: boolean;
   onClose: () => void;
   onCreate: (body: {
     name: string;
-    role: string;
-    lead: { cwd: string; prompt: string; preamble?: string };
+    role?: string;
+    roleId?: string;
+    lead: { cwd: string; prompt?: string; preamble?: string };
     defaults?: { model?: string; effort?: string; permissionMode?: string };
   }) => Promise<OrchestratorView>;
 }
+
+const CREATE_ROLE_SENTINEL = '__create_new__';
 
 const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 const PERMS = ['auto', 'acceptEdits', 'bypassPermissions', 'default', 'dontAsk', 'plan'] as const;
@@ -21,7 +26,9 @@ const MODELS = [
 ] as const;
 
 export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
+  const { roles, create: createRole } = useRoles();
   const [name, setName] = useState('smoke');
+  const [selectedRoleId, setSelectedRoleId] = useState<string>('');
   const [role, setRole] = useState('test');
   const [cwd, setCwd] = useState('');
   const [prompt, setPrompt] = useState('say hi');
@@ -31,8 +38,40 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
   const [perm, setPerm] = useState<(typeof PERMS)[number]>('bypassPermissions');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [roleDialogOpen, setRoleDialogOpen] = useState(false);
+
+  const selectedRole: RoleView | null = useMemo(
+    () => (selectedRoleId ? roles.find((r) => r.id === selectedRoleId) ?? null : null),
+    [selectedRoleId, roles],
+  );
+
+  // Auto-fill fields from the selected role. Only overwrites the value if it's
+  // still at the default/empty — we don't trample what the user has typed.
+  useEffect(() => {
+    if (!selectedRole) return;
+    setRole(selectedRole.label);
+    if (selectedRole.leadPrompt) setPrompt(selectedRole.leadPrompt);
+    if (selectedRole.leadPreamble) setPreamble(selectedRole.leadPreamble);
+    if (selectedRole.defaultModel) setModel(selectedRole.defaultModel);
+    if (selectedRole.defaultEffort) setEffort(selectedRole.defaultEffort);
+    if (selectedRole.defaultPermissionMode)
+      setPerm(selectedRole.defaultPermissionMode as (typeof PERMS)[number]);
+  }, [selectedRole]);
 
   if (!open) return null;
+
+  function onRolePicked(value: string) {
+    if (value === CREATE_ROLE_SENTINEL) {
+      setRoleDialogOpen(true);
+      return;
+    }
+    setSelectedRoleId(value);
+    if (!value) {
+      // Falling back to "(no role)" — clear the label so the user retypes
+      // an inline one rather than keeping the previous role's label.
+      setRole('test');
+    }
+  }
 
   async function submit() {
     setError(null);
@@ -41,6 +80,7 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
       await onCreate({
         name,
         role,
+        ...(selectedRoleId ? { roleId: selectedRoleId } : {}),
         lead: {
           cwd,
           prompt,
@@ -69,11 +109,42 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
             />
           </Field>
           <Field label="role">
-            <input
+            <select
               className={inputCls}
-              value={role}
-              onChange={(e) => setRole(e.target.value)}
-            />
+              value={selectedRoleId}
+              onChange={(e) => onRolePicked(e.target.value)}
+            >
+              <option value="">(no role — type a label below)</option>
+              {roles.map((r) => (
+                <option key={r.id} value={r.id}>
+                  {r.label}
+                </option>
+              ))}
+              <option value={CREATE_ROLE_SENTINEL}>+ Create new role…</option>
+            </select>
+            {!selectedRoleId && (
+              <input
+                className={`${inputCls} mt-1`}
+                placeholder="role label (e.g. researcher)"
+                value={role}
+                onChange={(e) => setRole(e.target.value)}
+              />
+            )}
+            {selectedRole && (
+              <div className="mt-1 flex flex-wrap gap-1 text-[11px] text-slate-400">
+                {selectedRole.workerCount != null && selectedRole.workerCount > 0 && (
+                  <span className="px-1.5 py-0.5 rounded bg-slate-800">
+                    will spawn {selectedRole.workerCount} worker
+                    {selectedRole.workerCount > 1 ? 's' : ''}
+                  </span>
+                )}
+                {selectedRole.connectors.find((c) => c.type === 'discord') && (
+                  <span className="px-1.5 py-0.5 rounded bg-indigo-900/60 text-indigo-200">
+                    Discord webhook
+                  </span>
+                )}
+              </div>
+            )}
           </Field>
           <Field label="cwd (workspace-relative, ex: / ou /mon-projet)" wide>
             <input
@@ -166,6 +237,15 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
           </button>
         </div>
       </div>
+      <RoleDialog
+        open={roleDialogOpen}
+        onClose={() => setRoleDialogOpen(false)}
+        onSubmit={async (body) => {
+          const r = await createRole(body);
+          setSelectedRoleId(r.id);
+          return r;
+        }}
+      />
     </div>
   );
 }

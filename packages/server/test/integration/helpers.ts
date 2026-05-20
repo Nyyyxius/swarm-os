@@ -20,6 +20,7 @@ import { Spawner } from '../../src/modules/spawner/index.js';
 import { McpServer } from '../../src/modules/mcp/server.js';
 import { SwarmDb } from '../../src/modules/db/index.js';
 import { DbPersistence } from '../../src/modules/orchestrator/persistence.js';
+import { RoleStore } from '../../src/modules/roles/index.js';
 import { createApp, startServer } from '../../src/http/main.js';
 import { loadConfig, _resetConfigCacheForTesting } from '../../src/config.js';
 import type { Config } from '../../src/config.js';
@@ -108,9 +109,10 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
   const config = loadConfig();
   const db = new SwarmDb(dataDir);
   const persistence = new DbPersistence(db);
+  const roleStore = new RoleStore(db);
   // Default to no-op so a notifier wasn't passed
   const notifier = opts.notifier ?? new NoOpNotifier();
-  const spawner = new Spawner(config, { notifier, persistence });
+  const spawner = new Spawner(config, { notifier, persistence, roleStore });
 
   let mcp: McpServer | null = null;
   if (!opts.skipMcp) {
@@ -120,7 +122,7 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
 
   let http: HttpServer | null = null;
   if (!opts.skipMainHttp) {
-    const handle = startServer(config, spawner);
+    const handle = startServer(config, spawner, roleStore);
     http = handle.http;
     // Wait until the listener is actually accepting connections.
     await new Promise<void>((resolve) => {

@@ -26,6 +26,11 @@ const VALID_PERMS: ReadonlySet<string> = new Set([
 interface CreateBody {
   name?: unknown;
   role?: unknown;
+  /** Phase 7: optional FK into the roles table. When set, the role's fields
+   * (leadPrompt, leadPreamble, workerPreamble, defaults) fill in any field
+   * the caller did NOT provide. The label still becomes `orchestrator.role`
+   * (denormalized) so existing readers keep working. */
+  roleId?: unknown;
   lead?: {
     cwd?: unknown;
     prompt?: unknown;
@@ -57,19 +62,52 @@ export function createOrchestratorsRouter(spawner: Spawner, config: Config): Rou
       res.status(400).json({ error: 'name is required and must be a non-empty string' });
       return;
     }
-    if (!isString(body.role)) {
+
+    // Phase 7: optional role lookup. The role's fields fill in anything the
+    // caller omitted (label, lead prompt/preamble, workerPreamble, defaults).
+    let role = null;
+    if (body.roleId != null) {
+      if (!isString(body.roleId)) {
+        res.status(400).json({ error: 'roleId must be a non-empty string' });
+        return;
+      }
+      if (spawner.roleStore) {
+        role = spawner.roleStore.get(body.roleId);
+        if (!role) {
+          res.status(400).json({ error: 'roleId not found' });
+          return;
+        }
+      }
+    }
+
+    // The label may come from the body or fall back to the role's label.
+    let roleLabel: string;
+    if (isString(body.role)) {
+      roleLabel = body.role;
+    } else if (role) {
+      roleLabel = role.label;
+    } else {
       res.status(400).json({ error: 'role is required and must be a non-empty string' });
       return;
     }
+
     const lead = body.lead ?? {};
     if (!isString(lead.cwd)) {
       res.status(400).json({ error: 'lead.cwd is required and must be a non-empty string' });
       return;
     }
-    if (!isString(lead.prompt)) {
+
+    // Lead prompt: body wins, else role.leadPrompt, else required error.
+    let leadPrompt: string;
+    if (isString(lead.prompt)) {
+      leadPrompt = lead.prompt;
+    } else if (role?.leadPrompt) {
+      leadPrompt = role.leadPrompt;
+    } else {
       res.status(400).json({ error: 'lead.prompt is required and must be a non-empty string' });
       return;
     }
+
     if (lead.preamble != null && typeof lead.preamble !== 'string') {
       res.status(400).json({ error: 'lead.preamble must be a string if provided' });
       return;
@@ -79,7 +117,13 @@ export function createOrchestratorsRouter(spawner: Spawner, config: Config): Rou
       return;
     }
 
-    const promptBytes = bytesOf(lead.prompt) + (isString(lead.preamble) ? bytesOf(lead.preamble) : 0);
+    const effectiveLeadPreamble =
+      isString(lead.preamble) ? lead.preamble : role?.leadPreamble ?? null;
+    const effectiveWorkerPreamble =
+      isString(body.workerPreamble) ? body.workerPreamble : role?.workerPreamble ?? null;
+
+    const promptBytes =
+      bytesOf(leadPrompt) + (effectiveLeadPreamble ? bytesOf(effectiveLeadPreamble) : 0);
     if (promptBytes > config.maxPromptSizeBytes) {
       res.status(413).json({
         error: `prompt+preamble too large: ${promptBytes} bytes > ${config.maxPromptSizeBytes}`,
@@ -87,10 +131,11 @@ export function createOrchestratorsRouter(spawner: Spawner, config: Config): Rou
       return;
     }
 
-    // Validate defaults
-    let model = config.defaultModel;
-    let effort: EffortLevel = config.defaultEffort;
-    let permissionMode: PermissionMode = config.defaultPermissionMode;
+    // Validate defaults — body > role > global config
+    let model = role?.defaultModel ?? config.defaultModel;
+    let effort: EffortLevel = (role?.defaultEffort as EffortLevel | null) ?? config.defaultEffort;
+    let permissionMode: PermissionMode =
+      (role?.defaultPermissionMode as PermissionMode | null) ?? config.defaultPermissionMode;
     if (body.defaults) {
       if (body.defaults.model != null) {
         if (!isString(body.defaults.model)) {
@@ -131,16 +176,17 @@ export function createOrchestratorsRouter(spawner: Spawner, config: Config): Rou
     try {
       const { orchestrator, lead: leadSession } = spawner.create({
         name: body.name,
-        role: body.role,
+        role: roleLabel,
+        roleId: role?.id ?? null,
         defaultModel: model,
         defaultEffort: effort,
         defaultPermissionMode: permissionMode,
-        leadPreamble: isString(lead.preamble) ? lead.preamble : null,
-        workerPreamble: isString(body.workerPreamble) ? body.workerPreamble : null,
+        leadPreamble: effectiveLeadPreamble,
+        workerPreamble: effectiveWorkerPreamble,
         lead: {
           cwd: resolvedCwd,
-          prompt: lead.prompt,
-          preamble: isString(lead.preamble) ? lead.preamble : null,
+          prompt: leadPrompt,
+          preamble: effectiveLeadPreamble,
         },
       });
       res.status(201).json({

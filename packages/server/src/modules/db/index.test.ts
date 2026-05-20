@@ -20,6 +20,7 @@ function makeOrchRow(over: Partial<OrchestratorRow> = {}): OrchestratorRow {
     id: 'orch-1',
     name: 'merge-team',
     role: 'coordinator',
+    role_id: null,
     status: 'running',
     lead_session_id: null,
     default_model: 'claude-opus-4-7',

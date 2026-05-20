@@ -18,6 +18,8 @@ export type OrchestratorStatus = 'starting' | 'running' | 'stopping' | 'stopped'
 export interface OrchestratorInit {
   name: string;
   role: string;
+  /** Optional FK into the `roles` table. Stored as denormalized label in `role`. */
+  roleId?: string | null;
   defaultModel: string;
   defaultEffort: EffortLevel;
   defaultPermissionMode: PermissionMode;
@@ -34,6 +36,7 @@ export interface OrchestratorView {
   id: string;
   name: string;
   role: string;
+  roleId: string | null;
   status: OrchestratorStatus;
   leadSessionId: string | null;
   defaultModel: string;
@@ -99,6 +102,7 @@ export class Orchestrator {
   readonly id: string;
   readonly name: string;
   readonly role: string;
+  readonly roleId: string | null;
   readonly defaultModel: string;
   readonly defaultEffort: EffortLevel;
   readonly defaultPermissionMode: PermissionMode;
@@ -128,6 +132,7 @@ export class Orchestrator {
     this.id = crypto.randomUUID();
     this.name = init.name;
     this.role = init.role;
+    this.roleId = init.roleId ?? null;
     this.defaultModel = init.defaultModel;
     this.defaultEffort = init.defaultEffort;
     this.defaultPermissionMode = init.defaultPermissionMode;
@@ -400,6 +405,7 @@ export class Orchestrator {
       id: this.id,
       name: this.name,
       role: this.role,
+      roleId: this.roleId,
       status: this._status,
       leadSessionId: this._leadSessionId,
       defaultModel: this.defaultModel,

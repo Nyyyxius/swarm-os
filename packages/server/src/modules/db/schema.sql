@@ -17,6 +17,7 @@ CREATE TABLE IF NOT EXISTS orchestrators (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   role TEXT NOT NULL,
+  role_id TEXT,                         -- nullable FK to roles.id (denormalized: label stays in `role`)
   status TEXT NOT NULL,                 -- starting|running|stopping|stopped|failed
   lead_session_id TEXT,
   default_model TEXT NOT NULL,
@@ -32,6 +33,26 @@ CREATE TABLE IF NOT EXISTS orchestrators (
 
 CREATE INDEX IF NOT EXISTS idx_orchestrators_status ON orchestrators(status);
 CREATE INDEX IF NOT EXISTS idx_orchestrators_ended_at ON orchestrators(ended_at);
+
+-- Roles: reusable templates for orchestrators. Every field except `label` is
+-- optional; when present it pre-fills / overrides the corresponding orch field.
+-- `connectors_json` is a JSON array of {type, ...config}. Only `type:"discord"`
+-- with `webhookUrl` is supported today.
+CREATE TABLE IF NOT EXISTS roles (
+  id TEXT PRIMARY KEY,
+  label TEXT NOT NULL,
+  lead_prompt TEXT,
+  lead_preamble TEXT,
+  worker_preamble TEXT,
+  worker_count INTEGER,
+  default_model TEXT,
+  default_effort TEXT,
+  default_permission_mode TEXT,
+  connectors_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_roles_label ON roles(label);
 
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,

@@ -16,6 +16,7 @@ export interface OrchestratorView {
   id: string;
   name: string;
   role: string;
+  roleId: string | null;
   status: 'starting' | 'running' | 'stopping' | 'stopped' | 'failed';
   leadSessionId: string | null;
   defaultModel: string;
@@ -30,6 +31,29 @@ export interface OrchestratorView {
   /** Phase 4: present on history rows so UI can show "interrupted (server-restart)" etc. */
   stopReason?: string | null;
 }
+
+export interface DiscordConnectorView {
+  type: 'discord';
+  webhookUrl: string;
+}
+export type ConnectorView = DiscordConnectorView;
+
+export interface RoleView {
+  id: string;
+  label: string;
+  leadPrompt: string | null;
+  leadPreamble: string | null;
+  workerPreamble: string | null;
+  workerCount: number | null;
+  defaultModel: string | null;
+  defaultEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null;
+  defaultPermissionMode: string | null;
+  connectors: ConnectorView[];
+  createdAt: string;
+  updatedAt: string;
+}
+
+export type RoleInput = Omit<RoleView, 'id' | 'createdAt' | 'updatedAt'>;
 
 export interface SessionView {
   id: string;
@@ -117,8 +141,9 @@ export const api = {
   getOrchestrator: (id: string) => request<OrchestratorView>('GET', `/orchestrators/${id}`),
   createOrchestrator: (body: {
     name: string;
-    role: string;
-    lead: { cwd: string; prompt: string; preamble?: string };
+    role?: string;
+    roleId?: string;
+    lead: { cwd: string; prompt?: string; preamble?: string };
     workerPreamble?: string;
     defaults?: { model?: string; effort?: string; permissionMode?: string };
   }) =>
@@ -127,6 +152,13 @@ export const api = {
       '/orchestrators',
       body,
     ),
+  listRoles: () => request<{ roles: RoleView[] }>('GET', '/roles'),
+  getRole: (id: string) => request<{ role: RoleView }>('GET', `/roles/${id}`),
+  createRole: (body: Partial<RoleInput> & { label: string }) =>
+    request<{ role: RoleView }>('POST', '/roles', body),
+  updateRole: (id: string, body: Partial<RoleInput>) =>
+    request<{ role: RoleView }>('PATCH', `/roles/${id}`, body),
+  deleteRole: (id: string) => request<void>('DELETE', `/roles/${id}`),
   destroyOrchestrator: (id: string) =>
     request<void>('DELETE', `/orchestrators/${id}`),
   getSession: (id: string) => request<SessionView>('GET', `/sessions/${id}`),

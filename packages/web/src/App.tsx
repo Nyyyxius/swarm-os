@@ -2,6 +2,7 @@ import { useCallback, useEffect, useState } from 'react';
 import { OrchestratorList } from './components/OrchestratorList';
 import { OrchestratorView } from './components/OrchestratorView';
 import { NotificationPanel } from './components/NotificationPanel';
+import { RolesPage } from './components/RolesPage';
 import {
   api,
   getToken,
@@ -11,24 +12,29 @@ import {
   type InfoView,
 } from './api/client';
 
-type Route = { kind: 'list' } | { kind: 'detail'; id: string };
+type Route = { kind: 'list' } | { kind: 'detail'; id: string } | { kind: 'roles' };
 
 /**
  * Parse the current URL hash into a Route. We use the URL fragment so deep
  * links work without needing server-side rewrites:
  *
  *   #/orchestrators/<id>  → detail view
+ *   #/roles               → roles dashboard
  *   #/                    → list (also: empty hash)
  */
 function parseHash(): Route {
   const h = window.location.hash;
   const m = /^#\/orchestrators\/([a-zA-Z0-9-]+)$/.exec(h);
   if (m && m[1]) return { kind: 'detail', id: m[1] };
+  if (h === '#/roles') return { kind: 'roles' };
   return { kind: 'list' };
 }
 
 function setHashRoute(route: Route): void {
-  const target = route.kind === 'list' ? '#/' : `#/orchestrators/${route.id}`;
+  let target: string;
+  if (route.kind === 'list') target = '#/';
+  else if (route.kind === 'roles') target = '#/roles';
+  else target = `#/orchestrators/${route.id}`;
   if (window.location.hash !== target) {
     window.location.hash = target;
   }
@@ -104,7 +110,19 @@ export default function App() {
             {health.uptime_seconds}s
           </span>
         )}
-        <div className="ml-auto">
+        <div className="ml-auto flex gap-2">
+          <button
+            className={`px-2 py-1 text-xs rounded ${route.kind === 'list' ? 'bg-emerald-700' : 'bg-slate-800 hover:bg-slate-700'}`}
+            onClick={() => setRoute({ kind: 'list' })}
+          >
+            Orchestrators
+          </button>
+          <button
+            className={`px-2 py-1 text-xs rounded ${route.kind === 'roles' ? 'bg-emerald-700' : 'bg-slate-800 hover:bg-slate-700'}`}
+            onClick={() => setRoute({ kind: 'roles' })}
+          >
+            Roles
+          </button>
           <button
             className="px-2 py-1 text-xs rounded bg-slate-800 hover:bg-slate-700"
             onClick={() => setShowSettings((v) => !v)}
@@ -163,9 +181,11 @@ export default function App() {
       )}
 
       <main className="flex-1 p-4 min-h-0">
-        {route.kind === 'list' ? (
+        {route.kind === 'list' && (
           <OrchestratorList onSelect={(id) => setRoute({ kind: 'detail', id })} />
-        ) : (
+        )}
+        {route.kind === 'roles' && <RolesPage />}
+        {route.kind === 'detail' && (
           <OrchestratorView
             orchestratorId={route.id}
             onBack={() => setRoute({ kind: 'list' })}

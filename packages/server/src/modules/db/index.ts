@@ -55,6 +55,7 @@ export interface OrchestratorRow {
   id: string;
   name: string;
   role: string;
+  role_id: string | null;
   status: OrchestratorStatusRow;
   lead_session_id: string | null;
   default_model: string;
@@ -66,6 +67,26 @@ export interface OrchestratorRow {
   ended_at: string | null;
   last_error: string | null;
   stop_reason: string | null;
+}
+
+/**
+ * Roles: reusable orchestrator templates. The `connectors_json` column carries
+ * a JSON-serialized array of {type, ...config} entries — see modules/roles
+ * for the parsed types.
+ */
+export interface RoleRow {
+  id: string;
+  label: string;
+  lead_prompt: string | null;
+  lead_preamble: string | null;
+  worker_preamble: string | null;
+  worker_count: number | null;
+  default_model: string | null;
+  default_effort: string | null;
+  default_permission_mode: string | null;
+  connectors_json: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 export interface SessionRow {
@@ -108,27 +129,34 @@ export class SwarmDb {
   private readonly listSessionsByOrchStmt;
   private readonly markOrchInterruptedStmt;
   private readonly markSessionInterruptedStmt;
+  private readonly insertRoleStmt;
+  private readonly updateRoleStmt;
+  private readonly getRoleStmt;
+  private readonly listRolesStmt;
+  private readonly deleteRoleStmt;
 
   constructor(dataDir: string) {
     fs.mkdirSync(dataDir, { recursive: true });
     const dbPath = path.join(dataDir, 'swarm-os.db');
     this.db = new Database(dbPath);
     this.applySchema();
+    this.applyMigrations();
 
     // Prepared statements — bound to `this` for use throughout the module.
     this.upsertOrchStmt = this.db.prepare<OrchestratorRow>(`
       INSERT INTO orchestrators (
-        id, name, role, status, lead_session_id, default_model, default_effort,
+        id, name, role, role_id, status, lead_session_id, default_model, default_effort,
         default_permission_mode, lead_preamble, worker_preamble, created_at,
         ended_at, last_error, stop_reason
       ) VALUES (
-        @id, @name, @role, @status, @lead_session_id, @default_model, @default_effort,
+        @id, @name, @role, @role_id, @status, @lead_session_id, @default_model, @default_effort,
         @default_permission_mode, @lead_preamble, @worker_preamble, @created_at,
         @ended_at, @last_error, @stop_reason
       )
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
         role = excluded.role,
+        role_id = excluded.role_id,
         status = excluded.status,
         lead_session_id = excluded.lead_session_id,
         default_model = excluded.default_model,
@@ -203,6 +231,63 @@ export class SwarmDb {
           stop_reason = 'server-restart'
       WHERE status NOT IN ('exited','killed','interrupted','failed')
     `);
+
+    this.insertRoleStmt = this.db.prepare<RoleRow>(`
+      INSERT INTO roles (
+        id, label, lead_prompt, lead_preamble, worker_preamble, worker_count,
+        default_model, default_effort, default_permission_mode, connectors_json,
+        created_at, updated_at
+      ) VALUES (
+        @id, @label, @lead_prompt, @lead_preamble, @worker_preamble, @worker_count,
+        @default_model, @default_effort, @default_permission_mode, @connectors_json,
+        @created_at, @updated_at
+      )
+    `);
+    this.updateRoleStmt = this.db.prepare<RoleRow>(`
+      UPDATE roles SET
+        label = @label,
+        lead_prompt = @lead_prompt,
+        lead_preamble = @lead_preamble,
+        worker_preamble = @worker_preamble,
+        worker_count = @worker_count,
+        default_model = @default_model,
+        default_effort = @default_effort,
+        default_permission_mode = @default_permission_mode,
+        connectors_json = @connectors_json,
+        updated_at = @updated_at
+      WHERE id = @id
+    `);
+    this.getRoleStmt = this.db.prepare<[string], RoleRow>(
+      'SELECT * FROM roles WHERE id = ?',
+    );
+    this.listRolesStmt = this.db.prepare<[], RoleRow>(
+      'SELECT * FROM roles ORDER BY label ASC',
+    );
+    this.deleteRoleStmt = this.db.prepare<[string]>(
+      'DELETE FROM roles WHERE id = ?',
+    );
+  }
+
+  /**
+   * Idempotent column-additions for upgrades. SQLite's `CREATE TABLE IF NOT
+   * EXISTS` skips the table entirely if it already exists, so a fresh
+   * column on an existing table needs an explicit `ALTER TABLE`. We swallow
+   * the duplicate-column error so this stays safe to run on every boot.
+   */
+  private applyMigrations(): void {
+    const additions: Array<{ table: string; column: string; ddl: string }> = [
+      { table: 'orchestrators', column: 'role_id', ddl: 'ALTER TABLE orchestrators ADD COLUMN role_id TEXT' },
+    ];
+    for (const a of additions) {
+      try {
+        this.db.exec(a.ddl);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!/duplicate column name/i.test(msg)) {
+          log.warn({ event: 'db.migration_failed', table: a.table, column: a.column, error: msg });
+        }
+      }
+    }
   }
 
   private applySchema(): void {
@@ -315,6 +400,70 @@ export class SwarmDb {
     return { orchestrators: orchs, sessions };
   }
 
+  // --- Roles -------------------------------------------------------------
+
+  insertRole(row: RoleRow): void {
+    try {
+      this.insertRoleStmt.run(row);
+    } catch (err) {
+      log.warn({
+        event: 'db.write_failed',
+        op: 'insertRole',
+        roleId: row.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
+  }
+
+  updateRole(row: RoleRow): void {
+    try {
+      this.updateRoleStmt.run(row);
+    } catch (err) {
+      log.warn({
+        event: 'db.write_failed',
+        op: 'updateRole',
+        roleId: row.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
+  }
+
+  getRole(id: string): RoleRow | null {
+    try {
+      const row = this.getRoleStmt.get(id);
+      return row ?? null;
+    } catch (err) {
+      log.warn({ event: 'db.read_failed', op: 'getRole', error: String(err) });
+      return null;
+    }
+  }
+
+  listRoles(): RoleRow[] {
+    try {
+      return this.listRolesStmt.all();
+    } catch (err) {
+      log.warn({ event: 'db.read_failed', op: 'listRoles', error: String(err) });
+      return [];
+    }
+  }
+
+  deleteRole(id: string): boolean {
+    try {
+      const res = this.deleteRoleStmt.run(id);
+      return res.changes > 0;
+    } catch (err) {
+      log.warn({
+        event: 'db.write_failed',
+        op: 'deleteRole',
+        roleId: id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+  }
+
   /** Helper for tests / verify scripts — both predicates exposed. */
   static isTerminalOrch(s: OrchestratorStatusRow): boolean {
     return TERMINAL_ORCH.has(s);
@@ -343,6 +492,7 @@ CREATE TABLE IF NOT EXISTS orchestrators (
   id TEXT PRIMARY KEY,
   name TEXT NOT NULL,
   role TEXT NOT NULL,
+  role_id TEXT,
   status TEXT NOT NULL,
   lead_session_id TEXT,
   default_model TEXT NOT NULL,
@@ -358,6 +508,22 @@ CREATE TABLE IF NOT EXISTS orchestrators (
 
 CREATE INDEX IF NOT EXISTS idx_orchestrators_status ON orchestrators(status);
 CREATE INDEX IF NOT EXISTS idx_orchestrators_ended_at ON orchestrators(ended_at);
+
+CREATE TABLE IF NOT EXISTS roles (
+  id TEXT PRIMARY KEY,
+  label TEXT NOT NULL,
+  lead_prompt TEXT,
+  lead_preamble TEXT,
+  worker_preamble TEXT,
+  worker_count INTEGER,
+  default_model TEXT,
+  default_effort TEXT,
+  default_permission_mode TEXT,
+  connectors_json TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_roles_label ON roles(label);
 
 CREATE TABLE IF NOT EXISTS sessions (
   id TEXT PRIMARY KEY,

@@ -469,6 +469,7 @@ async function main(): Promise<void> {
     id: ghostOrchId,
     name: 'ghost',
     role: 'pre-restart',
+    role_id: null,
     status: 'running',
     lead_session_id: ghostSessId,
     default_model: 'claude-opus-4-7',

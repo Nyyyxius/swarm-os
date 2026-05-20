@@ -8,6 +8,7 @@ import { SwarmDb } from './modules/db/index.js';
 import { DbPersistence } from './modules/orchestrator/persistence.js';
 import { DiscordWebhookNotifier, NoOpNotifier, type Notifier } from './modules/notify/index.js';
 import { initClaudeRuntime } from './runtime/claude-init.js';
+import { RoleStore } from './modules/roles/index.js';
 
 const config = loadConfig();
 const rootLog = initRootLogger(config);
@@ -93,8 +94,9 @@ const notifier: Notifier = config.discordWebhookUrl
     })
   : new NoOpNotifier();
 
-const spawner = new Spawner(config, { notifier, persistence });
-const handle = startServer(config, spawner);
+const roleStore = new RoleStore(db);
+const spawner = new Spawner(config, { notifier, persistence, roleStore });
+const handle = startServer(config, spawner, roleStore);
 
 // Start MCP HTTP listener on its own port (loopback only, plan §14).
 // Boot ordering: main HTTP first (so /health is up if a healthcheck is
