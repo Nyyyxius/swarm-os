@@ -87,15 +87,19 @@ export function useEvents(): {
           const ws = new WebSocket(url);
           wsRef.current = ws;
           await new Promise<void>((resolve, reject) => {
+            let opened = false;
             ws.onopen = () => {
+              opened = true;
               setConnected(true);
               backoff = 1000;
-              resolve();
             };
-            ws.onerror = () => reject(new Error('ws error'));
+            ws.onerror = () => {
+              if (!opened) reject(new Error('ws error'));
+            };
             ws.onclose = () => {
               setConnected(false);
-              if (!cancelled) reject(new Error('ws closed'));
+              if (opened) resolve();
+              else reject(new Error('ws closed'));
             };
             ws.onmessage = (e) => {
               try {
