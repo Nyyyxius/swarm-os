@@ -8,6 +8,7 @@ import type { Orchestrator } from '../orchestrator/index.js';
 import { registerTeamCommsTools, type ToolContext } from './tools.js';
 import type { Config } from '../../config.js';
 import type { MessagingDefaults } from '../orchestrator/messaging.js';
+import type { BusMetricsCollector } from '../metrics/busMetrics.js';
 import { withModule } from '../../logger.js';
 
 const log = withModule('mcp');
@@ -71,6 +72,14 @@ export class McpServer {
      * code in `index.ts` always passes the loaded `Config`.
      */
     private readonly config?: Config,
+    /**
+     * Phase update_system S8 — bus health collector. When passed, each MCP
+     * tool call is bracketed with `recordRequestStart` /
+     * `recordRequestEnd(ok)` so `/metrics/bus` can compute latency &
+     * err_rate over a 60 s sliding window. Optional so existing test paths
+     * (pre-S8) keep working unchanged.
+     */
+    private readonly busMetrics?: BusMetricsCollector,
   ) {
     this.messagingDefaults = {
       maxMessageSizeBytes: this.config?.maxMessageSizeBytes ?? 16 * 1024,
@@ -224,6 +233,14 @@ export class McpServer {
       void sdkServer.close();
     });
 
+    // S8 — bracket the transport call with the bus-health collector. We
+    // measure only the `handleRequest()` span (NOT auth, body parsing, or
+    // SDK connect) so the latency reflects what an operator perceives as
+    // "MCP request → response". Auth-fail paths (resolveContext → null)
+    // and oversize/malformed body paths returned earlier are intentionally
+    // excluded — counting them would inflate err_rate_pct on every probe.
+    const t0 = this.busMetrics?.recordRequestStart();
+    let ok = true;
     try {
       await sdkServer.connect(transport);
       // The streamable HTTP transport accepts a pre-parsed body so we don't
@@ -246,6 +263,7 @@ export class McpServer {
         parsedBody instanceof Error ? undefined : parsedBody;
       await transport.handleRequest(req, res, bodyForTransport);
     } catch (err) {
+      ok = false;
       log.error({
         event: 'mcp.transport_failed',
         error: err instanceof Error ? err.message : String(err),
@@ -254,6 +272,8 @@ export class McpServer {
         res.statusCode = 500;
         res.end('internal error');
       }
+    } finally {
+      if (t0 !== undefined) this.busMetrics?.recordRequestEnd(t0, ok);
     }
   }
 

@@ -57,6 +57,12 @@ export interface MailboxOptions {
 export class Mailbox {
   private readonly inboxes = new Map<string, Message[]>();
   private readonly maxSize: number;
+  /**
+   * Cumulative count of messages pushed into this mailbox since the
+   * orchestrator started. Backed by `_messagesTotal`, surfaced via the
+   * `messagesTotal` getter — see its JSDoc for semantics.
+   */
+  private _messagesTotal = 0;
 
   constructor(opts: MailboxOptions = {}) {
     const cap = opts.maxSize ?? 100;
@@ -64,6 +70,32 @@ export class Mailbox {
       throw new Error(`Mailbox maxSize must be a positive integer, got ${cap}`);
     }
     this.maxSize = cap;
+  }
+
+  /**
+   * Cumulative count of bus messages pushed into this mailbox since the
+   * orchestrator started. Phase update_system S1.
+   *
+   * Semantics (documented for UI consumers):
+   * - **One push = one increment.** A `team.broadcast` that reaches N
+   *   active sessions increments the counter by N (one push per
+   *   recipient), not by 1. The counter measures bus *traffic*, not
+   *   "logical messages".
+   * - **Monotone, never reset.** `read()`, `peek()`, `removeSession()`,
+   *   and `clearAll()` leave it untouched — they don't represent bus
+   *   activity, just inbox lifecycle.
+   * - **Drop-oldest still counts.** When a push exceeds the cap and the
+   *   oldest message is evicted, the counter has already taken +1 for
+   *   that older push and takes +1 for the new push. The drop is a cap
+   *   effect, not a bus failure.
+   * - **In-memory only.** The counter dies with the orchestrator process
+   *   and restarts at 0. Acceptable v1 (cf. `update_system.md`).
+   * - **Wraparound non-issue.** `Number.MAX_SAFE_INTEGER` (~9e15) at
+   *   1000 msg/s sustained 24/7 = ~285 000 years. We don't wrap in
+   *   BigInt.
+   */
+  get messagesTotal(): number {
+    return this._messagesTotal;
   }
 
   /**
@@ -90,6 +122,10 @@ export class Mailbox {
       ...(msg.fromSessionName ? { fromSessionName: msg.fromSessionName } : {}),
     };
     q.push(full);
+    // Phase update_system S1: count *every* push, irrespective of recipient
+    // and irrespective of the drop-oldest path below (cf. `messagesTotal`
+    // JSDoc — the drop is a cap effect, not a bus failure).
+    this._messagesTotal++;
     let dropped = false;
     if (q.length > this.maxSize) {
       // Drop the OLDEST. Plan §11 step 3: bounded, drop-oldest semantics.
@@ -136,6 +172,18 @@ export class Mailbox {
   /** Number of messages currently queued for `sid`. */
   size(sid: string): number {
     return this.inboxes.get(sid)?.length ?? 0;
+  }
+
+  /**
+   * Sum of every inbox queue length across all sessions in this mailbox.
+   * Phase update_system S8 — used by `BusMetricsCollector.snapshot()` to
+   * compute the instantaneous `queue_depth` KPI surfaced on `/metrics/bus`.
+   * O(N sessions) — does NOT scan messages, only sums queue lengths.
+   */
+  totalSize(): number {
+    let sum = 0;
+    for (const q of this.inboxes.values()) sum += q.length;
+    return sum;
   }
 
   /**

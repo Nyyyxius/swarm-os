@@ -1,24 +1,91 @@
+// S3 — Status badge.
+//
+// The component is a thin wrapper around the `lib/sessionStatus` mapping.
+// It accepts both `SessionStatus` and `OrchestratorStatus` (the two
+// consumer sites — orch header & session list) and falls back gracefully
+// for unknown strings (in case the server adds a status before the UI is
+// rebuilt).
+
+import {
+  mapSessionStatusToVisual,
+  mapOrchestratorStatusToVisual,
+  enrichWithIdle,
+  VISUAL_CLASSES,
+  type SessionStatus,
+  type OrchestratorStatus,
+  type VisualDescriptor,
+} from '../lib/sessionStatus';
+import { useNow } from '../lib/useNow';
+
 interface Props {
   status: string;
+  /**
+   * S6 — optional ISO timestamp of the session's last PTY output. When
+   * provided AND `status === 'running'`, the badge downgrades to `IDLE`
+   * (muted) once `now - lastActivityAt > 30 s`. Pass it for session
+   * badges; leave undefined for orchestrator badges (no per-orch
+   * activity timestamp).
+   */
+  lastActivityAt?: string;
 }
 
-const COLORS: Record<string, string> = {
-  starting: 'bg-amber-500/20 text-amber-300 border-amber-500/40',
-  running: 'bg-emerald-500/20 text-emerald-300 border-emerald-500/40',
-  waiting: 'bg-yellow-500/20 text-yellow-200 border-yellow-500/40',
-  stopping: 'bg-orange-500/20 text-orange-300 border-orange-500/40',
-  stopped: 'bg-slate-500/20 text-slate-300 border-slate-500/40',
-  exited: 'bg-slate-500/20 text-slate-300 border-slate-500/40',
-  killed: 'bg-rose-500/20 text-rose-300 border-rose-500/40',
-  failed: 'bg-red-500/20 text-red-300 border-red-500/40',
-  interrupted: 'bg-purple-500/20 text-purple-300 border-purple-500/40',
-};
+const SESSION_STATUSES = new Set<SessionStatus>([
+  'starting',
+  'running',
+  'paused',
+  'waiting',
+  'exited',
+  'killed',
+  'interrupted',
+  'failed',
+]);
 
-export function StatusBadge({ status }: Props) {
-  const cls = COLORS[status] ?? 'bg-slate-700/30 text-slate-300 border-slate-600/40';
+const ORCH_STATUSES = new Set<OrchestratorStatus>([
+  'starting',
+  'running',
+  'stopping',
+  'stopped',
+  'failed',
+]);
+
+function describe(status: string, now: number, lastActivityAt?: string): VisualDescriptor {
+  if (SESSION_STATUSES.has(status as SessionStatus)) {
+    const sessionStatus = status as SessionStatus;
+    // S6 — only session badges can become `idle`; the override is a no-op
+    // when `lastActivityAt` is absent (orch badges) or when `status` is
+    // not `running` (`enrichWithIdle` short-circuits).
+    if (lastActivityAt !== undefined) {
+      return enrichWithIdle({ status: sessionStatus, lastActivityAt }, now);
+    }
+    return mapSessionStatusToVisual(sessionStatus);
+  }
+  if (ORCH_STATUSES.has(status as OrchestratorStatus)) {
+    return mapOrchestratorStatusToVisual(status as OrchestratorStatus);
+  }
+  return {
+    visual: 'idle',
+    label: status.toUpperCase(),
+    pulse: false,
+  };
+}
+
+export function StatusBadge({ status, lastActivityAt }: Props) {
+  // `useNow` is invoked unconditionally to obey the Rules of Hooks; the
+  // value is only consulted by `describe` when `lastActivityAt` was
+  // actually supplied. Orch badges still pay the cost of a 5 s
+  // re-render but the work done per render is trivial.
+  const now = useNow();
+  const descriptor = describe(status, now, lastActivityAt);
+  const cls = VISUAL_CLASSES[descriptor.visual];
+  const pulseCls = descriptor.pulse ? 'status-pulse' : '';
   return (
-    <span className={`inline-block text-xs font-mono px-2 py-0.5 rounded border ${cls}`}>
-      {status}
+    <span
+      className={`inline-block text-xs font-mono px-2 py-0.5 rounded border ${cls} ${pulseCls}`.trim()}
+      title={descriptor.tooltip}
+      data-visual={descriptor.visual}
+      data-pulse={descriptor.pulse ? 'true' : undefined}
+    >
+      {descriptor.label}
     </span>
   );
 }

@@ -45,6 +45,10 @@ export type OrchestratorStatusRow =
 export type SessionStatusRow =
   | 'starting'
   | 'running'
+  // S5 — operator-paused via SIGSTOP. Non-terminal: counted as in-flight by
+  // `markAllNonTerminalAsInterrupted` (the `NOT IN (terminal-set)` query
+  // already sweeps it without an explicit branch).
+  | 'paused'
   | 'waiting'
   | 'exited'
   | 'killed'

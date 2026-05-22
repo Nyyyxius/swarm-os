@@ -151,6 +151,12 @@ export class FakeAgentProcess implements AgentProcess {
   private exited = false;
   /** Public test-only history of every write() the orchestrator made. */
   readonly writes: string[] = [];
+  /**
+   * S5 — public test-only log of every kill(signal) the orchestrator
+   * requested. Tests assert on `signals` to verify SIGSTOP / SIGCONT actually
+   * landed without having to spy on the kill() call directly.
+   */
+  readonly signals: string[] = [];
 
   constructor(opts: FakeAgentOptions) {
     this._pid = opts.pid ?? 1;
@@ -171,8 +177,15 @@ export class FakeAgentProcess implements AgentProcess {
 
   kill(signal?: NodeJS.Signals | number): void {
     if (this.exited) return;
-    this.exited = true;
     const sig = typeof signal === 'string' ? signal : 'SIGTERM';
+    this.signals.push(sig);
+    // S5 — SIGSTOP / SIGCONT must NOT exit the fake process. On a real PTY
+    // SIGSTOP freezes the process (it stays alive, just suspended) and
+    // SIGCONT wakes it back up. Without this branch, calling pause() on a
+    // FakeAgentProcess-backed Session would synthesize an exit immediately,
+    // making every pause/resume test a false positive.
+    if (sig === 'SIGSTOP' || sig === 'SIGCONT') return;
+    this.exited = true;
     const info: AgentExitInfo =
       sig === 'SIGKILL' ? { exitCode: 137, signal: 9 } : { exitCode: 143, signal: 15 };
     setImmediate(() => {

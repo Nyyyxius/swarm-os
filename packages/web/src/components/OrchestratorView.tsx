@@ -197,7 +197,10 @@ function SessionItem({
               {inboxCount}
             </span>
           )}
-          <StatusBadge status={session.status} />
+          <StatusBadge
+            status={session.status}
+            lastActivityAt={session.lastActivityAt}
+          />
         </div>
       </div>
       <div className="text-xs text-slate-500 font-mono mt-0.5">

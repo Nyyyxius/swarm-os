@@ -14,3 +14,29 @@ body {
     'Segoe UI',
     sans-serif;
 }
+
+/*
+ * S3 — Pulsation utility for status badges representing a `waiting`
+ * session. We animate `box-shadow` (not `opacity`) so the badge stays
+ * fully legible while the halo breathes. The hue matches the `warn`
+ * palette (#e8b04a) of the desktop prototype.
+ */
+@keyframes swarm-status-pulse {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(232, 176, 74, 0.55);
+  }
+  50% {
+    box-shadow: 0 0 0 6px rgba(232, 176, 74, 0);
+  }
+}
+
+.status-pulse {
+  animation: swarm-status-pulse 1.6s ease-in-out infinite;
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .status-pulse {
+    animation: none;
+  }
+}

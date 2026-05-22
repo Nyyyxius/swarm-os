@@ -28,8 +28,24 @@ export interface OrchestratorView {
   endedAt: string | null;
   lastError: string | null;
   sessions: SessionView[];
+  /**
+   * Phase update_system S1 — cumulative count of bus messages pushed into
+   * this orchestrator's mailbox since it started (one push = one
+   * increment; broadcast to N recipients adds N). Monotone, never reset.
+   * 0 for history rows recovered from SQLite (no live mailbox).
+   */
+  msgCount: number;
   /** Phase 4: present on history rows so UI can show "interrupted (server-restart)" etc. */
   stopReason?: string | null;
+  /**
+   * Phase update_system S7 — aggregated team health verdict, derived
+   * server-side on every `toView()` from `status`, `lead.status`, worker
+   * statuses and `lastError`. Maps 1:1 to the desktop TopBar pill
+   * (`ok` = HEALTHY, `warn` = DEGRADED, `bad` = FAILED, `stopped` =
+   * OFFLINE). History rows recovered from SQLite return `'bad'` (for
+   * `status === 'failed'`) or `'stopped'` otherwise.
+   */
+  health: 'ok' | 'warn' | 'bad' | 'stopped';
 }
 
 export interface DiscordConnectorView {
@@ -65,7 +81,15 @@ export interface SessionView {
   model: string;
   effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   permissionMode: string;
-  status: 'starting' | 'running' | 'waiting' | 'exited' | 'killed' | 'interrupted' | 'failed';
+  status:
+    | 'starting'
+    | 'running'
+    | 'paused'
+    | 'waiting'
+    | 'exited'
+    | 'killed'
+    | 'interrupted'
+    | 'failed';
   pid: number | null;
   startedAt: string;
   endedAt: string | null;
@@ -126,11 +150,40 @@ async function request<T>(
   return parsed as T;
 }
 
+/**
+ * A single mail entry as returned by `GET /orchestrators/:id/mailbox/peek`.
+ *
+ * Authoritative semantics live in
+ * `packages/server/src/modules/orchestrator/mailbox.ts:24-43`. The `from`
+ * field is intentionally polymorphic; it belongs to one of four buckets
+ * that the UI distinguishes via `classifyBubble` (see
+ * `packages/web/src/lib/mailBubble.ts`):
+ *
+ * 1. `'human'`      — operator broadcast via `POST /orchestrators/:id/broadcast`.
+ * 2. `'system'`     — server-emitted notice (e.g. worker exit signalled to
+ *                     the lead). Future sentinel values may be added; the
+ *                     classifier keeps them in a `Set` for easy extension.
+ * 3. session-id (intra-team) — peer-to-peer via `team.send_message` /
+ *                     `team.broadcast`. No cross-team enrichment fields.
+ * 4. session-id (cross-team) — `swarm.send_to_lead` /
+ *                     `swarm.broadcast_to_leads`. Distinguished on the
+ *                     wire by the optional fields below being present.
+ */
 export interface MailMessageView {
   id: string;
+  /** See JSDoc above for the four-bucket semantics. */
   from: string;
   content: string;
   ts: string;
+  /**
+   * Cross-team only: orchestrator id of the sending team. Absent for
+   * intra-team peer messages, `'human'` and `'system'` entries.
+   */
+  fromOrchestratorId?: string;
+  /** Cross-team only: human-readable name of the sending orchestrator. */
+  fromOrchestratorName?: string;
+  /** Cross-team only: name of the sending session within its team. */
+  fromSessionName?: string;
 }
 
 export const api = {
@@ -164,6 +217,24 @@ export const api = {
   getSession: (id: string) => request<SessionView>('GET', `/sessions/${id}`),
   postSessionInput: (id: string, data: string) =>
     request<{ ok: boolean; bytes: number }>('POST', `/sessions/${id}/input`, { data }),
+  /** S5 — stop a single worker session. Lead → 409 LEAD_NOT_STOPPABLE. */
+  stopSession: (id: string) =>
+    request<{ stopped: true; status: string }>('POST', `/sessions/${id}/stop`),
+  /** S5 — pause a session via SIGSTOP. Idempotent (already paused → 409). */
+  pauseSession: (id: string) =>
+    request<{ paused: true; status: string }>('POST', `/sessions/${id}/pause`),
+  /** S5 — resume a paused session via SIGCONT. */
+  resumeSession: (id: string) =>
+    request<{ resumed: true; status: string }>('POST', `/sessions/${id}/resume`),
+  /**
+   * S5 — restart a worker: stop the existing PTY and respawn with the same
+   * config. Returns the old + new session views. Lead → 409 LEAD_NOT_RESTARTABLE.
+   */
+  restartSession: (id: string) =>
+    request<{ oldSession: SessionView; newSession: SessionView; note: string }>(
+      'POST',
+      `/sessions/${id}/restart`,
+    ),
   /**
    * Phase 3: human → all sessions broadcast (`from: 'human'` mailbox push,
    * idle PTY signal). Body `{ content }`.

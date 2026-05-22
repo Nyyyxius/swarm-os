@@ -213,17 +213,25 @@ export class Spawner {
   }
 
   /** Counters for /health. */
-  counters(): { orchestratorsActive: number; sessionsActive: number; sessionsWaiting: number } {
+  counters(): {
+    orchestratorsActive: number;
+    sessionsActive: number;
+    sessionsWaiting: number;
+    /** S5 — sessions paused via SIGSTOP. Excluded from sessionsActive. */
+    sessionsPaused: number;
+  } {
     let sessionsActive = 0;
     let sessionsWaiting = 0;
+    let sessionsPaused = 0;
     const orchestratorsActive = this.listActive().length;
     for (const orch of this.orchestrators.values()) {
       for (const s of orch.listSessions()) {
         if (s.status === 'running' || s.status === 'starting') sessionsActive++;
         if (s.status === 'waiting') sessionsWaiting++;
+        if (s.status === 'paused') sessionsPaused++;
       }
     }
-    return { orchestratorsActive, sessionsActive, sessionsWaiting };
+    return { orchestratorsActive, sessionsActive, sessionsWaiting, sessionsPaused };
   }
 
   /** Find a session across all orchestrators. */

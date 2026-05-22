@@ -106,6 +106,57 @@ describe('REST: orchestrator lifecycle', () => {
     const inbox = stack.spawner.get(orchestratorId)?.mailbox.peek(leadId) ?? [];
     expect(inbox[0]?.from).toBe('human');
   });
+
+  it('exposes msgCount on GET /orchestrators and GET /orchestrators/:id (S1)', async () => {
+    const { orchestratorId, leadId } = createOrch('msg-count-team');
+
+    // Initial state: a freshly created orchestrator has pushed zero bus messages.
+    const r0 = await fetch(
+      `http://127.0.0.1:${stack.mainPort}/orchestrators/${orchestratorId}`,
+      { headers: authHeaders(stack.config.token) },
+    );
+    expect(r0.status).toBe(200);
+    const v0 = (await r0.json()) as { msgCount: number };
+    expect(v0.msgCount).toBe(0);
+
+    // Drive N broadcasts via REST. Each broadcast has `from: 'human'`, which
+    // doesn't match any session id, so all active sessions are recipients —
+    // here just the lead, so one push per broadcast = +1 msgCount each.
+    const N = 5;
+    for (let i = 0; i < N; i++) {
+      const res = await fetch(
+        `http://127.0.0.1:${stack.mainPort}/orchestrators/${orchestratorId}/broadcast`,
+        {
+          method: 'POST',
+          headers: authHeaders(stack.config.token),
+          body: JSON.stringify({ content: `m${i}` }),
+        },
+      );
+      expect(res.status).toBe(200);
+    }
+
+    // GET /orchestrators/:id reflects the cumulative count.
+    const r1 = await fetch(
+      `http://127.0.0.1:${stack.mainPort}/orchestrators/${orchestratorId}`,
+      { headers: authHeaders(stack.config.token) },
+    );
+    const v1 = (await r1.json()) as { msgCount: number };
+    expect(v1.msgCount).toBe(N);
+
+    // GET /orchestrators (list) also exposes msgCount on the same row.
+    const r2 = await fetch(`http://127.0.0.1:${stack.mainPort}/orchestrators`, {
+      headers: authHeaders(stack.config.token),
+    });
+    const list = (await r2.json()) as { orchestrators: Array<{ id: string; msgCount: number }> };
+    const row = list.orchestrators.find((o) => o.id === orchestratorId);
+    expect(row).toBeTruthy();
+    expect(row!.msgCount).toBe(N);
+
+    // The mailbox-level counter agrees (sanity).
+    expect(stack.spawner.get(orchestratorId)?.mailbox.messagesTotal).toBe(N);
+    // Lead inbox was drained by zero readers, so all N landed in lead.
+    expect(stack.spawner.get(orchestratorId)?.mailbox.peek(leadId).length).toBe(N);
+  });
 });
 
 describe('REST + MCP end-to-end (worker spawned via fake agent)', () => {

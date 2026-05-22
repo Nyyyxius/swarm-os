@@ -107,3 +107,140 @@ describe('Mailbox.removeSession / clearAll', () => {
     expect(m.size('b')).toBe(0);
   });
 });
+
+/**
+ * Phase update_system S1 — cumulative `messagesTotal` counter (one push =
+ * one increment, monotone, never reset).
+ */
+describe('Mailbox.messagesTotal', () => {
+  it('starts at zero on a fresh mailbox', () => {
+    const m = new Mailbox();
+    expect(m.messagesTotal).toBe(0);
+  });
+
+  it('increments by one for a single push', () => {
+    const m = new Mailbox();
+    m.push('a', { from: 's', content: '1' });
+    expect(m.messagesTotal).toBe(1);
+  });
+
+  it('counts pushes across distinct recipients (global, not per-inbox)', () => {
+    const m = new Mailbox();
+    m.push('a', { from: 's', content: '1' });
+    m.push('b', { from: 's', content: '2' });
+    m.push('c', { from: 's', content: '3' });
+    expect(m.messagesTotal).toBe(3);
+  });
+
+  it('counts repeated pushes to the same recipient (no dedup)', () => {
+    const m = new Mailbox();
+    m.push('a', { from: 's', content: '1' });
+    m.push('a', { from: 's', content: '2' });
+    m.push('a', { from: 's', content: '3' });
+    expect(m.messagesTotal).toBe(3);
+  });
+
+  it('still increments when a push triggers a drop-oldest', () => {
+    const m = new Mailbox({ maxSize: 2 });
+    m.push('a', { from: 's', content: '1' });
+    m.push('a', { from: 's', content: '2' });
+    const r = m.push('a', { from: 's', content: '3' });
+    expect(r.dropped).toBe(true);
+    // Three pushes total — the drop is a cap effect, not a bus failure.
+    expect(m.messagesTotal).toBe(3);
+  });
+
+  it('is unaffected by read()', () => {
+    const m = new Mailbox();
+    m.push('a', { from: 's', content: '1' });
+    m.push('a', { from: 's', content: '2' });
+    m.read('a');
+    expect(m.messagesTotal).toBe(2);
+  });
+
+  it('is unaffected by peek()', () => {
+    const m = new Mailbox();
+    m.push('a', { from: 's', content: '1' });
+    m.peek('a');
+    expect(m.messagesTotal).toBe(1);
+  });
+
+  it('is unaffected by removeSession()', () => {
+    const m = new Mailbox();
+    m.push('a', { from: 's', content: '1' });
+    m.push('a', { from: 's', content: '2' });
+    m.removeSession('a');
+    expect(m.messagesTotal).toBe(2);
+  });
+
+  it('is unaffected by clearAll()', () => {
+    const m = new Mailbox();
+    m.push('a', { from: 's', content: '1' });
+    m.push('b', { from: 's', content: '2' });
+    m.clearAll();
+    expect(m.messagesTotal).toBe(2);
+  });
+
+  it('handles 1000 sequential pushes (sanity / perf gross check)', () => {
+    const m = new Mailbox({ maxSize: 1000 });
+    for (let i = 0; i < 1000; i++) {
+      m.push('a', { from: 's', content: `m${i}` });
+    }
+    expect(m.messagesTotal).toBe(1000);
+  });
+});
+
+/**
+ * Phase update_system S8 — instantaneous Σ queue lengths across every
+ * session in the mailbox. Backs `/metrics/bus` queue_depth.
+ */
+describe('Mailbox.totalSize', () => {
+  it('returns 0 on an empty mailbox', () => {
+    const m = new Mailbox();
+    expect(m.totalSize()).toBe(0);
+  });
+
+  it('sums queue lengths across multiple sessions', () => {
+    const m = new Mailbox();
+    m.push('a', { from: 's', content: '1' });
+    m.push('a', { from: 's', content: '2' });
+    m.push('a', { from: 's', content: '3' });
+    m.push('b', { from: 's', content: 'x' });
+    m.push('b', { from: 's', content: 'y' });
+    expect(m.totalSize()).toBe(5);
+  });
+
+  it('decreases when an inbox is drained via read()', () => {
+    const m = new Mailbox();
+    m.push('a', { from: 's', content: '1' });
+    m.push('a', { from: 's', content: '2' });
+    m.push('b', { from: 's', content: '3' });
+    expect(m.totalSize()).toBe(3);
+    m.read('a');
+    expect(m.totalSize()).toBe(1);
+  });
+
+  it('decreases when removeSession() drops a queue', () => {
+    const m = new Mailbox();
+    m.push('a', { from: 's', content: '1' });
+    m.push('b', { from: 's', content: '2' });
+    m.removeSession('a');
+    expect(m.totalSize()).toBe(1);
+  });
+
+  it('drops to 0 after clearAll()', () => {
+    const m = new Mailbox();
+    m.push('a', { from: 's', content: '1' });
+    m.push('b', { from: 's', content: '2' });
+    m.clearAll();
+    expect(m.totalSize()).toBe(0);
+  });
+
+  it('respects the maxSize cap — never exceeds N sessions × maxSize', () => {
+    const m = new Mailbox({ maxSize: 5 });
+    for (let i = 0; i < 50; i++) m.push('a', { from: 's', content: `m${i}` });
+    for (let i = 0; i < 50; i++) m.push('b', { from: 's', content: `m${i}` });
+    // Each inbox capped at 5 → totalSize = 10.
+    expect(m.totalSize()).toBe(10);
+  });
+});

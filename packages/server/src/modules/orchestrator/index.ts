@@ -2,6 +2,7 @@ import * as crypto from 'node:crypto';
 import { Session, type SessionView } from './session.js';
 import { Mailbox } from './mailbox.js';
 import { buildPreamble } from './preamble.js';
+import { emitMailboxMessage } from './messaging.js';
 import { eventBus } from '../../events.js';
 import { withModule } from '../../logger.js';
 import type { AgentProcess } from './agent-process.js';
@@ -10,10 +11,13 @@ import type { Notifier } from '../notify/index.js';
 import { NoOpNotifier } from '../notify/null.js';
 import type { Persistence } from './persistence.js';
 import { NoOpPersistence } from './persistence.js';
+import { computeOrchestratorHealth, type OrchestratorHealth } from './health.js';
 
 const log = withModule('orchestrator');
 
 export type OrchestratorStatus = 'starting' | 'running' | 'stopping' | 'stopped' | 'failed';
+export type { OrchestratorHealth } from './health.js';
+export { computeOrchestratorHealth } from './health.js';
 
 export interface OrchestratorInit {
   name: string;
@@ -48,8 +52,25 @@ export interface OrchestratorView {
   endedAt: string | null;
   lastError: string | null;
   sessions: SessionView[];
+  /**
+   * Phase update_system S1 — cumulative count of bus messages pushed into
+   * this orchestrator's mailbox since it started. Monotone, never reset
+   * (`read`/`peek`/`removeSession`/`clearAll` don't decrement). One push =
+   * one increment, so a broadcast hitting N recipients adds N. In-memory
+   * only: history rows recovered from SQLite expose `msgCount: 0` because
+   * the live mailbox no longer exists.
+   */
+  msgCount: number;
   /** Phase 4: surfaced so UI can show "interrupted (server-restart)" etc. */
   stopReason?: string | null;
+  /**
+   * Phase update_system S7 — aggregated health verdict, derived from
+   * `status`, `lead.status`, worker statuses, and `lastError`. Recomputed
+   * on every `toView()` call by `computeOrchestratorHealth` (pure
+   * function). The new desktop UI maps this to the per-team pill
+   * (`ok|warn|bad|stopped` ↔ `HEALTHY|DEGRADED|FAILED|OFFLINE`).
+   */
+  health: OrchestratorHealth;
 }
 
 /** Phase 4: optional dependencies wired by the Spawner. */
@@ -91,6 +112,29 @@ export class WorkerCapError extends Error {
   constructor(cap: number) {
     super(`max workers per orchestrator (${cap}) reached`);
     this.name = 'WorkerCapError';
+  }
+}
+
+/**
+ * S5 — typed error for per-session lifecycle actions. The HTTP layer maps
+ * `httpStatus` straight to the response; the `code` is the stable token
+ * clients switch on.
+ */
+export class SessionActionError extends Error {
+  constructor(
+    public readonly code:
+      | 'SESSION_UNKNOWN'
+      | 'LEAD_NOT_STOPPABLE'
+      | 'LEAD_NOT_RESTARTABLE'
+      | 'ALREADY_TERMINATED'
+      | 'NOT_PAUSED'
+      | 'INVALID_TRANSITION'
+      | 'RESTART_IN_PROGRESS',
+    message: string,
+    public readonly httpStatus: number,
+  ) {
+    super(message);
+    this.name = 'SessionActionError';
   }
 }
 
@@ -352,6 +396,159 @@ export class Orchestrator {
     return killed;
   }
 
+  // --- S5 per-session lifecycle actions ---------------------------------
+
+  /**
+   * S5 — stop a single worker. Refuses the lead (use `DELETE /orchestrators`
+   * to take down the whole team) and refuses already-terminated sessions.
+   */
+  stopSession(id: string, reason = 'user-stop-rest'): Session {
+    const s = this.sessions.get(id);
+    if (!s) {
+      throw new SessionActionError('SESSION_UNKNOWN', `session ${id} not found`, 404);
+    }
+    if (s.type === 'lead') {
+      throw new SessionActionError(
+        'LEAD_NOT_STOPPABLE',
+        'cannot stop the lead session directly — use DELETE /orchestrators/:id',
+        409,
+      );
+    }
+    if (
+      s.status === 'exited' ||
+      s.status === 'killed' ||
+      s.status === 'failed' ||
+      s.status === 'interrupted'
+    ) {
+      throw new SessionActionError(
+        'ALREADY_TERMINATED',
+        `session ${id} is already terminated (status=${s.status})`,
+        409,
+      );
+    }
+    s.stop(reason, 5000);
+    return s;
+  }
+
+  /**
+   * S5 — pause a session (SIGSTOP). Lead is allowed (operator may want to
+   * freeze the lead to inspect state); workers obviously are too.
+   */
+  pauseSession(id: string, reason = 'user-pause-rest'): Session {
+    const s = this.sessions.get(id);
+    if (!s) {
+      throw new SessionActionError('SESSION_UNKNOWN', `session ${id} not found`, 404);
+    }
+    if (
+      s.status === 'exited' ||
+      s.status === 'killed' ||
+      s.status === 'failed' ||
+      s.status === 'interrupted'
+    ) {
+      throw new SessionActionError(
+        'ALREADY_TERMINATED',
+        `session ${id} is terminated (status=${s.status})`,
+        409,
+      );
+    }
+    if (!s.pause(reason)) {
+      throw new SessionActionError(
+        'INVALID_TRANSITION',
+        `session ${id} cannot be paused from status=${s.status}`,
+        409,
+      );
+    }
+    return s;
+  }
+
+  /** S5 — resume a paused session (SIGCONT). */
+  resumeSession(id: string, reason = 'user-resume-rest'): Session {
+    const s = this.sessions.get(id);
+    if (!s) {
+      throw new SessionActionError('SESSION_UNKNOWN', `session ${id} not found`, 404);
+    }
+    if (s.status !== 'paused') {
+      throw new SessionActionError(
+        'NOT_PAUSED',
+        `session ${id} is not paused (status=${s.status})`,
+        409,
+      );
+    }
+    if (!s.resume(reason)) {
+      throw new SessionActionError(
+        'INVALID_TRANSITION',
+        `session ${id} could not be resumed`,
+        409,
+      );
+    }
+    return s;
+  }
+
+  /**
+   * S5 — restart a worker: stop the existing PTY (marked `killed` with
+   * `stopReason: 'restart-requested'`) and spawn a fresh session with the
+   * same config (model, effort, permissionMode, cwd, role, name, prompt).
+   *
+   * The new session has a fresh UUID (see plan §5.1) — the old row stays
+   * visible in history. Lead restart is forbidden (cf. §5.2): bringing the
+   * lead back up requires rebuilding the entire team.
+   */
+  restartSession(id: string): { oldSession: Session; newSession: Session } {
+    const old = this.sessions.get(id);
+    if (!old) {
+      throw new SessionActionError('SESSION_UNKNOWN', `session ${id} not found`, 404);
+    }
+    if (old.type === 'lead') {
+      throw new SessionActionError(
+        'LEAD_NOT_RESTARTABLE',
+        'cannot restart the lead — destroy and recreate the whole orchestrator',
+        409,
+      );
+    }
+    if (old.restarting) {
+      throw new SessionActionError(
+        'RESTART_IN_PROGRESS',
+        `session ${id} is already being restarted`,
+        409,
+      );
+    }
+    old.setRestarting(true);
+    // Recapture the spawn config BEFORE asking the old session to die — the
+    // accessors are still valid for terminal sessions, but reading first
+    // keeps the code path simpler and resilient to future changes.
+    const spec: WorkerSpec = {
+      name: old.name,
+      role: old.role,
+      prompt: old.initialPromptRaw ?? '',
+      cwd: old.cwd,
+      model: old.model,
+      effort: old.effort,
+      permissionMode: old.permissionMode,
+    };
+    // Kill the old session if it's still alive — otherwise leave it as-is
+    // (its row stays in history). Even terminated, mark the stop reason so
+    // history reports "restart-requested" instead of a stale value.
+    if (
+      old.status !== 'exited' &&
+      old.status !== 'killed' &&
+      old.status !== 'failed' &&
+      old.status !== 'interrupted'
+    ) {
+      old.stop('restart-requested', 5000);
+    }
+    // addWorker mints a new UUID, rebuilds the preamble against the new
+    // session id, and emits `session.created` itself.
+    let newSession: Session;
+    try {
+      newSession = this.addWorker(spec);
+    } finally {
+      // Always clear the flag — a successful restart hands off to the new
+      // session, a failed one leaves the old session in its terminal state.
+      old.setRestarting(false);
+    }
+    return { oldSession: old, newSession };
+  }
+
   /**
    * Idempotent stop: SIGTERM lead+workers, grace 5s, SIGKILL.
    */
@@ -401,7 +598,8 @@ export class Orchestrator {
   }
 
   toView(): OrchestratorView {
-    return {
+    const sessions = this.listSessions().map((s) => s.toView());
+    const base = {
       id: this.id,
       name: this.name,
       role: this.role,
@@ -416,15 +614,31 @@ export class Orchestrator {
       createdAt: this.createdAt,
       endedAt: this._endedAt,
       lastError: this._lastError,
-      sessions: this.listSessions().map((s) => s.toView()),
+      sessions,
+      msgCount: this.mailbox.messagesTotal,
       stopReason: this._stopReason,
+    };
+    return {
+      ...base,
+      // S7 — derived field, recomputed on every serialization. Cheap
+      // (O(N) over sessions, N ≤ maxWorkersPerOrch).
+      health: computeOrchestratorHealth(base),
     };
   }
 
   // --- Internals ---------------------------------------------------------
 
   private _isActive(s: Session): boolean {
-    return s.status === 'running' || s.status === 'starting' || s.status === 'waiting';
+    // S5 — `paused` counts as active: the PTY still exists, the slot in the
+    // worker cap is consumed, and pause/resume must not let an operator
+    // sneak past `maxWorkersPerOrch`. Treat it the same as running for every
+    // active-set computation.
+    return (
+      s.status === 'running' ||
+      s.status === 'starting' ||
+      s.status === 'waiting' ||
+      s.status === 'paused'
+    );
   }
 
   private _setStatus(s: OrchestratorStatus): void {
@@ -558,6 +772,7 @@ export class Orchestrator {
       (lastLines ? `; last 20 lines:\n${lastLines}` : '');
 
     this.mailbox.push(lead.id, { from: 'system', content });
+    emitMailboxMessage(this.id, 'system', lead.id);
     // Idle-signal the lead (best-effort). We bypass `messaging.sendMessage`
     // here to avoid the active-recipient check (the lead is by definition
     // the recipient — and this is server-internal book-keeping anyway).

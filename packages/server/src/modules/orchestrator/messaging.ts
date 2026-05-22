@@ -2,9 +2,44 @@ import type { Message, Mailbox } from './mailbox.js';
 import type { Session } from './session.js';
 import type { Orchestrator } from './index.js';
 import type { Spawner } from '../spawner/index.js';
+import { eventBus } from '../../events.js';
 import { withModule } from '../../logger.js';
 
 const log = withModule('messaging');
+
+/**
+ * Emit a `mailbox.message` event on the global bus (update_system S2).
+ *
+ * Called from every site that successfully pushes into a mailbox so the UI
+ * can light up "pulses" on its MapView. `orchestratorId` is ALWAYS the
+ * orchestrator of the recipient — for cross-team sends, the source is
+ * surfaced via the optional `fromOrchestratorId` field.
+ *
+ * Exported so `Orchestrator._onWorkerExit` (which lives in `index.ts` and
+ * pushes a synthetic `from: 'system'` notice without going through this
+ * module) can fire the same canonical event shape.
+ */
+export function emitMailboxMessage(
+  orchestratorId: string,
+  from: string,
+  to: string | 'broadcast',
+  fromOrchestratorId?: string,
+): void {
+  const payload: {
+    from: string;
+    to: string | 'broadcast';
+    orchestratorId: string;
+    fromOrchestratorId?: string;
+  } = { from, to, orchestratorId };
+  if (fromOrchestratorId !== undefined && fromOrchestratorId !== orchestratorId) {
+    payload.fromOrchestratorId = fromOrchestratorId;
+  }
+  eventBus.emitEvent({
+    kind: 'mailbox.message',
+    orchestratorId,
+    payload,
+  });
+}
 
 /**
  * High-level messaging helpers (plan §11).
@@ -90,7 +125,17 @@ export function validateMessageSize(
 
 function isActive(s: Session | undefined | null): boolean {
   if (!s) return false;
-  return s.status === 'running' || s.status === 'starting' || s.status === 'waiting';
+  // S5 — `paused` is "active" for the purpose of routing mail (the message
+  // sits in the inbox, the agent will read it on resume); it is NOT idle for
+  // the purpose of the PTY wake-up signal (`isIdle` handles that). Including
+  // `paused` here keeps `team.send_message` / broadcast working against a
+  // paused recipient without flipping to RECIPIENT_NOT_ACTIVE.
+  return (
+    s.status === 'running' ||
+    s.status === 'starting' ||
+    s.status === 'waiting' ||
+    s.status === 'paused'
+  );
 }
 
 /**
@@ -102,6 +147,12 @@ function isActive(s: Session | undefined | null): boolean {
  * Date.parse() per call.
  */
 export function isIdle(session: Session, now: number, idleThresholdMs: number): boolean {
+  // S5 — paused sessions deliberately suppress the PTY wake-up signal: the
+  // SIGSTOP'd process can't read its tty anyway, and write()s would just
+  // buffer up to arrive in a garbled clump on resume. The mailbox push is
+  // still effective (the recipient will see the new mail when it wakes up
+  // and calls team.read_inbox).
+  if (session.status === 'paused') return false;
   return now - session.idleSince >= idleThresholdMs;
 }
 
@@ -163,6 +214,7 @@ export function sendMessage(
   }
 
   const result = deps.mailbox.push(toSid, { from: fromSid, content });
+  emitMailboxMessage(deps.orchestrator.id, fromSid, toSid);
 
   // Structured log — body is intentionally NOT included (plan §15).
   log.info({
@@ -224,6 +276,13 @@ export function broadcast(
       injectSignal(s);
     }
     delivered.push(s.id);
+  }
+
+  // Single event with `to: 'broadcast'` (update_system S2). We intentionally
+  // skip when no one was reached — avoids fantom pulses on a 1-session orch
+  // where the sender is the only member.
+  if (delivered.length > 0) {
+    emitMailboxMessage(deps.orchestrator.id, fromSid, 'broadcast');
   }
 
   log.info({
@@ -328,6 +387,9 @@ export function sendMessageToLead(
     fromOrchestratorName: sourceOrch.name,
     fromSessionName: sourceLead?.name ?? sourceSid,
   });
+  // Cross-team event: `orchestratorId` = destination, `fromOrchestratorId`
+  // = source — gives the MapView enough to draw an inter-team arrow.
+  emitMailboxMessage(targetOrch.id, sourceSid, targetLead.id, sourceOrch.id);
 
   log.info({
     event: 'mail.cross_send',
@@ -392,6 +454,8 @@ export function broadcastToLeads(
       fromOrchestratorName: sourceOrch.name,
       fromSessionName: sourceLead?.name ?? sourceSid,
     });
+    // N events, one per destination — `orchestratorId` differs each iter.
+    emitMailboxMessage(orch.id, sourceSid, lead.id, sourceOrch.id);
     if (isIdle(lead, now, defaults.idleThresholdMs)) {
       injectSignal(lead);
     }

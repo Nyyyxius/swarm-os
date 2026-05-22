@@ -9,6 +9,8 @@ import { DbPersistence } from './modules/orchestrator/persistence.js';
 import { DiscordWebhookNotifier, NoOpNotifier, type Notifier } from './modules/notify/index.js';
 import { initClaudeRuntime } from './runtime/claude-init.js';
 import { RoleStore } from './modules/roles/index.js';
+import { MessagesAggregator } from './modules/metrics/aggregator.js';
+import { BusMetricsCollector } from './modules/metrics/busMetrics.js';
 
 const config = loadConfig();
 const rootLog = initRootLogger(config);
@@ -96,13 +98,28 @@ const notifier: Notifier = config.discordWebhookUrl
 
 const roleStore = new RoleStore(db);
 const spawner = new Spawner(config, { notifier, persistence, roleStore });
-const handle = startServer(config, spawner, roleStore);
+
+// ---- S9: in-memory `/metrics/messages` aggregator -------------------------
+// Owns a 60-pt global ring + 8-pt per-orch rings, ticked every 60 s. Lost on
+// restart by design (see docs/update_system/09_metrics_messages.md §7.3).
+const aggregator = new MessagesAggregator(spawner);
+aggregator.start();
+
+// ---- S8: in-memory `/metrics/bus` collector -------------------------------
+// 60-slot ring (1 s/slot) backing latency / throughput / err_rate, with an
+// instantaneous queue_depth. Instrumented from McpServer (constructor arg)
+// so each tool call updates the current slot synchronously. Lost on restart
+// by design — same policy as the messages aggregator above.
+const busMetrics = new BusMetricsCollector(spawner);
+busMetrics.start();
+
+const handle = startServer(config, spawner, roleStore, aggregator, busMetrics);
 
 // Start MCP HTTP listener on its own port (loopback only, plan §14).
 // Boot ordering: main HTTP first (so /health is up if a healthcheck is
 // already pointed at us), then MCP. If MCP fails to bind we shut down
 // the main listener too — the system is non-functional without MCP.
-const mcp = new McpServer(spawner, config.mcpPort, config);
+const mcp = new McpServer(spawner, config.mcpPort, config, busMetrics);
 mcp.start().catch(async (err) => {
   log.error({ event: 'mcp.start_failed', error: err instanceof Error ? err.message : String(err) });
   try {
@@ -126,6 +143,10 @@ async function shutdown(signal: string): Promise<void> {
   shuttingDown = true;
   log.info({ event: 'shutdown.start', signal });
   try {
+    // S9 + S8 — stop the metrics ticks BEFORE the spawner so the last tick
+    // can't observe a half-torn-down mailbox.
+    aggregator.stop();
+    busMetrics.stop();
     spawner.shutdownAll(`signal:${signal}`);
     // Stop MCP first (per-request transport instances will tear down with
     // their sockets) then the main HTTP listener.

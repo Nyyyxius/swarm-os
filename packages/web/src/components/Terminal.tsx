@@ -1,3 +1,10 @@
+// S11 (v1, option a) — Console = xterm + ANSI passthrough.
+// Le flux PTY brut reçu sur `{ type:'data' }` est écrit tel quel via
+// `term.write(o.data)`. Les couleurs Claude natives (CSI/OSC, gras, dim)
+// sont donc rendues directement par xterm — pas de parsing serveur.
+// Toute coloration enrichie par niveau sémantique (INFO/OK/WARN/ERR/SEND/RECV
+// telle qu'esquissée dans les prototypes) est différée à un éventuel
+// chantier v2 (cf. docs/update_system/11_console_structuree.md, option b.2).
 import { useEffect, useRef, useState } from 'react';
 import { Terminal as XTerm } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';

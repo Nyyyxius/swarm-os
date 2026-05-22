@@ -14,6 +14,7 @@ import { Mailbox } from './mailbox.js';
 import { Session } from './session.js';
 import { FakeAgentProcess } from './agent-process.js';
 import type { Orchestrator } from './index.js';
+import { eventBus, type SwarmEvent } from '../../events.js';
 
 /**
  * Phase 7 — high-level messaging helpers.
@@ -27,8 +28,8 @@ import type { Orchestrator } from './index.js';
 
 interface StubOrchestrator
   extends Pick<Orchestrator, 'getSession' | 'listSessions'> {
-  /** Make TS happy when callers spread additional Orch members. */
-  readonly id?: string;
+  /** Required for `mailbox.message` event tests (update_system S2). */
+  readonly id: string;
 }
 
 let tmpRoot: string;
@@ -97,9 +98,13 @@ function makeSession(opts: {
   return s;
 }
 
-function makeStubOrchestrator(sessions: Session[]): StubOrchestrator {
+function makeStubOrchestrator(
+  sessions: Session[],
+  id: string = 'orch-test',
+): StubOrchestrator {
   const map = new Map(sessions.map((s) => [s.id, s] as const));
   return {
+    id,
     getSession: (id: string) => map.get(id),
     listSessions: () => Array.from(map.values()),
   };
@@ -273,5 +278,232 @@ describe('broadcast', () => {
     expect(() =>
       broadcast(deps, a.id, 'x'.repeat(DEFAULTS.maxMessageSizeBytes + 1)),
     ).toThrow(MessageError);
+  });
+});
+
+/**
+ * update_system S2 — `mailbox.message` event on `/ws/events`.
+ *
+ * Captures emissions on the singleton `eventBus` and asserts the payload shape
+ * + cardinality for each of the four messaging.ts entrypoints. The 5th
+ * emission site (`_onWorkerExit` synthetic `from:'system'`) lives in
+ * `index.ts` and is exercised via a separate integration test path; here we
+ * only cover `messaging.ts` directly.
+ */
+describe('mailbox.message event emission', () => {
+  let captured: SwarmEvent[] = [];
+  let unsubscribe: (() => void) | null = null;
+
+  beforeEach(() => {
+    captured = [];
+    unsubscribe = eventBus.onEvent((ev) => {
+      if (ev.kind === 'mailbox.message') captured.push(ev);
+    });
+  });
+
+  afterEach(() => {
+    if (unsubscribe) {
+      unsubscribe();
+      unsubscribe = null;
+    }
+  });
+
+  it('sendMessage emits exactly one event with from/to/orchestratorId', () => {
+    const sender = makeSession({ id: 'sender' });
+    const recv = makeSession({ id: 'recv' });
+    const orch = makeStubOrchestrator([sender, recv], 'orch-A');
+    const deps = makeDeps(orch);
+    sendMessage(deps, sender.id, recv.id, 'hi');
+    expect(captured).toHaveLength(1);
+    const ev = captured[0]!;
+    expect(ev.kind).toBe('mailbox.message');
+    expect(ev.orchestratorId).toBe('orch-A');
+    expect(ev.payload).toMatchObject({
+      from: sender.id,
+      to: recv.id,
+      orchestratorId: 'orch-A',
+    });
+    // No cross-team field on intra-team sends.
+    expect((ev.payload as { fromOrchestratorId?: string }).fromOrchestratorId).toBeUndefined();
+    // `ts` is stamped by emitEvent.
+    expect(typeof ev.ts).toBe('string');
+  });
+
+  it('sendMessage does NOT emit when validation rejects the push', () => {
+    const sender = makeSession({ id: 'sender' });
+    const orch = makeStubOrchestrator([sender]);
+    const deps = makeDeps(orch);
+    // RECIPIENT_UNKNOWN — push never happens.
+    expect(() => sendMessage(deps, sender.id, 'ghost', 'hi')).toThrow(MessageError);
+    expect(captured).toHaveLength(0);
+    // MESSAGE_TOO_LARGE — same.
+    const big = 'x'.repeat(DEFAULTS.maxMessageSizeBytes + 1);
+    expect(() => sendMessage(deps, sender.id, sender.id, big)).toThrow(MessageError);
+    expect(captured).toHaveLength(0);
+  });
+
+  it('broadcast emits a SINGLE event with to:"broadcast" (not N)', () => {
+    const a = makeSession({ id: 'a' });
+    const b = makeSession({ id: 'b' });
+    const c = makeSession({ id: 'c' });
+    const orch = makeStubOrchestrator([a, b, c], 'orch-B');
+    const deps = makeDeps(orch);
+    broadcast(deps, a.id, 'team-wide');
+    expect(captured).toHaveLength(1);
+    const ev = captured[0]!;
+    expect(ev.orchestratorId).toBe('orch-B');
+    expect(ev.payload).toMatchObject({
+      from: a.id,
+      to: 'broadcast',
+      orchestratorId: 'orch-B',
+    });
+  });
+
+  it('broadcast emits NO event when nobody else is on the orchestrator', () => {
+    const a = makeSession({ id: 'a' });
+    const orch = makeStubOrchestrator([a]);
+    const deps = makeDeps(orch);
+    const out = broadcast(deps, a.id, 'lonely');
+    expect(out.delivered_to).toEqual([]);
+    expect(captured).toHaveLength(0);
+  });
+
+  it('broadcast emits NO event when all other sessions are inactive', async () => {
+    const a = makeSession({ id: 'a' });
+    const b = makeSession({ id: 'b' });
+    b.stop('test');
+    await new Promise((r) => setTimeout(r, 20));
+    expect(b.status).toBe('killed');
+    const orch = makeStubOrchestrator([a, b]);
+    const deps = makeDeps(orch);
+    const out = broadcast(deps, a.id, 'lonely');
+    expect(out.delivered_to).toEqual([]);
+    expect(captured).toHaveLength(0);
+  });
+});
+
+/**
+ * Cross-team event emission (`swarm.send_to_lead`, `swarm.broadcast_to_leads`).
+ *
+ * These code paths take a `Spawner` rather than `MessagingDeps`, so we mount
+ * a minimal stub instead of the full class. We only test the event side of
+ * things — the underlying push behaviour is already covered upstream.
+ */
+describe('mailbox.message event emission (cross-team)', () => {
+  let captured: SwarmEvent[] = [];
+  let unsubscribe: (() => void) | null = null;
+
+  beforeEach(() => {
+    captured = [];
+    unsubscribe = eventBus.onEvent((ev) => {
+      if (ev.kind === 'mailbox.message') captured.push(ev);
+    });
+  });
+
+  afterEach(() => {
+    if (unsubscribe) {
+      unsubscribe();
+      unsubscribe = null;
+    }
+  });
+
+  function makeCrossOrch(opts: {
+    id: string;
+    name: string;
+    lead: Session;
+    status?: 'running' | 'stopped';
+  }) {
+    const mailbox = new Mailbox({ maxSize: 100 });
+    return {
+      id: opts.id,
+      name: opts.name,
+      lead: opts.lead,
+      mailbox,
+      status: opts.status ?? 'running',
+    };
+  }
+
+  it('sendMessageToLead emits 1 event with orchestratorId = destination and fromOrchestratorId = source', async () => {
+    // Defer require to avoid circular import surprises at file-eval time.
+    const { sendMessageToLead } = await import('./messaging.js');
+
+    const sourceLead = makeSession({ id: 'lead-src' });
+    const targetLead = makeSession({ id: 'lead-dst' });
+    const sourceOrch = makeCrossOrch({ id: 'orch-src', name: 'src', lead: sourceLead });
+    const targetOrch = makeCrossOrch({ id: 'orch-dst', name: 'dst', lead: targetLead });
+
+    const spawner = {
+      get: (id: string) =>
+        id === targetOrch.id
+          ? (targetOrch as unknown as Orchestrator)
+          : id === sourceOrch.id
+            ? (sourceOrch as unknown as Orchestrator)
+            : undefined,
+      listActive: () => [
+        sourceOrch as unknown as Orchestrator,
+        targetOrch as unknown as Orchestrator,
+      ],
+    };
+
+    sendMessageToLead(
+      spawner as unknown as import('../spawner/index.js').Spawner,
+      sourceOrch as unknown as Orchestrator,
+      sourceLead.id,
+      targetOrch.id,
+      'cross-team hi',
+      DEFAULTS,
+    );
+
+    expect(captured).toHaveLength(1);
+    const ev = captured[0]!;
+    expect(ev.orchestratorId).toBe('orch-dst');
+    expect(ev.payload).toMatchObject({
+      from: sourceLead.id,
+      to: targetLead.id,
+      orchestratorId: 'orch-dst',
+      fromOrchestratorId: 'orch-src',
+    });
+  });
+
+  it('broadcastToLeads emits N events (one per destination orchestrator)', async () => {
+    const { broadcastToLeads } = await import('./messaging.js');
+
+    const sourceLead = makeSession({ id: 'lead-src' });
+    const leadA = makeSession({ id: 'lead-a' });
+    const leadB = makeSession({ id: 'lead-b' });
+
+    const sourceOrch = makeCrossOrch({ id: 'orch-src', name: 'src', lead: sourceLead });
+    const orchA = makeCrossOrch({ id: 'orch-a', name: 'A', lead: leadA });
+    const orchB = makeCrossOrch({ id: 'orch-b', name: 'B', lead: leadB });
+
+    const spawner = {
+      get: () => undefined,
+      listActive: () => [
+        sourceOrch as unknown as Orchestrator,
+        orchA as unknown as Orchestrator,
+        orchB as unknown as Orchestrator,
+      ],
+    };
+
+    broadcastToLeads(
+      spawner as unknown as import('../spawner/index.js').Spawner,
+      sourceOrch as unknown as Orchestrator,
+      sourceLead.id,
+      'all hands',
+      DEFAULTS,
+    );
+
+    // Source orch is skipped → expect 2 events.
+    expect(captured).toHaveLength(2);
+    const byOrch = new Map(captured.map((e) => [e.orchestratorId, e]));
+    expect(byOrch.has('orch-a')).toBe(true);
+    expect(byOrch.has('orch-b')).toBe(true);
+    expect(byOrch.has('orch-src')).toBe(false);
+    for (const ev of captured) {
+      expect(ev.payload).toMatchObject({
+        from: sourceLead.id,
+        fromOrchestratorId: 'orch-src',
+      });
+    }
   });
 });

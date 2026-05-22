@@ -22,6 +22,7 @@ export type SessionType = 'lead' | 'worker';
 export type SessionStatus =
   | 'starting'
   | 'running'
+  | 'paused'
   | 'waiting'
   | 'exited'
   | 'killed'
@@ -193,6 +194,14 @@ export class Session extends EventEmitter {
   private readonly ringBuffer: string[] = [];
   private partialLine = '';
   private _stopRequested = false;
+  /**
+   * S5 — last non-paused status captured immediately before SIGSTOP so we can
+   * restore it on resume (avoids a `paused → running → waiting` flicker when
+   * the Notification hook re-fires after SIGCONT).
+   */
+  private _statusBeforePause: SessionStatus | null = null;
+  /** S5 — guard against concurrent restart calls. Set by Orchestrator.restartSession. */
+  private _restarting = false;
   private _killTimer: NodeJS.Timeout | null = null;
   private _agentDataDisp: Disposable | null = null;
   private _agentExitDisp: Disposable | null = null;
@@ -662,6 +671,21 @@ export class Session extends EventEmitter {
       this._cleanupMcpConfig();
       return;
     }
+    // S5 §7.5 — SIGTERM on a SIGSTOP'd process is queued as pending and only
+    // delivered when the process is resumed. Without an explicit SIGCONT the
+    // graceful shutdown is silently stuck for the full grace window and the
+    // SIGKILL timer fires by default. Wake the process first so SIGTERM is
+    // honored immediately.
+    if (this._status === 'paused') {
+      try {
+        this.agent.kill('SIGCONT');
+      } catch {
+        /* ignore */
+      }
+      // Clear the captured pre-pause status so any downstream introspection
+      // sees a coherent state (we're now en route to `killed`).
+      this._statusBeforePause = null;
+    }
     try {
       this.agent.kill('SIGTERM');
     } catch {
@@ -682,6 +706,78 @@ export class Session extends EventEmitter {
     // Don't keep the event loop alive just for this timer.
     timer.unref();
     this._killTimer = timer;
+  }
+
+  /**
+   * S5 — SIGSTOP the underlying PTY so the agent freezes mid-execution.
+   *
+   * Returns true if the SIGSTOP was actually requested + status flipped to
+   * `paused`, false if the transition was illegal (already paused, terminal,
+   * starting, a stop is in progress, or no agent attached).
+   *
+   * Important: we deliberately do NOT set `_stopRequested = true` here. The
+   * pause is reversible; an exit after a future resume should still be
+   * classified naturally (`exited` for code 0, `failed` otherwise) instead of
+   * being demoted to `killed` by `_handleExit`.
+   */
+  pause(reason: string): boolean {
+    if (this._status === 'paused') return false; // idempotent
+    // Only running / waiting can be paused. `starting` would freeze the agent
+    // mid-boot before identification — refuse. Terminal states are obviously
+    // refused.
+    if (this._status !== 'running' && this._status !== 'waiting') return false;
+    if (!this.agent) return false; // skipSpawn / no real process
+    if (this._stopRequested) return false; // a stop is in-flight — don't fight it
+    this._statusBeforePause = this._status;
+    try {
+      this.agent.kill('SIGSTOP');
+    } catch (err) {
+      log.warn({
+        event: 'session.pause_failed',
+        sessionId: this.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      this._statusBeforePause = null;
+      return false;
+    }
+    this._setStatus('paused');
+    this._appendLog(`[swarm-os] PAUSE (SIGSTOP) — ${reason}\n`);
+    return true;
+  }
+
+  /**
+   * S5 — SIGCONT the underlying PTY and restore the pre-pause status.
+   *
+   * Restoring `waiting` (when that's what we paused from) avoids a visible
+   * `paused → running → waiting` flicker if the Notification hook is going
+   * to re-fire shortly after the agent wakes up.
+   */
+  resume(reason: string): boolean {
+    if (this._status !== 'paused') return false;
+    if (!this.agent) return false;
+    try {
+      this.agent.kill('SIGCONT');
+    } catch (err) {
+      log.warn({
+        event: 'session.resume_failed',
+        sessionId: this.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+    const restored = this._statusBeforePause ?? 'running';
+    this._statusBeforePause = null;
+    this._setStatus(restored);
+    this._appendLog(`[swarm-os] RESUME (SIGCONT) — ${reason}\n`);
+    return true;
+  }
+
+  /** S5 — read/set the per-session restart-in-progress guard. */
+  get restarting(): boolean {
+    return this._restarting;
+  }
+  setRestarting(v: boolean): void {
+    this._restarting = v;
   }
 
   // --- Internals ---------------------------------------------------------

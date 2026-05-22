@@ -25,6 +25,7 @@ function makeOnCreate() {
     endedAt: null,
     lastError: null,
     sessions: [],
+    msgCount: 0,
   });
 }
 

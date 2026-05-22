@@ -185,6 +185,14 @@ export function rowToOrchView(
     endedAt: row.ended_at,
     lastError: row.last_error,
     sessions,
+    // Phase update_system S1: history rows have no live mailbox, so the
+    // cumulative bus counter is 0 by definition. Not persisted in v1.
+    msgCount: 0,
+    // Phase update_system S7: history rows are by definition terminal
+    // (status ∈ {stopped, failed}). Hardcode the verdict instead of
+    // re-running the computation — `'bad'` for the failed branch so the
+    // UI can still flag historical failures, `'stopped'` otherwise.
+    health: row.status === 'failed' ? 'bad' : 'stopped',
   };
 }
 

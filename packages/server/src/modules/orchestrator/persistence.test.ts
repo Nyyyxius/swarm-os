@@ -96,6 +96,7 @@ describe('orchToRow / sessionToRow', () => {
       endedAt: null,
       lastError: null,
       sessions: [],
+      msgCount: 0,
     };
     const row = orchToRow(view, { stopReason: 'user' });
     expect(row.id).toBe('orch-1');
@@ -149,12 +150,15 @@ describe('rowToOrchView / rowToSessionView', () => {
       endedAt: '2030-01-02T00:00:00Z',
       lastError: null,
       sessions: [],
+      msgCount: 0,
     };
     const row = orchToRow(baseView, { stopReason: 'user' });
     const back = rowToOrchView(row, []);
     expect(back.id).toBe(baseView.id);
     expect(back.status).toBe(baseView.status);
     expect(back.endedAt).toBe(baseView.endedAt);
+    // Phase update_system S1: history rows return 0 (no live mailbox).
+    expect(back.msgCount).toBe(0);
   });
 
   it('rowToSessionView preserves the SessionView contract', () => {

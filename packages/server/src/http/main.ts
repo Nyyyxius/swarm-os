@@ -11,7 +11,10 @@ import { createSessionsRouter } from './routes/sessions.js';
 import { createWsTicketRouter } from './routes/ws-ticket.js';
 import { createHooksRouter } from './routes/hooks.js';
 import { createRolesRouter } from './routes/roles.js';
+import { createMetricsRouter } from './routes/metrics.js';
 import type { RoleStore } from '../modules/roles/index.js';
+import type { MessagesAggregator } from '../modules/metrics/aggregator.js';
+import type { BusMetricsCollector } from '../modules/metrics/busMetrics.js';
 import { TerminalHub } from './ws/terminal.js';
 import { EventsHub } from './ws/events.js';
 import { withModule } from '../logger.js';
@@ -47,6 +50,10 @@ function findWebRoot(): string | null {
 export interface ServerHandle {
   http: Server;
   spawner: Spawner;
+  /** S9 — exposed on the handle so integration tests can call `tick()`. */
+  aggregator: MessagesAggregator;
+  /** S8 — exposed so integration tests can call `tick()` / `snapshot()`. */
+  busMetrics: BusMetricsCollector | null;
   close(): Promise<void>;
 }
 
@@ -54,6 +61,8 @@ export function createApp(
   config: Config,
   spawner: Spawner,
   roleStore: RoleStore,
+  aggregator: MessagesAggregator,
+  busMetrics?: BusMetricsCollector,
 ): { app: express.Express } {
   const app = express();
   app.disable('x-powered-by');
@@ -74,6 +83,9 @@ export function createApp(
       orchestrators_active: c.orchestratorsActive,
       sessions_active: c.sessionsActive,
       sessions_waiting: c.sessionsWaiting,
+      // S5 — surfaced so health dashboards can distinguish "operator-paused"
+      // from "active/idle". 0 when no session has been pause()d.
+      sessions_paused: c.sessionsPaused,
       uptime_seconds: Math.round(process.uptime()),
     });
   });
@@ -132,6 +144,11 @@ export function createApp(
   app.use(createSessionsRouter(spawner, config));
   app.use(createWsTicketRouter(spawner));
   app.use(createRolesRouter(roleStore, config));
+  // S9 + S8 — `GET /metrics/messages` and `GET /metrics/bus`. Mounted
+  // after the auth middleware so they return 401 without X-Auth-Token
+  // (parity with `/orchestrators`). `/metrics/bus` is only mounted when
+  // a `BusMetricsCollector` was provided.
+  app.use(createMetricsRouter(aggregator, busMetrics));
 
   // JSON error handler — must be the LAST middleware. Without this, body-parser
   // failures (entity.too.large, malformed JSON) return Express' default HTML
@@ -161,8 +178,10 @@ export function startServer(
   config: Config,
   spawner: Spawner,
   roleStore: RoleStore,
+  aggregator: MessagesAggregator,
+  busMetrics?: BusMetricsCollector,
 ): ServerHandle {
-  const { app } = createApp(config, spawner, roleStore);
+  const { app } = createApp(config, spawner, roleStore, aggregator, busMetrics);
   const http = createServer(app);
 
   const terminalHub = new TerminalHub(spawner);
@@ -239,6 +258,8 @@ export function startServer(
   return {
     http,
     spawner,
+    aggregator,
+    busMetrics: busMetrics ?? null,
     async close(): Promise<void> {
       terminalHub.shutdownAll();
       eventsHub.shutdownAll();

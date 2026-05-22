@@ -21,6 +21,8 @@ import { McpServer } from '../../src/modules/mcp/server.js';
 import { SwarmDb } from '../../src/modules/db/index.js';
 import { DbPersistence } from '../../src/modules/orchestrator/persistence.js';
 import { RoleStore } from '../../src/modules/roles/index.js';
+import { MessagesAggregator } from '../../src/modules/metrics/aggregator.js';
+import { BusMetricsCollector } from '../../src/modules/metrics/busMetrics.js';
 import { createApp, startServer } from '../../src/http/main.js';
 import { loadConfig, _resetConfigCacheForTesting } from '../../src/config.js';
 import type { Config } from '../../src/config.js';
@@ -48,6 +50,10 @@ export interface TestStack {
   mainPort: number | null;
   db: SwarmDb;
   persistence: DbPersistence;
+  /** S9 — exposed so integration tests can call `tick()` synchronously. */
+  aggregator: MessagesAggregator;
+  /** S8 — exposed so integration tests can call `tick()` / `snapshot()`. */
+  busMetrics: BusMetricsCollector;
   workspaceRoot: string;
   dataDir: string;
   /** Tear everything down. Must be called from afterEach. */
@@ -113,16 +119,24 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
   // Default to no-op so a notifier wasn't passed
   const notifier = opts.notifier ?? new NoOpNotifier();
   const spawner = new Spawner(config, { notifier, persistence, roleStore });
+  // S9 — aggregator. We DON'T call `start()` in tests: the integration tests
+  // drive `tick()` synchronously to avoid 60 s waits, and starting the
+  // interval would risk spurious ticks during the test.
+  const aggregator = new MessagesAggregator(spawner);
+  // S8 — bus collector. Same policy as the aggregator above — tests drive
+  // `tick()` manually. The collector is still instantiated so MCP requests
+  // can record latency/error counts even without an interval running.
+  const busMetrics = new BusMetricsCollector(spawner);
 
   let mcp: McpServer | null = null;
   if (!opts.skipMcp) {
-    mcp = new McpServer(spawner, config.mcpPort, config);
+    mcp = new McpServer(spawner, config.mcpPort, config, busMetrics);
     await mcp.start();
   }
 
   let http: HttpServer | null = null;
   if (!opts.skipMainHttp) {
-    const handle = startServer(config, spawner, roleStore);
+    const handle = startServer(config, spawner, roleStore, aggregator, busMetrics);
     http = handle.http;
     // Wait until the listener is actually accepting connections.
     await new Promise<void>((resolve) => {
@@ -140,9 +154,13 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
       mainPort: config.port,
       db,
       persistence,
+      aggregator,
+      busMetrics,
       workspaceRoot,
       dataDir,
       teardown: async () => {
+        aggregator.stop();
+        busMetrics.stop();
         spawner.shutdownAll('test-shutdown');
         await new Promise((r) => setTimeout(r, 50));
         if (mcp) await mcp.stop();
@@ -165,9 +183,13 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
     mainPort: null,
     db,
     persistence,
+    aggregator,
+    busMetrics,
     workspaceRoot,
     dataDir,
     teardown: async () => {
+      aggregator.stop();
+      busMetrics.stop();
       spawner.shutdownAll('test-shutdown');
       await new Promise((r) => setTimeout(r, 50));
       if (mcp) await mcp.stop();

@@ -2,8 +2,9 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { Session } from './session.js';
+import { Session, type SessionStatus } from './session.js';
 import { FakeAgentProcess } from './agent-process.js';
+import { eventBus } from '../../events.js';
 
 /**
  * Pre-seed `.claude.json` so claude-code's "Trust this folder?" widget
@@ -195,5 +196,145 @@ describe('Session — .claude.json trust seed', () => {
       'utf8',
     );
     expect(JSON.parse(runtimeRaw)).toEqual({ canary: 'untouched' });
+  });
+});
+
+/**
+ * S5 — pause / resume / stop interactions on the underlying PTY.
+ *
+ * We need a slimmed-down session factory so we can capture the FakeAgent
+ * reference (the outer helper hides it inside the override). The fake is
+ * extended to NOT exit on SIGSTOP/SIGCONT so we can drive a realistic
+ * pause→resume→stop sequence.
+ */
+function makeS5Session(): { s: Session; fake: FakeAgentProcess } {
+  const fake = new FakeAgentProcess({ command: 'fake', args: [], cwd });
+  const s = new Session({
+    orchestratorId: 'orch-s5-test',
+    name: 's5-test',
+    role: 'tester',
+    type: 'worker',
+    cwd,
+    initialPrompt: 'noop',
+    preamble: null,
+    model: 'test-model',
+    effort: 'low',
+    permissionMode: 'bypassPermissions',
+    logsDir,
+    mcpRuntimeDir,
+    mcpHost: '127.0.0.1',
+    mcpPort: 0,
+    agentProcessOverride: fake,
+    hookToken: 'test-hook',
+    mainHttpPort: 12345,
+    claudeConfigRoot: claudeRuntimeDir,
+  });
+  openSessions.push(s);
+  return { s, fake };
+}
+
+/** Sniff every `session.status_changed` event for the given session. */
+const eventUnsubs: Array<() => void> = [];
+function captureStatusEvents(sessionId: string): SessionStatus[] {
+  const seen: SessionStatus[] = [];
+  const off = eventBus.onEvent((ev) => {
+    if (ev.kind !== 'session.status_changed') return;
+    if (ev.sessionId !== sessionId) return;
+    const status = (ev.payload as { status?: SessionStatus })?.status;
+    if (status) seen.push(status);
+  });
+  eventUnsubs.push(off);
+  return seen;
+}
+
+afterEach(() => {
+  for (const off of eventUnsubs) {
+    try {
+      off();
+    } catch {
+      /* ignore */
+    }
+  }
+  eventUnsubs.length = 0;
+});
+
+describe('Session.pause / resume — SIGSTOP / SIGCONT', () => {
+  it('pause() from running flips to paused and pushes SIGSTOP to the PTY', () => {
+    const { s, fake } = makeS5Session();
+    expect(s.status).toBe('running');
+    const events = captureStatusEvents(s.id);
+    expect(s.pause('operator-pause')).toBe(true);
+    expect(s.status).toBe('paused');
+    expect(fake.signals).toContain('SIGSTOP');
+    // session.status_changed must be emitted for the paused transition.
+    expect(events.at(-1)).toBe('paused');
+  });
+
+  it('pause() is idempotent — second call returns false and does not re-emit', () => {
+    const { s, fake } = makeS5Session();
+    expect(s.pause('first')).toBe(true);
+    const sigCountBefore = fake.signals.filter((sig) => sig === 'SIGSTOP').length;
+    const events = captureStatusEvents(s.id);
+    expect(s.pause('second')).toBe(false);
+    const sigCountAfter = fake.signals.filter((sig) => sig === 'SIGSTOP').length;
+    expect(sigCountAfter).toBe(sigCountBefore); // no duplicate SIGSTOP
+    expect(events).toHaveLength(0); // no status event for a no-op
+  });
+
+  it('pause() refuses terminal states and stop-requested sessions', () => {
+    const { s } = makeS5Session();
+    s.stop('test', 5000); // sets _stopRequested
+    expect(s.pause('attempt')).toBe(false);
+    expect(s.status).not.toBe('paused');
+  });
+
+  it('resume() from paused → running, pushes SIGCONT to the PTY', () => {
+    const { s, fake } = makeS5Session();
+    s.pause('p');
+    expect(s.resume('r')).toBe(true);
+    expect(s.status).toBe('running');
+    expect(fake.signals).toContain('SIGCONT');
+  });
+
+  it('resume() from non-paused returns false', () => {
+    const { s } = makeS5Session();
+    expect(s.resume('r')).toBe(false);
+  });
+});
+
+describe('Session.stop — SIGCONT before SIGTERM when paused', () => {
+  it('stop() on a paused session sends SIGCONT first so SIGTERM is honored without waiting the full grace', () => {
+    const { s, fake } = makeS5Session();
+    s.pause('test');
+    expect(s.status).toBe('paused');
+    // After stop: SIGCONT must appear BEFORE the SIGTERM in the recorded signal log.
+    s.stop('test-stop', 5000);
+    const sigContIdx = fake.signals.indexOf('SIGCONT');
+    const sigTermIdx = fake.signals.indexOf('SIGTERM');
+    expect(sigContIdx).toBeGreaterThanOrEqual(0);
+    expect(sigTermIdx).toBeGreaterThan(sigContIdx);
+  });
+
+  it('stop() classifies the eventual exit as killed (user-initiated)', async () => {
+    const { s } = makeS5Session();
+    s.stop('test-kill', 5000);
+    // FakeAgentProcess.kill('SIGTERM') schedules onExit via setImmediate.
+    await new Promise((r) => setImmediate(r));
+    expect(s.status).toBe('killed');
+  });
+});
+
+describe('FakeAgentProcess — SIGSTOP/SIGCONT do not exit', () => {
+  it('records the signal without exiting the process', () => {
+    const fake = new FakeAgentProcess({ command: 'fake', args: [], cwd });
+    let exits = 0;
+    fake.onExit(() => exits++);
+    fake.kill('SIGSTOP');
+    fake.kill('SIGCONT');
+    expect(fake.signals).toEqual(['SIGSTOP', 'SIGCONT']);
+    // Writes still go through — the fake is still "alive".
+    fake.write('post-stop');
+    expect(fake.writes).toContain('post-stop');
+    expect(exits).toBe(0);
   });
 });
