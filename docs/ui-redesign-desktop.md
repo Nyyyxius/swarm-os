@@ -8,8 +8,11 @@ traitée séparément — la version desktop est servie au chargement, la mobile
 sera activée plus tard via un breakpoint.
 
 Statut : `update_system.md` S1–S12 est livré (backend v1 complet,
-2026-05-22) ; le prototype v2 couvre U0.1–U0.7, U1.1–U1.9, U2.1–U2.6. Ce
-document acte la nouvelle réalité après validation bidirectionnelle.
+2026-05-22) ; le prototype v2 couvre U0.1–U0.7, U1.1–U1.9, U2.1–U2.6.
+**Phase A–D livrée le 2026-05-22** (19 étapes du §5.1, voir
+`docs/redesign-desktop/01_…md` à `19_…md`). Phase E (mobile) reste hors
+scope. Ce document acte la nouvelle réalité après validation
+bidirectionnelle et implémentation.
 
 ---
 
@@ -277,6 +280,9 @@ prototype v2. Légende : ✅ couvert, ⚠ couvert avec note, ❌ gap résiduel.
 
 ## 4. Gaps résiduels côté serveur
 
+> UI v1 livrée 2026-05-22, ces gaps restent ouverts côté serveur, mitigés
+> côté UI par disabled+tooltip ou workarounds clients.
+
 La liste de §4 (v1 du doc) est largement résorbée. Voici **ce qui reste**
 après S1–S12 :
 
@@ -314,6 +320,9 @@ tooltip `available in v2`, toggle disabled côté composer.
 ---
 
 ## 5. Plan d'intégration
+
+> Phase A–D livrées le 2026-05-22 — voir ci-dessous l'état effectif et
+> `docs/redesign-desktop/` pour les analyses détaillées.
 
 ### 5.1 Étapes (ordre d'exécution proposé)
 
@@ -475,42 +484,42 @@ tooltip `available in v2`, toggle disabled côté composer.
 
 ### 5.5 Critères d'acceptation v1
 
-- [ ] Au chargement, la grille desktop (TopBar / LeftPanel / MapView /
+- [x] Au chargement, la grille desktop (TopBar / LeftPanel / MapView /
       RightPanel fermée) est affichée.
-- [ ] TopBar : une pill par orchestrator actif (mise à jour 3 s),
+- [x] TopBar : une pill par orchestrator actif (mise à jour 3 s),
       statut HEALTHY / DEGRADED / WAITING / STARTING / OFFLINE / BAD
       correct. `msgCount` formaté `Nk` au-delà de 999. Waiting-flag ●
       apparaît quand un worker est en `waiting`.
-- [ ] TopBar : bouton `+ NEW TEAM` → `NewOrchestratorDialog`,
+- [x] TopBar : bouton `+ NEW TEAM` → `NewOrchestratorDialog`,
       `ROLES` → `RolesPage`, cog → `SettingsDrawer`. Project name + version
       + uptime affichés sous le brand.
-- [ ] LeftPanel : MESSAGE FLOW total + delta/min + sparkline 60 pts ;
+- [x] LeftPanel : MESSAGE FLOW total + delta/min + sparkline 60 pts ;
       PER-TEAM TRAFFIC sparkline par team ; RECENTLY ENDED avec badge-reason ;
       BUS HEALTH 4 valeurs (latency / throughput / queue / err rate).
-- [ ] MapView : hub central clickable (broadcast), 1 lead diamond par
+- [x] MapView : hub central clickable (broadcast), 1 lead diamond par
       team + workers selon `ROLE_SHAPE`, statut visuel via
       `enrichWithIdle`, inbox badge non-zéro, waiting ring pulsant,
       SVR-RESTART label sur `interrupted`, spawn animation à la création.
-- [ ] Pulses 4 kinds animés selon `mailbox.message` event.
-- [ ] Clic sur un node → RightPanel ouvre avec head + cfgline + cwd +
+- [x] Pulses 4 kinds animés selon `mailbox.message` event.
+- [x] Clic sur un node → RightPanel ouvre avec head + cfgline + cwd +
       stats + meta + 5 boutons d'action + 3 tabs.
-- [ ] Tab CONSOLE attaché au PTY, pastille WRITER/READER affichée.
-- [ ] Tab MESSAGES affiche les bulles classifiées (`me/them/system/other-team`).
-- [ ] Tab CONFIG affiche RUNTIME (model/effort/perm/cwd/pid/started/EXIT
+- [x] Tab CONSOLE attaché au PTY, pastille WRITER/READER affichée.
+- [x] Tab MESSAGES affiche les bulles classifiées (`me/them/system/other-team`).
+- [x] Tab CONFIG affiche RUNTIME (model/effort/perm/cwd/pid/started/EXIT
       REASON si applicable), LEAD PROMPT, LEAD PREAMBLE, WORKER PREAMBLE,
       CONNECTORS (Discord chip si webhook).
-- [ ] Composer toggle PTY/INBOX + AGENT/TEAM ; envoi PTY câblé sur
+- [x] Composer toggle PTY/INBOX + AGENT/TEAM ; envoi PTY câblé sur
       `postSessionInput`, TEAM câblé sur `broadcastToOrchestrator`. INBOX
       en mode AGENT est disabled v1 (gap §4-5).
-- [ ] Boutons STOP / PAUSE / RESUME / RESTART / KILL câblés sur les
+- [x] Boutons STOP / PAUSE / RESUME / RESTART / KILL câblés sur les
       endpoints S5. `+ WORKER`, ROTATE config, REACTIVATE en preview
       disabled (gaps §4-2, §4-3).
-- [ ] Confirmation modale KILL / STOP avant exécution.
-- [ ] Toasts SESSION WAITING bas-droite, max 5, `+N older`, auto-dismiss
+- [x] Confirmation modale KILL / STOP avant exécution.
+- [x] Toasts SESSION WAITING bas-droite, max 5, `+N older`, auto-dismiss
       30 s, bouton OPEN navigue vers l'agent.
-- [ ] `EventsPip` quand aucun toast (`events :: live` ou
+- [x] `EventsPip` quand aucun toast (`events :: live` ou
       `reconnecting…`).
-- [ ] Aucune régression dans les tests Vitest existants (ajuster les
+- [x] Aucune régression dans les tests Vitest existants (ajuster les
       selectors uniquement quand le composant a été déplacé).
 
 ---
@@ -593,3 +602,6 @@ Le prototype v2 est une cible visuelle **complète** pour le backend v1 :
 
 La phase 3 (intégration code) peut démarrer. Les 8 gaps résiduels du §4
 sont des améliorations v2, pas des blocages.
+
+Implémentation Phase A–D livrée 2026-05-22 ; voir
+`docs/redesign-desktop/`.

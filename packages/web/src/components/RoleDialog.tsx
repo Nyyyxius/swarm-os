@@ -1,4 +1,4 @@
-import { useEffect, useState } from 'react';
+import { useEffect, useState, type CSSProperties } from 'react';
 import type { ConnectorView, RoleView } from '../api/client';
 
 interface SubmitBody {
@@ -19,6 +19,12 @@ interface Props {
   onSubmit: (body: SubmitBody) => Promise<RoleView>;
   /** When provided, the dialog edits an existing role. */
   initial?: RoleView | null;
+  /**
+   * Optional inline styles for the outer fixed wrapper. Used by the v2
+   * NewOrchestratorDialog (Step 9) to bump z-index above the warm-black
+   * `.modal-backdrop` until RoleDialog itself is ported (Step 10).
+   */
+  containerStyle?: CSSProperties;
 }
 
 const EFFORTS = ['', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
@@ -41,7 +47,7 @@ const MODELS = [
 const inputCls =
   'w-full bg-slate-950 border border-slate-700 rounded px-2 py-1 text-sm text-slate-100 focus:outline-none focus:border-emerald-500';
 
-export function RoleDialog({ open, onClose, onSubmit, initial }: Props) {
+export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }: Props) {
   const editing = !!initial;
   const [label, setLabel] = useState('');
   const [leadPrompt, setLeadPrompt] = useState('');
@@ -124,7 +130,10 @@ export function RoleDialog({ open, onClose, onSubmit, initial }: Props) {
   }
 
   return (
-    <div className="fixed inset-0 bg-black/60 z-40 flex items-center justify-center p-4">
+    <div
+      className="fixed inset-0 bg-black/60 z-40 flex items-center justify-center p-4"
+      style={containerStyle}
+    >
       <div className="bg-slate-900 border border-slate-700 rounded-lg w-full max-w-2xl p-6 shadow-2xl max-h-[90vh] overflow-y-auto">
         <h2 className="text-xl font-semibold mb-4">{editing ? 'Edit role' : 'New role'}</h2>
         <div className="grid grid-cols-2 gap-3">

@@ -115,6 +115,45 @@ export interface InfoView {
   started_at: string;
 }
 
+/**
+ * Phase update_system S9 — snapshot returned by `GET /metrics/messages`.
+ * Shape mirrored from `packages/server/src/modules/metrics/aggregator.ts`;
+ * we **do not** import server types here because `web` does not depend on
+ * `server` (cf. design doc §2.1).
+ */
+export interface MessagesMetricsSnapshot {
+  /** Σ mailbox.messagesTotal across all orchs at call time. */
+  total: number;
+  /** Most recent 60-second delta (`global[59]`). */
+  per_minute: number;
+  /** 60 ints: msg/min over the trailing 60 minutes (oldest first). */
+  global: number[];
+  /**
+   * Per-orchestrator 8-point ring (oldest first), keyed by orch.id (UUID).
+   * An orch that has just been created may not appear here until the first
+   * tick after its creation.
+   */
+  per_orchestrator: Record<string, number[]>;
+}
+
+/**
+ * Phase update_system S8 — snapshot returned by `GET /metrics/bus`. May
+ * 404 if the server was instantiated without a `BusMetricsCollector`;
+ * callers must tolerate the error (cf. design doc §2.2 note).
+ */
+export interface BusMetricsSnapshot {
+  /** Sliding mean MCP RTT (ms) over the trailing 60 s window. */
+  latency_ms: number;
+  /** Mean bus throughput (messages / second) over the trailing window. */
+  throughput_msg_per_s: number;
+  /** Instantaneous Σ mailbox.totalSize() across every orch. */
+  queue_depth: number;
+  /** Sliding error rate (%) over the trailing window. */
+  err_rate_pct: number;
+  /** Constant 60 — handy for UI labelling. */
+  window_seconds: number;
+}
+
 class HttpError extends Error {
   constructor(
     message: string,
@@ -261,6 +300,22 @@ export const api = {
     ),
   getEventsTicket: () =>
     request<{ ticket: string; ttlMs: number; kind: string }>('GET', `/ws-ticket?events=1`),
+  /**
+   * Phase update_system S9 — global + per-orchestrator message-flow ring
+   * buffers. Used by `LeftPanel` for the `MESSAGE FLOW` big graph (when
+   * `messageFlowSource === 's9-server'`) and for the `PER-TEAM TRAFFIC`
+   * sparklines (always).
+   */
+  getMetricsMessages: () =>
+    request<MessagesMetricsSnapshot>('GET', '/metrics/messages'),
+  /**
+   * Phase update_system S8 — bus health KPIs. Drives the `BUS HEALTH` 4-cell
+   * grid in `LeftPanel`. May return 404 on servers built without
+   * `BusMetricsCollector`; the consumer hook swallows the error and keeps
+   * cells at `—`.
+   */
+  getMetricsBus: () =>
+    request<BusMetricsSnapshot>('GET', '/metrics/bus'),
 };
 
 export { HttpError };

@@ -14,13 +14,39 @@ import { api } from '../api/client';
 
 interface Props {
   sessionId: string;
+  /**
+   * Step 7 — optional callback fired when the server sends `attached` /
+   * `role-changed` hello frames. Lets a parent (e.g. RightPanel) surface
+   * the WRITER/READER pip without re-implementing the WS handshake.
+   * Legacy callers (OrchestratorView) leave this undefined.
+   */
+  onRoleChange?: (role: 'writer' | 'reader') => void;
+  /**
+   * Step 7 — optional callback fired once per PTY `data` frame.
+   * Used by the RightPanel to maintain a coarse "LOG LINES" counter
+   * (1 frame ≈ 1 line, no parsing). Throttling is the caller's
+   * responsibility if needed.
+   */
+  onDataFrame?: () => void;
+  /**
+   * Step 7 — hide the small "WS: open · role: writer" status row above
+   * the xterm container. The RightPanel already renders a WRITER/READER
+   * chip in its tabs strip, so the legacy chrome would be redundant.
+   */
+  hideChrome?: boolean;
 }
 
-export function Terminal({ sessionId }: Props) {
+export function Terminal({ sessionId, onRoleChange, onDataFrame, hideChrome }: Props) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const [status, setStatus] = useState<'connecting' | 'open' | 'closed' | 'error'>('connecting');
   const [role, setRole] = useState<'writer' | 'reader' | null>(null);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  // Keep callback refs so the WS-effect doesn't tear down when the parent
+  // re-creates the function identity each render.
+  const onRoleChangeRef = useRef(onRoleChange);
+  const onDataFrameRef = useRef(onDataFrame);
+  useEffect(() => { onRoleChangeRef.current = onRoleChange; }, [onRoleChange]);
+  useEffect(() => { onDataFrameRef.current = onDataFrame; }, [onDataFrame]);
 
   useEffect(() => {
     let cancelled = false;
@@ -38,7 +64,16 @@ export function Terminal({ sessionId }: Props) {
           fontFamily:
             'ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", monospace',
           fontSize: 13,
-          theme: { background: '#0b1220' },
+          // Step 7 — warm-black palette to match v2 BACKDROPS.void
+          // (prototypes/v2/app.jsx:23). Only the chrome colours change;
+          // ANSI codes from Claude are still rendered untouched.
+          theme: {
+            background: '#0d0a08',
+            foreground: '#f3e9dc',
+            cursor: '#ffb060',
+            cursorAccent: '#0d0a08',
+            selectionBackground: 'rgba(255,176,96,0.25)',
+          },
           cursorBlink: true,
           scrollback: 5000,
           convertEol: true,
@@ -80,10 +115,16 @@ export function Terminal({ sessionId }: Props) {
               const o = obj as { type?: string; data?: string; role?: string; lines?: string[] };
               switch (o.type) {
                 case 'attached':
-                  if (o.role === 'writer' || o.role === 'reader') setRole(o.role);
+                  if (o.role === 'writer' || o.role === 'reader') {
+                    setRole(o.role);
+                    onRoleChangeRef.current?.(o.role);
+                  }
                   return;
                 case 'role-changed':
-                  if (o.role === 'writer' || o.role === 'reader') setRole(o.role);
+                  if (o.role === 'writer' || o.role === 'reader') {
+                    setRole(o.role);
+                    onRoleChangeRef.current?.(o.role);
+                  }
                   return;
                 case 'replay':
                   if (Array.isArray(o.lines)) {
@@ -91,7 +132,12 @@ export function Terminal({ sessionId }: Props) {
                   }
                   return;
                 case 'data':
-                  if (typeof o.data === 'string') term.write(o.data);
+                  if (typeof o.data === 'string') {
+                    term.write(o.data);
+                    // Step 7 — coarse log-line counter (1 frame ≈ 1 line);
+                    // RightPanel uses it for the LOG LINES stat cell.
+                    onDataFrameRef.current?.();
+                  }
                   return;
                 case 'exit':
                   term.writeln('\r\n[swarm-os] session exited');
@@ -156,6 +202,17 @@ export function Terminal({ sessionId }: Props) {
     };
   }, [sessionId]);
 
+  if (hideChrome) {
+    // Step 7 — RightPanel-style mount: the xterm fills the container,
+    // status + role chips are rendered by the parent's pr-tabs-meta.
+    // The bg colour follows the v2 warm-black theme set above.
+    return (
+      <div
+        ref={containerRef}
+        style={{ width: '100%', height: '100%', background: '#0d0a08' }}
+      />
+    );
+  }
   return (
     <div className="flex flex-col h-full">
       <div className="flex items-center gap-2 text-xs text-slate-400 mb-1">
@@ -164,7 +221,7 @@ export function Terminal({ sessionId }: Props) {
         <span>role: {role ?? '…'}</span>
         {errorMsg && <span className="text-red-400">{errorMsg}</span>}
       </div>
-      <div ref={containerRef} className="flex-1 min-h-0 bg-[#0b1220] border border-slate-700 rounded p-1" />
+      <div ref={containerRef} className="flex-1 min-h-0 bg-[#0d0a08] border border-slate-700 rounded p-1" />
     </div>
   );
 }

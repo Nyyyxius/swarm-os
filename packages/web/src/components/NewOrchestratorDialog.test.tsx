@@ -3,16 +3,18 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import { NewOrchestratorDialog } from './NewOrchestratorDialog';
 
 /**
- * Phase 7 — NewOrchestratorDialog basic UX.
+ * Phase C — Step 9 — form-level checks for the v2 layout.
  *
- * Form-level checks only. We don't fight xterm or the Vite-served bundle —
- * Phase 6 polish covers the visual layer; this is just a sanity gate.
+ * Selectors target the v2 class structure (`.modal`, `.field*`, `role=alert`,
+ * `CREATE TEAM →` button). The form defaults to empty `name` / `prompt` /
+ * `preamble` and `cwd='/'`, so each "filled" test must populate the inputs
+ * explicitly. The submitted name is forced to UPPERCASE per spec §3 / §7.
  */
 
 function makeOnCreate() {
   return vi.fn().mockResolvedValue({
     id: 'orch-1',
-    name: 'smoke',
+    name: 'SMOKE',
     role: 'test',
     status: 'starting',
     leadSessionId: 'sess-1',
@@ -41,17 +43,22 @@ describe('NewOrchestratorDialog', () => {
     render(
       <NewOrchestratorDialog open={true} onClose={() => undefined} onCreate={makeOnCreate()} />,
     );
-    expect(screen.getByText('New orchestrator')).toBeInTheDocument();
+    expect(screen.getByText(/NEW ORCHESTRATOR/i)).toBeInTheDocument();
     // The amber bypassPermissions warning should be present by default
-    // (defaults to bypassPermissions per plan §3 / §17).
-    expect(screen.getByText(/bypassPermissions disables/i)).toBeInTheDocument();
+    // (defaults to bypassPermissions per plan §3 / §17). We target the
+    // `role="alert"` live region so the text wording can evolve freely.
+    expect(screen.getByRole('alert')).toHaveTextContent(/bypassPermissions/i);
   });
 
-  it('disables the Create button when cwd is empty', () => {
+  it('disables the Create button when cwd is cleared', () => {
     render(
       <NewOrchestratorDialog open={true} onClose={() => undefined} onCreate={makeOnCreate()} />,
     );
-    const createBtn = screen.getByRole('button', { name: /Create/i });
+    // cwd defaults to '/' which is valid; we have to empty it to assert
+    // the disabled state.
+    const cwdInput = screen.getByPlaceholderText('/workspace/path');
+    fireEvent.change(cwdInput, { target: { value: '' } });
+    const createBtn = screen.getByRole('button', { name: /CREATE TEAM/i });
     expect(createBtn).toBeDisabled();
   });
 
@@ -59,9 +66,13 @@ describe('NewOrchestratorDialog', () => {
     render(
       <NewOrchestratorDialog open={true} onClose={() => undefined} onCreate={makeOnCreate()} />,
     );
-    const cwdInput = screen.getByPlaceholderText('/mon-projet');
+    const nameInput = screen.getByPlaceholderText(/e\.g\. NOMAD/i);
+    const cwdInput = screen.getByPlaceholderText('/workspace/path');
+    const promptInput = screen.getByPlaceholderText(/Ship the new swarm\.bin/i);
+    fireEvent.change(nameInput, { target: { value: 'smoke' } });
     fireEvent.change(cwdInput, { target: { value: '/workspace/x' } });
-    const createBtn = screen.getByRole('button', { name: /Create/i });
+    fireEvent.change(promptInput, { target: { value: 'say hi' } });
+    const createBtn = screen.getByRole('button', { name: /CREATE TEAM/i });
     expect(createBtn).not.toBeDisabled();
   });
 
@@ -70,14 +81,19 @@ describe('NewOrchestratorDialog', () => {
     render(
       <NewOrchestratorDialog open={true} onClose={() => undefined} onCreate={onCreate} />,
     );
-    const cwdInput = screen.getByPlaceholderText('/mon-projet');
+    const nameInput = screen.getByPlaceholderText(/e\.g\. NOMAD/i);
+    const cwdInput = screen.getByPlaceholderText('/workspace/path');
+    const promptInput = screen.getByPlaceholderText(/Ship the new swarm\.bin/i);
+    fireEvent.change(nameInput, { target: { value: 'smoke' } });
     fireEvent.change(cwdInput, { target: { value: '/workspace/x' } });
-    fireEvent.click(screen.getByRole('button', { name: /Create/i }));
+    fireEvent.change(promptInput, { target: { value: 'say hi' } });
+    fireEvent.click(screen.getByRole('button', { name: /CREATE TEAM/i }));
     // Wait one microtask for the async submit to fire.
     await new Promise((r) => setTimeout(r, 10));
     expect(onCreate).toHaveBeenCalledTimes(1);
     const call = onCreate.mock.calls[0]?.[0] as Record<string, unknown>;
-    expect(call.name).toBe('smoke');
+    // submit() applies .toUpperCase() (spec §3 — parity with team-pills).
+    expect(call.name).toBe('SMOKE');
     expect((call.lead as { cwd: string }).cwd).toBe('/workspace/x');
     expect((call.defaults as { permissionMode: string }).permissionMode).toBe('bypassPermissions');
   });

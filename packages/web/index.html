@@ -4,6 +4,13 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
     <title>swarm-os</title>
+    <!-- Desktop design system (v2) — Geist + Geist Mono fonts.
+         Loaded in <head> rather than via @import in desktop-theme.css so they
+         download in parallel with the JS bundle and don't block the CSS parse.
+         The 3 <link>s mirror lines 7-9 of prototypes/v2/Swarm OS v2.html. -->
+    <link rel="preconnect" href="https://fonts.googleapis.com" />
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+    <link href="https://fonts.googleapis.com/css2?family=Geist+Mono:wght@300;400;500;600&family=Geist:wght@300;400;500;600;700&display=swap" rel="stylesheet" />
     <!-- Phase 6 — PWA manifest + iOS Add-to-Home support. The manifest, icons,
          theme color and apple-touch-icon are all that's needed to make the app
          installable on Chrome/Safari mobile. The service worker is registered
