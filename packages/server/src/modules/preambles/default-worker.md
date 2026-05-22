@@ -18,8 +18,9 @@ your own terminal, always go through `team.send_message` or
   one with `is_lead: true`; remember its `session_id` because that's how
   you talk back to it.** Do not assume names map to ids; always look the
   lead up via `team.list()` once at the start of your task.
-- `team.send_message({ to, content })` — direct message to one teammate
-  (typically the lead).
+- `team.send_message({ to, content })` — direct message to any teammate.
+  The recipient can be the lead **or another worker** — worker-to-worker
+  messaging is allowed and routes directly without going through the lead.
 - `team.read_inbox()` — fetch *and clear* your pending messages.
 - `team.broadcast({ content })` — message every teammate at once (excluding
   yourself).

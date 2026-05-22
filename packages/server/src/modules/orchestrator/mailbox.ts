@@ -30,6 +30,16 @@ export interface Message {
   content: string;
   /** ISO 8601 timestamp set at push time. */
   ts: string;
+  /**
+   * Origin orchestrator id — present ONLY for cross-team messages
+   * (swarm.send_to_lead / swarm.broadcast_to_leads). Absent for intra-team
+   * messages so the existing wire format stays unchanged.
+   */
+  fromOrchestratorId?: string;
+  /** Denormalized source orch name (cross-team only). */
+  fromOrchestratorName?: string;
+  /** Denormalized source session name (cross-team only). */
+  fromSessionName?: string;
 }
 
 export interface PushResult {
@@ -75,6 +85,9 @@ export class Mailbox {
       from: msg.from,
       content: msg.content,
       ts: msg.ts ?? new Date().toISOString(),
+      ...(msg.fromOrchestratorId ? { fromOrchestratorId: msg.fromOrchestratorId } : {}),
+      ...(msg.fromOrchestratorName ? { fromOrchestratorName: msg.fromOrchestratorName } : {}),
+      ...(msg.fromSessionName ? { fromSessionName: msg.fromSessionName } : {}),
     };
     q.push(full);
     let dropped = false;

@@ -274,3 +274,110 @@ appeler `team.kill_all_workers()` + sortir proprement en fin de mission.
 - **Quick-reply per-session** réutilise `POST /sessions/:id/input` (Phase 1)
   plutôt qu'une nouvelle route — la sémantique est strictement la même
   (pousse du texte humain dans le PTY).
+
+## 13. Extension post-MVP — cross-équipe (`swarm.*`, lead-only)
+
+Ajout post-Phase-7 : les leads d'orchestrateurs distincts peuvent se
+parler. Les workers restent **strictement enfermés** dans leur équipe
+(`team.*` only). Référence canonique : plan §10 (table d'outils) et §11
+(modèle de mailbox / tagging). Préambule lead à jour côté
+`default-lead.md` ("Cross-team coordination (lead-only)"). Le préambule
+worker reste inchangé : les workers n'ont pas besoin de savoir que
+`swarm.*` existe.
+
+### Surface MCP ajoutée
+
+| Outil | Visibilité | Params | Retour |
+|---|---|---|---|
+| `swarm.list_teams` | **lead** | `{}` | `{ teams: [{ orchestrator_id, name, role, status, worker_count, lead: { session_id, name, role } }] }` |
+| `swarm.send_to_lead` | **lead** | `{ orchestrator_id, content }` | `{ delivered, to_session_id, to_orchestrator_id, queue_size, dropped }` |
+| `swarm.broadcast_to_leads` | **lead** | `{ content }` | `{ delivered_to: [{ orchestrator_id, session_id }] }` |
+
+`requireLead(ctx, '<tool>')` est appelé **avant** toute lookup → un worker
+qui sonde n'obtient même pas la confirmation qu'un autre orch existe.
+`swarm.list_teams` exclut l'orch appelant et ceux sans lead actif ; les
+**workers d'autres équipes ne sont jamais exposés** (seul le lead l'est) —
+frontière inter-équipes préservée par construction.
+
+### Mailbox : extension du `Message`
+
+`packages/server/src/modules/orchestrator/mailbox.ts` — 3 champs
+optionnels ajoutés, dénormalisés au push (le destinataire les lit même si
+l'orch source disparaît) :
+
+```ts
+fromOrchestratorId?: string;
+fromOrchestratorName?: string;
+fromSessionName?: string;
+```
+
+Intra-équipe : ces champs sont absents → wire format `team.read_inbox`
+inchangé pour les messages historiques. Cross-équipe : sérialisés en
+`from_orchestrator: { id, name, lead_name }` côté `team.read_inbox`
+(champ optionnel sur l'output schema).
+
+### Helpers messaging
+
+`packages/server/src/modules/orchestrator/messaging.ts` ajoute deux
+helpers parallèles aux `sendMessage` / `broadcast` existants — la couche
+intra-équipe est **intacte** (clarté de contrat et de logs) :
+
+- `sendMessageToLead(spawner, sourceOrch, sourceSid, toOrchId, content, defaults)` :
+  size check → self-target rejection → `spawner.get` → status check
+  (stopped/failed/**stopping**) → **re-read `targetOrch.lead` juste avant
+  le push** (fenêtre lead-flip) → mailbox push tagué → idle-signal → log
+  `mail.cross_send`.
+- `broadcastToLeads(...)` : itère `spawner.listActive()`, exclut le self,
+  skip les orchs sans lead actif. Per-recipient failures loggées mais
+  n'avortent pas la boucle (best-effort). Log `mail.cross_broadcast`.
+
+Codes d'erreur (`MessageError`) en plus de `MESSAGE_TOO_LARGE` :
+
+| Code | HTTP | Trigger |
+|---|---|---|
+| `INVALID_RECIPIENT` | 400 | `orchestrator_id` vide ou `=== sourceOrch.id` |
+| `ORCH_UNKNOWN` | 404 | `spawner.get` retourne `undefined` |
+| `ORCH_NOT_ACTIVE` | 404 | `status ∈ { stopped, failed, stopping }` — **`stopping` inclus** car `Orchestrator.stop()` passe en `stopping` synchroniquement avant l'async vers `stopped` (le lead est déjà killé) |
+| `RECIPIENT_NOT_ACTIVE` | 404 | Lead null ou inactif au moment du re-read (race lead-flip) |
+
+Côté MCP les `MessageError` sont mappées via `throwAsMcp` (préfixe
+textuel `CODE:` que le client peut pattern-matcher). Pas de leak de
+`session_secret` dans les logs (même invariant que Phase 2/3).
+
+### Tests
+
+`packages/server/test/integration/mcp-swarm-tools.test.ts` — 9 checks
+end-to-end via `bootTestStack` + clients MCP réels :
+
+1. `swarm.list_teams` retourne les autres orchs actifs, **exclut**
+   l'appelant ET un orch stoppé. `worker_count` reflète les workers
+   actifs uniquement.
+2. Worker → `swarm.list_teams` → `PERMISSION_DENIED`.
+3. Lead A → `swarm.send_to_lead(B, content)` : le message atterrit dans
+   `team.read_inbox` de B avec `from_orchestrator: { id, name, lead_name }`.
+4. Worker → `swarm.send_to_lead` → `PERMISSION_DENIED`, **rien** n'arrive
+   dans la mailbox cible.
+5. Lead → `swarm.send_to_lead(unknown_id, ...)` → `ORCH_UNKNOWN`.
+6. Lead → `swarm.send_to_lead(self.id, ...)` → `INVALID_RECIPIENT`.
+7. Lead → `swarm.send_to_lead(stopped.id, ...)` → `ORCH_NOT_ACTIVE`.
+8. Lead A → `swarm.broadcast_to_leads(content)` (3 équipes actives) →
+   arrive aux 2 autres leads (mailbox/`from_orchestrator` corrects),
+   **pas** dans l'inbox de A.
+9. Worker → `swarm.broadcast_to_leads` → `PERMISSION_DENIED`.
+
+Test suite complète : 174/174 PASS. Pas de régression sur les tests
+intra-équipe (`team.*` inchangé).
+
+### Hors-scope (à reprendre si besoin)
+
+- **Pas d'`eventBus`** dédié pour la topologie cross-équipe — le log
+  structuré `mail.cross_*` suffit côté observabilité, pas de consommateur
+  UI aujourd'hui.
+- **Pas de quota cross-team** — un lead bavard peut saturer la mailbox
+  bornée (100) d'un autre lead. Le champ `dropped: true` du retour
+  alerte au moins le sender. À durcir si problème observé.
+- **Pas d'affichage UI** du tag `from_orchestrator` — l'inbox UI compte
+  les messages, ne rend pas leur contenu. À traiter quand le client
+  rendra le contenu des messages.
+- **Pas de persistance** — comme l'intra-équipe, in-memory uniquement.
+  Cohérent avec plan §11 ("Survie au restart : aucune").

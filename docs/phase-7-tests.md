@@ -140,6 +140,12 @@ Surfaces clés exercées :
 - **MCP `team.*`** : `whoami` / `list` / `send_message` / `read_inbox` /
   `broadcast` / `kill_worker` via vrai client SDK contre le serveur réel ;
   gating `PERMISSION_DENIED` sur `team.spawn_worker` côté worker.
+- **MCP `swarm.*` (cross-équipe, lead-only, post-MVP)** :
+  `list_teams` / `send_to_lead` / `broadcast_to_leads` via vrais clients
+  MCP, couvrant la livraison taguée (`from_orchestrator`),
+  `PERMISSION_DENIED` côté worker pour les 3 tools, et les codes
+  `ORCH_UNKNOWN` / `ORCH_NOT_ACTIVE` / `INVALID_RECIPIENT`. Fichier :
+  `test/integration/mcp-swarm-tools.test.ts`. Détails : `docs/phase-3-workers-mailbox.md` §13.
 - **REST routes** : `POST/GET/DELETE /orchestrators`, broadcast, sessions, input.
 - **WS terminal** : ticket usage unique TTL 10 s, multi-attach un seul writer,
   ticket invalide rejeté.

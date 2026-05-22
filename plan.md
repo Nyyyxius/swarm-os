@@ -456,18 +456,39 @@ Le `session_secret` (UUID v4) n'apparaît jamais dans les logs ni l'UI. L'auth e
 
 ## 10. MCP team-comms — outils exposés
 
+### Intra-équipe (`team.*`)
+
 | Outil | Visibilité | Paramètres | Retour |
 |---|---|---|---|
 | `team.whoami` | tous | `{}` | `{ session_id, name, role, type, is_lead }` |
 | `team.list` | tous | `{}` | `{ members: [...] }` (sessions actives uniquement) |
 | `team.send_message` | tous | `{ to, content }` | `{ delivered: boolean, queue_size: number }` |
-| `team.read_inbox` | tous | `{}` | `{ messages: [{ id, from, content, ts }, ...] }` (vide la queue) |
+| `team.read_inbox` | tous | `{}` | `{ messages: [{ id, from, content, ts, from_orchestrator? }, ...] }` (vide la queue) |
 | `team.broadcast` | tous | `{ content }` | `{ delivered_to: [...] }` |
 | `team.spawn_worker` | **lead only** | `{ name, role, prompt, cwd?, model?, permissionMode? }` | `{ session: { id, name, ... } }` |
 | `team.kill_worker` | **lead only** | `{ id }` | `{ killed: boolean }` |
 | `team.kill_all_workers` | **lead only** | `{}` | `{ killed: [...] }` |
 
 `is_lead` retourné par `whoami` (pas de tool dédié `am_i_lead`).
+`team.send_message` accepte n'importe quel `session_id` actif de l'équipe : un worker peut écrire à un autre worker (worker-à-worker autorisé, sans passer par le lead). `from_orchestrator` n'est présent dans `team.read_inbox` que pour les messages cross-équipe (cf. §10 bis).
+
+### Cross-équipe (`swarm.*`, lead-only)
+
+Coordination entre leads d'orchestrateurs distincts. Aucun de ces outils n'est appelable par un worker — `requireLead` lève `PERMISSION_DENIED` **avant** toute lookup (pas de fuite d'existence d'orchestrateur).
+
+| Outil | Visibilité | Paramètres | Retour |
+|---|---|---|---|
+| `swarm.list_teams` | **lead only** | `{}` | `{ teams: [{ orchestrator_id, name, role, status, worker_count, lead: { session_id, name, role } }] }` — exclut l'orch appelant et ceux sans lead actif. Pas de liste de membres workers (frontière inter-équipes préservée). |
+| `swarm.send_to_lead` | **lead only** | `{ orchestrator_id, content }` | `{ delivered, to_session_id, to_orchestrator_id, queue_size, dropped }` |
+| `swarm.broadcast_to_leads` | **lead only** | `{ content }` | `{ delivered_to: [{ orchestrator_id, session_id }] }` (best-effort, excluant l'orch appelant) |
+
+Codes d'erreur spécifiques (en plus de `MESSAGE_TOO_LARGE` partagé avec `team.*`) :
+
+- `PERMISSION_DENIED` (worker → `swarm.*`).
+- `INVALID_RECIPIENT` — `orchestrator_id` vide ou pointant sur l'orch appelant (pour parler à son propre lead, utiliser `team.send_message`).
+- `ORCH_UNKNOWN` — `orchestrator_id` ne correspond à aucun orch enregistré.
+- `ORCH_NOT_ACTIVE` — orch en `stopped`/`failed`/`stopping`.
+- `RECIPIENT_NOT_ACTIVE` — orch présent mais lead courant absent/non-actif (race lead-flip ; vérifié juste avant le push).
 
 ---
 
@@ -483,10 +504,15 @@ const inboxes = new Map<sessionId, Message[]>();
 const MAX_INBOX_SIZE = 100;
 
 interface Message {
-  id: string;          // UUID v4
-  from: string;        // session_id sender
+  id: string;                       // UUID v4
+  from: string;                     // session_id sender
   content: string;
-  ts: string;          // ISO
+  ts: string;                       // ISO
+  // Présents UNIQUEMENT pour les messages cross-équipe (swarm.*) — dénormalisés
+  // au push pour que le destinataire les lise même si l'orch source disparaît.
+  fromOrchestratorId?: string;
+  fromOrchestratorName?: string;
+  fromSessionName?: string;
 }
 ```
 
@@ -524,6 +550,22 @@ Le défaut **insiste fortement** sur la discipline mailbox :
 > Ne réponds jamais à un signal en l'écrivant dans ton terminal — passe par `team.send_message`.
 
 Variantes lead/worker pour rappeler les outils disponibles (le worker n'a pas `spawn_worker`/`kill_*`).
+
+### Coordination cross-équipe (lead-only)
+
+En plus du transport intra-équipe ci-dessus, les leads d'orchestrateurs distincts peuvent se parler via `swarm.*` (cf. §10). Mêmes mailboxes, mêmes signaux PTY, **un seul point de lecture** :
+
+- Le sender (`swarm.send_to_lead` / `swarm.broadcast_to_leads`) push dans la mailbox de l'orchestrateur **cible**, indexée par l'id de son lead courant. La cible re-résolue **juste avant le push** ferme la fenêtre lead-flip (le lead peut sortir entre la lookup et le push).
+- Le message est **tagué** : `fromOrchestratorId` / `fromOrchestratorName` / `fromSessionName` sont dénormalisés au push.
+- Côté destinataire, le message arrive dans la **mailbox normale du lead** (pas de seconde queue) et `team.read_inbox` le sérialise avec un champ optionnel :
+  ```json
+  { "id": "...", "from": "<sender_session_id>", "content": "...", "ts": "...",
+    "from_orchestrator": { "id": "...", "name": "...", "lead_name": "..." } }
+  ```
+  Les messages intra-équipe omettent ce champ — wire format intra-équipe **inchangé**, pas de migration côté lecteur historique.
+- Idle-signal identique au flux intra-équipe (`SIGNAL_TEXT`, seuil `idleThresholdMs`). Le destinataire ne distingue pas le signal selon l'origine — il sait juste qu'un nouveau message est arrivé, le tag éventuel apparaît à la lecture.
+- Logs structurés : `mail.cross_send { fromOrch, toOrch, fromSid, toSid, len, queueSize, dropped }` et `mail.cross_broadcast { fromOrch, fromSid, deliveredCount, len }`. Même discipline que `mail.send` : pas de body, pas de `session_secret`.
+- Workers : aucun accès aux `swarm.*` ; `requireLead` enforce **avant** la lookup pour ne pas révéler l'existence d'orchestrateurs aux non-leads.
 
 ---
 

@@ -9,6 +9,8 @@ import {
   sendMessage,
   broadcast,
   readInbox,
+  sendMessageToLead,
+  broadcastToLeads,
   MessageError,
   type MessagingDefaults,
 } from '../orchestrator/messaging.js';
@@ -287,7 +289,7 @@ export function registerTeamCommsTools(
     {
       title: 'Read and clear the calling session\'s inbox',
       description:
-        'Returns and atomically clears every message queued for the calling session. Returns an empty array if the inbox is empty.',
+        'Returns and atomically clears every message queued for the calling session. Returns an empty array if the inbox is empty. Cross-team messages (from another team\'s lead) carry an extra `from_orchestrator` field.',
       inputSchema: {},
       outputSchema: {
         messages: z.array(
@@ -296,13 +298,20 @@ export function registerTeamCommsTools(
             from: z.string(),
             content: z.string(),
             ts: z.string(),
+            from_orchestrator: z
+              .object({
+                id: z.string(),
+                name: z.string(),
+                lead_name: z.string(),
+              })
+              .optional(),
           }),
         ),
       },
     },
     () => {
       const ctx = ctxResolver();
-      const messages = readInbox(
+      const raw = readInbox(
         {
           orchestrator: ctx.orchestrator,
           mailbox: ctx.orchestrator.mailbox,
@@ -310,6 +319,21 @@ export function registerTeamCommsTools(
         },
         ctx.session.id,
       );
+      const messages = raw.map((m) => ({
+        id: m.id,
+        from: m.from,
+        content: m.content,
+        ts: m.ts,
+        ...(m.fromOrchestratorId
+          ? {
+              from_orchestrator: {
+                id: m.fromOrchestratorId,
+                name: m.fromOrchestratorName ?? m.fromOrchestratorId,
+                lead_name: m.fromSessionName ?? m.from,
+              },
+            }
+          : {}),
+      }));
       logCall('team.read_inbox', ctx, true);
       return ok({ messages });
     },
@@ -523,6 +547,173 @@ export function registerTeamCommsTools(
       const killed = ctx.orchestrator.killAllWorkers();
       logCall('team.kill_all_workers', ctx, true);
       return ok({ killed });
+    },
+  );
+
+  // ---- swarm.list_teams (lead-only) ------------------------------------
+  // Cross-team discovery: returns the other active orchestrators and their
+  // leads. Workers cannot use this — coordination across teams is the
+  // lead's responsibility. Member workers of other teams are intentionally
+  // hidden to keep the inter-team boundary tight.
+  server.registerTool(
+    'swarm.list_teams',
+    {
+      title: 'List other active teams (lead-only)',
+      description:
+        'Lead-only. Returns active orchestrators other than the caller\'s, with each team\'s lead and current active worker count. Used as the directory for swarm.send_to_lead.',
+      inputSchema: {},
+      outputSchema: {
+        teams: z.array(
+          z.object({
+            orchestrator_id: z.string(),
+            name: z.string(),
+            role: z.string(),
+            status: z.string(),
+            worker_count: z.number(),
+            lead: z.object({
+              session_id: z.string(),
+              name: z.string(),
+              role: z.string(),
+            }),
+          }),
+        ),
+      },
+    },
+    () => {
+      const ctx = ctxResolver();
+      requireLead(ctx, 'swarm.list_teams');
+      const teams = ctx.spawner
+        .listActive()
+        .filter((o) => o.id !== ctx.orchestrator.id)
+        .map((o) => {
+          const lead = o.lead;
+          if (!lead || !isActive(lead)) return null;
+          const worker_count = o
+            .listSessions()
+            .filter((s) => s.type === 'worker' && isActive(s)).length;
+          return {
+            orchestrator_id: o.id,
+            name: o.name,
+            role: o.role,
+            status: o.status,
+            worker_count,
+            lead: {
+              session_id: lead.id,
+              name: lead.name,
+              role: lead.role,
+            },
+          };
+        })
+        .filter((t): t is NonNullable<typeof t> => t !== null);
+      logCall('swarm.list_teams', ctx, true);
+      return ok({ teams });
+    },
+  );
+
+  // ---- swarm.send_to_lead (lead-only) ----------------------------------
+  // 1-to-1 cross-team message to another team's lead. Re-resolves the
+  // target lead just before push to close the lead-flip race window
+  // (handled inside sendMessageToLead).
+  server.registerTool(
+    'swarm.send_to_lead',
+    {
+      title: 'Send a message to another team\'s lead (lead-only)',
+      description:
+        'Lead-only. Pushes content into the target orchestrator\'s lead inbox. The recipient sees the message via team.read_inbox with a from_orchestrator tag. Use swarm.list_teams to discover orchestrator_ids.',
+      inputSchema: {
+        orchestrator_id: z
+          .string()
+          .describe('Target orchestrator id (use swarm.list_teams to discover)'),
+        content: z.string(),
+      },
+      outputSchema: {
+        delivered: z.boolean(),
+        to_session_id: z.string(),
+        to_orchestrator_id: z.string(),
+        queue_size: z.number(),
+        dropped: z.boolean(),
+      },
+    },
+    (args) => {
+      const ctx = ctxResolver();
+      requireLead(ctx, 'swarm.send_to_lead');
+      const a = args as { orchestrator_id: string; content: string };
+      try {
+        const out = sendMessageToLead(
+          ctx.spawner,
+          ctx.orchestrator,
+          ctx.session.id,
+          a.orchestrator_id,
+          a.content,
+          ctx.messagingDefaults,
+        );
+        logCall('swarm.send_to_lead', ctx, true);
+        return ok({
+          delivered: out.delivered,
+          to_session_id: out.to_session_id,
+          to_orchestrator_id: out.to_orchestrator_id,
+          queue_size: out.queueSize,
+          dropped: out.dropped,
+        });
+      } catch (err) {
+        logCall(
+          'swarm.send_to_lead',
+          ctx,
+          false,
+          err instanceof Error ? err.message : String(err),
+        );
+        if (err instanceof MessageError) throwAsMcp(err);
+        throw err;
+      }
+    },
+  );
+
+  // ---- swarm.broadcast_to_leads (lead-only) ----------------------------
+  // Best-effort fan-out to every other active team's lead. Per-recipient
+  // failures (lead exited mid-loop) are silently skipped — caller sees the
+  // final delivered_to list.
+  server.registerTool(
+    'swarm.broadcast_to_leads',
+    {
+      title: 'Broadcast a message to every other team\'s lead (lead-only)',
+      description:
+        'Lead-only. Pushes content into every other active orchestrator\'s lead inbox. Excludes the caller\'s own team. Use sparingly — this lands in every other lead\'s inbox simultaneously.',
+      inputSchema: {
+        content: z.string(),
+      },
+      outputSchema: {
+        delivered_to: z.array(
+          z.object({
+            orchestrator_id: z.string(),
+            session_id: z.string(),
+          }),
+        ),
+      },
+    },
+    (args) => {
+      const ctx = ctxResolver();
+      requireLead(ctx, 'swarm.broadcast_to_leads');
+      const a = args as { content: string };
+      try {
+        const out = broadcastToLeads(
+          ctx.spawner,
+          ctx.orchestrator,
+          ctx.session.id,
+          a.content,
+          ctx.messagingDefaults,
+        );
+        logCall('swarm.broadcast_to_leads', ctx, true);
+        return ok({ delivered_to: out.delivered_to });
+      } catch (err) {
+        logCall(
+          'swarm.broadcast_to_leads',
+          ctx,
+          false,
+          err instanceof Error ? err.message : String(err),
+        );
+        if (err instanceof MessageError) throwAsMcp(err);
+        throw err;
+      }
     },
   );
 }

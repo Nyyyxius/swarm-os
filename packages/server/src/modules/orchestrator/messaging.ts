@@ -1,6 +1,7 @@
 import type { Message, Mailbox } from './mailbox.js';
 import type { Session } from './session.js';
 import type { Orchestrator } from './index.js';
+import type { Spawner } from '../spawner/index.js';
 import { withModule } from '../../logger.js';
 
 const log = withModule('messaging');
@@ -234,6 +235,178 @@ export function broadcast(
   });
 
   return { delivered_to: delivered, skipped };
+}
+
+/**
+ * Outcome of a `swarm.send_to_lead` call. `to_session_id` is the lead session
+ * id we landed in — included so the caller can correlate logs without a
+ * second lookup.
+ */
+export interface CrossSendOutcome {
+  delivered: boolean;
+  dropped: boolean;
+  queueSize: number;
+  signalled: boolean;
+  to_session_id: string;
+  to_orchestrator_id: string;
+}
+
+/** Outcome of a `swarm.broadcast_to_leads` call. */
+export interface CrossBroadcastOutcome {
+  delivered_to: Array<{ orchestrator_id: string; session_id: string }>;
+}
+
+/**
+ * `swarm.send_to_lead` core implementation. Cross-orchestrator delivery to
+ * the target's current lead. Validation order is deliberate: size first
+ * (cheap), then self-target rejection, then orchestrator lookup, then a
+ * re-read of the target's lead immediately before push to close the
+ * lead-flip race (the lead could exit between `spawner.get()` and the
+ * mailbox push).
+ *
+ * Permission (sender must be a lead) is enforced upstream by the MCP tool
+ * via `requireLead`, so this helper does not re-check it.
+ */
+export function sendMessageToLead(
+  spawner: Spawner,
+  sourceOrch: Orchestrator,
+  sourceSid: string,
+  toOrchId: string,
+  content: string,
+  defaults: MessagingDefaults,
+): CrossSendOutcome {
+  const sizeCheck = validateMessageSize(content, defaults.maxMessageSizeBytes);
+  if (!sizeCheck.ok) {
+    throw new MessageError(
+      'MESSAGE_TOO_LARGE',
+      `message too large: ${sizeCheck.bytes} bytes > ${sizeCheck.max}`,
+      413,
+    );
+  }
+  if (!toOrchId || typeof toOrchId !== 'string') {
+    throw new MessageError('INVALID_RECIPIENT', 'orchestrator_id required', 400);
+  }
+  if (toOrchId === sourceOrch.id) {
+    throw new MessageError(
+      'INVALID_RECIPIENT',
+      'cannot use swarm.send_to_lead to message your own team; use team.send_message',
+      400,
+    );
+  }
+
+  const targetOrch = spawner.get(toOrchId);
+  if (!targetOrch) {
+    throw new MessageError('ORCH_UNKNOWN', `orchestrator ${toOrchId} does not exist`, 404);
+  }
+  if (
+    targetOrch.status === 'stopped' ||
+    targetOrch.status === 'failed' ||
+    targetOrch.status === 'stopping'
+  ) {
+    throw new MessageError(
+      'ORCH_NOT_ACTIVE',
+      `orchestrator ${toOrchId} is not active (status=${targetOrch.status})`,
+      404,
+    );
+  }
+
+  // Re-read the lead immediately before the push to close the lead-flip race.
+  const targetLead = targetOrch.lead;
+  if (!targetLead || !isActive(targetLead)) {
+    throw new MessageError(
+      'RECIPIENT_NOT_ACTIVE',
+      `lead of orchestrator ${toOrchId} is not active`,
+      404,
+    );
+  }
+
+  const sourceLead = sourceOrch.lead;
+  const result = targetOrch.mailbox.push(targetLead.id, {
+    from: sourceSid,
+    content,
+    fromOrchestratorId: sourceOrch.id,
+    fromOrchestratorName: sourceOrch.name,
+    fromSessionName: sourceLead?.name ?? sourceSid,
+  });
+
+  log.info({
+    event: 'mail.cross_send',
+    fromOrch: sourceOrch.id,
+    toOrch: toOrchId,
+    fromSid: sourceSid,
+    toSid: targetLead.id,
+    len: sizeCheck.bytes,
+    queueSize: result.queueSize,
+    dropped: result.dropped,
+  });
+
+  let signalled = false;
+  if (isIdle(targetLead, Date.now(), defaults.idleThresholdMs)) {
+    signalled = injectSignal(targetLead);
+  }
+
+  return {
+    delivered: true,
+    dropped: result.dropped,
+    queueSize: result.queueSize,
+    signalled,
+    to_session_id: targetLead.id,
+    to_orchestrator_id: toOrchId,
+  };
+}
+
+/**
+ * `swarm.broadcast_to_leads` core implementation. Iterates every active
+ * orchestrator other than the sender's, delivering to each one's current
+ * lead. Best-effort: per-recipient failures (lead just exited, signal write
+ * error) are logged but do not abort the rest of the broadcast.
+ */
+export function broadcastToLeads(
+  spawner: Spawner,
+  sourceOrch: Orchestrator,
+  sourceSid: string,
+  content: string,
+  defaults: MessagingDefaults,
+): CrossBroadcastOutcome {
+  const sizeCheck = validateMessageSize(content, defaults.maxMessageSizeBytes);
+  if (!sizeCheck.ok) {
+    throw new MessageError(
+      'MESSAGE_TOO_LARGE',
+      `message too large: ${sizeCheck.bytes} bytes > ${sizeCheck.max}`,
+      413,
+    );
+  }
+
+  const delivered: Array<{ orchestrator_id: string; session_id: string }> = [];
+  const now = Date.now();
+  const sourceLead = sourceOrch.lead;
+
+  for (const orch of spawner.listActive()) {
+    if (orch.id === sourceOrch.id) continue;
+    const lead = orch.lead;
+    if (!lead || !isActive(lead)) continue;
+    orch.mailbox.push(lead.id, {
+      from: sourceSid,
+      content,
+      fromOrchestratorId: sourceOrch.id,
+      fromOrchestratorName: sourceOrch.name,
+      fromSessionName: sourceLead?.name ?? sourceSid,
+    });
+    if (isIdle(lead, now, defaults.idleThresholdMs)) {
+      injectSignal(lead);
+    }
+    delivered.push({ orchestrator_id: orch.id, session_id: lead.id });
+  }
+
+  log.info({
+    event: 'mail.cross_broadcast',
+    fromOrch: sourceOrch.id,
+    fromSid: sourceSid,
+    deliveredCount: delivered.length,
+    len: sizeCheck.bytes,
+  });
+
+  return { delivered_to: delivered };
 }
 
 /**
