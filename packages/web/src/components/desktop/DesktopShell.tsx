@@ -472,7 +472,9 @@ export default function DesktopShell({
   // Évite un appel `api.health()` supplémentaire et reste cohérent avec
   // les pills (mêmes données, même tick 3 s).
   const totalAgents = useMemo(
-    () => orchestrators.reduce((s, o) => s + o.sessions.length, 0),
+    () => orchestrators
+      .filter((o) => o.endedAt == null)
+      .reduce((s, o) => s + o.sessions.length, 0),
     [orchestrators],
   );
 
@@ -692,6 +694,15 @@ export default function DesktopShell({
         case 'start':
           // REACTIVATE — disabled in the UI (gap §4-8). No-op fallback.
           console.warn('start/reactivate not supported v1 (gap §4-8)');
+          return;
+        case 'remove':
+          // Soft-delete from the map. Lead → cascade to whole team.
+          if (actingOnLead) {
+            await api.hideOrchestrator(selectedOrch.id);
+          } else {
+            await api.hideSession(agentId);
+          }
+          setSelectedSessionId(null);
           return;
       }
     } catch (err) {
