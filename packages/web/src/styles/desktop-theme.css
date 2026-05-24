@@ -173,8 +173,9 @@
   /* ============ Main grid ============ */
   .main {
     display: grid;
-    grid-template-columns: 320px 1fr 400px;
+    grid-template-columns: 320px 1fr;
     overflow: hidden;
+    position: relative;
   }
   .panel-left, .panel-right {
     background: var(--panel-solid);
@@ -186,7 +187,14 @@
   .panel-left { overflow-y: auto; }
   .panel-left { border-right: 1px solid var(--border); }
   .panel-right {
+    position: absolute;
+    top: 0;
+    right: 0;
+    bottom: 0;
+    width: 400px;
+    z-index: 20;
     border-left: 1px solid var(--border);
+    box-shadow: -8px 0 24px rgba(0, 0, 0, 0.35);
     transition: transform 280ms cubic-bezier(.2,.7,.2,1);
   }
   .panel-right.closed { transform: translateX(100%); pointer-events: none; }
