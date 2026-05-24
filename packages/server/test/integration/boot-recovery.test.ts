@@ -47,6 +47,7 @@ describe('Boot recovery', () => {
       worker_preamble: null,
       created_at: new Date().toISOString(),
       ended_at: null,
+      hidden_at: null,
       last_error: null,
       stop_reason: null,
     });
@@ -70,6 +71,7 @@ describe('Boot recovery', () => {
       stop_reason: null,
       log_path: '/tmp/x.log',
       last_activity_at: new Date().toISOString(),
+      hidden_at: null,
     });
     db1.close();
 
@@ -102,6 +104,7 @@ describe('Boot recovery', () => {
       worker_preamble: null,
       created_at: new Date().toISOString(),
       ended_at: new Date().toISOString(),
+      hidden_at: null,
       last_error: null,
       stop_reason: 'user',
     });

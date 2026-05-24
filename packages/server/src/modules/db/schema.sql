@@ -27,12 +27,16 @@ CREATE TABLE IF NOT EXISTS orchestrators (
   worker_preamble TEXT,
   created_at TEXT NOT NULL,             -- ISO
   ended_at TEXT,                        -- ISO, nullable
+  hidden_at TEXT,                       -- ISO, nullable: soft-delete from the map
   last_error TEXT,
   stop_reason TEXT
 );
 
 CREATE INDEX IF NOT EXISTS idx_orchestrators_status ON orchestrators(status);
 CREATE INDEX IF NOT EXISTS idx_orchestrators_ended_at ON orchestrators(ended_at);
+-- idx_orchestrators_hidden_at: created lazily in applyMigrations() AFTER the
+-- ALTER TABLE that adds hidden_at, so legacy DBs created before this column
+-- existed don't try to index a missing column on boot.
 
 -- Roles: reusable templates for orchestrators. Every field except `label` is
 -- optional; when present it pre-fills / overrides the corresponding orch field.
@@ -74,6 +78,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   stop_reason TEXT,
   log_path TEXT NOT NULL,
   last_activity_at TEXT NOT NULL,
+  hidden_at TEXT,                       -- ISO, nullable: soft-delete from the map
   -- session_secret is intentionally NOT persisted — it's regenerated on
   -- spawn and pivoting it across restarts gives no benefit (the PTY can't
   -- be restored anyway, plan §6 / §14).
@@ -83,3 +88,4 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_orch ON sessions(orchestrator_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
 CREATE INDEX IF NOT EXISTS idx_sessions_ended_at ON sessions(ended_at);
+-- idx_sessions_hidden_at: see comment on idx_orchestrators_hidden_at above.

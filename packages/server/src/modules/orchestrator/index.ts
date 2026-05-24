@@ -77,6 +77,14 @@ export interface OrchestratorView {
 export interface OrchestratorDeps {
   notifier?: Notifier;
   persistence?: Persistence;
+  /**
+   * Invoked once when the orchestrator first reaches a terminal status
+   * (`stopped` / `failed`) AND `setHideOnExit(true)` was called beforehand
+   * (i.e. the operator clicked KILL on the lead). The Spawner wires this to
+   * its own `hideOrchestrator(id)` so the team disappears from the map
+   * without a second REMOVE click.
+   */
+  onHideRequested?: (orchestratorId: string) => void;
 }
 
 export interface StartOptions {
@@ -161,9 +169,12 @@ export class Orchestrator {
   private _leadSessionId: string | null = null;
   private _stopReason: string | null = null;
   private _endNotified = false;
+  private _hideOnExit = false;
+  private _hideRequestFired = false;
 
   readonly notifier: Notifier;
   readonly persistence: Persistence;
+  private readonly _onHideRequested: ((orchestratorId: string) => void) | null;
 
   /** All sessions, including terminated ones, indexed by id. */
   private readonly sessions = new Map<string, Session>();
@@ -186,6 +197,16 @@ export class Orchestrator {
     this.mailbox = new Mailbox({ maxSize: this.config.maxInboxSize });
     this.notifier = deps.notifier ?? new NoOpNotifier();
     this.persistence = deps.persistence ?? new NoOpPersistence();
+    this._onHideRequested = deps.onHideRequested ?? null;
+  }
+
+  /**
+   * KILL-on-lead flow: ask for soft-delete of the whole team once the
+   * orchestrator reaches a terminal status. The actual hide is delegated to
+   * the Spawner via the `onHideRequested` dep.
+   */
+  setHideOnExit(v: boolean): void {
+    this._hideOnExit = v;
   }
 
   /** Public Phase 4 accessor — needed by persistence to write `stop_reason`. */
@@ -401,8 +422,16 @@ export class Orchestrator {
   /**
    * S5 — stop a single worker. Refuses the lead (use `DELETE /orchestrators`
    * to take down the whole team) and refuses already-terminated sessions.
+   *
+   * When `opts.hideAfterExit` is true, the session will be soft-deleted from
+   * the map once the PTY actually exits (handled in `_onWorkerExit`). Used by
+   * the KILL UI button to collapse the two-click stop-then-remove flow.
    */
-  stopSession(id: string, reason = 'user-stop-rest'): Session {
+  stopSession(
+    id: string,
+    reason = 'user-stop-rest',
+    opts: { hideAfterExit?: boolean } = {},
+  ): Session {
     const s = this.sessions.get(id);
     if (!s) {
       throw new SessionActionError('SESSION_UNKNOWN', `session ${id} not found`, 404);
@@ -426,6 +455,7 @@ export class Orchestrator {
         409,
       );
     }
+    if (opts.hideAfterExit) s.setHideAfterExit(true);
     s.stop(reason, 5000);
     return s;
   }
@@ -597,6 +627,25 @@ export class Orchestrator {
     return Array.from(this.sessions.values());
   }
 
+  /**
+   * Soft-delete a terminal worker session from the map. Callers must check
+   * that the session exists, is terminal, and is NOT the lead (lead removal
+   * goes through `Spawner.hideOrchestrator`). Returns true if hidden, false
+   * if the session was not found or was already gone.
+   *
+   * The in-memory row is dropped so subsequent `toView()` calls do not
+   * include it; the DB row is flipped `hidden_at` so it stays out of
+   * history lists too.
+   */
+  hideSession(id: string): boolean {
+    const session = this.sessions.get(id);
+    if (!session) return false;
+    this.sessions.delete(id);
+    this.mailbox.removeSession(id);
+    this.persistence.db.hideSession(id);
+    return true;
+  }
+
   toView(): OrchestratorView {
     const sessions = this.listSessions().map((s) => s.toView());
     const base = {
@@ -704,6 +753,27 @@ export class Orchestrator {
           });
         });
     }
+    // KILL UI flow on the lead: hide the whole team once it reaches terminal.
+    // Guarded by `_hideRequestFired` so we never invoke the callback twice
+    // (a `stopped → failed` re-transition is unlikely but possible if a
+    // downstream component reclassifies).
+    if (
+      (s === 'stopped' || s === 'failed') &&
+      this._hideOnExit &&
+      !this._hideRequestFired &&
+      this._onHideRequested
+    ) {
+      this._hideRequestFired = true;
+      try {
+        this._onHideRequested(this.id);
+      } catch (err) {
+        log.warn({
+          event: 'hide_on_exit.callback_failed',
+          orchId: this.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
   }
 
   private _onLeadExit(): void {
@@ -738,6 +808,14 @@ export class Orchestrator {
   private _onWorkerExit(worker: Session): void {
     // Always wipe the dead worker's own inbox — nobody's reading it.
     this.mailbox.removeSession(worker.id);
+
+    // KILL UI flow: the operator asked for stop-then-remove in one click. Drop
+    // the row from the map now that the PTY is gone (the session is in a
+    // terminal status by definition at this point — `_onWorkerExit` only fires
+    // after the Session emits its `exit` event). Run before any further checks
+    // so the hide happens even when the orchestrator itself is also shutting
+    // down (clean cascade).
+    if (worker.hideAfterExit) this.hideSession(worker.id);
 
     const lead = this.lead;
     if (!lead) return; // lead already gone — no point notifying anyone

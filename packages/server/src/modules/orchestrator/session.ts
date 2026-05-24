@@ -202,6 +202,7 @@ export class Session extends EventEmitter {
   private _statusBeforePause: SessionStatus | null = null;
   /** S5 — guard against concurrent restart calls. Set by Orchestrator.restartSession. */
   private _restarting = false;
+  private _hideAfterExit = false;
   private _killTimer: NodeJS.Timeout | null = null;
   private _agentDataDisp: Disposable | null = null;
   private _agentExitDisp: Disposable | null = null;
@@ -778,6 +779,19 @@ export class Session extends EventEmitter {
   }
   setRestarting(v: boolean): void {
     this._restarting = v;
+  }
+
+  /**
+   * Soft-delete-on-exit flag. Set by `Orchestrator.stopSession({ hideAfterExit })`
+   * so the worker exit handler can drop the session from the map once it
+   * reaches a terminal state, instead of leaving it visible (the default
+   * REMOVE-after-stop two-click flow).
+   */
+  get hideAfterExit(): boolean {
+    return this._hideAfterExit;
+  }
+  setHideAfterExit(v: boolean): void {
+    this._hideAfterExit = v;
   }
 
   // --- Internals ---------------------------------------------------------

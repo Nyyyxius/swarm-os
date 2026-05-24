@@ -13,7 +13,10 @@ import {
 import { formatLoadPercent } from '../../lib/loadPercent';
 
 /** Action déclenchable depuis le panneau droit. */
-export type AgentAction = 'stop' | 'start' | 'pause' | 'resume' | 'kill' | 'restart';
+export type AgentAction =
+  | 'stop' | 'start' | 'pause' | 'resume' | 'kill' | 'restart'
+  /** Soft-delete a terminal session/team from the map. */
+  | 'remove';
 
 /** Forme partielle d'un agent (session) attendue par le RightPanel. */
 export interface RightPanelAgent {
@@ -129,8 +132,8 @@ export default function RightPanel({
         action,
         label: isLead ? 'KILL TEAM' : 'KILL WORKER',
         body: isLead
-          ? `KILL ${selected.name} will terminate the whole ${team.name} team. All ${team.workerCount} workers will exit immediately. This cannot be undone.`
-          : `KILL ${selected.name} will terminate this worker session. Lead will be notified.`,
+          ? `KILL ${selected.name} will terminate the whole ${team.name} team (lead + ${team.workerCount} workers) AND remove it from the map. This cannot be undone.`
+          : `KILL ${selected.name} will terminate this worker AND remove it from the map. Use STOP instead if you want to keep the row visible.`,
         cls: 'danger',
       });
       return;
@@ -144,6 +147,17 @@ export default function RightPanel({
             ? `STOP ${selected.name} will gracefully shut down the entire ${team.name} team and its ${team.workerCount} ${team.workerCount === 1 ? 'worker' : 'workers'}.`
             : `STOP ${selected.name} will gracefully shut down the ${team.name} team (no workers attached).`
           : `STOP ${selected.name} will gracefully shut down this worker.`,
+        cls: 'danger',
+      });
+      return;
+    }
+    if (action === 'remove') {
+      setConfirm({
+        action,
+        label: isLead ? 'REMOVE TEAM' : 'REMOVE WORKER',
+        body: isLead
+          ? `REMOVE ${selected.name} will permanently hide the ${team.name} team and all its sessions from the map. This cannot be undone.`
+          : `REMOVE ${selected.name} will permanently hide this worker from the map. This cannot be undone.`,
         cls: 'danger',
       });
       return;
@@ -181,6 +195,11 @@ export default function RightPanel({
       status === 'exited' || status === 'killed' ||
       status === 'interrupted' || status === 'stopped';
     const isFailed = status === 'failed';
+    // Soft-delete from the map is allowed for the three terminal statuses
+    // explicitly chosen by the user; `interrupted` is not removable (it is
+    // a transient SVR-RESTART state).
+    const removable =
+      status === 'killed' || status === 'exited' || status === 'failed';
     const writer = selected.writer !== false;
     const hasDiscord = !!team.discordWebhook;
 
@@ -265,7 +284,15 @@ export default function RightPanel({
       </div>
 
       <div className="pr-actions">
-        {(stopped || isFailed) ? (
+        {removable ? (
+          <button className="pr-action danger"
+            title={isLead
+              ? 'remove this team from the map (soft delete)'
+              : 'remove this worker from the map (soft delete)'}
+            onClick={() => askConfirm('remove')}>
+            {ICON.kill}<span>REMOVE</span>
+          </button>
+        ) : (stopped || isFailed) ? (
           <button className="pr-action go"
             disabled                                  /* gap §4-8 */
             title="reactivate available in v2"

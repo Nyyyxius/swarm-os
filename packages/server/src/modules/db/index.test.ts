@@ -30,6 +30,7 @@ function makeOrchRow(over: Partial<OrchestratorRow> = {}): OrchestratorRow {
     worker_preamble: null,
     created_at: new Date().toISOString(),
     ended_at: null,
+    hidden_at: null,
     last_error: null,
     stop_reason: null,
     ...over,
@@ -57,6 +58,7 @@ function makeSessionRow(over: Partial<SessionRow> = {}): SessionRow {
     stop_reason: null,
     log_path: '/data/logs/orch-1/sess-1.log',
     last_activity_at: new Date().toISOString(),
+    hidden_at: null,
     ...over,
   };
 }

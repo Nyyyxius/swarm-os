@@ -682,14 +682,16 @@ export default function DesktopShell({
           return;
         }
         case 'kill':
-          // Lead KILL = destroyOrchestrator (hard close, same endpoint).
-          // Worker KILL = stopSession (gap §4-6 — no dedicated /kill).
+          // KILL = graceful stop + auto-remove from the map. Identical PTY
+          // shutdown path as STOP (SIGTERM → 5s grace → SIGKILL) but with
+          // the hide flag set so the session/team disappears from the map
+          // as soon as it reaches terminal — no second REMOVE click.
           if (actingOnLead) {
-            await api.destroyOrchestrator(selectedOrch.id);
-            setSelectedSessionId(null);
+            await api.destroyOrchestrator(selectedOrch.id, { hide: true });
           } else {
-            await api.stopSession(agentId);
+            await api.stopSession(agentId, { hideAfterExit: true });
           }
+          setSelectedSessionId(null);
           return;
         case 'start':
           // REACTIVATE — disabled in the UI (gap §4-8). No-op fallback.

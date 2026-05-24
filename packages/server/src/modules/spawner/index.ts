@@ -112,6 +112,12 @@ export class Spawner {
     const orch = new Orchestrator(spec, this.config, {
       notifier: effectiveNotifier,
       persistence: this.persistence,
+      // KILL UI flow on the lead: when the operator clicked KILL we ask the
+      // orchestrator to call us back once it reaches terminal, so we can soft
+      // delete the whole team from the map in one shot.
+      onHideRequested: (id) => {
+        this.hideOrchestrator(id);
+      },
     });
     this.orchestrators.set(orch.id, orch);
     eventBus.emitEvent({
@@ -181,11 +187,49 @@ export class Spawner {
     );
   }
 
-  /** Idempotent: returns true if it was running and is now stopped, false if no-op. */
-  destroy(id: string, reason = 'user'): boolean {
+  /**
+   * Soft-delete a terminal orchestrator. The DB row gets `hidden_at`, all
+   * sessions get cascade-hidden, and the in-memory entry is dropped. Returns
+   * true if the orchestrator was found AND terminal; false otherwise.
+   *
+   * Callers must verify terminal status (`stopped` / `failed`) before
+   * calling — a still-running orchestrator can't be hidden without first
+   * stopping it (its sessions are live PTYs).
+   */
+  hideOrchestrator(id: string): boolean {
     const orch = this.orchestrators.get(id);
-    if (!orch) return false;
+    if (orch) {
+      if (orch.status !== 'stopped' && orch.status !== 'failed') return false;
+      this.orchestrators.delete(id);
+    }
+    // Whether or not the in-memory row was present, flip the DB rows.
+    // history-only orchestrators (server restarted, never re-added to the
+    // Map) still need to be hidable.
+    return this.persistence.db.hideOrchestrator(id);
+  }
+
+  /**
+   * Idempotent: returns true if it was running and is now stopped, false if no-op.
+   *
+   * `opts.hideAfterExit` flips the orchestrator's hide-on-terminal flag so the
+   * team disappears from the map as soon as the lead PTY exits — used by the
+   * desktop KILL button on a lead (collapses the legacy stop-then-remove
+   * two-click flow into one).
+   */
+  destroy(id: string, reason = 'user', opts: { hideAfterExit?: boolean } = {}): boolean {
+    const orch = this.orchestrators.get(id);
+    if (!orch) {
+      // History-only orchestrator (server restart dropped the in-memory entry
+      // but the row is still in SQLite). Honour `hideAfterExit` here too —
+      // `hideOrchestrator` handles the history-row case via the DB fallback.
+      if (opts.hideAfterExit) this.hideOrchestrator(id);
+      return false;
+    }
+    if (opts.hideAfterExit) orch.setHideOnExit(true);
     if (orch.status === 'stopped' || orch.status === 'failed') {
+      // Already terminal — fire the hide immediately so callers using
+      // `hideAfterExit` get the expected outcome regardless of timing.
+      if (opts.hideAfterExit) this.hideOrchestrator(id);
       return false;
     }
     orch.stop(reason);

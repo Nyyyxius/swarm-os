@@ -282,3 +282,100 @@ describe('REST + MCP end-to-end (worker spawned via fake agent)', () => {
     expect(res.status).toBe(404);
   });
 });
+
+describe('REST: KILL = stop + auto-remove (hideAfterExit flag)', () => {
+  it('POST /sessions/:id/stop {hideAfterExit:true} drops the worker from the map once exited', async () => {
+    const { FakeAgentProcess } = await import('../../src/modules/orchestrator/agent-process.js');
+    const { orchestratorId } = createOrch('kill-team');
+    const orch = stack.spawner.get(orchestratorId)!;
+    const workerAgent = new FakeAgentProcess({ command: 'fake', args: [], cwd: stack.workspaceRoot });
+    const worker = orch.addWorker({
+      name: 'scout',
+      role: 'recon',
+      prompt: 'noop',
+      cwd: stack.workspaceRoot,
+      agentProcessOverride: workerAgent,
+    });
+    expect(orch.getSession(worker.id)).toBeDefined();
+
+    const res = await fetch(
+      `http://127.0.0.1:${stack.mainPort}/sessions/${worker.id}/stop`,
+      {
+        method: 'POST',
+        headers: authHeaders(stack.config.token),
+        body: JSON.stringify({ hideAfterExit: true }),
+      },
+    );
+    expect(res.status).toBe(200);
+
+    // FakeAgentProcess emits exit on next tick via setImmediate; give it a
+    // few ms to fire the EventEmitter `exit` and let _onWorkerExit run.
+    await new Promise((r) => setTimeout(r, 50));
+
+    // In-memory map drops the session.
+    expect(orch.getSession(worker.id)).toBeUndefined();
+    // DB row is hidden (getSession filters hidden_at IS NULL).
+    expect(stack.db.getSession(worker.id)).toBeNull();
+  });
+
+  it('POST /sessions/:id/stop without flag keeps the worker visible in terminal state', async () => {
+    const { FakeAgentProcess } = await import('../../src/modules/orchestrator/agent-process.js');
+    const { orchestratorId } = createOrch('stop-team');
+    const orch = stack.spawner.get(orchestratorId)!;
+    const workerAgent = new FakeAgentProcess({ command: 'fake', args: [], cwd: stack.workspaceRoot });
+    const worker = orch.addWorker({
+      name: 'scout',
+      role: 'recon',
+      prompt: 'noop',
+      cwd: stack.workspaceRoot,
+      agentProcessOverride: workerAgent,
+    });
+
+    const res = await fetch(
+      `http://127.0.0.1:${stack.mainPort}/sessions/${worker.id}/stop`,
+      { method: 'POST', headers: authHeaders(stack.config.token) },
+    );
+    expect(res.status).toBe(200);
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Session is still in the map but terminal.
+    const still = orch.getSession(worker.id);
+    expect(still).toBeDefined();
+    expect(still!.status).toBe('killed');
+    // DB row visible.
+    expect(stack.db.getSession(worker.id)).not.toBeNull();
+  });
+
+  it('DELETE /orchestrators/:id?hide=true cascades hide once the lead exits', async () => {
+    const { FakeAgentProcess } = await import('../../src/modules/orchestrator/agent-process.js');
+    // Spin the orch up with a fake lead agent so the lead exit emit fires and
+    // the orchestrator can reach `stopped` without the 6 s safety timeout.
+    const leadAgent = new FakeAgentProcess({ command: 'fake', args: [], cwd: stack.workspaceRoot });
+    const { orchestrator: orch } = stack.spawner.create(
+      {
+        name: 'kill-lead-team',
+        role: 'coordinator',
+        defaultModel: stack.config.defaultModel,
+        defaultEffort: stack.config.defaultEffort,
+        defaultPermissionMode: stack.config.defaultPermissionMode,
+        leadPreamble: null,
+        workerPreamble: null,
+        lead: { cwd: stack.workspaceRoot, prompt: 'noop', preamble: null },
+      },
+      { agentProcessOverride: leadAgent },
+    );
+    expect(stack.spawner.get(orch.id)).toBeDefined();
+
+    const res = await fetch(
+      `http://127.0.0.1:${stack.mainPort}/orchestrators/${orch.id}?hide=true`,
+      { method: 'DELETE', headers: authHeaders(stack.config.token) },
+    );
+    expect(res.status).toBe(204);
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Spawner drops the in-memory orchestrator entirely.
+    expect(stack.spawner.get(orch.id)).toBeUndefined();
+    // DB row hidden — getOrchestrator filters hidden_at IS NULL.
+    expect(stack.db.getOrchestrator(orch.id)).toBeNull();
+  });
+});

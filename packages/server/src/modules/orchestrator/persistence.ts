@@ -132,6 +132,7 @@ export function orchToRow(
     worker_preamble: view.workerPreamble,
     created_at: view.createdAt,
     ended_at: view.endedAt,
+    hidden_at: null,
     last_error: view.lastError,
     stop_reason: extra.stopReason,
   };
@@ -161,6 +162,7 @@ export function sessionToRow(
     stop_reason: view.stopReason,
     log_path: view.logPath,
     last_activity_at: view.lastActivityAt,
+    hidden_at: null,
   };
 }
 

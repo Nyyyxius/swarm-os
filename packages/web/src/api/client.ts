@@ -251,14 +251,30 @@ export const api = {
   updateRole: (id: string, body: Partial<RoleInput>) =>
     request<{ role: RoleView }>('PATCH', `/roles/${id}`, body),
   deleteRole: (id: string) => request<void>('DELETE', `/roles/${id}`),
-  destroyOrchestrator: (id: string) =>
-    request<void>('DELETE', `/orchestrators/${id}`),
+  /**
+   * Destroy an orchestrator. `opts.hide` collapses stop-then-remove into one
+   * request: the team is soft-deleted from the map as soon as the lead PTY
+   * exits. Used by the KILL UI button on a lead.
+   */
+  destroyOrchestrator: (id: string, opts: { hide?: boolean } = {}) => {
+    const qs = opts.hide ? '?hide=true' : '';
+    return request<void>('DELETE', `/orchestrators/${id}${qs}`);
+  },
   getSession: (id: string) => request<SessionView>('GET', `/sessions/${id}`),
   postSessionInput: (id: string, data: string) =>
     request<{ ok: boolean; bytes: number }>('POST', `/sessions/${id}/input`, { data }),
-  /** S5 — stop a single worker session. Lead → 409 LEAD_NOT_STOPPABLE. */
-  stopSession: (id: string) =>
-    request<{ stopped: true; status: string }>('POST', `/sessions/${id}/stop`),
+  /**
+   * S5 — stop a single worker session. Lead → 409 LEAD_NOT_STOPPABLE.
+   * `opts.hideAfterExit` collapses stop-then-remove into one request: the
+   * session is soft-deleted from the map once the PTY actually exits.
+   * Used by the KILL UI button on a worker.
+   */
+  stopSession: (id: string, opts: { hideAfterExit?: boolean } = {}) =>
+    request<{ stopped: true; status: string }>(
+      'POST',
+      `/sessions/${id}/stop`,
+      opts.hideAfterExit ? { hideAfterExit: true } : undefined,
+    ),
   /** S5 — pause a session via SIGSTOP. Idempotent (already paused → 409). */
   pauseSession: (id: string) =>
     request<{ paused: true; status: string }>('POST', `/sessions/${id}/pause`),
@@ -274,6 +290,19 @@ export const api = {
       'POST',
       `/sessions/${id}/restart`,
     ),
+  /**
+   * Soft-delete a terminal session (killed/exited/failed) from the map. If
+   * the session is the orchestrator's lead, the whole team is hidden.
+   * Returns 204 on success, 409 if the session is not terminal.
+   */
+  hideSession: (id: string) =>
+    request<void>('POST', `/sessions/${id}/hide`),
+  /**
+   * Soft-delete a terminal orchestrator (stopped/failed). Cascades to hide
+   * all its sessions. Returns 204 on success, 409 if not terminal.
+   */
+  hideOrchestrator: (id: string) =>
+    request<void>('POST', `/orchestrators/${id}/hide`),
   /**
    * Phase 3: human → all sessions broadcast (`from: 'human'` mailbox push,
    * idle PTY signal). Body `{ content }`.

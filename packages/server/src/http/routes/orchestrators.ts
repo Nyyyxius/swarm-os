@@ -262,9 +262,44 @@ export function createOrchestratorsRouter(spawner: Spawner, config: Config): Rou
   });
 
   router.delete('/orchestrators/:id', (req: Request<{ id: string }>, res: Response) => {
+    // `?hide=true` collapses the legacy stop-then-remove two-click flow into
+    // one for the desktop KILL button: the orchestrator hides itself as soon
+    // as it reaches a terminal status.
+    const hideAfterExit = req.query.hide === 'true' || req.query.hide === '1';
     // Idempotent: 204 whether it existed or not.
-    spawner.destroy(req.params.id, 'user');
+    spawner.destroy(req.params.id, 'user', { hideAfterExit });
     res.status(204).end();
+  });
+
+  // Soft-delete from the map. Orchestrator must be terminal (stopped/failed).
+  // Cascades to hide every session of the orchestrator.
+  router.post('/orchestrators/:id/hide', (req: Request<{ id: string }>, res: Response) => {
+    const orch = spawner.get(req.params.id);
+    if (orch) {
+      if (orch.status !== 'stopped' && orch.status !== 'failed') {
+        res.status(409).json({
+          error: 'NOT_TERMINAL',
+          message: `cannot hide orchestrator in status '${orch.status}'`,
+        });
+        return;
+      }
+      spawner.hideOrchestrator(orch.id);
+      res.status(204).end();
+      return;
+    }
+    // Falls back to history rows in SQLite. Those are by definition terminal
+    // (the listing query filters status ∈ {stopped, failed}).
+    try {
+      const row = spawner.persistence.db.getOrchestrator(req.params.id);
+      if (!row) {
+        res.status(404).json({ error: 'not found' });
+        return;
+      }
+      spawner.hideOrchestrator(req.params.id);
+      res.status(204).end();
+    } catch {
+      res.status(404).json({ error: 'not found' });
+    }
   });
 
   router.get('/orchestrators/:id/sessions', (req: Request<{ id: string }>, res: Response) => {

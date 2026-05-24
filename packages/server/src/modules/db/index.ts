@@ -69,6 +69,7 @@ export interface OrchestratorRow {
   worker_preamble: string | null;
   created_at: string;
   ended_at: string | null;
+  hidden_at: string | null;
   last_error: string | null;
   stop_reason: string | null;
 }
@@ -113,6 +114,7 @@ export interface SessionRow {
   stop_reason: string | null;
   log_path: string;
   last_activity_at: string;
+  hidden_at: string | null;
 }
 
 const TERMINAL_ORCH = new Set<OrchestratorStatusRow>(['stopped', 'failed']);
@@ -131,8 +133,12 @@ export class SwarmDb {
   private readonly listOrchStmt;
   private readonly listOrchByEndedStmt;
   private readonly listSessionsByOrchStmt;
+  private readonly getSessionStmt;
   private readonly markOrchInterruptedStmt;
   private readonly markSessionInterruptedStmt;
+  private readonly hideOrchStmt;
+  private readonly hideSessionStmt;
+  private readonly hideSessionsOfOrchStmt;
   private readonly insertRoleStmt;
   private readonly updateRoleStmt;
   private readonly getRoleStmt;
@@ -151,11 +157,11 @@ export class SwarmDb {
       INSERT INTO orchestrators (
         id, name, role, role_id, status, lead_session_id, default_model, default_effort,
         default_permission_mode, lead_preamble, worker_preamble, created_at,
-        ended_at, last_error, stop_reason
+        ended_at, hidden_at, last_error, stop_reason
       ) VALUES (
         @id, @name, @role, @role_id, @status, @lead_session_id, @default_model, @default_effort,
         @default_permission_mode, @lead_preamble, @worker_preamble, @created_at,
-        @ended_at, @last_error, @stop_reason
+        @ended_at, @hidden_at, @last_error, @stop_reason
       )
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
@@ -171,17 +177,18 @@ export class SwarmDb {
         ended_at = excluded.ended_at,
         last_error = excluded.last_error,
         stop_reason = excluded.stop_reason
+        -- hidden_at intentionally NOT overwritten: once hidden, stays hidden
     `);
 
     this.upsertSessionStmt = this.db.prepare<SessionRow>(`
       INSERT INTO sessions (
         id, orchestrator_id, name, role, type, cwd, initial_prompt, model,
         effort, permission_mode, status, pid, started_at, ended_at, exit_code,
-        last_error, stop_reason, log_path, last_activity_at
+        last_error, stop_reason, log_path, last_activity_at, hidden_at
       ) VALUES (
         @id, @orchestrator_id, @name, @role, @type, @cwd, @initial_prompt, @model,
         @effort, @permission_mode, @status, @pid, @started_at, @ended_at, @exit_code,
-        @last_error, @stop_reason, @log_path, @last_activity_at
+        @last_error, @stop_reason, @log_path, @last_activity_at, @hidden_at
       )
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
@@ -200,24 +207,40 @@ export class SwarmDb {
         stop_reason = excluded.stop_reason,
         log_path = excluded.log_path,
         last_activity_at = excluded.last_activity_at
+        -- hidden_at intentionally NOT overwritten: once hidden, stays hidden
     `);
 
     this.getOrchStmt = this.db.prepare<[string], OrchestratorRow>(
-      'SELECT * FROM orchestrators WHERE id = ?',
+      'SELECT * FROM orchestrators WHERE id = ? AND hidden_at IS NULL',
     );
     this.listOrchStmt = this.db.prepare<[], OrchestratorRow>(
-      'SELECT * FROM orchestrators ORDER BY created_at DESC',
+      'SELECT * FROM orchestrators WHERE hidden_at IS NULL ORDER BY created_at DESC',
     );
     // Recently-ended orchestrators ordered by ended_at desc (NULLs treated
-    // as oldest so non-terminated rows fall off the tail).
+    // as oldest so non-terminated rows fall off the tail). Hidden rows are
+    // excluded — they were soft-deleted by the user.
     this.listOrchByEndedStmt = this.db.prepare<[number], OrchestratorRow>(
       `SELECT * FROM orchestrators
-       WHERE status IN ('stopped','failed')
+       WHERE status IN ('stopped','failed') AND hidden_at IS NULL
        ORDER BY COALESCE(ended_at, '') DESC
        LIMIT ?`,
     );
     this.listSessionsByOrchStmt = this.db.prepare<[string], SessionRow>(
-      'SELECT * FROM sessions WHERE orchestrator_id = ? ORDER BY started_at ASC',
+      `SELECT * FROM sessions
+       WHERE orchestrator_id = ? AND hidden_at IS NULL
+       ORDER BY started_at ASC`,
+    );
+    this.getSessionStmt = this.db.prepare<[string], SessionRow>(
+      'SELECT * FROM sessions WHERE id = ? AND hidden_at IS NULL',
+    );
+    this.hideOrchStmt = this.db.prepare<[string, string]>(
+      'UPDATE orchestrators SET hidden_at = ? WHERE id = ? AND hidden_at IS NULL',
+    );
+    this.hideSessionStmt = this.db.prepare<[string, string]>(
+      'UPDATE sessions SET hidden_at = ? WHERE id = ? AND hidden_at IS NULL',
+    );
+    this.hideSessionsOfOrchStmt = this.db.prepare<[string, string]>(
+      'UPDATE sessions SET hidden_at = ? WHERE orchestrator_id = ? AND hidden_at IS NULL',
     );
 
     this.markOrchInterruptedStmt = this.db.prepare(`
@@ -281,6 +304,8 @@ export class SwarmDb {
   private applyMigrations(): void {
     const additions: Array<{ table: string; column: string; ddl: string }> = [
       { table: 'orchestrators', column: 'role_id', ddl: 'ALTER TABLE orchestrators ADD COLUMN role_id TEXT' },
+      { table: 'orchestrators', column: 'hidden_at', ddl: 'ALTER TABLE orchestrators ADD COLUMN hidden_at TEXT' },
+      { table: 'sessions',      column: 'hidden_at', ddl: 'ALTER TABLE sessions ADD COLUMN hidden_at TEXT' },
     ];
     for (const a of additions) {
       try {
@@ -291,6 +316,14 @@ export class SwarmDb {
           log.warn({ event: 'db.migration_failed', table: a.table, column: a.column, error: msg });
         }
       }
+    }
+    // Idempotent index creation for the new columns (not in older schema.sql
+    // exports). Same swallow-if-exists pattern.
+    try {
+      this.db.exec('CREATE INDEX IF NOT EXISTS idx_orchestrators_hidden_at ON orchestrators(hidden_at)');
+      this.db.exec('CREATE INDEX IF NOT EXISTS idx_sessions_hidden_at ON sessions(hidden_at)');
+    } catch (err) {
+      log.warn({ event: 'db.migration_failed', op: 'hidden_at_indexes', error: String(err) });
     }
   }
 
@@ -377,6 +410,61 @@ export class SwarmDb {
     } catch (err) {
       log.warn({ event: 'db.read_failed', op: 'listSessions', error: String(err) });
       return [];
+    }
+  }
+
+  /** Single session by id (history fallback for `GET /sessions/:id`). */
+  getSession(id: string): SessionRow | null {
+    try {
+      return this.getSessionStmt.get(id) ?? null;
+    } catch (err) {
+      log.warn({ event: 'db.read_failed', op: 'getSession', error: String(err) });
+      return null;
+    }
+  }
+
+  /**
+   * Soft-delete a single session from the map. The row stays in the DB for
+   * audit; subsequent SELECTs filter `WHERE hidden_at IS NULL`. Returns true
+   * if a row was hidden (false if already hidden or absent).
+   */
+  hideSession(id: string): boolean {
+    try {
+      const res = this.hideSessionStmt.run(new Date().toISOString(), id);
+      return res.changes > 0;
+    } catch (err) {
+      log.warn({
+        event: 'db.write_failed',
+        op: 'hideSession',
+        sessionId: id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+  }
+
+  /**
+   * Soft-delete an orchestrator AND cascade-hide all of its sessions. Returns
+   * true if the orchestrator row was hidden (false if already hidden / absent).
+   * The cascade runs unconditionally so any half-hidden state from a prior
+   * partial run gets cleaned up.
+   */
+  hideOrchestrator(id: string): boolean {
+    const now = new Date().toISOString();
+    try {
+      const res = this.hideOrchStmt.run(now, id);
+      // Cascade always — covers the case where someone hid the orch row but
+      // not the sessions in a prior call (defensive idempotence).
+      this.hideSessionsOfOrchStmt.run(now, id);
+      return res.changes > 0;
+    } catch (err) {
+      log.warn({
+        event: 'db.write_failed',
+        op: 'hideOrchestrator',
+        orchId: id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
     }
   }
 
@@ -506,6 +594,7 @@ CREATE TABLE IF NOT EXISTS orchestrators (
   worker_preamble TEXT,
   created_at TEXT NOT NULL,
   ended_at TEXT,
+  hidden_at TEXT,
   last_error TEXT,
   stop_reason TEXT
 );
@@ -549,6 +638,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   stop_reason TEXT,
   log_path TEXT NOT NULL,
   last_activity_at TEXT NOT NULL,
+  hidden_at TEXT,
   FOREIGN KEY (orchestrator_id) REFERENCES orchestrators(id) ON DELETE CASCADE
 );
 
