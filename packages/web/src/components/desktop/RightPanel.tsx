@@ -195,6 +195,7 @@ export default function RightPanel({
       status === 'exited' || status === 'killed' ||
       status === 'interrupted' || status === 'stopped';
     const isFailed = status === 'failed';
+    const isPaused = status === 'paused';
     // Soft-delete from the map is allowed for the three terminal statuses
     // explicitly chosen by the user; `interrupted` is not removable (it is
     // a transient SVR-RESTART state).
@@ -284,6 +285,24 @@ export default function RightPanel({
       </div>
 
       <div className="pr-actions">
+        {isPaused ? (
+          <button className="pr-action go"
+            onClick={() => onAction(selected.id, 'resume')}>
+            {ICON.start}<span>RESUME</span>
+          </button>
+        ) : (
+          <button className="pr-action"
+            disabled={stopped || isFailed}
+            onClick={() => onAction(selected.id, 'pause')}>
+            {ICON.pause}<span>PAUSE</span>
+          </button>
+        )}
+        <button className="pr-action primary"
+          disabled={stopped || isFailed || isLead /* lead non restartable, S5 409 */}
+          title={isLead ? 'lead is restarted via STOP + recreate' : 'restart this worker'}
+          onClick={() => onAction(selected.id, 'restart')}>
+          {ICON.reload}<span>RESTART</span>
+        </button>
         {removable ? (
           <button className="pr-action danger"
             title={isLead
@@ -304,17 +323,6 @@ export default function RightPanel({
             {ICON.stop}<span>STOP</span>
           </button>
         )}
-        <button className="pr-action"
-          disabled={stopped || isFailed}
-          onClick={() => onAction(selected.id, 'pause')}>
-          {ICON.pause}<span>PAUSE</span>
-        </button>
-        <button className="pr-action primary"
-          disabled={stopped || isFailed || isLead /* lead non restartable, S5 409 */}
-          title={isLead ? 'lead is restarted via STOP + recreate' : 'restart this worker'}
-          onClick={() => onAction(selected.id, 'restart')}>
-          {ICON.reload}<span>RESTART</span>
-        </button>
         <button className="pr-action danger" onClick={() => askConfirm('kill')}>
           {ICON.kill}<span>KILL</span>
         </button>

@@ -4,7 +4,7 @@
 // indirectly by other tests; here we focus on the new ones.
 
 import { describe, it, expect } from 'vitest';
-import { formatMsgCount, formatUptimeShort } from './format';
+import { formatMsgCount, formatUptimeShort, statusChipClass } from './format';
 
 describe('formatMsgCount', () => {
   it('returns "0" for 0', () => {
@@ -53,5 +53,21 @@ describe('formatUptimeShort', () => {
   it('accepts an ISO string', () => {
     const iso = new Date(Date.now() - 5 * 60_000).toISOString();
     expect(formatUptimeShort(iso)).toBe('5m');
+  });
+});
+
+describe('statusChipClass', () => {
+  it('maps paused to warn (was falling through to ok before)', () => {
+    expect(statusChipClass('paused')).toBe('warn');
+  });
+  it('keeps running as ok', () => {
+    expect(statusChipClass('running')).toBe('ok');
+  });
+  it('keeps terminal statuses as stopped', () => {
+    expect(statusChipClass('exited')).toBe('stopped');
+    expect(statusChipClass('killed')).toBe('stopped');
+  });
+  it('keeps failed as bad', () => {
+    expect(statusChipClass('failed')).toBe('bad');
   });
 });

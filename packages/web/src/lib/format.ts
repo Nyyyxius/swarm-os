@@ -129,7 +129,7 @@ export type ChipClass = 'ok' | 'warn' | 'bad' | 'stopped' | 'waiting' | 'startin
 export function statusChipClass(s: string): ChipClass {
   if (s === 'stopped' || s === 'exited' || s === 'killed' || s === 'interrupted') return 'stopped';
   if (s === 'failed') return 'bad';
-  if (s === 'warn') return 'warn';
+  if (s === 'warn' || s === 'paused') return 'warn';
   if (s === 'waiting') return 'waiting';
   if (s === 'starting') return 'starting';
   return 'ok';
