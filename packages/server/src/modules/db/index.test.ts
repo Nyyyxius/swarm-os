@@ -33,6 +33,9 @@ function makeOrchRow(over: Partial<OrchestratorRow> = {}): OrchestratorRow {
     hidden_at: null,
     last_error: null,
     stop_reason: null,
+    // Phase 8 — auto-resume audit. Defaults to "never resumed".
+    last_resumed_at: null,
+    resume_count: 0,
     ...over,
   };
 }

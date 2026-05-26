@@ -5,9 +5,16 @@
 #   open http://127.0.0.1:8787
 #
 # Mounts:
-#   /workspace    ← ~/projets/test         (empty, RW — agents work here)
-#   /claude-source ← ~/.claude            (RO; copied to /data/.claude-runtime at boot)
-#   /data         ← ~/.swarm-os/test       (SQLite, token, logs)
+#   /workspace     ← ~/projets/test         (RW — agents work here)
+#   /claude-source ← ~/.claude              (RO — used in local mode; SSH mode
+#                                            keeps it only for the .claude.json
+#                                            read in `_seedClaudeJsonTrust`)
+#   /data          ← ~/.swarm-os/test       (SQLite, token, logs, mcp-runtime)
+#   /host-ssh      ← ~/.ssh                 (RO — SSH key to reach the host)
+#
+# Transport: SWARM_OS_AGENT_TRANSPORT=ssh — claude runs on the host VM, not
+# inside this container, so host + container can never race on
+# ~/.claude/.credentials.json OAuth refresh.
 
 services:
   swarm-os-test:
@@ -17,14 +24,26 @@ services:
     restart: unless-stopped
     ports:
       - "127.0.0.1:8787:8787"
+    extra_hosts:
+      # Linux docker — host.docker.internal isn't resolved by default. Add a
+      # gateway-mapped alias so the container can SSH back to the host.
+      - "host.docker.internal:host-gateway"
     volumes:
       - ${HOME}/projets/test:/workspace
       - ${HOME}/.claude:/claude-source:ro
       - ${HOME}/.claude.json:/claude-source.json:ro
       - ${HOME}/.swarm-os/test:/data
+      - ${HOME}/.ssh:/host-ssh:ro
     environment:
       SWARM_OS_PROJECT_NAME: test
       SWARM_OS_PUBLIC_URL: https://vps-00b690bc.tail240b2d.ts.net:8787
+      # SSH transport: claude runs on the host, container only orchestrates.
+      SWARM_OS_AGENT_TRANSPORT: ssh
+      SWARM_OS_SSH_TARGET: ubuntu@host.docker.internal
+      SWARM_OS_SSH_KEY: /host-ssh/fyrel-dev-spawner
+      SWARM_OS_HOST_DATA_DIR: ${HOME}/.swarm-os/test
+      SWARM_OS_HOST_CLAUDE_DIR: ${HOME}/.claude
+      SWARM_OS_HOST_WORKSPACE_ROOT: ${HOME}/projets/test
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/health"]
       interval: 30s

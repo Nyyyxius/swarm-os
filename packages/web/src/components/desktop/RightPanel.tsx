@@ -46,6 +46,12 @@ export interface RightPanelTeam extends ConfigTabTeam {
   leadId: string;
   workerCount: number;
   discordWebhook?: string | null;
+  /**
+   * Phase 8 — auto-resume audit. Drives the "Resumed N×" chip in the
+   * header so operators can spot restart loops.
+   */
+  resumeCount?: number;
+  lastResumedAt?: string | null;
 }
 
 /** Bulle dans la tab MESSAGES. */
@@ -228,6 +234,19 @@ export default function RightPanel({
           <span>{selected.role}</span>
           {hasDiscord && (
             <span className="discord-chip" title={team.discordWebhook ?? ''}>◇ DISCORD</span>
+          )}
+          {team.resumeCount !== undefined && team.resumeCount > 0 && (
+            <span
+              className="discord-chip"
+              title={
+                team.lastResumedAt
+                  ? `last resumed ${formatRelative(team.lastResumedAt)} (${team.lastResumedAt})`
+                  : 'team was auto-resumed at least once'
+              }
+              style={{ color: 'var(--warn)', borderColor: 'var(--warn)' }}
+            >
+              ↻ RESUMED {team.resumeCount}×
+            </span>
           )}
         </div>
 

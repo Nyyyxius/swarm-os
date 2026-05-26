@@ -49,14 +49,48 @@ export interface PushResult {
   queueSize: number;
 }
 
+/**
+ * Phase 8 — write-through persistence hook. When supplied, every `push`
+ * INSERTs into `mailbox_messages` so messages survive a server restart;
+ * `markDelivered` is called by the MCP `read_inbox` handler after the
+ * response has been flushed (NOT inside `Mailbox.read`, so partial reads
+ * don't lose data — see plan §F.1 / at-least-once "soft" semantics).
+ *
+ * The hook intentionally lives behind an interface so this module stays
+ * free of any DB imports; the concrete impl lives in
+ * `mailbox-persistence.ts`.
+ */
+export interface MailboxPersistHook {
+  writeMessage(to: string, msg: Message): void;
+  writeMessagesBatch(items: Array<{ to: string; msg: Message }>): void;
+  markDelivered(ids: string[]): void;
+}
+
 export interface MailboxOptions {
   /** Max messages per session inbox. Defaults to plan's 100. */
   maxSize?: number;
+  /**
+   * Phase 8 — optional write-through persistence. When undefined (tests,
+   * legacy NoOpPersistence), the mailbox stays purely in-memory.
+   */
+  persist?: MailboxPersistHook;
+}
+
+export interface PushOptions {
+  /**
+   * Phase 8 — rehydrate path only. Skip the `_messagesTotal++` bump AND the
+   * persist-hook write, since the message is already counted in the
+   * previous incarnation's history and already on disk in the DB.
+   * Without this, every restart would fake-spike the `/metrics/bus`
+   * throughput gauge as rehydrated messages get "pushed" again.
+   */
+  silent?: boolean;
 }
 
 export class Mailbox {
   private readonly inboxes = new Map<string, Message[]>();
   private readonly maxSize: number;
+  private readonly persist: MailboxPersistHook | undefined;
   /**
    * Cumulative count of messages pushed into this mailbox since the
    * orchestrator started. Backed by `_messagesTotal`, surfaced via the
@@ -70,6 +104,7 @@ export class Mailbox {
       throw new Error(`Mailbox maxSize must be a positive integer, got ${cap}`);
     }
     this.maxSize = cap;
+    this.persist = opts.persist;
   }
 
   /**
@@ -102,10 +137,15 @@ export class Mailbox {
    * Push a message into `to`'s inbox. Mints `id` and `ts` if not provided.
    * Returns `{ dropped, queueSize }`. When `dropped` is true the oldest
    * message in the recipient's queue was evicted to make room.
+   *
+   * Phase 8 — `opts.silent: true` skips both the `_messagesTotal++` bump
+   * and the persist-hook write. Used by `rehydrateMailbox` to reload
+   * already-persisted messages without double-counting or double-writing.
    */
   push(
     to: string,
     msg: Omit<Message, 'id' | 'ts'> & Partial<Pick<Message, 'id' | 'ts'>>,
+    opts: PushOptions = {},
   ): PushResult {
     let q = this.inboxes.get(to);
     if (!q) {
@@ -122,10 +162,24 @@ export class Mailbox {
       ...(msg.fromSessionName ? { fromSessionName: msg.fromSessionName } : {}),
     };
     q.push(full);
-    // Phase update_system S1: count *every* push, irrespective of recipient
-    // and irrespective of the drop-oldest path below (cf. `messagesTotal`
-    // JSDoc — the drop is a cap effect, not a bus failure).
-    this._messagesTotal++;
+    if (!opts.silent) {
+      // Phase update_system S1: count *every* push, irrespective of recipient
+      // and irrespective of the drop-oldest path below (cf. `messagesTotal`
+      // JSDoc — the drop is a cap effect, not a bus failure).
+      this._messagesTotal++;
+      // Phase 8: write-through persist (sync, single-row INSERT).
+      // `silent` path bypasses this so rehydrate doesn't double-write.
+      try {
+        this.persist?.writeMessage(to, full);
+      } catch (err) {
+        log.warn({
+          event: 'mail.persist_failed',
+          to,
+          msgId: full.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
     let dropped = false;
     if (q.length > this.maxSize) {
       // Drop the OLDEST. Plan §11 step 3: bounded, drop-oldest semantics.
@@ -139,8 +193,89 @@ export class Mailbox {
         evictedId: evicted?.id,
         maxSize: this.maxSize,
       });
+      // Phase 8: mark the evicted msg delivered so rehydrate doesn't bring
+      // it back at the next boot. Skip in silent mode (rehydrate path) —
+      // there's no DB row corresponding to a freshly-evicted in-memory msg.
+      if (!opts.silent && evicted?.id) {
+        try {
+          this.persist?.markDelivered([evicted.id]);
+        } catch {
+          /* best-effort */
+        }
+      }
     }
     return { dropped, queueSize: q.length };
+  }
+
+  /**
+   * Phase 8 — push N messages and write them through the persist hook in a
+   * single transaction (one fsync for the whole batch). Used by
+   * `messaging.broadcast` so a 50-recipient broadcast doesn't block the
+   * event loop on 50 individual fsyncs.
+   *
+   * Cap enforcement runs per recipient like `push()`. Returns the per-item
+   * PushResult array in the same order.
+   */
+  pushBatch(
+    items: Array<{
+      to: string;
+      msg: Omit<Message, 'id' | 'ts'> & Partial<Pick<Message, 'id' | 'ts'>>;
+    }>,
+  ): PushResult[] {
+    if (items.length === 0) return [];
+    const results: PushResult[] = [];
+    const persistedItems: Array<{ to: string; msg: Message }> = [];
+    const evictedIds: string[] = [];
+    for (const item of items) {
+      const { to, msg } = item;
+      let q = this.inboxes.get(to);
+      if (!q) {
+        q = [];
+        this.inboxes.set(to, q);
+      }
+      const full: Message = {
+        id: msg.id ?? crypto.randomUUID(),
+        from: msg.from,
+        content: msg.content,
+        ts: msg.ts ?? new Date().toISOString(),
+        ...(msg.fromOrchestratorId ? { fromOrchestratorId: msg.fromOrchestratorId } : {}),
+        ...(msg.fromOrchestratorName ? { fromOrchestratorName: msg.fromOrchestratorName } : {}),
+        ...(msg.fromSessionName ? { fromSessionName: msg.fromSessionName } : {}),
+      };
+      q.push(full);
+      this._messagesTotal++;
+      persistedItems.push({ to, msg: full });
+      let dropped = false;
+      if (q.length > this.maxSize) {
+        const evicted = q.shift();
+        dropped = true;
+        log.warn({
+          event: 'mail.dropped',
+          to,
+          evictedId: evicted?.id,
+          maxSize: this.maxSize,
+        });
+        if (evicted?.id) evictedIds.push(evicted.id);
+      }
+      results.push({ dropped, queueSize: q.length });
+    }
+    try {
+      this.persist?.writeMessagesBatch(persistedItems);
+    } catch (err) {
+      log.warn({
+        event: 'mail.persist_batch_failed',
+        count: persistedItems.length,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    if (evictedIds.length > 0) {
+      try {
+        this.persist?.markDelivered(evictedIds);
+      } catch {
+        /* best-effort */
+      }
+    }
+    return results;
   }
 
   /**
@@ -189,15 +324,42 @@ export class Mailbox {
   /**
    * Drop everything queued for `sid`. Called when the session is destroyed
    * (worker killed, lead exit) so we don't leak across recycled ids.
+   *
+   * Phase 8 — also stamps DB rows as delivered so they don't ressurect at
+   * the next boot. An operator who just killed a worker would be confused
+   * to see its old undelivered messages re-emerge after a server restart.
    */
   removeSession(sid: string): void {
+    const q = this.inboxes.get(sid);
+    if (q && q.length > 0) {
+      try {
+        this.persist?.markDelivered(q.map((m) => m.id));
+      } catch {
+        /* best-effort */
+      }
+    }
     this.inboxes.delete(sid);
   }
 
   /**
    * Wipe every queue. Used by `Orchestrator.stop()` and tests.
+   *
+   * Phase 8 — same rationale as `removeSession`: stamp the persisted rows
+   * delivered so a server restart that fires straight after `stop()`
+   * doesn't bring messages back from the dead.
    */
   clearAll(): void {
+    const ids: string[] = [];
+    for (const q of this.inboxes.values()) {
+      for (const m of q) ids.push(m.id);
+    }
+    if (ids.length > 0) {
+      try {
+        this.persist?.markDelivered(ids);
+      } catch {
+        /* best-effort */
+      }
+    }
     this.inboxes.clear();
   }
 }

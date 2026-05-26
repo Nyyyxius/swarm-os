@@ -1,7 +1,7 @@
 import * as path from 'node:path';
 import { loadConfig } from './config.js';
 import { Spawner } from './modules/spawner/index.js';
-import { startServer } from './http/main.js';
+import { startServer, type BootGate } from './http/main.js';
 import { McpServer } from './modules/mcp/server.js';
 import { initRootLogger, withModule } from './logger.js';
 import { SwarmDb } from './modules/db/index.js';
@@ -11,6 +11,10 @@ import { initClaudeRuntime } from './runtime/claude-init.js';
 import { RoleStore } from './modules/roles/index.js';
 import { MessagesAggregator } from './modules/metrics/aggregator.js';
 import { BusMetricsCollector } from './modules/metrics/busMetrics.js';
+import {
+  rehydrateMailbox,
+  mailboxJanitor,
+} from './modules/orchestrator/mailbox-persistence.js';
 
 const config = loadConfig();
 const rootLog = initRootLogger(config);
@@ -59,29 +63,62 @@ log.info({
 // Phase 6 also lifts `~/.claude.json` (sibling of `~/.claude/`) so the
 // theme picker / "configuration file not found" warning don't wedge the
 // first PTY spawn.
-const claudeInit = initClaudeRuntime({
-  sourceDir: config.claudeSourceDir,
-  runtimeDir: config.claudeRuntimeDir,
-  claudeJsonSource: config.claudeJsonSource,
-});
-log.info({
-  event: 'boot.claude_init',
-  initialized: claudeInit.initialized,
-  copied: claudeInit.copied,
-  skipReason: claudeInit.skipReason ?? null,
-  entriesCopied: claudeInit.entriesCopied ?? null,
-  claudeJson: claudeInit.claudeJson ?? null,
-  claudeJsonSource: claudeInit.claudeJsonSource ?? null,
-});
+//
+// SSH transport: the host claude reads its own `~/.claude/` directly; no
+// container-side copy is needed and copying would actively re-introduce the
+// OAuth refresh race this mode is built to avoid. Skip.
+if (config.agentTransport === 'ssh') {
+  log.info({
+    event: 'boot.claude_init_skipped',
+    reason: 'ssh-transport',
+    note: 'host claude resolves ~/.claude/ in its own namespace',
+  });
+} else {
+  const claudeInit = initClaudeRuntime({
+    sourceDir: config.claudeSourceDir,
+    runtimeDir: config.claudeRuntimeDir,
+    claudeJsonSource: config.claudeJsonSource,
+  });
+  log.info({
+    event: 'boot.claude_init',
+    initialized: claudeInit.initialized,
+    copied: claudeInit.copied,
+    skipReason: claudeInit.skipReason ?? null,
+    entriesCopied: claudeInit.entriesCopied ?? null,
+    claudeJson: claudeInit.claudeJson ?? null,
+    claudeJsonSource: claudeInit.claudeJsonSource ?? null,
+  });
+}
 
-// ---- Phase 4: SQLite persistence + crash recovery -------------------------
+// ---- Phase 4: SQLite persistence ------------------------------------------
 const db = new SwarmDb(config.dataDir);
 const persistence = new DbPersistence(db);
-const recovered = persistence.recoverFromCrash();
-if (recovered.orchestrators > 0 || recovered.sessions > 0) {
+
+// ---- Phase 8: auto-resume — classify what to bring back up ----------------
+// loadResumableState is the atomic-guard variant of the old recoverFromCrash:
+// it flips every resumable orch row to 'interrupted' synchronously BEFORE
+// returning, so a crash mid-resume cannot lead to a double-spawn at the
+// next boot. The orch rows are then re-flipped to 'running' by
+// Orchestrator.resume() on success.
+let resumableState: ReturnType<typeof persistence.loadResumableState> = {
+  resumable: [],
+  reaped: { orchestrators: 0, sessions: 0 },
+};
+if (config.autoResume) {
+  resumableState = persistence.loadResumableState();
   log.warn({
     event: 'boot.recovery',
-    note: 'marked stale rows as interrupted (server-restart)',
+    mode: 'auto-resume',
+    candidates: resumableState.resumable.length,
+    reapedOrchestrators: resumableState.reaped.orchestrators,
+    reapedSessions: resumableState.reaped.sessions,
+  });
+} else {
+  const recovered = persistence.recoverFromCrash();
+  log.warn({
+    event: 'boot.recovery',
+    mode: 'legacy',
+    note: 'auto-resume disabled — marked stale rows as interrupted',
     orchestrators: recovered.orchestrators,
     sessions: recovered.sessions,
   });
@@ -113,24 +150,75 @@ aggregator.start();
 const busMetrics = new BusMetricsCollector(spawner);
 busMetrics.start();
 
-const handle = startServer(config, spawner, roleStore, aggregator, busMetrics);
+// Phase 8 — bootGate: HTTP listens immediately so /health stays green for
+// Docker, but business routes return 503 until auto-resume finishes.
+const bootGate: BootGate = { value: false };
+const handle = startServer(config, spawner, roleStore, aggregator, busMetrics, bootGate);
 
 // Start MCP HTTP listener on its own port (loopback only, plan §14).
-// Boot ordering: main HTTP first (so /health is up if a healthcheck is
-// already pointed at us), then MCP. If MCP fails to bind we shut down
-// the main listener too — the system is non-functional without MCP.
+// Phase 8 — MCP must be listening BEFORE we respawn PTYs, otherwise the
+// first `team.read_inbox` call from a resumed agent ECONNREFUSEs and the
+// agent wastes its first turn on a transport error. If MCP fails to bind
+// we shut down the main listener too — the system is non-functional
+// without MCP.
 const mcp = new McpServer(spawner, config.mcpPort, config, busMetrics);
-mcp.start().catch(async (err) => {
-  log.error({ event: 'mcp.start_failed', error: err instanceof Error ? err.message : String(err) });
-  try {
-    await handle.close();
-  } catch {
-    /* ignore */
+
+async function runAutoResume(): Promise<void> {
+  if (!config.autoResume || resumableState.resumable.length === 0) {
+    bootGate.value = true;
+    log.info({ event: 'boot.complete', resumed: 0, mailboxRehydrated: 0 });
+    return;
   }
-  // Use the unified shutdown so DB/spawner/etc. flush together.
-  await shutdown('mcp.start_failed').catch(() => undefined);
-  process.exit(1);
-});
+  try {
+    const { resumed, failed } = await spawner.resumeFromDb(
+      resumableState.resumable,
+      { staggerMs: config.resumeStaggerMs },
+    );
+    const mailbox = rehydrateMailbox(spawner, db);
+    const janitor = mailboxJanitor(db);
+    // Mute Discord for a window so the inevitable session.waiting cascade
+    // from N freshly-respawned agents doesn't hit the webhook rate limit.
+    if (config.notifyQuietAfterBootMs > 0) {
+      notifier.muteUntil = Date.now() + config.notifyQuietAfterBootMs;
+    }
+    log.info({
+      event: 'boot.auto_resume',
+      resumed,
+      failed: failed.length,
+      mailboxRehydrated: mailbox.rehydrated,
+      mailboxDroppedSenderTerminal: mailbox.droppedSenderTerminal,
+      mailboxDroppedOrphan: mailbox.droppedOrphan,
+      janitorDeleted: janitor.deleted,
+      muteUntilMs: notifier.muteUntil ?? null,
+    });
+    if (failed.length > 0) {
+      log.warn({ event: 'boot.auto_resume_failures', failed });
+    }
+  } catch (err) {
+    log.error({
+      event: 'boot.auto_resume_failed',
+      error: err instanceof Error ? err.message : String(err),
+    });
+  } finally {
+    bootGate.value = true;
+    log.info({ event: 'boot.complete', listening: true });
+  }
+}
+
+mcp
+  .start()
+  .then(() => runAutoResume())
+  .catch(async (err) => {
+    log.error({ event: 'mcp.start_failed', error: err instanceof Error ? err.message : String(err) });
+    try {
+      await handle.close();
+    } catch {
+      /* ignore */
+    }
+    // Use the unified shutdown so DB/spawner/etc. flush together.
+    await shutdown('mcp.start_failed').catch(() => undefined);
+    process.exit(1);
+  });
 
 let shuttingDown = false;
 /**

@@ -11,6 +11,20 @@ export type PermissionMode =
   | 'dontAsk'
   | 'plan';
 
+/**
+ * Transport used to launch claude agent processes.
+ *
+ * - `local` (default): spawn the `claude` binary directly inside this process'
+ *   namespace via `node-pty`. Used when swarm-os runs on the same host as
+ *   claude (dev mode) or inside a container that has its own claude binary +
+ *   credentials copy.
+ * - `ssh`: open `ssh -tt <sshTarget>` and run the **host's** claude binary
+ *   remotely. Used to avoid sharing `~/.claude/.credentials.json` between a
+ *   container and the host — both processes would otherwise race on OAuth
+ *   refresh and invalidate each other's tokens.
+ */
+export type AgentTransport = 'local' | 'ssh';
+
 export interface Config {
   port: number;
   host: string;
@@ -105,6 +119,68 @@ export interface Config {
    * 'production' AND stdout is a TTY.
    */
   logPretty: boolean;
+  /**
+   * Phase 8: auto-resume teams from SQLite on boot. When false, the legacy
+   * recovery path runs (mark all non-terminal as interrupted, no respawn).
+   * Default `true`. Env `SWARM_OS_AUTO_RESUME`.
+   */
+  autoResume: boolean;
+  /**
+   * Phase 8: delay (ms) between successive PTY spawns during auto-resume.
+   * Applied between orchs AND between worker spawns within an orch. Avoids
+   * `/data/.claude-runtime` contention + claude-cli startup CPU spikes when
+   * resuming many teams at once. Default 150ms. Env
+   * `SWARM_OS_RESUME_STAGGER_MS`.
+   */
+  resumeStaggerMs: number;
+  /**
+   * Phase 8: how long (ms) to suppress Discord notifications after auto-
+   * resume. Agents waking up after a restart commonly need an input prompt
+   * within seconds; without this mute window, N restarted teams would emit
+   * N `session.waiting` notifications and rate-limit the webhook. Default
+   * 60000ms. Env `SWARM_OS_NOTIFY_QUIET_AFTER_BOOT_MS`.
+   */
+  notifyQuietAfterBootMs: number;
+  /**
+   * Transport for agent processes. When `ssh`, claude is launched on the host
+   * VM via SSH instead of inside this process' namespace. See `AgentTransport`.
+   * Env: `SWARM_OS_AGENT_TRANSPORT`, default `local`.
+   */
+  agentTransport: AgentTransport;
+  /**
+   * SSH destination for `agentTransport=ssh` (e.g. `ubuntu@host.docker.internal`).
+   * Required when transport is `ssh`. Env: `SWARM_OS_SSH_TARGET`.
+   */
+  sshTarget: string | null;
+  /**
+   * SSH private key path inside this process' filesystem. Defaults to
+   * `/host-ssh/id_ed25519` (matches the docker-compose `${HOME}/.ssh:/host-ssh:ro`
+   * mount). Env: `SWARM_OS_SSH_KEY`.
+   */
+  sshKey: string;
+  /** SSH port on the host. Default 22. Env: `SWARM_OS_SSH_PORT`. */
+  sshPort: number;
+  /**
+   * Host-side path that corresponds to `dataDir` (mounted via bind). Required
+   * when `agentTransport=ssh` so per-session config dirs + mcp.json paths can
+   * be translated into paths the host claude can resolve.
+   * Env: `SWARM_OS_HOST_DATA_DIR`.
+   */
+  hostDataDir: string | null;
+  /**
+   * Host-side `~/.claude` path (e.g. `/home/ubuntu/.claude`). Used in SSH mode
+   * to point per-session symlinks (`.credentials.json`, `history.jsonl`, …) at
+   * the host's real files rather than a container-side copy. Default
+   * `/home/ubuntu/.claude`. Env: `SWARM_OS_HOST_CLAUDE_DIR`.
+   */
+  hostClaudeDir: string;
+  /**
+   * Host-side path matching `workspaceRoot` (container `/workspace`). Required
+   * in SSH mode so a cwd stored in DB as `/workspace/foo` (the existing API
+   * convention) can be translated to its host equivalent before being passed
+   * as the remote `cd` target. Env: `SWARM_OS_HOST_WORKSPACE_ROOT`.
+   */
+  hostWorkspaceRoot: string | null;
   startedAt: string;
   version: string;
 }
@@ -280,14 +356,75 @@ export function loadConfig(): Config {
   else if (logPrettyEnv === '0' || logPrettyEnv === 'false') logPretty = false;
   else logPretty = process.env.NODE_ENV !== 'production' && Boolean(process.stdout.isTTY);
 
+  // Phase 8 — auto-resume (default true). Any value !== 'false' enables it
+  // so an operator setting `SWARM_OS_AUTO_RESUME=true` works as expected.
+  const autoResumeEnv = process.env.SWARM_OS_AUTO_RESUME;
+  const autoResume = autoResumeEnv === undefined ? true : autoResumeEnv !== 'false';
+  const resumeStaggerMs = intEnv('SWARM_OS_RESUME_STAGGER_MS', 150);
+  const notifyQuietAfterBootMs = intEnv('SWARM_OS_NOTIFY_QUIET_AFTER_BOOT_MS', 60_000);
+
+  // Agent transport selector (default `local` for backwards-compatibility).
+  // When `ssh`, the orchestrator opens `ssh -tt <target>` and runs claude on
+  // the host instead of inside this process. Required vars are validated
+  // below — fail-fast at boot rather than at first spawn.
+  const rawTransport = process.env.SWARM_OS_AGENT_TRANSPORT ?? 'local';
+  if (rawTransport !== 'local' && rawTransport !== 'ssh') {
+    throw new Error(
+      `SWARM_OS_AGENT_TRANSPORT must be 'local' or 'ssh', got: ${rawTransport}`,
+    );
+  }
+  const agentTransport = rawTransport as AgentTransport;
+  const sshTarget =
+    process.env.SWARM_OS_SSH_TARGET && process.env.SWARM_OS_SSH_TARGET.length > 0
+      ? process.env.SWARM_OS_SSH_TARGET
+      : null;
+  const sshKey = process.env.SWARM_OS_SSH_KEY ?? '/host-ssh/id_ed25519';
+  const sshPort = intEnv('SWARM_OS_SSH_PORT', 22);
+  const hostDataDir =
+    process.env.SWARM_OS_HOST_DATA_DIR && process.env.SWARM_OS_HOST_DATA_DIR.length > 0
+      ? path.resolve(process.env.SWARM_OS_HOST_DATA_DIR)
+      : null;
+  const hostClaudeDir = path.resolve(
+    process.env.SWARM_OS_HOST_CLAUDE_DIR ?? '/home/ubuntu/.claude',
+  );
+  const hostWorkspaceRoot =
+    process.env.SWARM_OS_HOST_WORKSPACE_ROOT && process.env.SWARM_OS_HOST_WORKSPACE_ROOT.length > 0
+      ? path.resolve(process.env.SWARM_OS_HOST_WORKSPACE_ROOT)
+      : null;
+  if (agentTransport === 'ssh') {
+    if (!sshTarget) {
+      throw new Error(
+        'SWARM_OS_AGENT_TRANSPORT=ssh requires SWARM_OS_SSH_TARGET (e.g. ubuntu@host.docker.internal)',
+      );
+    }
+    if (!hostDataDir) {
+      throw new Error(
+        'SWARM_OS_AGENT_TRANSPORT=ssh requires SWARM_OS_HOST_DATA_DIR (host path matching the /data bind mount)',
+      );
+    }
+    if (!hostWorkspaceRoot) {
+      throw new Error(
+        'SWARM_OS_AGENT_TRANSPORT=ssh requires SWARM_OS_HOST_WORKSPACE_ROOT (host path matching the /workspace bind mount)',
+      );
+    }
+  }
+
   // Per-session mcp.json runtime dir. Lives under /tmp so it disappears with
   // the container; per-session files are mode 0600 and per-session/orch dirs
   // are mode 0700 (see mcp-config.ts). The runtime root itself is also
   // tightened to 0700 so other users on the host can't enumerate orch ids by
   // listing the directory — defence in depth on top of the per-orch/dir
   // perms (plan §14).
+  //
+  // SSH transport: the host claude reads `--mcp-config=<path>` in its own
+  // filesystem namespace, so the runtime root MUST live under `dataDir`
+  // (which is bind-mounted to the host) so it has a host-side equivalent
+  // reachable via `toHostPath()`. Default to `<dataDir>/mcp-runtime` in that
+  // mode; operators can still override with `SWARM_OS_MCP_RUNTIME_DIR`.
+  const defaultMcpRuntimeDir =
+    agentTransport === 'ssh' ? path.join(dataDir, 'mcp-runtime') : '/tmp/swarm-os';
   const mcpRuntimeDir = path.resolve(
-    process.env.SWARM_OS_MCP_RUNTIME_DIR ?? '/tmp/swarm-os',
+    process.env.SWARM_OS_MCP_RUNTIME_DIR ?? defaultMcpRuntimeDir,
   );
   fs.mkdirSync(mcpRuntimeDir, { recursive: true, mode: 0o700 });
   try {
@@ -324,6 +461,16 @@ export function loadConfig(): Config {
     publicUrl,
     logLevel,
     logPretty,
+    autoResume,
+    resumeStaggerMs,
+    notifyQuietAfterBootMs,
+    agentTransport,
+    sshTarget,
+    sshKey,
+    sshPort,
+    hostDataDir,
+    hostClaudeDir,
+    hostWorkspaceRoot,
     startedAt: new Date().toISOString(),
     version: '0.6.0-phase6',
   };

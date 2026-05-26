@@ -54,6 +54,16 @@ export interface NotificationInput {
 
 export interface Notifier {
   notify(input: NotificationInput): Promise<void>;
+  /**
+   * Phase 8 — optional mute window. When set to a future epoch ms, the
+   * notifier returns immediately without sending. Used by the boot sequence
+   * to suppress the `session.waiting` storm that occurs when N teams are
+   * auto-resumed and each lead asks for input within seconds.
+   *
+   * Implementations not interested in muting can omit the property — the
+   * caller does a duck-typed check `(notifier as any).muteUntil`.
+   */
+  muteUntil?: number;
 }
 
 export { DiscordWebhookNotifier } from './discord.js';

@@ -1,5 +1,5 @@
 import * as crypto from 'node:crypto';
-import { Session, type SessionView } from './session.js';
+import { Session, type SessionView, type SessionSshTransport } from './session.js';
 import { Mailbox } from './mailbox.js';
 import { buildPreamble } from './preamble.js';
 import { emitMailboxMessage } from './messaging.js';
@@ -12,6 +12,9 @@ import { NoOpNotifier } from '../notify/null.js';
 import type { Persistence } from './persistence.js';
 import { NoOpPersistence } from './persistence.js';
 import { computeOrchestratorHealth, type OrchestratorHealth } from './health.js';
+import { makeMailboxPersistenceForOrch } from './mailbox-persistence.js';
+import { buildResumeNotice } from './log-tail-reader.js';
+import type { SessionRow } from '../db/index.js';
 
 const log = withModule('orchestrator');
 
@@ -34,6 +37,23 @@ export interface OrchestratorInit {
     prompt: string;
     preamble?: string | null;
   };
+  /**
+   * Phase 8 — auto-resume only. When provided, reuse this UUID instead of
+   * minting a fresh one. The Spawner sets this when rebuilding an
+   * orchestrator from a persisted DB row so the session ids, log paths,
+   * mailbox routing keys, and history references all stay stable.
+   */
+  id?: string;
+  /**
+   * Phase 8 — auto-resume only. When provided, reuse this ISO timestamp
+   * for `createdAt` so the historical "team age" survives the restart.
+   */
+  createdAt?: string;
+  /**
+   * Phase 8 — auto-resume only. Seed for the monotonic `resume_count`.
+   * Incremented once at the end of a successful `resume()`.
+   */
+  resumeCount?: number;
 }
 
 export interface OrchestratorView {
@@ -71,6 +91,15 @@ export interface OrchestratorView {
    * (`ok|warn|bad|stopped` ↔ `HEALTHY|DEGRADED|FAILED|OFFLINE`).
    */
   health: OrchestratorHealth;
+  /**
+   * Phase 8 — count of successful auto-resumes since this orch's first
+   * boot. 0 means "never restarted"; >0 means the UI can surface a
+   * "Resumed N×" chip so operators can spot restart loops without grepping
+   * logs.
+   */
+  resumeCount: number;
+  /** Phase 8 — ISO timestamp of the latest successful resume (or null). */
+  lastResumedAt: string | null;
 }
 
 /** Phase 4: optional dependencies wired by the Spawner. */
@@ -113,6 +142,19 @@ export interface WorkerSpec {
   /** Test hooks — same as StartOptions for the lead. */
   skipSpawn?: boolean;
   agentProcessOverride?: AgentProcess;
+  /**
+   * Phase 8 — auto-resume only. When provided, reuse this session id +
+   * startedAt instead of minting a fresh UUID. Required so the rebuilt
+   * worker keeps the same DB row, log path, and mailbox routing key.
+   */
+  existingId?: string;
+  startedAt?: string;
+  /**
+   * Phase 8 — auto-resume only. Appended to the preamble (after any
+   * customOverride) so the agent sees the "## Server restart notice"
+   * block at the start of its replayed prompt.
+   */
+  resumeNotice?: string;
 }
 
 export class WorkerCapError extends Error {
@@ -171,6 +213,12 @@ export class Orchestrator {
   private _endNotified = false;
   private _hideOnExit = false;
   private _hideRequestFired = false;
+  // Phase 8 — auto-resume audit. `_resumeCount` is incremented at the end
+  // of a successful `resume()`; `_lastResumedAt` is stamped at the same
+  // time. Both are persisted via UPSERT in `_setStatus` and surfaced in
+  // `toView()` for the UI chip.
+  private _resumeCount: number;
+  private _lastResumedAt: string | null = null;
 
   readonly notifier: Notifier;
   readonly persistence: Persistence;
@@ -184,7 +232,10 @@ export class Orchestrator {
     private readonly config: Config,
     deps: OrchestratorDeps = {},
   ) {
-    this.id = crypto.randomUUID();
+    // Phase 8: reuse the persisted UUID when resuming, otherwise mint a
+    // fresh one. Same for `createdAt` and `resumeCount` so the historical
+    // audit survives a server restart.
+    this.id = init.id ?? crypto.randomUUID();
     this.name = init.name;
     this.role = init.role;
     this.roleId = init.roleId ?? null;
@@ -193,11 +244,21 @@ export class Orchestrator {
     this.defaultPermissionMode = init.defaultPermissionMode;
     this.leadPreamble = init.leadPreamble;
     this.workerPreamble = init.workerPreamble;
-    this.createdAt = new Date().toISOString();
-    this.mailbox = new Mailbox({ maxSize: this.config.maxInboxSize });
+    this.createdAt = init.createdAt ?? new Date().toISOString();
+    this._resumeCount = init.resumeCount ?? 0;
+    // Mailbox persistence hook is wired below once `persistence` is set.
     this.notifier = deps.notifier ?? new NoOpNotifier();
     this.persistence = deps.persistence ?? new NoOpPersistence();
     this._onHideRequested = deps.onHideRequested ?? null;
+    // Phase 8 — write-through mailbox: every push/markDelivered routes to
+    // SQLite via the hook below. Constructed AFTER persistence is set.
+    // The hook impl is provided by mailbox-persistence.ts to keep the DB
+    // SQL out of mailbox.ts. When persistence is a NoOp (tests), the hook
+    // resolves to undefined so the mailbox stays purely in-memory.
+    this.mailbox = new Mailbox({
+      maxSize: this.config.maxInboxSize,
+      persist: makeMailboxPersistenceForOrch(this.id, this.persistence),
+    });
   }
 
   /**
@@ -212,6 +273,32 @@ export class Orchestrator {
   /** Public Phase 4 accessor — needed by persistence to write `stop_reason`. */
   get stopReason(): string | null {
     return this._stopReason;
+  }
+
+  /**
+   * Build the per-session SSH transport bundle from the orchestrator's Config.
+   * Returns `null` for `agentTransport=local`. Centralised so all three Session
+   * construction sites (`start`, `resume`, `addWorker`) stay in sync.
+   */
+  private _sshTransportBundle(): SessionSshTransport | null {
+    if (this.config.agentTransport !== 'ssh') return null;
+    if (
+      !this.config.sshTarget ||
+      !this.config.hostDataDir ||
+      !this.config.hostWorkspaceRoot
+    ) {
+      return null;
+    }
+    return {
+      sshTarget: this.config.sshTarget,
+      sshKey: this.config.sshKey,
+      sshPort: this.config.sshPort,
+      dataDir: this.config.dataDir,
+      hostDataDir: this.config.hostDataDir,
+      hostClaudeDir: this.config.hostClaudeDir,
+      workspaceRoot: this.config.workspaceRoot,
+      hostWorkspaceRoot: this.config.hostWorkspaceRoot,
+    };
   }
 
   // --- Lifecycle ---------------------------------------------------------
@@ -267,6 +354,7 @@ export class Orchestrator {
       claudeConfigRoot: this.config.claudeRuntimeDir,
       claudeSourceDir: this.config.claudeSourceDir,
       claudeJsonSource: this.config.claudeJsonSource,
+      sshTransport: this._sshTransportBundle(),
     });
 
     this._leadSessionId = lead.id;
@@ -294,6 +382,148 @@ export class Orchestrator {
   }
 
   /**
+   * Phase 8 — auto-resume entrypoint. Used by `Spawner.resumeFromDb` to
+   * rebuild a previously-running team from persisted rows. Behaves like
+   * `start()` + `addWorker()` for each worker, but:
+   *
+   *  - Reuses the persisted session ids / startedAt / log_path so history
+   *    stays continuous and mailbox routing keeps working.
+   *  - Appends a "## Server restart notice" (with PTY log tail) to every
+   *    session's preamble so the agent knows it was interrupted and
+   *    re-reads its workspace defensively.
+   *  - Awaits `staggerMs` between each PTY spawn (lead first, then each
+   *    worker) so 60 PTYs don't race for `/data/.claude-runtime` on boot.
+   *  - Bumps `resumeCount` + stamps `lastResumedAt` only at the end, on
+   *    full success. A mid-resume failure leaves the row in `failed`
+   *    (caller wraps in try/catch and records `last_error`).
+   *
+   * Throws if the lead session can't be spawned. Worker failures are
+   * captured but don't abort the whole resume — the lead being up is
+   * what matters most.
+   */
+  async resume(opts: {
+    leadRow: SessionRow;
+    workerRows: SessionRow[];
+    staggerMs: number;
+  }): Promise<void> {
+    if (this._leadSessionId) {
+      throw new Error(`orchestrator ${this.id} already has a lead — resume called twice?`);
+    }
+
+    const leadRow = opts.leadRow;
+    const leadNotice = buildResumeNotice(leadRow.log_path);
+
+    // Build the preamble with the resume notice appended. We use the
+    // persisted `init.lead.preamble` (already in `this.init.lead.preamble`)
+    // OR the orchestrator-level `leadPreamble` for the customOverride —
+    // same precedence as `start()`.
+    const preamble = buildPreamble({
+      identity: {
+        name: leadRow.name,
+        role: leadRow.role,
+        sessionId: leadRow.id,
+        orchName: this.name,
+      },
+      isLead: true,
+      customOverride: this.init.lead.preamble ?? this.leadPreamble,
+      resumeNotice: leadNotice,
+    });
+
+    const lead = new Session({
+      id: leadRow.id,
+      startedAt: leadRow.started_at,
+      orchestratorId: this.id,
+      name: leadRow.name,
+      role: leadRow.role,
+      type: 'lead',
+      cwd: leadRow.cwd,
+      initialPrompt: leadRow.initial_prompt,
+      preamble,
+      model: leadRow.model,
+      effort: leadRow.effort as EffortLevel,
+      permissionMode: leadRow.permission_mode as PermissionMode,
+      logsDir: this.config.logsDir,
+      mcpRuntimeDir: this.config.mcpRuntimeDir,
+      mcpHost: '127.0.0.1',
+      mcpPort: this.config.mcpPort,
+      onStateChange: (s, force) => this._onSessionState(s, force),
+      hookToken: this.config.hookToken,
+      mainHttpPort: this.config.port,
+      claudeConfigRoot: this.config.claudeRuntimeDir,
+      claudeSourceDir: this.config.claudeSourceDir,
+      claudeJsonSource: this.config.claudeJsonSource,
+      sshTransport: this._sshTransportBundle(),
+    });
+
+    this._leadSessionId = lead.id;
+    this.sessions.set(lead.id, lead);
+
+    if (lead.status === 'failed') {
+      this._setStatus('failed');
+      this._lastError = lead.lastError;
+      this._endedAt = new Date().toISOString();
+      this._stopReason = 'resume-failed';
+      throw new Error(`lead session failed to spawn on resume: ${lead.lastError ?? 'unknown'}`);
+    }
+
+    this._setStatus('running');
+    eventBus.emitEvent({
+      kind: 'session.created',
+      orchestratorId: this.id,
+      sessionId: lead.id,
+      payload: lead.toView(),
+    });
+    lead.once('exit', () => this._onLeadExit());
+
+    // Workers: stagger spawns to avoid /data/.claude-runtime contention.
+    for (const workerRow of opts.workerRows) {
+      if (workerRow.id === leadRow.id) continue; // safety net
+      if (opts.staggerMs > 0) {
+        await new Promise((resolve) => setTimeout(resolve, opts.staggerMs));
+      }
+      // Persisted-paused sessions can't really resume into 'paused' — the
+      // SIGSTOP target is gone. Bring them back as 'running' with a
+      // last_error stamp so the operator sees what happened.
+      const wasPaused = workerRow.status === 'paused';
+      try {
+        const worker = this.addWorker({
+          name: workerRow.name,
+          role: workerRow.role,
+          prompt: workerRow.initial_prompt ?? '',
+          cwd: workerRow.cwd,
+          model: workerRow.model,
+          effort: workerRow.effort as EffortLevel,
+          permissionMode: workerRow.permission_mode as PermissionMode,
+          existingId: workerRow.id,
+          startedAt: workerRow.started_at,
+          resumeNotice: buildResumeNotice(workerRow.log_path),
+        });
+        if (wasPaused) {
+          log.warn({
+            event: 'resume.paused_session_unpaused',
+            orchId: this.id,
+            sessionId: worker.id,
+          });
+        }
+      } catch (err) {
+        // A single worker failing shouldn't take down the team. Log + persist
+        // a marker via the worker row (which already exists in DB from the
+        // previous incarnation) — we leave the DB row as 'interrupted'
+        // (atomic guard's flip) so it stays out of the live map.
+        log.warn({
+          event: 'resume.worker_spawn_failed',
+          orchId: this.id,
+          workerId: workerRow.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // Successful resume: bump audit counters. Persists via writeOrchestrator.
+    this._stampResumeCompleted();
+  }
+
+  /**
    * Spawn a worker. Throws `WorkerCapError` if the active worker count would
    * exceed `config.maxWorkersPerOrch`. The caller is responsible for any
    * `cwd` realpath validation BEFORE this is called — we don't redo it here
@@ -314,7 +544,9 @@ export class Orchestrator {
     const model = spec.model ?? this.defaultModel;
     const effort = spec.effort ?? this.defaultEffort;
     const permissionMode = spec.permissionMode ?? this.defaultPermissionMode;
-    const sessionId = crypto.randomUUID();
+    // Phase 8: reuse the persisted id when resuming so the row + log path
+    // + mailbox routing stay stable; otherwise mint a fresh UUID.
+    const sessionId = spec.existingId ?? crypto.randomUUID();
     const preambleText = buildPreamble({
       identity: {
         name: spec.name,
@@ -324,10 +556,12 @@ export class Orchestrator {
       },
       isLead: false,
       customOverride: spec.preamble ?? this.workerPreamble,
+      resumeNotice: spec.resumeNotice,
     });
 
     const worker = new Session({
       id: sessionId,
+      startedAt: spec.startedAt,
       orchestratorId: this.id,
       name: spec.name,
       role: spec.role,
@@ -350,6 +584,7 @@ export class Orchestrator {
       claudeConfigRoot: this.config.claudeRuntimeDir,
       claudeSourceDir: this.config.claudeSourceDir,
       claudeJsonSource: this.config.claudeJsonSource,
+      sshTransport: this._sshTransportBundle(),
     });
 
     this.sessions.set(worker.id, worker);
@@ -670,6 +905,9 @@ export class Orchestrator {
       sessions,
       msgCount: this.mailbox.messagesTotal,
       stopReason: this._stopReason,
+      // Phase 8 — auto-resume audit, surfaced for UI chip.
+      resumeCount: this._resumeCount,
+      lastResumedAt: this._lastResumedAt,
     };
     return {
       ...base,
@@ -677,6 +915,25 @@ export class Orchestrator {
       // (O(N) over sessions, N ≤ maxWorkersPerOrch).
       health: computeOrchestratorHealth(base),
     };
+  }
+
+  /**
+   * Phase 8 — bump the resume audit counters. Called once per successful
+   * `resume()` at the very end so the count never reflects a half-resumed
+   * orch. UPSERT through the existing persistence hook.
+   */
+  _stampResumeCompleted(): void {
+    this._resumeCount++;
+    this._lastResumedAt = new Date().toISOString();
+    try {
+      this.persistence.writeOrchestrator(this);
+    } catch (err) {
+      log.warn({
+        event: 'persistence.resume_stamp_failed',
+        orchId: this.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   // --- Internals ---------------------------------------------------------

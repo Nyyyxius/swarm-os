@@ -31,9 +31,28 @@ export interface SessionPersistence {
   writeSession(session: Session, opts?: { force?: boolean }): void;
 }
 
+/**
+ * Phase 8 — boot-time classification of what the previous server process
+ * left behind. The Spawner consumes `resumable[]` to respawn teams; the
+ * `reaped` counters cover orchestrators the operator already asked to stop
+ * (status='stopping') which we explicitly do NOT bring back up.
+ */
+export interface ResumableState {
+  resumable: Array<{ orch: OrchestratorRow; sessions: SessionRow[] }>;
+  reaped: { orchestrators: number; sessions: number };
+}
+
 export interface Persistence extends OrchestratorPersistence, SessionPersistence {
   /** Mark every non-terminal row as interrupted (boot recovery). */
   recoverFromCrash(): { orchestrators: number; sessions: number };
+  /**
+   * Phase 8 — replacement for `recoverFromCrash` on the auto-resume path.
+   * Atomic-guards every resumable row by flipping it to 'interrupted' BEFORE
+   * returning, so a crash mid-resume can't lead to a double-spawn at the
+   * next boot. Each resumed orch's `Orchestrator.resume()` will UPSERT the
+   * row back to 'running' on success.
+   */
+  loadResumableState(): ResumableState;
   /** Underlying SwarmDb — used by REST handlers to read history. */
   readonly db: SwarmDb;
 }
@@ -88,6 +107,66 @@ export class DbPersistence implements Persistence {
   recoverFromCrash(): { orchestrators: number; sessions: number } {
     return this.db.markAllNonTerminalAsInterrupted();
   }
+
+  /**
+   * Phase 8 — atomic guard + classification. Returns the orch rows + their
+   * sessions ready to be passed to `Spawner.resumeFromDb`. Side effects on
+   * the DB:
+   *   - Every 'stopping' orch is marked 'interrupted' with
+   *     stop_reason='server-restart-during-stop' (the operator already
+   *     asked to take it down — respect that, don't resume).
+   *   - Every 'starting'|'running' orch is marked 'interrupted' with
+   *     stop_reason='resume-in-progress'. If the spawner crashes mid-resume,
+   *     the next boot sees 'interrupted' and the loop is broken.
+   *   - All non-terminal sessions of each affected orch are flipped to
+   *     'interrupted' in the same transaction.
+   *
+   * On a successful resume, `Orchestrator.resume()` will UPSERT the row
+   * back to 'running'.
+   */
+  loadResumableState(): ResumableState {
+    const reaped = { orchestrators: 0, sessions: 0 };
+
+    // 1. Reap orchs in 'stopping' — they were on their way out.
+    for (const row of this.db.listStoppingOrchestrators()) {
+      const flipped = this.db.markOrchAndSessionsInterrupted(
+        row.id,
+        'server-restart-during-stop',
+      );
+      if (flipped) reaped.orchestrators++;
+    }
+
+    // 2. Atomic-guard resumable candidates: flip to 'interrupted' BEFORE
+    // returning. On a crash mid-resume, the row stays 'interrupted'
+    // (non-resumable). On success, Orchestrator.resume() UPSERTs to
+    // 'running' so the row is back to live state.
+    //
+    // CRUCIAL ordering: load sessions BEFORE the atomic flip, so the
+    // returned list reflects what was actually live before this boot
+    // (the flip would otherwise clobber every non-terminal session row).
+    const candidates = this.db.listResumableOrchestrators();
+    const resumable: ResumableState['resumable'] = [];
+    for (const row of candidates) {
+      // Load sessions first (in their pre-flip state) so the spawner knows
+      // which ones to rebuild. Filter to non-terminal — terminal sessions
+      // stay in history as-is and are not respawned.
+      const sessions = this.db
+        .listSessions(row.id)
+        .filter((s) => !isTerminalSessionStatus(s.status));
+      // Now atomic-flip the orch + its sessions so the next boot can tell
+      // "this team is being resumed by an in-flight process" from "this
+      // team is genuinely live".
+      this.db.markOrchAndSessionsInterrupted(row.id, 'resume-in-progress');
+      resumable.push({ orch: row, sessions });
+    }
+
+    return { resumable, reaped };
+  }
+}
+
+const TERMINAL_SESSION_SET = new Set(['exited', 'killed', 'interrupted', 'failed']);
+function isTerminalSessionStatus(s: string): boolean {
+  return TERMINAL_SESSION_SET.has(s);
 }
 
 /** No-op persistence — used by tests / phases that don't want a DB. */
@@ -102,6 +181,19 @@ export class NoOpPersistence implements Persistence {
     listRecentlyTerminatedOrchestrators: () => [],
     listSessions: () => [],
     markAllNonTerminalAsInterrupted: () => ({ orchestrators: 0, sessions: 0 }),
+    // Phase 8 — no-op stubs for the new SwarmDb methods so tests that wire
+    // a NoOpPersistence into an Orchestrator don't crash when the mailbox
+    // persistence hook fires (the hook is also gated on `db` presence in
+    // makeMailboxPersistenceForOrch, but defensive).
+    markOrchAndSessionsInterrupted: () => false,
+    listResumableOrchestrators: () => [],
+    listStoppingOrchestrators: () => [],
+    insertMailboxMessage: () => undefined,
+    insertMailboxMessagesBatch: () => undefined,
+    insertMailboxMessageOrIgnore: () => undefined,
+    markMailboxMessagesDelivered: () => undefined,
+    selectPendingMailboxMessagesForOrch: () => [],
+    deleteOldDeliveredMailboxMessages: () => 0,
     close: () => undefined,
   } as unknown as SwarmDb;
 
@@ -109,6 +201,9 @@ export class NoOpPersistence implements Persistence {
   writeSession(): void {}
   recoverFromCrash(): { orchestrators: number; sessions: number } {
     return { orchestrators: 0, sessions: 0 };
+  }
+  loadResumableState(): ResumableState {
+    return { resumable: [], reaped: { orchestrators: 0, sessions: 0 } };
   }
 }
 
@@ -135,6 +230,9 @@ export function orchToRow(
     hidden_at: null,
     last_error: view.lastError,
     stop_reason: extra.stopReason,
+    // Phase 8 — auto-resume audit.
+    last_resumed_at: view.lastResumedAt,
+    resume_count: view.resumeCount,
   };
 }
 
@@ -171,12 +269,17 @@ export function rowToOrchView(
   row: OrchestratorRow,
   sessions: SessionView[],
 ): OrchestratorView {
+  // Cast: the row may carry the new 'interrupted' status (Phase 8 atomic
+  // guard) which is not part of the OrchestratorView union — clamp to
+  // 'failed' for the history view so the UI doesn't crash. The DB still
+  // holds the real value for diagnostics.
+  const viewStatus = (row.status === 'interrupted' ? 'failed' : row.status) as OrchestratorView['status'];
   return {
     id: row.id,
     name: row.name,
     role: row.role,
     roleId: row.role_id,
-    status: row.status,
+    status: viewStatus,
     leadSessionId: row.lead_session_id,
     defaultModel: row.default_model,
     defaultEffort: row.default_effort as OrchestratorView['defaultEffort'],
@@ -191,10 +294,15 @@ export function rowToOrchView(
     // cumulative bus counter is 0 by definition. Not persisted in v1.
     msgCount: 0,
     // Phase update_system S7: history rows are by definition terminal
-    // (status ∈ {stopped, failed}). Hardcode the verdict instead of
-    // re-running the computation — `'bad'` for the failed branch so the
-    // UI can still flag historical failures, `'stopped'` otherwise.
-    health: row.status === 'failed' ? 'bad' : 'stopped',
+    // (status ∈ {stopped, failed, interrupted}). Hardcode the verdict
+    // instead of re-running the computation — `'bad'` for failure/
+    // interrupted so the UI can still flag historical failures,
+    // `'stopped'` otherwise.
+    health: (row.status === 'failed' || row.status === 'interrupted') ? 'bad' : 'stopped',
+    // Phase 8 — auto-resume audit, surfaced unconditionally.
+    resumeCount: row.resume_count,
+    lastResumedAt: row.last_resumed_at,
+    stopReason: row.stop_reason,
   };
 }
 

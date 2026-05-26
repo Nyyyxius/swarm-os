@@ -50,6 +50,8 @@ describe('Boot recovery', () => {
       hidden_at: null,
       last_error: null,
       stop_reason: null,
+      last_resumed_at: null,
+      resume_count: 0,
     });
     db1.upsertSession({
       id: 'sess-live',
@@ -107,6 +109,8 @@ describe('Boot recovery', () => {
       hidden_at: null,
       last_error: null,
       stop_reason: 'user',
+      last_resumed_at: null,
+      resume_count: 0,
     });
     db1.close();
 

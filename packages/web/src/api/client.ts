@@ -46,6 +46,14 @@ export interface OrchestratorView {
    * `status === 'failed'`) or `'stopped'` otherwise.
    */
   health: 'ok' | 'warn' | 'bad' | 'stopped';
+  /**
+   * Phase 8 — count of successful auto-resumes since this team's first
+   * boot. 0 means "never restarted"; >0 means the UI surfaces a
+   * "Resumed N×" chip so operators can spot restart loops.
+   */
+  resumeCount: number;
+  /** Phase 8 — ISO timestamp of the latest successful resume (or null). */
+  lastResumedAt: string | null;
 }
 
 export interface DiscordConnectorView {

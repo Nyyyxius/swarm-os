@@ -262,6 +262,11 @@ export function broadcast(
   const skipped: string[] = [];
   const now = Date.now();
 
+  // Phase 8 — collect first so we can write all DB rows in a single
+  // transaction (one fsync instead of N). Idle-signalling stays per-recipient
+  // since it touches the PTY, not the DB.
+  const batch: Array<{ to: string; msg: { from: string; content: string } }> = [];
+  const idleRecipients: Session[] = [];
   for (const s of deps.orchestrator.listSessions()) {
     if (s.id === fromSid) {
       skipped.push(s.id);
@@ -271,11 +276,13 @@ export function broadcast(
       skipped.push(s.id);
       continue;
     }
-    deps.mailbox.push(s.id, { from: fromSid, content });
-    if (isIdle(s, now, deps.defaults.idleThresholdMs)) {
-      injectSignal(s);
-    }
+    batch.push({ to: s.id, msg: { from: fromSid, content } });
+    if (isIdle(s, now, deps.defaults.idleThresholdMs)) idleRecipients.push(s);
     delivered.push(s.id);
+  }
+  if (batch.length > 0) {
+    deps.mailbox.pushBatch(batch);
+    for (const s of idleRecipients) injectSignal(s);
   }
 
   // Single event with `to: 'broadcast'` (update_system S2). We intentionally

@@ -57,12 +57,23 @@ export interface ServerHandle {
   close(): Promise<void>;
 }
 
+/**
+ * Phase 8 — shared boot-complete signal. `value` flips to true once the
+ * auto-resume sequence (resumeFromDb + rehydrateMailbox + janitor) has
+ * finished. While false, business routes return 503; health/info/static
+ * stay green so Docker healthchecks pass and the operator can load the UI.
+ */
+export interface BootGate {
+  value: boolean;
+}
+
 export function createApp(
   config: Config,
   spawner: Spawner,
   roleStore: RoleStore,
   aggregator: MessagesAggregator,
   busMetrics?: BusMetricsCollector,
+  bootGate?: BootGate,
 ): { app: express.Express } {
   const app = express();
   app.disable('x-powered-by');
@@ -137,6 +148,24 @@ export function createApp(
     log.warn({ event: 'http.no_web_bundle', note: 'dev mode — Vite serves the bundle on its own port' });
   }
 
+  // Phase 8 — bootGate: while auto-resume is rebuilding teams, business
+  // routes return 503 (health/info/static stay green). Mounted BEFORE the
+  // auth middleware so an operator polling `/orchestrators` during a
+  // restart gets a clean 503-Service-Unavailable instead of a half-loaded
+  // list (or a 401 if no token, which would be confusing).
+  if (bootGate) {
+    app.use((req, res, next) => {
+      if (bootGate.value) return next();
+      res
+        .status(503)
+        .set('Retry-After', '5')
+        .json({
+          error: 'BOOT_IN_PROGRESS',
+          message: 'auto-resume is still rebuilding teams; retry shortly',
+        });
+    });
+  }
+
   // Authenticated routes.
   const auth = makeAuthMiddleware(config.token);
   app.use(auth);
@@ -180,8 +209,9 @@ export function startServer(
   roleStore: RoleStore,
   aggregator: MessagesAggregator,
   busMetrics?: BusMetricsCollector,
+  bootGate?: BootGate,
 ): ServerHandle {
-  const { app } = createApp(config, spawner, roleStore, aggregator, busMetrics);
+  const { app } = createApp(config, spawner, roleStore, aggregator, busMetrics, bootGate);
   const http = createServer(app);
 
   const terminalHub = new TerminalHub(spawner);

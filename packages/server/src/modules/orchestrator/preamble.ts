@@ -70,6 +70,15 @@ export interface BuildPreambleInput {
    * mailbox-discipline language always survives.
    */
   customOverride?: string | null;
+  /**
+   * Phase 8 — auto-resume only. When the orchestrator is being respawned
+   * after a server restart, this block is appended at the very end of the
+   * preamble so the agent sees a defensive "## Server restart notice"
+   * (with a tail of the previous PTY log) right before its replayed
+   * initial prompt. Empty/null/undefined = no notice = normal first-spawn
+   * preamble.
+   */
+  resumeNotice?: string | null;
 }
 
 /**
@@ -89,9 +98,20 @@ export function buildPreamble(input: BuildPreambleInput): string {
     .replace(/\{\{orchName\}\}/g, input.identity.orchName);
 
   const override = input.customOverride?.trim();
-  if (!override) return filled;
+  let out = filled;
+  if (override) {
+    out = `${out}\n\n---\n\n## Project-specific instructions\n\n${override}\n`;
+  }
 
-  return `${filled}\n\n---\n\n## Project-specific instructions\n\n${override}\n`;
+  // Phase 8 — resume notice goes LAST so it sits just before the initial
+  // prompt the CLI receives via argv. Operators / agents see it first
+  // every time the team is auto-resumed.
+  const notice = input.resumeNotice?.trim();
+  if (notice) {
+    out = `${out}\n\n${notice}\n`;
+  }
+
+  return out;
 }
 
 /** Test-only — drop the cached defaults so a test can swap the files on disk. */

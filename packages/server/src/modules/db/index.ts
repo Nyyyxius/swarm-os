@@ -40,7 +40,11 @@ export type OrchestratorStatusRow =
   | 'running'
   | 'stopping'
   | 'stopped'
-  | 'failed';
+  | 'failed'
+  // Phase 8 — non-resumable status used by the atomic guard in loadResumableState():
+  // a row flipped to 'interrupted' just before respawn so that a crash mid-resume
+  // can't lead to a double-spawn at the next boot.
+  | 'interrupted';
 
 export type SessionStatusRow =
   | 'starting'
@@ -72,6 +76,26 @@ export interface OrchestratorRow {
   hidden_at: string | null;
   last_error: string | null;
   stop_reason: string | null;
+  // Phase 8 — auto-resume audit (visible in UI via OrchestratorView).
+  last_resumed_at: string | null;
+  resume_count: number;
+}
+
+/**
+ * Phase 8 — persisted mailbox row. Mirrors the in-memory Message struct,
+ * plus an `orchestrator_id` foreign key and a `delivered_at` lifecycle column.
+ */
+export interface MailboxMessageRow {
+  id: string;
+  orchestrator_id: string;
+  to_session_id: string;
+  from_id: string;
+  content: string;
+  ts: string;
+  from_orchestrator_id: string | null;
+  from_orchestrator_name: string | null;
+  from_session_name: string | null;
+  delivered_at: string | null;
 }
 
 /**
@@ -144,6 +168,16 @@ export class SwarmDb {
   private readonly getRoleStmt;
   private readonly listRolesStmt;
   private readonly deleteRoleStmt;
+  // Phase 8 — auto-resume + persisted mailbox.
+  private readonly markOrchInterruptedByIdStmt;
+  private readonly markSessionsInterruptedByOrchIdStmt;
+  private readonly listResumableOrchsStmt;
+  private readonly listStoppingOrchsStmt;
+  private readonly insertMessageStmt;
+  private readonly insertMessageOrIgnoreStmt;
+  private readonly selectPendingMessagesForOrchStmt;
+  private readonly deleteOldDeliveredMessagesStmt;
+  private readonly insertMessagesBatchFn;
 
   constructor(dataDir: string) {
     fs.mkdirSync(dataDir, { recursive: true });
@@ -157,11 +191,11 @@ export class SwarmDb {
       INSERT INTO orchestrators (
         id, name, role, role_id, status, lead_session_id, default_model, default_effort,
         default_permission_mode, lead_preamble, worker_preamble, created_at,
-        ended_at, hidden_at, last_error, stop_reason
+        ended_at, hidden_at, last_error, stop_reason, last_resumed_at, resume_count
       ) VALUES (
         @id, @name, @role, @role_id, @status, @lead_session_id, @default_model, @default_effort,
         @default_permission_mode, @lead_preamble, @worker_preamble, @created_at,
-        @ended_at, @hidden_at, @last_error, @stop_reason
+        @ended_at, @hidden_at, @last_error, @stop_reason, @last_resumed_at, @resume_count
       )
       ON CONFLICT(id) DO UPDATE SET
         name = excluded.name,
@@ -176,7 +210,9 @@ export class SwarmDb {
         worker_preamble = excluded.worker_preamble,
         ended_at = excluded.ended_at,
         last_error = excluded.last_error,
-        stop_reason = excluded.stop_reason
+        stop_reason = excluded.stop_reason,
+        last_resumed_at = excluded.last_resumed_at,
+        resume_count = excluded.resume_count
         -- hidden_at intentionally NOT overwritten: once hidden, stays hidden
     `);
 
@@ -243,21 +279,93 @@ export class SwarmDb {
       'UPDATE sessions SET hidden_at = ? WHERE orchestrator_id = ? AND hidden_at IS NULL',
     );
 
+    // Legacy/fallback path (SWARM_OS_AUTO_RESUME=false): mark every
+    // non-terminal orch + session as interrupted. Excludes rows already in
+    // `interrupted` so the atomic-guard flip in loadResumableState() isn't
+    // clobbered if both helpers run.
     this.markOrchInterruptedStmt = this.db.prepare(`
       UPDATE orchestrators
       SET status = 'failed',
           ended_at = ?,
-          stop_reason = 'server-restart',
+          stop_reason = COALESCE(stop_reason, 'server-restart'),
           last_error = COALESCE(last_error, 'server-restart')
-      WHERE status NOT IN ('stopped','failed')
+      WHERE status NOT IN ('stopped','failed','interrupted')
     `);
     this.markSessionInterruptedStmt = this.db.prepare(`
       UPDATE sessions
       SET status = 'interrupted',
           ended_at = ?,
-          stop_reason = 'server-restart'
+          stop_reason = COALESCE(stop_reason, 'server-restart')
       WHERE status NOT IN ('exited','killed','interrupted','failed')
     `);
+
+    // Phase 8 — atomic guard helpers. We flip a single orch row to
+    // `interrupted` BEFORE respawning it, so a crash mid-resume doesn't lead
+    // to a double-spawn at the next boot.
+    this.markOrchInterruptedByIdStmt = this.db.prepare<[string, string, string]>(`
+      UPDATE orchestrators
+      SET status = 'interrupted',
+          stop_reason = ?,
+          last_error = COALESCE(last_error, ?)
+      WHERE id = ? AND status NOT IN ('stopped','failed','interrupted')
+    `);
+    this.markSessionsInterruptedByOrchIdStmt = this.db.prepare<[string, string, string]>(`
+      UPDATE sessions
+      SET status = 'interrupted',
+          ended_at = ?,
+          stop_reason = ?
+      WHERE orchestrator_id = ?
+        AND status NOT IN ('exited','killed','interrupted','failed')
+    `);
+    // Resumable candidates: non-terminal, non-hidden orchestrators that the
+    // operator hasn't explicitly asked to stop.
+    this.listResumableOrchsStmt = this.db.prepare<[], OrchestratorRow>(`
+      SELECT * FROM orchestrators
+      WHERE status IN ('starting','running')
+        AND hidden_at IS NULL
+      ORDER BY created_at ASC
+    `);
+    this.listStoppingOrchsStmt = this.db.prepare<[], OrchestratorRow>(`
+      SELECT * FROM orchestrators
+      WHERE status = 'stopping' AND hidden_at IS NULL
+    `);
+
+    // Phase 8 — mailbox persistence statements.
+    this.insertMessageStmt = this.db.prepare<MailboxMessageRow>(`
+      INSERT INTO mailbox_messages (
+        id, orchestrator_id, to_session_id, from_id, content, ts,
+        from_orchestrator_id, from_orchestrator_name, from_session_name, delivered_at
+      ) VALUES (
+        @id, @orchestrator_id, @to_session_id, @from_id, @content, @ts,
+        @from_orchestrator_id, @from_orchestrator_name, @from_session_name, @delivered_at
+      )
+    `);
+    this.insertMessageOrIgnoreStmt = this.db.prepare<MailboxMessageRow>(`
+      INSERT OR IGNORE INTO mailbox_messages (
+        id, orchestrator_id, to_session_id, from_id, content, ts,
+        from_orchestrator_id, from_orchestrator_name, from_session_name, delivered_at
+      ) VALUES (
+        @id, @orchestrator_id, @to_session_id, @from_id, @content, @ts,
+        @from_orchestrator_id, @from_orchestrator_name, @from_session_name, @delivered_at
+      )
+    `);
+    this.selectPendingMessagesForOrchStmt = this.db.prepare<[string], MailboxMessageRow>(`
+      SELECT * FROM mailbox_messages
+      WHERE orchestrator_id = ? AND delivered_at IS NULL
+      ORDER BY ts ASC
+    `);
+    this.deleteOldDeliveredMessagesStmt = this.db.prepare<[string]>(`
+      DELETE FROM mailbox_messages
+      WHERE delivered_at IS NOT NULL AND delivered_at < ?
+    `);
+    // markMessagesDelivered uses a freshly-built statement per call (variadic
+    // IN clause) — better-sqlite3 doesn't support array-spread placeholders.
+
+    // Batch insert helper — wrapped in a transaction so a 50-recipient
+    // broadcast is one fsync instead of fifty (plan §F.2).
+    this.insertMessagesBatchFn = this.db.transaction((rows: MailboxMessageRow[]) => {
+      for (const row of rows) this.insertMessageStmt.run(row);
+    });
 
     this.insertRoleStmt = this.db.prepare<RoleRow>(`
       INSERT INTO roles (
@@ -306,6 +414,9 @@ export class SwarmDb {
       { table: 'orchestrators', column: 'role_id', ddl: 'ALTER TABLE orchestrators ADD COLUMN role_id TEXT' },
       { table: 'orchestrators', column: 'hidden_at', ddl: 'ALTER TABLE orchestrators ADD COLUMN hidden_at TEXT' },
       { table: 'sessions',      column: 'hidden_at', ddl: 'ALTER TABLE sessions ADD COLUMN hidden_at TEXT' },
+      // Phase 8 — auto-resume audit columns.
+      { table: 'orchestrators', column: 'last_resumed_at', ddl: 'ALTER TABLE orchestrators ADD COLUMN last_resumed_at TEXT' },
+      { table: 'orchestrators', column: 'resume_count', ddl: 'ALTER TABLE orchestrators ADD COLUMN resume_count INTEGER NOT NULL DEFAULT 0' },
     ];
     for (const a of additions) {
       try {
@@ -469,9 +580,11 @@ export class SwarmDb {
   }
 
   /**
-   * Mark every non-terminal orch/session as interrupted. Used at boot to
-   * record that the previous server restart wiped their PTYs (plan §6
-   * Phase 4 + §8). Returns the row counts for both tables.
+   * Mark every non-terminal orch/session as interrupted. Used at boot in the
+   * legacy `SWARM_OS_AUTO_RESUME=false` path to record that the previous
+   * server restart wiped their PTYs (plan §6 Phase 4 + §8). Rows already in
+   * 'interrupted' state (flipped earlier by the atomic guard in
+   * `loadResumableState`) are intentionally left alone.
    */
   markAllNonTerminalAsInterrupted(): { orchestrators: number; sessions: number } {
     const now = new Date().toISOString();
@@ -490,6 +603,170 @@ export class SwarmDb {
       });
     }
     return { orchestrators: orchs, sessions };
+  }
+
+  /**
+   * Phase 8 — atomic guard for a single orchestrator. Flips its status to
+   * 'interrupted' with the given `stopReason`. Also marks all of its
+   * non-terminal sessions as 'interrupted'. Runs in a single transaction so
+   * a crash between the two UPDATEs cannot leave the pair inconsistent.
+   *
+   * Used by `loadResumableState`: rows are flipped to 'interrupted'
+   * BEFORE the spawner attempts to respawn them. If the resume succeeds,
+   * `orch.resume()` UPSERTs the row back to 'running'. If the process dies
+   * mid-resume, the next boot finds 'interrupted' (not resumable) — no
+   * double-spawn.
+   *
+   * @returns true if the orchestrator row was actually flipped.
+   */
+  markOrchAndSessionsInterrupted(orchId: string, stopReason: string): boolean {
+    try {
+      const now = new Date().toISOString();
+      let flipped = false;
+      this.db.transaction(() => {
+        const oRes = this.markOrchInterruptedByIdStmt.run(stopReason, stopReason, orchId);
+        flipped = oRes.changes > 0;
+        this.markSessionsInterruptedByOrchIdStmt.run(now, stopReason, orchId);
+      })();
+      return flipped;
+    } catch (err) {
+      log.warn({
+        event: 'db.write_failed',
+        op: 'markOrchAndSessionsInterrupted',
+        orchId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+  }
+
+  /** Phase 8 — list orch rows in resumable status (starting|running). */
+  listResumableOrchestrators(): OrchestratorRow[] {
+    try {
+      return this.listResumableOrchsStmt.all();
+    } catch (err) {
+      log.warn({ event: 'db.read_failed', op: 'listResumableOrchestrators', error: String(err) });
+      return [];
+    }
+  }
+
+  /** Phase 8 — list orch rows in 'stopping' status (reaped, not resumed). */
+  listStoppingOrchestrators(): OrchestratorRow[] {
+    try {
+      return this.listStoppingOrchsStmt.all();
+    } catch (err) {
+      log.warn({ event: 'db.read_failed', op: 'listStoppingOrchestrators', error: String(err) });
+      return [];
+    }
+  }
+
+  // --- Phase 8: Mailbox persistence -------------------------------------
+
+  /**
+   * INSERT a single mailbox message. Throws on PK collision (a bug elsewhere
+   * — silent IGNORE would mask the issue; see plan §F.3 for the rationale).
+   * The rehydrate path uses `insertMessageOrIgnore` instead.
+   */
+  insertMailboxMessage(row: MailboxMessageRow): void {
+    try {
+      this.insertMessageStmt.run(row);
+    } catch (err) {
+      log.warn({
+        event: 'db.write_failed',
+        op: 'insertMailboxMessage',
+        msgId: row.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Batch INSERT wrapped in a transaction. One fsync for the whole batch
+   * (better-sqlite3 `db.transaction`), avoiding the N-fsyncs blow-up of a
+   * 50-recipient broadcast.
+   */
+  insertMailboxMessagesBatch(rows: MailboxMessageRow[]): void {
+    if (rows.length === 0) return;
+    try {
+      this.insertMessagesBatchFn(rows);
+    } catch (err) {
+      log.warn({
+        event: 'db.write_failed',
+        op: 'insertMailboxMessagesBatch',
+        count: rows.length,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /** Defensive INSERT OR IGNORE — used only if a row needs to be re-inserted idempotently. */
+  insertMailboxMessageOrIgnore(row: MailboxMessageRow): void {
+    try {
+      this.insertMessageOrIgnoreStmt.run(row);
+    } catch (err) {
+      log.warn({
+        event: 'db.write_failed',
+        op: 'insertMailboxMessageOrIgnore',
+        msgId: row.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Mark a set of messages as delivered (`delivered_at = now`). Variadic IN
+   * clause built per-call since better-sqlite3 doesn't spread arrays into
+   * placeholders.
+   */
+  markMailboxMessagesDelivered(ids: string[]): void {
+    if (ids.length === 0) return;
+    try {
+      const placeholders = ids.map(() => '?').join(',');
+      const stmt = this.db.prepare(
+        `UPDATE mailbox_messages SET delivered_at = ? WHERE id IN (${placeholders})`,
+      );
+      stmt.run(new Date().toISOString(), ...ids);
+    } catch (err) {
+      log.warn({
+        event: 'db.write_failed',
+        op: 'markMailboxMessagesDelivered',
+        count: ids.length,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /** Pending (delivered_at IS NULL) messages for one orch, sorted by ts ASC. */
+  selectPendingMailboxMessagesForOrch(orchId: string): MailboxMessageRow[] {
+    try {
+      return this.selectPendingMessagesForOrchStmt.all(orchId);
+    } catch (err) {
+      log.warn({
+        event: 'db.read_failed',
+        op: 'selectPendingMailboxMessagesForOrch',
+        orchId,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return [];
+    }
+  }
+
+  /**
+   * GC: delete delivered messages older than the given ISO threshold.
+   * Returns the number of rows removed. Called once at boot.
+   */
+  deleteOldDeliveredMailboxMessages(olderThanIso: string): number {
+    try {
+      const res = this.deleteOldDeliveredMessagesStmt.run(olderThanIso);
+      return res.changes;
+    } catch (err) {
+      log.warn({
+        event: 'db.write_failed',
+        op: 'deleteOldDeliveredMailboxMessages',
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return 0;
+    }
   }
 
   // --- Roles -------------------------------------------------------------
@@ -596,7 +873,9 @@ CREATE TABLE IF NOT EXISTS orchestrators (
   ended_at TEXT,
   hidden_at TEXT,
   last_error TEXT,
-  stop_reason TEXT
+  stop_reason TEXT,
+  last_resumed_at TEXT,
+  resume_count INTEGER NOT NULL DEFAULT 0
 );
 
 CREATE INDEX IF NOT EXISTS idx_orchestrators_status ON orchestrators(status);
@@ -645,4 +924,21 @@ CREATE TABLE IF NOT EXISTS sessions (
 CREATE INDEX IF NOT EXISTS idx_sessions_orch ON sessions(orchestrator_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
 CREATE INDEX IF NOT EXISTS idx_sessions_ended_at ON sessions(ended_at);
+
+CREATE TABLE IF NOT EXISTS mailbox_messages (
+  id TEXT PRIMARY KEY,
+  orchestrator_id TEXT NOT NULL,
+  to_session_id TEXT NOT NULL,
+  from_id TEXT NOT NULL,
+  content TEXT NOT NULL,
+  ts TEXT NOT NULL,
+  from_orchestrator_id TEXT,
+  from_orchestrator_name TEXT,
+  from_session_name TEXT,
+  delivered_at TEXT,
+  FOREIGN KEY (orchestrator_id) REFERENCES orchestrators(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_mailbox_pending_by_orch
+  ON mailbox_messages(orchestrator_id, delivered_at, ts)
+  WHERE delivered_at IS NULL;
 `;

@@ -46,6 +46,9 @@ export function buildRightPanelTeam(
     leadPreamble: orch.leadPreamble,
     workerPreamble: orch.workerPreamble,
     discordWebhook,
+    // Phase 8 — surface auto-resume audit for the "RESUMED N×" chip.
+    resumeCount: orch.resumeCount,
+    lastResumedAt: orch.lastResumedAt,
   };
 }
 

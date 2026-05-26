@@ -108,6 +108,7 @@ RUN apt-get update \
       python3 \
       git \
       ca-certificates \
+      openssh-client \
  && rm -rf /var/lib/apt/lists/*
 
 # Claude Code CLI — pinned to the version validated by the spike (§Phase 0 bis,

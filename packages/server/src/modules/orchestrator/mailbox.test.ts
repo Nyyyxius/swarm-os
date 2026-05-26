@@ -88,6 +88,46 @@ describe('Mailbox.peek', () => {
   });
 });
 
+describe('Mailbox.pushBatch (Phase 8 broadcast batching)', () => {
+  it('returns a PushResult per item in input order', () => {
+    const m = new Mailbox();
+    const results = m.pushBatch([
+      { to: 'a', msg: { from: 's', content: '1' } },
+      { to: 'b', msg: { from: 's', content: '2' } },
+      { to: 'a', msg: { from: 's', content: '3' } },
+    ]);
+    expect(results).toHaveLength(3);
+    expect(results[0]?.queueSize).toBe(1);
+    expect(results[1]?.queueSize).toBe(1);
+    expect(results[2]?.queueSize).toBe(2);
+    expect(m.messagesTotal).toBe(3);
+  });
+
+  it('routes a batch persist call to the persist hook', () => {
+    const writes: Array<{ to: string; id: string }> = [];
+    let batchCallCount = 0;
+    const m = new Mailbox({
+      persist: {
+        writeMessage: () => {
+          /* never called when pushBatch is used */
+        },
+        writeMessagesBatch: (items) => {
+          batchCallCount++;
+          for (const it of items) writes.push({ to: it.to, id: it.msg.id });
+        },
+        markDelivered: () => undefined,
+      },
+    });
+    m.pushBatch([
+      { to: 'a', msg: { from: 's', content: '1' } },
+      { to: 'b', msg: { from: 's', content: '2' } },
+    ]);
+    expect(batchCallCount).toBe(1);
+    expect(writes).toHaveLength(2);
+    expect(writes.map((w) => w.to).sort()).toEqual(['a', 'b']);
+  });
+});
+
 describe('Mailbox.removeSession / clearAll', () => {
   it('removeSession drops one queue', () => {
     const m = new Mailbox();
@@ -171,6 +211,21 @@ describe('Mailbox.messagesTotal', () => {
     m.push('a', { from: 's', content: '2' });
     m.removeSession('a');
     expect(m.messagesTotal).toBe(2);
+  });
+
+  /**
+   * Phase 8 — `push({silent:true})` is used by rehydrateMailbox to reload
+   * already-persisted messages without polluting the counter (which is
+   * documented as "in-memory only, restarts at 0"). Without this flag a
+   * restart would manifest as a fake throughput spike on /metrics/bus.
+   */
+  it('does NOT bump messagesTotal when push opts.silent is true', () => {
+    const m = new Mailbox();
+    m.push('a', { from: 's', content: '1' }, { silent: true });
+    m.push('a', { from: 's', content: '2' }, { silent: true });
+    expect(m.messagesTotal).toBe(0);
+    // The message is still in the queue.
+    expect(m.size('a')).toBe(2);
   });
 
   it('is unaffected by clearAll()', () => {

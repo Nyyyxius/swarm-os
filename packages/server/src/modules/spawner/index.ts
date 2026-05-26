@@ -1,14 +1,15 @@
 import { Orchestrator, WorkerCapError, type OrchestratorInit, type StartOptions } from '../orchestrator/index.js';
 import { eventBus } from '../../events.js';
 import { withModule } from '../../logger.js';
-import type { Config } from '../../config.js';
+import type { Config, EffortLevel, PermissionMode } from '../../config.js';
 import type { Session } from '../orchestrator/session.js';
 import type { Notifier } from '../notify/index.js';
 import { DiscordWebhookNotifier } from '../notify/discord.js';
-import type { Persistence } from '../orchestrator/persistence.js';
+import type { Persistence, ResumableState } from '../orchestrator/persistence.js';
 import { NoOpNotifier } from '../notify/null.js';
 import { NoOpPersistence } from '../orchestrator/persistence.js';
 import type { RoleStore, Role } from '../roles/index.js';
+import type { SessionRow } from '../db/index.js';
 
 const log = withModule('spawner');
 
@@ -286,4 +287,130 @@ export class Spawner {
     }
     return null;
   }
+
+  /**
+   * Phase 8 — auto-resume entrypoint. Replays the `resumable[]` list from
+   * `Persistence.loadResumableState()` to rebuild each team's
+   * `Orchestrator` + Session PTYs with stable ids. The DB rows were already
+   * flipped to 'interrupted' by the atomic guard upstream; a successful
+   * `Orchestrator.resume()` UPSERTs them back to 'running'.
+   *
+   * Behaviour notes:
+   *   - `maxOrchestrators` is NOT enforced — we honour what was running
+   *     before the restart even if the cap has since been lowered. The cap
+   *     still applies to future `create()` calls. A soft warn is logged
+   *     when the cap is exceeded so operators notice.
+   *   - Per-orch try/catch: one bad cwd / model can't break the rest.
+   *   - `staggerMs` is honoured both between orchs AND between worker
+   *     spawns inside an orch (see Orchestrator.resume), avoiding a 60-way
+   *     contention on `/data/.claude-runtime`.
+   */
+  async resumeFromDb(
+    rows: ResumableState['resumable'],
+    opts: { staggerMs?: number } = {},
+  ): Promise<{ resumed: number; failed: Array<{ id: string; error: string }> }> {
+    const staggerMs = opts.staggerMs ?? this.config.resumeStaggerMs ?? 0;
+    let resumed = 0;
+    const failed: Array<{ id: string; error: string }> = [];
+
+    for (let i = 0; i < rows.length; i++) {
+      const item = rows[i];
+      if (!item) continue;
+      const { orch: row, sessions } = item;
+
+      // Soft cap: warn if we're going over `maxOrchestrators` but DO bring
+      // the orch back up. Restoring fewer teams than were running before
+      // surprises the operator more than a soft cap warning.
+      if (this.orchestrators.size >= this.config.maxOrchestrators) {
+        log.warn({
+          event: 'resume.cap_exceeded',
+          orchId: row.id,
+          cap: this.config.maxOrchestrators,
+          inFlight: this.orchestrators.size,
+        });
+      }
+
+      // Find the lead session row — every orchestrator has at most one
+      // lead (type='lead'). Workers are everything else.
+      const leadRow = sessions.find((s: SessionRow) => s.type === 'lead');
+      const workerRows = sessions.filter((s: SessionRow) => s.type === 'worker');
+      if (!leadRow) {
+        failed.push({ id: row.id, error: 'no lead session row in DB — cannot resume' });
+        continue;
+      }
+
+      // Build a fresh OrchestratorInit from the persisted row so the
+      // constructor has everything it needs (including the preserved id,
+      // createdAt, and resumeCount).
+      const init: OrchestratorInit = {
+        id: row.id,
+        createdAt: row.created_at,
+        resumeCount: row.resume_count,
+        name: row.name,
+        role: row.role,
+        roleId: row.role_id,
+        defaultModel: row.default_model,
+        defaultEffort: row.default_effort as EffortLevel,
+        defaultPermissionMode: row.default_permission_mode as PermissionMode,
+        leadPreamble: row.lead_preamble,
+        workerPreamble: row.worker_preamble,
+        lead: {
+          cwd: leadRow.cwd,
+          prompt: leadRow.initial_prompt ?? '',
+          preamble: row.lead_preamble,
+        },
+      };
+
+      const role = row.role_id && this.roleStore ? this.roleStore.get(row.role_id) : null;
+      const effectiveNotifier = this.notifierFor(role);
+      const orch = new Orchestrator(init, this.config, {
+        notifier: effectiveNotifier,
+        persistence: this.persistence,
+        onHideRequested: (id) => this.hideOrchestrator(id),
+      });
+      this.orchestrators.set(orch.id, orch);
+
+      try {
+        await orch.resume({ leadRow, workerRows, staggerMs });
+        resumed++;
+        eventBus.emitEvent({
+          kind: 'orchestrator.created',
+          orchestratorId: orch.id,
+          payload: orch.toView(),
+        });
+        log.info({
+          event: 'resume.orch_ok',
+          orchId: orch.id,
+          name: orch.name,
+          workerCount: workerRows.length,
+        });
+      } catch (err) {
+        const errMsg = err instanceof Error ? err.message : String(err);
+        failed.push({ id: row.id, error: errMsg });
+        // Drop the half-resumed orchestrator from the live map so the next
+        // create() doesn't fail on cap. The DB row stays 'interrupted'
+        // courtesy of the atomic guard — operator can manually retry later.
+        this.orchestrators.delete(orch.id);
+        log.warn({
+          event: 'resume.orch_failed',
+          orchId: orch.id,
+          name: row.name,
+          error: errMsg,
+        });
+      }
+
+      // Inter-orch stagger so 10 leads + 50 workers don't all race for
+      // `/data/.claude-runtime` and claude-cli startup at once.
+      if (staggerMs > 0 && i < rows.length - 1) {
+        await new Promise((resolve) => setTimeout(resolve, staggerMs));
+      }
+    }
+
+    return { resumed, failed };
+  }
 }
+
+// Re-export for callers that don't want to import from persistence directly.
+export type { ResumableState } from '../orchestrator/persistence.js';
+// Re-export so server/index.ts can pass it down without a separate import.
+export type { SessionRow } from '../db/index.js';

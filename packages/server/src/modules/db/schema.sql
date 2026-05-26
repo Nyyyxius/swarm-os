@@ -18,7 +18,7 @@ CREATE TABLE IF NOT EXISTS orchestrators (
   name TEXT NOT NULL,
   role TEXT NOT NULL,
   role_id TEXT,                         -- nullable FK to roles.id (denormalized: label stays in `role`)
-  status TEXT NOT NULL,                 -- starting|running|stopping|stopped|failed
+  status TEXT NOT NULL,                 -- starting|running|stopping|stopped|failed|interrupted
   lead_session_id TEXT,
   default_model TEXT NOT NULL,
   default_effort TEXT NOT NULL,
@@ -29,7 +29,9 @@ CREATE TABLE IF NOT EXISTS orchestrators (
   ended_at TEXT,                        -- ISO, nullable
   hidden_at TEXT,                       -- ISO, nullable: soft-delete from the map
   last_error TEXT,
-  stop_reason TEXT
+  stop_reason TEXT,
+  last_resumed_at TEXT,                 -- ISO, nullable: last time auto-resume rebuilt this orch
+  resume_count INTEGER NOT NULL DEFAULT 0  -- monotonic, incremented on every successful resume
 );
 
 CREATE INDEX IF NOT EXISTS idx_orchestrators_status ON orchestrators(status);
@@ -89,3 +91,27 @@ CREATE INDEX IF NOT EXISTS idx_sessions_orch ON sessions(orchestrator_id);
 CREATE INDEX IF NOT EXISTS idx_sessions_status ON sessions(status);
 CREATE INDEX IF NOT EXISTS idx_sessions_ended_at ON sessions(ended_at);
 -- idx_sessions_hidden_at: see comment on idx_orchestrators_hidden_at above.
+
+-- Phase 8 — mailbox persistence (auto-resume foundation).
+-- The in-memory mailbox now write-through to this table so that messages
+-- queued at restart time survive and get rehydrated on the next boot.
+-- `delivered_at` NULL = pending; set when the recipient drains via read_inbox
+-- (stamped after MCP response flush, not on Mailbox.read() — see plan §F.1).
+CREATE TABLE IF NOT EXISTS mailbox_messages (
+  id TEXT PRIMARY KEY,                  -- UUID v4 minted by Mailbox.push
+  orchestrator_id TEXT NOT NULL,
+  to_session_id TEXT NOT NULL,
+  from_id TEXT NOT NULL,                -- session id | 'system' | 'human'
+  content TEXT NOT NULL,
+  ts TEXT NOT NULL,                     -- ISO 8601
+  from_orchestrator_id TEXT,            -- cross-team only
+  from_orchestrator_name TEXT,
+  from_session_name TEXT,
+  delivered_at TEXT,                    -- NULL = pending, ISO when delivered
+  FOREIGN KEY (orchestrator_id) REFERENCES orchestrators(id) ON DELETE CASCADE
+);
+-- Partial index scoped on the typical rehydrate query
+-- (WHERE orchestrator_id=? AND delivered_at IS NULL ORDER BY ts).
+CREATE INDEX IF NOT EXISTS idx_mailbox_pending_by_orch
+  ON mailbox_messages(orchestrator_id, delivered_at, ts)
+  WHERE delivered_at IS NULL;

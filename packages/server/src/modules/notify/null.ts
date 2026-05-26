@@ -12,7 +12,10 @@ import type { Notifier, NotificationInput } from './index.js';
 const log = withModule('notify');
 
 export class NoOpNotifier implements Notifier {
+  muteUntil: number | undefined = undefined;
+
   async notify(input: NotificationInput): Promise<void> {
+    if (this.muteUntil !== undefined && Date.now() < this.muteUntil) return;
     log.info({
       event: 'notify.noop',
       kind: input.kind,

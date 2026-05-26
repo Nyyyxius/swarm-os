@@ -7,12 +7,41 @@ import {
   type AgentExitInfo,
   type Disposable,
   PtyAgentProcess,
+  SshAgentProcess,
 } from './agent-process.js';
 import { writeSessionMcpConfig, removeSessionMcpConfig } from './mcp-config.js';
 import { eventBus } from '../../events.js';
 import { withModule } from '../../logger.js';
 import type { EffortLevel, PermissionMode } from '../../config.js';
 import { refreshClaudeSharedFiles } from '../../runtime/claude-init.js';
+import { toHostPath as toHostPathHelper } from './path-translate.js';
+
+/**
+ * SSH transport bundle passed to a Session. When set, the session opens
+ * `ssh -tt <sshTarget>` and runs the host's claude binary instead of the
+ * container's. See `SshAgentProcess` for the runtime semantics.
+ *
+ * `hostDataDir` is needed for two things: (1) translating
+ * `<claudeRuntimeDir>/sessions/<id>/` (a container path) into a host path for
+ * `CLAUDE_CONFIG_DIR`; (2) same for the per-session `--mcp-config=<path>`.
+ * `hostClaudeDir` is where the per-session symlinks point (the host's real
+ * `~/.claude/.credentials.json`, etc.).
+ */
+export interface SessionSshTransport {
+  sshTarget: string;
+  sshKey: string;
+  sshPort: number;
+  /** Container's `dataDir` (e.g. `/data`) — used for the path-translate. */
+  dataDir: string;
+  /** Host-side path matching `dataDir`. */
+  hostDataDir: string;
+  /** Host-side `~/.claude` path the symlinks point at. */
+  hostClaudeDir: string;
+  /** Container's `workspaceRoot` (e.g. `/workspace`). */
+  workspaceRoot: string;
+  /** Host-side path matching `workspaceRoot`. */
+  hostWorkspaceRoot: string;
+}
 
 const log = withModule('session');
 
@@ -37,6 +66,13 @@ export interface SessionInit {
    * into the preamble before constructing the Session.
    */
   id?: string;
+  /**
+   * Phase 8 — auto-resume only. When provided, reuse this ISO timestamp
+   * for `startedAt` so the historical session age survives the restart.
+   * Without it, a respawn would write `now()` and overwrite the original
+   * value in the next UPSERT.
+   */
+  startedAt?: string;
   orchestratorId: string;
   name: string;
   role: string;
@@ -98,6 +134,14 @@ export interface SessionInit {
   claudeSourceDir?: string;
   /** Optional explicit override for the `.claude.json` source path. */
   claudeJsonSource?: string | null;
+  /**
+   * SSH transport bundle. When provided, the session spawns `claude` on the
+   * remote host via `ssh -tt` instead of locally via `node-pty`. Required
+   * paths inside the session (CLAUDE_CONFIG_DIR, --mcp-config, symlink
+   * targets) are translated to host paths via this bundle. When omitted,
+   * the session uses the local `PtyAgentProcess` (default).
+   */
+  sshTransport?: SessionSshTransport | null;
 }
 
 export interface SessionView {
@@ -199,6 +243,7 @@ export class Session extends EventEmitter {
 
   private readonly mcpRuntimeDir: string;
   private mcpConfigPath: string | null = null;
+  private readonly sshTransport: SessionSshTransport | null;
 
   private agent: AgentProcess | null = null;
   private logStream: fs.WriteStream | null = null;
@@ -238,10 +283,14 @@ export class Session extends EventEmitter {
     this.model = init.model;
     this.effort = init.effort;
     this.permissionMode = init.permissionMode;
-    this.startedAt = new Date().toISOString();
+    // Phase 8: reuse the persisted ISO timestamp on auto-resume; mint a
+    // fresh one on first spawn. Without this, the next UPSERT would
+    // overwrite the original startedAt with the boot time.
+    this.startedAt = init.startedAt ?? new Date().toISOString();
     this._lastActivityAt = this.startedAt;
     this._idleSince = Date.now();
     this.mcpRuntimeDir = init.mcpRuntimeDir;
+    this.sshTransport = init.sshTransport ?? null;
     this._onStateChange = init.onStateChange ?? null;
 
     const orchLogDir = path.join(init.logsDir, this.orchestratorId);
@@ -289,7 +338,11 @@ export class Session extends EventEmitter {
       // this, every team created after a host token rotation would inherit
       // a stale runtime `.credentials.json` and the PTY would land on the
       // interactive `/login` prompt.
-      if (init.claudeSourceDir) {
+      //
+      // SSH transport: the container never reads or copies host credentials —
+      // the host claude resolves its own `~/.claude/.credentials.json`
+      // directly via the per-session symlink. Skip the refresh entirely.
+      if (init.claudeSourceDir && !this.sshTransport) {
         try {
           const refresh = refreshClaudeSharedFiles({
             sourceDir: init.claudeSourceDir,
@@ -323,7 +376,20 @@ export class Session extends EventEmitter {
       // pass (which is now scoped to skip `.claude.json`) and BEFORE any
       // settings.json write so the dialog state is in place before the
       // claude CLI reads it.
-      this._seedClaudeJsonTrust(cfgDir, init.claudeConfigRoot);
+      //
+      // SSH mode: the container-side `<runtimeDir>/.claude.json` is never
+      // populated (claude-init is a no-op). Read the host's `.claude.json`
+      // directly through the RO source mount (`init.claudeJsonSource`,
+      // typically `/claude-source.json`, or `<sourceDir>.json` as fallback)
+      // so onboarding / userID / theme survive.
+      const sshJsonFallback =
+        init.claudeSourceDir && init.claudeSourceDir.length > 0
+          ? `${init.claudeSourceDir}.json`
+          : null;
+      const claudeJsonSrc = this.sshTransport
+        ? init.claudeJsonSource ?? sshJsonFallback
+        : path.join(init.claudeConfigRoot, '.claude.json');
+      this._seedClaudeJsonTrust(cfgDir, claudeJsonSrc);
       // Build the hook command. Claude streams the JSON event on stdin per
       // the spike H6 confirmation. We pipe stdin into jq if present; if not,
       // we fall back to a minimal awk-based pass-through. Practically:
@@ -410,6 +476,15 @@ export class Session extends EventEmitter {
    * land directly in the session dir — no shared corruption.
    */
   private _linkSharedClaudeState(runtimeDir: string, cfgDir: string): void {
+    // SSH transport: symlink targets must be HOST paths so the remote claude
+    // resolves them in its own namespace. We cannot stat the target from the
+    // container side (the host `~/.claude/` is not mounted RW in SSH mode);
+    // create the links best-effort and let claude silently skip missing
+    // entries on the host.
+    if (this.sshTransport) {
+      this._linkSharedClaudeStateSsh(cfgDir);
+      return;
+    }
     // Spike H7 inventory: ~/.claude has these RW children. We deliberately
     // include `settings.json` even though we override it below — if the
     // user's host settings are present, they'll be referenced via this
@@ -481,6 +556,57 @@ export class Session extends EventEmitter {
   }
 
   /**
+   * SSH-mode variant of `_linkSharedClaudeState`. Symlink targets point at the
+   * host's real `~/.claude/<entry>` paths. No existence check is possible from
+   * the container side (host `~/.claude` isn't mounted RW in SSH mode), so we
+   * write the symlinks unconditionally — the remote claude resolves them in
+   * its own namespace and ignores missing entries.
+   */
+  private _linkSharedClaudeStateSsh(cfgDir: string): void {
+    if (!this.sshTransport) return;
+    const hostClaudeDir = this.sshTransport.hostClaudeDir;
+    const SHARED_ENTRIES = [
+      '.credentials.json',
+      '.last-cleanup',
+      'backups',
+      'cache',
+      'debug',
+      'file-history',
+      'history.jsonl',
+      'mcp-needs-auth-cache.json',
+      'paste-cache',
+      'plans',
+      'plugins',
+      'projects',
+      'session-env',
+      'shell-snapshots',
+      'tasks',
+      'telemetry',
+      'todos',
+    ];
+    for (const name of SHARED_ENTRIES) {
+      const target = path.join(hostClaudeDir, name);
+      const linkPath = path.join(cfgDir, name);
+      try {
+        try {
+          fs.unlinkSync(linkPath);
+        } catch {
+          /* didn't exist — fine */
+        }
+        fs.symlinkSync(target, linkPath);
+      } catch (err) {
+        log.warn({
+          event: 'session.shared_link_ssh_failed',
+          sessionId: this.id,
+          entry: name,
+          target,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+  }
+
+  /**
    * Pre-accept the trust dialog and project-onboarding prompts for this
    * session's `cwd` by writing a per-session `.claude.json` under
    * `<cfgDir>/.claude.json`. Without this, the claude CLI opens the
@@ -499,13 +625,23 @@ export class Session extends EventEmitter {
    *     etc.) leaking across sessions through the shared file.
    *   - Avoids racing with concurrent spawns also mutating the same path.
    */
-  private _seedClaudeJsonTrust(cfgDir: string, runtimeDir: string): void {
+  private _seedClaudeJsonTrust(cfgDir: string, claudeJsonSrc: string | null): void {
     const dest = path.join(cfgDir, '.claude.json');
-    const src = path.join(runtimeDir, '.claude.json');
+    // Projects in `~/.claude.json` are keyed by absolute path. In SSH mode the
+    // remote claude resolves the cwd as a host path; the trust entry must use
+    // the same key or claude re-opens the trust dialog.
+    const projectKey = this.sshTransport
+      ? toHostPathHelper({
+          containerPath: this.cwd,
+          dataDir: this.sshTransport.workspaceRoot,
+          hostDataDir: this.sshTransport.hostWorkspaceRoot,
+        })
+      : this.cwd;
 
     let base: Record<string, unknown>;
     try {
-      const raw = fs.readFileSync(src, 'utf8');
+      if (!claudeJsonSrc) throw new Error('no .claude.json source path');
+      const raw = fs.readFileSync(claudeJsonSrc, 'utf8');
       const parsed: unknown = JSON.parse(raw);
       base =
         parsed && typeof parsed === 'object' && !Array.isArray(parsed)
@@ -533,7 +669,7 @@ export class Session extends EventEmitter {
       projectsRaw && typeof projectsRaw === 'object' && !Array.isArray(projectsRaw)
         ? (projectsRaw as Record<string, Record<string, unknown>>)
         : {};
-    const existing = projects[this.cwd];
+    const existing = projects[projectKey];
     const cwdEntry: Record<string, unknown> =
       existing && typeof existing === 'object' && !Array.isArray(existing)
         ? { ...existing }
@@ -550,7 +686,7 @@ export class Session extends EventEmitter {
       cwdEntry.enabledMcpjsonServers = [];
       cwdEntry.disabledMcpjsonServers = [];
     }
-    projects[this.cwd] = cwdEntry;
+    projects[projectKey] = cwdEntry;
     base.projects = projects;
 
     // Remove any pre-existing entry at `dest` (typically nothing now that
@@ -881,6 +1017,57 @@ export class Session extends EventEmitter {
     try {
       if (init.agentProcessOverride) {
         agent = init.agentProcessOverride;
+      } else if (this.sshTransport) {
+        // SSH transport: spawn claude on the host VM. The container-side
+        // CLAUDE_CONFIG_DIR + mcp.json + cwd all live under bind mounts; the
+        // host sees them at different paths. Translate before handing off.
+        const t = this.sshTransport;
+        const hostCfgDir = this._claudeConfigDir
+          ? toHostPathHelper({
+              containerPath: this._claudeConfigDir,
+              dataDir: t.dataDir,
+              hostDataDir: t.hostDataDir,
+            })
+          : null;
+        const hostMcp = this.mcpConfigPath
+          ? toHostPathHelper({
+              containerPath: this.mcpConfigPath,
+              dataDir: t.dataDir,
+              hostDataDir: t.hostDataDir,
+            })
+          : null;
+        // cwd is validated against workspaceRoot at API ingress (so always
+        // starts with `<workspaceRoot>/` or equals it). Translate to host.
+        const hostCwd = toHostPathHelper({
+          containerPath: this.cwd,
+          dataDir: t.workspaceRoot,
+          hostDataDir: t.hostWorkspaceRoot,
+        });
+        const args = buildClaudeArgs({
+          model: this.model,
+          effort: this.effort,
+          permissionMode: this.permissionMode,
+          initialPrompt: this.initialPrompt,
+          preamble: init.preamble,
+          mcpConfigPath: hostMcp,
+        });
+        const remoteEnv: Record<string, string> = {};
+        if (hostCfgDir) remoteEnv.CLAUDE_CONFIG_DIR = hostCfgDir;
+        agent = new SshAgentProcess({
+          sshTarget: t.sshTarget,
+          sshKey: t.sshKey,
+          sshPort: t.sshPort,
+          remoteCwd: hostCwd,
+          remoteEnv,
+          remoteCommand: init.claudeBin ?? 'claude',
+          args,
+          // The remote claude reads `--mcp-config=<url to http://127.0.0.1:mcpPort>`.
+          // The container's MCP listens on loopback only (plan §14), so set
+          // up an SSH reverse tunnel so the host's 127.0.0.1:mcpPort routes
+          // back into the container's namespace. Skipped when mcp isn't
+          // wired (mcpPort=0 / test paths).
+          reverseTunnelPort: init.mcpPort > 0 ? init.mcpPort : 0,
+        });
       } else {
         const args = buildClaudeArgs({
           model: this.model,

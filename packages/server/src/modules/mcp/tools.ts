@@ -319,6 +319,22 @@ export function registerTeamCommsTools(
         },
         ctx.session.id,
       );
+      // Phase 8 — stamp delivered in SQLite so the next boot's rehydrate
+      // doesn't re-emit these messages. We do this synchronously here (not
+      // inside Mailbox.read) so the markDelivered call sits AFTER the
+      // agent has effectively received the message in this turn. The
+      // window between flush and stamp is sub-millisecond in practice;
+      // a process death inside that window would re-deliver a few
+      // messages at next boot (acceptable at-least-once trade-off).
+      if (raw.length > 0) {
+        try {
+          ctx.orchestrator.persistence.db.markMailboxMessagesDelivered(
+            raw.map((m) => m.id),
+          );
+        } catch {
+          /* best-effort — db.write_failed already logged inside */
+        }
+      }
       const messages = raw.map((m) => ({
         id: m.id,
         from: m.from,

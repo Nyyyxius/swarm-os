@@ -151,7 +151,23 @@ export class DiscordWebhookNotifier implements Notifier {
     return { embeds: [embed] };
   }
 
+  /**
+   * Phase 8 — mute window. When set to a future epoch ms, notify() returns
+   * immediately. Used by the boot sequence to dampen the post-resume storm.
+   */
+  muteUntil: number | undefined = undefined;
+
   async notify(input: NotificationInput): Promise<void> {
+    if (this.muteUntil !== undefined && Date.now() < this.muteUntil) {
+      log.info({
+        event: 'notify.discord.muted',
+        kind: input.kind,
+        orchId: input.orchestrator.id,
+        sessionId: input.session?.id,
+        remainsMs: this.muteUntil - Date.now(),
+      });
+      return;
+    }
     const payload = this.buildPayload(input);
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), this.timeoutMs);
