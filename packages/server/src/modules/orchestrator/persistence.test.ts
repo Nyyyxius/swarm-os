@@ -264,6 +264,88 @@ describe('DbPersistence', () => {
   });
 });
 
+describe('shutdownForRestart vs loadResumableState', () => {
+  it('preserves orch.status="running" and is picked up as resumable on next boot', async () => {
+    const config = makeConfig();
+    const persistence = new DbPersistence(db);
+    const orch = new Orchestrator(
+      {
+        name: 'survives-restart',
+        role: 'co',
+        defaultModel: config.defaultModel,
+        defaultEffort: config.defaultEffort,
+        defaultPermissionMode: config.defaultPermissionMode,
+        leadPreamble: null,
+        workerPreamble: null,
+        lead: { cwd: tmpRoot, prompt: 'do work', preamble: null },
+      },
+      config,
+      { persistence },
+    );
+    persistence.writeOrchestrator(orch);
+    const fake = new FakeAgentProcess({ command: 'fake', args: [], cwd: tmpRoot });
+    const lead = orch.start({ agentProcessOverride: fake });
+    persistence.writeSession(lead, { force: true });
+    persistence.writeOrchestrator(orch);
+
+    // Simulate the SIGTERM path: kill PTYs without flipping status.
+    orch.shutdownForRestart('signal:SIGTERM');
+    // FakeAgent.kill resolves via setImmediate; let it settle.
+    await new Promise((r) => setTimeout(r, 50));
+
+    // Orch row in DB stays 'running' — exactly what auto-resume needs.
+    const row = db.getOrchestrator(orch.id);
+    expect(row?.status).toBe('running');
+    expect(row?.stop_reason).toBeNull();
+    expect(row?.ended_at).toBeNull();
+
+    // Session was actually killed (PTY went down).
+    const sessRow = db.listSessions(orch.id)[0]!;
+    expect(['killed', 'exited']).toContain(sessRow.status);
+
+    // Boot path: the orch should be classified as resumable, not reaped.
+    const state = persistence.loadResumableState();
+    expect(state.reaped.orchestrators).toBe(0);
+    expect(state.resumable).toHaveLength(1);
+    expect(state.resumable[0]!.orch.id).toBe(orch.id);
+  });
+
+  it('reaps orchs in operator-initiated "stopping" state — operator intent is preserved', async () => {
+    const config = makeConfig();
+    const persistence = new DbPersistence(db);
+    const orch = new Orchestrator(
+      {
+        name: 'operator-stopped',
+        role: 'co',
+        defaultModel: config.defaultModel,
+        defaultEffort: config.defaultEffort,
+        defaultPermissionMode: config.defaultPermissionMode,
+        leadPreamble: null,
+        workerPreamble: null,
+        lead: { cwd: tmpRoot, prompt: 'hi', preamble: null },
+      },
+      config,
+      { persistence },
+    );
+    persistence.writeOrchestrator(orch);
+    const fake = new FakeAgentProcess({ command: 'fake', args: [], cwd: tmpRoot });
+    const lead = orch.start({ agentProcessOverride: fake });
+    persistence.writeSession(lead, { force: true });
+    persistence.writeOrchestrator(orch);
+
+    // Operator path: stop() flips to 'stopping' and persists it.
+    orch.stop('operator-rest');
+    persistence.writeOrchestrator(orch);
+    expect(db.getOrchestrator(orch.id)?.status).toBe('stopping');
+
+    // Reboot before the safety timer fires → reap path.
+    const state = persistence.loadResumableState();
+    expect(state.reaped.orchestrators).toBe(1);
+    expect(state.resumable).toHaveLength(0);
+    expect(db.getOrchestrator(orch.id)?.stop_reason).toBe('server-restart-during-stop');
+  });
+});
+
 describe('NoOpPersistence', () => {
   it('exposes a stub db that satisfies the interface', () => {
     const p = new NoOpPersistence();

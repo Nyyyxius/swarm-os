@@ -213,6 +213,12 @@ export class Orchestrator {
   private _endNotified = false;
   private _hideOnExit = false;
   private _hideRequestFired = false;
+  /**
+   * Set by `shutdownForRestart()` so the cascading `_onLeadExit` /
+   * `_onWorkerExit` handlers do NOT call `this.stop()` — we want the orch
+   * row to stay in `running` so auto-resume picks it up on next boot.
+   */
+  private _shuttingDownForRestart = false;
   // Phase 8 — auto-resume audit. `_resumeCount` is incremented at the end
   // of a successful `resume()`; `_lastResumedAt` is stamped at the same
   // time. Both are persisted via UPSERT in `_setStatus` and surfaced in
@@ -844,6 +850,30 @@ export class Orchestrator {
     safety.unref();
   }
 
+  /**
+   * Process-shutdown tear-down (SIGTERM/SIGINT to the server). Kills the
+   * session PTYs and clears the mailbox, but DELIBERATELY does not mutate
+   * the orchestrator's persisted state: status stays `running`, `stopReason`
+   * stays null, `endedAt` stays null. The DB row therefore looks like
+   * "still live" to the next boot, and `listResumableOrchestrators()` picks
+   * it up via the normal auto-resume path.
+   *
+   * The reaper branch in `loadResumableState()` (orchs in 'stopping') stays
+   * reserved for operator-initiated stops (`Orchestrator.stop()` via REST
+   * or MCP) that didn't finish before the process died — those legitimately
+   * shouldn't come back.
+   */
+  shutdownForRestart(reason: string): void {
+    if (this._status === 'stopped' || this._status === 'failed') return;
+    // Suppress the lead/worker exit cascade so the dying PTYs don't drag
+    // the orch into 'stopping' via _onLeadExit → this.stop('lead-stopped').
+    this._shuttingDownForRestart = true;
+    for (const s of this.sessions.values()) {
+      s.stop(reason, 5000);
+    }
+    this.mailbox.clearAll();
+  }
+
   // --- Accessors ---------------------------------------------------------
 
   get status(): OrchestratorStatus {
@@ -1039,6 +1069,11 @@ export class Orchestrator {
 
   private _onLeadExit(): void {
     if (this._status === 'stopped' || this._status === 'failed') return;
+    if (this._shuttingDownForRestart) {
+      // Process is going down — leave the orch row in 'running' so the
+      // next boot's loadResumableState picks it up via auto-resume.
+      return;
+    }
     if (this._status === 'stopping') {
       // Externally-requested shutdown finished cleanly: lead PTY is gone.
       this._setStatus('stopped');
@@ -1081,6 +1116,7 @@ export class Orchestrator {
     const lead = this.lead;
     if (!lead) return; // lead already gone — no point notifying anyone
     if (this._status === 'stopping' || this._status === 'stopped') return;
+    if (this._shuttingDownForRestart) return; // process going down — no point notifying
 
     const status = worker.status;
     const code = worker.exitCode;

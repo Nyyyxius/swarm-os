@@ -242,11 +242,17 @@ export class Spawner {
     return true;
   }
 
-  /** Stop everything — used at process shutdown. */
+  /**
+   * Process-shutdown only — tear down every orchestrator's PTYs without
+   * marking the rows as 'stopping'. The DB therefore carries each orch
+   * into the next boot as 'running', so `loadResumableState()` picks it
+   * up via the normal auto-resume path. Operator-initiated stops go
+   * through `destroy()` → `orch.stop()` and continue to land in 'stopping'.
+   */
   shutdownAll(reason = 'shutdown'): void {
     for (const orch of this.orchestrators.values()) {
       try {
-        orch.stop(reason);
+        orch.shutdownForRestart(reason);
       } catch (err) {
         log.error({
           event: 'orchestrator.stop_failed',
