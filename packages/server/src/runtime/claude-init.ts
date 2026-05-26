@@ -122,82 +122,151 @@ function readDirSafe(p: string): fs.Dirent[] | null {
 }
 
 /**
- * Phase 6 — lift the host `~/.claude.json` (sibling of `~/.claude/`) into the
- * per-container runtime root. Returns the lift result so the caller can log
- * which path was used.
+ * Generic per-file lift with mtime-based caching (integer-second resolution).
  *
- * Resolution order for the source:
- *   1. `claudeJsonSource` (from `SWARM_OS_CLAUDE_JSON_SOURCE` env)
- *   2. `<sourceDir>.json` (implicit sibling — e.g. `/claude-source.json`,
- *      matches the optional second mount line in compose examples)
+ * Why this exists: the dir-mtime cache in `initClaudeRuntime` doesn't catch
+ * in-place edits of individual files inside the source dir (Linux dir mtime
+ * tracks entry add/remove/rename, not in-place content edits). Files that
+ * mutate frequently in-place — `.credentials.json` (OAuth refresh on host)
+ * and `.claude.json` (theme + onboarding bits) — need a per-file cache key.
  *
- * If neither is a regular file, we return `'absent'` (dev mode no-op).
- * Otherwise we copy it to `<runtimeDir>/.claude.json` (mode 0600). Idempotent
- * via mtime comparison against the marker tracked by `initClaudeRuntime`.
- *
- * Why this matters: without `~/.claude.json`, claude prints
- * "configuration file not found" and runs the interactive theme picker on
- * the first spawn, which wedges the PTY and blocks orchestrators. Phase 5
- * known issue, doc'd in `docs/phase-5-containerisation.md` §11.
+ * Returns `'absent'` if the source isn't a regular file, `'cache-hit'` if
+ * dst mtime already matches src mtime (integer-second resolution — see
+ * Phase 6 comment in `liftClaudeJson` for the FS resolution rationale),
+ * `'lifted'` if a copy ran on this call.
  */
-function liftClaudeJson(opts: {
-  sourceDir: string;
-  runtimeDir: string;
-  claudeJsonSource: string | null;
-}): { result: 'absent' | 'lifted' | 'cache-hit'; source?: string } {
-  const explicit = opts.claudeJsonSource;
-  const implicit = `${opts.sourceDir}.json`;
-  const candidates = [explicit, implicit].filter((p): p is string => Boolean(p && p.length));
-  let chosen: string | null = null;
-  let chosenStat: fs.Stats | null = null;
-  for (const c of candidates) {
-    const st = statSafe(c);
-    if (st && st.isFile()) {
-      chosen = c;
-      chosenStat = st;
-      break;
-    }
+function liftSingleFile(opts: {
+  src: string;
+  dst: string;
+  label: string;
+}): 'absent' | 'lifted' | 'cache-hit' {
+  const srcStat = statSafe(opts.src);
+  if (!srcStat || !srcStat.isFile()) {
+    return 'absent';
   }
-  if (!chosen || !chosenStat) {
-    return { result: 'absent' };
-  }
-  const dest = path.join(opts.runtimeDir, '.claude.json');
-  // Cache check: compare source mtime against existing dest mtime.
-  // We compare at integer-second resolution because `cpSync` with
-  // `preserveTimestamps: true` can round-trip with sub-ms drift on some
-  // filesystems (FAT32 = 2 s, NFS varies), which would defeat a strict
-  // ms-level compare. Per-second is plenty for "did the source change
-  // since we last copied?". See `claude-init.test.ts` for the regression.
-  const destStat = statSafe(dest);
+  const dstStat = statSafe(opts.dst);
   if (
-    destStat &&
-    destStat.isFile() &&
-    Math.floor(destStat.mtimeMs / 1000) === Math.floor(chosenStat.mtimeMs / 1000)
+    dstStat &&
+    dstStat.isFile() &&
+    Math.floor(dstStat.mtimeMs / 1000) === Math.floor(srcStat.mtimeMs / 1000)
   ) {
-    return { result: 'cache-hit', source: chosen };
+    return 'cache-hit';
   }
   try {
-    fs.cpSync(chosen, dest, {
+    fs.cpSync(opts.src, opts.dst, {
       force: true,
       preserveTimestamps: true,
       dereference: true,
       errorOnExist: false,
     });
     try {
-      fs.chmodSync(dest, 0o600);
+      fs.chmodSync(opts.dst, 0o600);
     } catch {
       /* best-effort */
     }
-    return { result: 'lifted', source: chosen };
+    return 'lifted';
   } catch (err) {
     log.warn({
-      event: 'claude_init.json_lift_failed',
-      source: chosen,
-      dest,
+      event: 'claude_init.file_lift_failed',
+      label: opts.label,
+      src: opts.src,
+      dst: opts.dst,
       error: err instanceof Error ? err.message : String(err),
     });
-    return { result: 'absent', source: chosen };
+    return 'absent';
   }
+}
+
+/**
+ * Resolve the source path for `~/.claude.json` from explicit override or
+ * implicit `<sourceDir>.json` sibling. Returns null if neither resolves to a
+ * regular file.
+ */
+function resolveClaudeJsonSource(opts: {
+  sourceDir: string;
+  claudeJsonSource: string | null;
+}): string | null {
+  const candidates = [opts.claudeJsonSource, `${opts.sourceDir}.json`].filter(
+    (p): p is string => Boolean(p && p.length),
+  );
+  for (const c of candidates) {
+    const st = statSafe(c);
+    if (st && st.isFile()) return c;
+  }
+  return null;
+}
+
+/**
+ * Phase 6 — lift the host `~/.claude.json` (sibling of `~/.claude/`) into the
+ * per-container runtime root. Thin wrapper kept for the boot-time callsite
+ * in `initClaudeRuntime`. See `liftSingleFile` for the per-file caching
+ * semantics.
+ *
+ * Why this matters: without `~/.claude.json`, claude prints
+ * "configuration file not found" and runs the interactive theme picker on
+ * the first spawn, which wedges the PTY and blocks orchestrators.
+ */
+function liftClaudeJson(opts: {
+  sourceDir: string;
+  runtimeDir: string;
+  claudeJsonSource: string | null;
+}): { result: 'absent' | 'lifted' | 'cache-hit'; source?: string } {
+  const chosen = resolveClaudeJsonSource({
+    sourceDir: opts.sourceDir,
+    claudeJsonSource: opts.claudeJsonSource,
+  });
+  if (!chosen) return { result: 'absent' };
+  const result = liftSingleFile({
+    src: chosen,
+    dst: path.join(opts.runtimeDir, '.claude.json'),
+    label: '.claude.json',
+  });
+  return { result, source: chosen };
+}
+
+/**
+ * Sync the host-volatile files (`.credentials.json` + `.claude.json`) from
+ * the RO source mount into the writable runtime root. Designed to be called
+ * lazily before each new claude spawn — the dir-mtime cache in
+ * `initClaudeRuntime` only invalidates on entry-level changes, so in-place
+ * refreshes of these files (e.g. host claude rotating OAuth tokens) would
+ * otherwise stay invisible to the container indefinitely.
+ *
+ * Cost: 2 `fs.stat` + 0-2 `cpSync` of small files (typically < 1 KB each).
+ * Negligible relative to a PTY spawn. Safe to call on every session start.
+ */
+export function refreshClaudeSharedFiles(opts: {
+  sourceDir: string;
+  runtimeDir: string;
+  claudeJsonSource: string | null;
+}): {
+  credentials: 'absent' | 'lifted' | 'cache-hit';
+  claudeJson: 'absent' | 'lifted' | 'cache-hit';
+} {
+  const credentials = liftSingleFile({
+    src: path.join(opts.sourceDir, '.credentials.json'),
+    dst: path.join(opts.runtimeDir, '.credentials.json'),
+    label: '.credentials.json',
+  });
+  const jsonSrc = resolveClaudeJsonSource({
+    sourceDir: opts.sourceDir,
+    claudeJsonSource: opts.claudeJsonSource,
+  });
+  const claudeJson: 'absent' | 'lifted' | 'cache-hit' = jsonSrc
+    ? liftSingleFile({
+        src: jsonSrc,
+        dst: path.join(opts.runtimeDir, '.claude.json'),
+        label: '.claude.json',
+      })
+    : 'absent';
+  if (credentials === 'lifted' || claudeJson === 'lifted') {
+    log.info({
+      event: 'claude_init.shared_refresh',
+      credentials,
+      claudeJson,
+    });
+  }
+  return { credentials, claudeJson };
 }
 
 /**

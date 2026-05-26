@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { initClaudeRuntime } from './claude-init.js';
+import { initClaudeRuntime, refreshClaudeSharedFiles } from './claude-init.js';
 
 /**
  * Phase 7 — boot-time `~/.claude` materialisation (Phase 5 module).
@@ -114,5 +114,79 @@ describe('initClaudeRuntime — claude.json lift', () => {
     expect(r.claudeJson).toBe('lifted');
     expect(r.claudeJsonSource).toBe(altPath);
     expect(fs.readFileSync(path.join(runtimeDir, '.claude.json'), 'utf8')).toBe('{"override":true}');
+  });
+});
+
+describe('refreshClaudeSharedFiles', () => {
+  it('returns credentials="absent" when source file does not exist', () => {
+    fs.mkdirSync(sourceDir, { recursive: true });
+    fs.mkdirSync(runtimeDir, { recursive: true });
+    const r = refreshClaudeSharedFiles({ sourceDir, runtimeDir, claudeJsonSource: null });
+    expect(r.credentials).toBe('absent');
+    expect(r.claudeJson).toBe('absent');
+  });
+
+  it('lifts .credentials.json when source is newer than runtime copy', () => {
+    fs.mkdirSync(sourceDir, { recursive: true });
+    fs.mkdirSync(runtimeDir, { recursive: true });
+    // Seed the runtime with an OLD copy (simulating boot-time copy that
+    // got stale after host claude rotated tokens).
+    fs.writeFileSync(path.join(runtimeDir, '.credentials.json'), '{"token":"old"}');
+    const past = (Date.now() - 3_600_000) / 1000; // 1h ago
+    fs.utimesSync(path.join(runtimeDir, '.credentials.json'), past, past);
+    // Source has the fresh token with the current mtime.
+    fs.writeFileSync(path.join(sourceDir, '.credentials.json'), '{"token":"new"}');
+    const r = refreshClaudeSharedFiles({ sourceDir, runtimeDir, claudeJsonSource: null });
+    expect(r.credentials).toBe('lifted');
+    expect(fs.readFileSync(path.join(runtimeDir, '.credentials.json'), 'utf8')).toBe('{"token":"new"}');
+  });
+
+  it('cache-hits when source and runtime mtimes match', () => {
+    fs.mkdirSync(sourceDir, { recursive: true });
+    fs.mkdirSync(runtimeDir, { recursive: true });
+    fs.writeFileSync(path.join(sourceDir, '.credentials.json'), '{"k":"v"}');
+    // First call copies.
+    const r1 = refreshClaudeSharedFiles({ sourceDir, runtimeDir, claudeJsonSource: null });
+    expect(r1.credentials).toBe('lifted');
+    // Second call (no source change) should cache-hit.
+    const r2 = refreshClaudeSharedFiles({ sourceDir, runtimeDir, claudeJsonSource: null });
+    expect(r2.credentials).toBe('cache-hit');
+  });
+
+  it('regression: catches the dir-mtime cache hole — source DIR mtime unchanged but file is newer', () => {
+    // This is the exact failure mode that triggered the fix: initClaudeRuntime
+    // caches on directory mtime, but in-place file edits don't bump that. The
+    // per-file helper must catch it.
+    fs.mkdirSync(sourceDir, { recursive: true });
+    fs.writeFileSync(path.join(sourceDir, '.credentials.json'), '{"token":"old"}');
+    initClaudeRuntime({ sourceDir, runtimeDir });
+    expect(fs.readFileSync(path.join(runtimeDir, '.credentials.json'), 'utf8')).toBe('{"token":"old"}');
+    // Capture and pin the dir mtime so an in-place file edit can't bump it
+    // even if the FS would normally.
+    const dirStat = fs.statSync(sourceDir);
+    const pinnedDirMtimeSec = dirStat.mtimeMs / 1000;
+    // Now simulate host claude rotating the token in-place. We bump only the
+    // file mtime forward, not the directory mtime.
+    fs.writeFileSync(path.join(sourceDir, '.credentials.json'), '{"token":"new"}');
+    const future = (Date.now() + 3_600_000) / 1000;
+    fs.utimesSync(path.join(sourceDir, '.credentials.json'), future, future);
+    fs.utimesSync(sourceDir, pinnedDirMtimeSec, pinnedDirMtimeSec);
+    // initClaudeRuntime would still cache-hit on the dir mtime…
+    const r1 = initClaudeRuntime({ sourceDir, runtimeDir });
+    expect(r1.skipReason).toBe('cache-hit');
+    expect(fs.readFileSync(path.join(runtimeDir, '.credentials.json'), 'utf8')).toBe('{"token":"old"}');
+    // …but the per-file refresh catches it.
+    const r2 = refreshClaudeSharedFiles({ sourceDir, runtimeDir, claudeJsonSource: null });
+    expect(r2.credentials).toBe('lifted');
+    expect(fs.readFileSync(path.join(runtimeDir, '.credentials.json'), 'utf8')).toBe('{"token":"new"}');
+  });
+
+  it('lifts .claude.json via implicit sibling', () => {
+    fs.mkdirSync(sourceDir, { recursive: true });
+    fs.mkdirSync(runtimeDir, { recursive: true });
+    fs.writeFileSync(`${sourceDir}.json`, '{"theme":"dark"}', { mode: 0o600 });
+    const r = refreshClaudeSharedFiles({ sourceDir, runtimeDir, claudeJsonSource: null });
+    expect(r.claudeJson).toBe('lifted');
+    expect(fs.readFileSync(path.join(runtimeDir, '.claude.json'), 'utf8')).toBe('{"theme":"dark"}');
   });
 });

@@ -265,6 +265,8 @@ export class Orchestrator {
       hookToken: this.config.hookToken,
       mainHttpPort: this.config.port,
       claudeConfigRoot: this.config.claudeRuntimeDir,
+      claudeSourceDir: this.config.claudeSourceDir,
+      claudeJsonSource: this.config.claudeJsonSource,
     });
 
     this._leadSessionId = lead.id;
@@ -346,6 +348,8 @@ export class Orchestrator {
       hookToken: this.config.hookToken,
       mainHttpPort: this.config.port,
       claudeConfigRoot: this.config.claudeRuntimeDir,
+      claudeSourceDir: this.config.claudeSourceDir,
+      claudeJsonSource: this.config.claudeJsonSource,
     });
 
     this.sessions.set(worker.id, worker);

@@ -12,6 +12,7 @@ import { writeSessionMcpConfig, removeSessionMcpConfig } from './mcp-config.js';
 import { eventBus } from '../../events.js';
 import { withModule } from '../../logger.js';
 import type { EffortLevel, PermissionMode } from '../../config.js';
+import { refreshClaudeSharedFiles } from '../../runtime/claude-init.js';
 
 const log = withModule('session');
 
@@ -86,6 +87,17 @@ export interface SessionInit {
    * `claudeRuntimeDir`.
    */
   claudeConfigRoot?: string;
+  /**
+   * RO source mount path (host `~/.claude` exposed in the container — e.g.
+   * `/claude-source`). When present alongside `claudeConfigRoot`, the
+   * Session refreshes `.credentials.json` + `.claude.json` from source into
+   * the runtime root right before symlinking them per-session, so a host
+   * OAuth refresh that happened after container boot still propagates.
+   * Omit (or pass an unmounted path) to skip the refresh.
+   */
+  claudeSourceDir?: string;
+  /** Optional explicit override for the `.claude.json` source path. */
+  claudeJsonSource?: string | null;
 }
 
 export interface SessionView {
@@ -269,6 +281,36 @@ export class Session extends EventEmitter {
         fs.chmodSync(cfgDir, 0o700);
       } catch {
         /* best-effort */
+      }
+      // Refresh the host-volatile files (`.credentials.json` + `.claude.json`)
+      // from the RO source mount before symlinking. The boot-time copy is
+      // gated by the dir-mtime marker, which doesn't notice in-place edits
+      // of these files (host claude rotates OAuth tokens in-place). Without
+      // this, every team created after a host token rotation would inherit
+      // a stale runtime `.credentials.json` and the PTY would land on the
+      // interactive `/login` prompt.
+      if (init.claudeSourceDir) {
+        try {
+          const refresh = refreshClaudeSharedFiles({
+            sourceDir: init.claudeSourceDir,
+            runtimeDir: init.claudeConfigRoot,
+            claudeJsonSource: init.claudeJsonSource ?? null,
+          });
+          if (refresh.credentials === 'lifted' || refresh.claudeJson === 'lifted') {
+            log.info({
+              event: 'session.shared_refresh',
+              sessionId: this.id,
+              credentials: refresh.credentials,
+              claudeJson: refresh.claudeJson,
+            });
+          }
+        } catch (err) {
+          log.warn({
+            event: 'session.shared_refresh_failed',
+            sessionId: this.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
       }
       // Phase 5: symlink shared Claude state into the per-session dir so the
       // per-session CLAUDE_CONFIG_DIR sees the credentials, history, etc.
