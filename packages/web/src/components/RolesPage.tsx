@@ -29,7 +29,7 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useRoles } from '../hooks/useRoles';
-import type { ConnectorView, RoleView, RoleInput } from '../api/client';
+import { api, type ConnectorView, type RoleView, type RoleInput } from '../api/client';
 
 interface Props {
   /** When `false`, the overlay is not rendered. The caller (App.tsx today,
@@ -72,6 +72,23 @@ export function RolesPage({ open, onClose }: Props) {
   const [selectedRoleId, setSelectedRoleId] = useState<string | null>(null);
   const [editingSection, setEditingSection] = useState<SectionId | null>(null);
   const [opError, setOpError] = useState<string | null>(null);
+  const [defaults, setDefaults] = useState<{ lead: string; worker: string } | null>(null);
+
+  useEffect(() => {
+    if (!open || defaults !== null) return;
+    let cancelled = false;
+    void api
+      .getPreambleDefaults()
+      .then((res) => {
+        if (!cancelled) setDefaults(res);
+      })
+      .catch(() => {
+        /* placeholder falls back to a static hint */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, defaults]);
 
   // Pré-sélection + auto-fallback si le role courant a disparu sous le poll.
   useEffect(() => {
@@ -275,6 +292,7 @@ export function RolesPage({ open, onClose }: Props) {
             <PreambleSection
               kind="lead"
               role={role}
+              defaultPreamble={defaults?.lead ?? null}
               editing={editingSection === 'leadPreamble'}
               onEdit={() => setEditingSection('leadPreamble')}
               onCancel={() => setEditingSection(null)}
@@ -284,6 +302,7 @@ export function RolesPage({ open, onClose }: Props) {
             <PreambleSection
               kind="worker"
               role={role}
+              defaultPreamble={defaults?.worker ?? null}
               editing={editingSection === 'workerPreamble'}
               onEdit={() => setEditingSection('workerPreamble')}
               onCancel={() => setEditingSection(null)}
@@ -501,6 +520,7 @@ function LeadPromptSection({
 }) {
   const [draft, setDraft] = useState(role.leadPrompt ?? '');
   const [error, setError] = useState<string | null>(null);
+  const [improving, setImproving] = useState(false);
 
   useEffect(() => {
     setDraft(role.leadPrompt ?? '');
@@ -516,18 +536,41 @@ function LeadPromptSection({
     }
   }
 
+  async function improve() {
+    if (improving) return;
+    setError(null);
+    setImproving(true);
+    try {
+      const { text } = await api.improveText({ field: 'leadPrompt', text: draft });
+      setDraft(text);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setImproving(false);
+    }
+  }
+
   return (
     <div className="role-section">
       <h3>
         <span>LEAD PROMPT</span>
         {editing ? (
           <span style={{ display: 'flex', gap: 6 }}>
-            <button className="h-edit" onClick={onCancel}>
+            <button
+              className="h-edit"
+              onClick={() => void improve()}
+              disabled={improving}
+              title="Améliorer avec Claude Opus 4.7"
+            >
+              {improving ? '… AMÉLIORATION' : '✨ AMÉLIORER'}
+            </button>
+            <button className="h-edit" onClick={onCancel} disabled={improving}>
               CANCEL
             </button>
             <button
               className="h-edit"
               onClick={() => void save()}
+              disabled={improving}
               style={{ color: 'var(--amber)' }}
             >
               SAVE
@@ -548,7 +591,7 @@ function LeadPromptSection({
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             placeholder="What the lead should focus on by default."
-            style={{ width: '100%', minHeight: 140 }}
+            style={{ width: '100%', minHeight: 140, resize: 'vertical' }}
           />
           {error && (
             <div
@@ -568,6 +611,7 @@ function LeadPromptSection({
 function PreambleSection({
   kind,
   role,
+  defaultPreamble,
   editing,
   onEdit,
   onCancel,
@@ -575,6 +619,7 @@ function PreambleSection({
 }: {
   kind: 'lead' | 'worker';
   role: RoleView;
+  defaultPreamble: string | null;
   editing: boolean;
   onEdit: () => void;
   onCancel: () => void;
@@ -582,8 +627,10 @@ function PreambleSection({
 }) {
   const current = kind === 'lead' ? role.leadPreamble : role.workerPreamble;
   const title = kind === 'lead' ? 'LEAD PREAMBLE' : 'WORKER PREAMBLE';
+  const field = kind === 'lead' ? 'leadPreamble' : 'workerPreamble';
   const [draft, setDraft] = useState(current ?? '');
   const [error, setError] = useState<string | null>(null);
+  const [improving, setImproving] = useState(false);
 
   useEffect(() => {
     setDraft(current ?? '');
@@ -602,18 +649,41 @@ function PreambleSection({
     }
   }
 
+  async function improve() {
+    if (improving) return;
+    setError(null);
+    setImproving(true);
+    try {
+      const { text } = await api.improveText({ field, text: draft });
+      setDraft(text);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    } finally {
+      setImproving(false);
+    }
+  }
+
   return (
     <div className="role-section">
       <h3>
         <span>{title}</span>
         {editing ? (
           <span style={{ display: 'flex', gap: 6 }}>
-            <button className="h-edit" onClick={onCancel}>
+            <button
+              className="h-edit"
+              onClick={() => void improve()}
+              disabled={improving}
+              title="Améliorer avec Claude Opus 4.7"
+            >
+              {improving ? '… AMÉLIORATION' : '✨ AMÉLIORER'}
+            </button>
+            <button className="h-edit" onClick={onCancel} disabled={improving}>
               CANCEL
             </button>
             <button
               className="h-edit"
               onClick={() => void save()}
+              disabled={improving}
               style={{ color: 'var(--amber)' }}
             >
               SAVE
@@ -634,11 +704,12 @@ function PreambleSection({
             value={draft}
             onChange={(e) => setDraft(e.target.value)}
             placeholder={
-              kind === 'lead'
-                ? 'System preamble injected before the lead prompt. Inherited at team creation unless overridden.'
-                : 'System preamble for workers spawned in teams using this role. Overridable per worker via team.spawn_worker(preamble=…).'
+              defaultPreamble ??
+              (kind === 'lead'
+                ? 'Chargement du preamble par défaut…'
+                : 'Chargement du preamble par défaut…')
             }
-            style={{ width: '100%', minHeight: 140 }}
+            style={{ width: '100%', minHeight: 140, resize: 'vertical' }}
           />
           {error && (
             <div

@@ -50,7 +50,7 @@ export interface SpawnAgentOptions {
  * sequence `'\''` (close quote, escaped quote, reopen quote). This is the
  * standard POSIX-safe form.
  */
-function shellQuote(arg: string): string {
+export function shellQuote(arg: string): string {
   if (arg.length === 0) return "''";
   return `'${arg.replace(/'/g, `'\\''`)}'`;
 }

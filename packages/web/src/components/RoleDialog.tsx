@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties } from 'react';
-import type { ConnectorView, RoleView } from '../api/client';
+import { api, type ConnectorView, type RoleView } from '../api/client';
 
 interface SubmitBody {
   label: string;
@@ -62,6 +62,26 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
   const [discordBotToken, setDiscordBotToken] = useState<string>('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [defaults, setDefaults] = useState<{ lead: string; worker: string } | null>(null);
+  const [improving, setImproving] = useState<
+    null | 'leadPrompt' | 'leadPreamble' | 'workerPreamble'
+  >(null);
+
+  useEffect(() => {
+    if (!open || defaults !== null) return;
+    let cancelled = false;
+    void api
+      .getPreambleDefaults()
+      .then((res) => {
+        if (!cancelled) setDefaults(res);
+      })
+      .catch(() => {
+        /* placeholder simply stays as the fallback string */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, defaults]);
 
   useEffect(() => {
     if (!open) return;
@@ -95,6 +115,24 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
   }, [open, initial]);
 
   if (!open) return null;
+
+  async function handleImprove(field: 'leadPrompt' | 'leadPreamble' | 'workerPreamble') {
+    if (improving) return;
+    const current =
+      field === 'leadPrompt' ? leadPrompt : field === 'leadPreamble' ? leadPreamble : workerPreamble;
+    setError(null);
+    setImproving(field);
+    try {
+      const { text } = await api.improveText({ field, text: current });
+      if (field === 'leadPrompt') setLeadPrompt(text);
+      else if (field === 'leadPreamble') setLeadPreamble(text);
+      else setWorkerPreamble(text);
+    } catch (err) {
+      setError(err instanceof Error ? err.message : String(err));
+    } finally {
+      setImproving(null);
+    }
+  }
 
   async function submit() {
     setError(null);
@@ -167,26 +205,49 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
             />
           </Field>
           <Field label="lead prompt (optional)" wide>
-            <textarea
-              className={`${inputCls} h-20 font-mono text-xs`}
-              placeholder="What the lead should focus on by default…"
-              value={leadPrompt}
-              onChange={(e) => setLeadPrompt(e.target.value)}
-            />
+            <div className="relative">
+              <textarea
+                className={`${inputCls} min-h-[80px] resize-y font-mono text-xs pr-24`}
+                placeholder="What the lead should focus on by default…"
+                value={leadPrompt}
+                onChange={(e) => setLeadPrompt(e.target.value)}
+              />
+              <ImproveButton
+                field="leadPrompt"
+                improving={improving}
+                onClick={() => void handleImprove('leadPrompt')}
+              />
+            </div>
           </Field>
           <Field label="lead preamble override (optional)" wide>
-            <textarea
-              className={`${inputCls} h-20 font-mono text-xs`}
-              value={leadPreamble}
-              onChange={(e) => setLeadPreamble(e.target.value)}
-            />
+            <div className="relative">
+              <textarea
+                className={`${inputCls} min-h-[80px] resize-y font-mono text-xs pr-24`}
+                placeholder={defaults?.lead ?? 'Chargement du preamble par défaut…'}
+                value={leadPreamble}
+                onChange={(e) => setLeadPreamble(e.target.value)}
+              />
+              <ImproveButton
+                field="leadPreamble"
+                improving={improving}
+                onClick={() => void handleImprove('leadPreamble')}
+              />
+            </div>
           </Field>
           <Field label="worker preamble override (optional)" wide>
-            <textarea
-              className={`${inputCls} h-20 font-mono text-xs`}
-              value={workerPreamble}
-              onChange={(e) => setWorkerPreamble(e.target.value)}
-            />
+            <div className="relative">
+              <textarea
+                className={`${inputCls} min-h-[80px] resize-y font-mono text-xs pr-24`}
+                placeholder={defaults?.worker ?? 'Chargement du preamble par défaut…'}
+                value={workerPreamble}
+                onChange={(e) => setWorkerPreamble(e.target.value)}
+              />
+              <ImproveButton
+                field="workerPreamble"
+                improving={improving}
+                onClick={() => void handleImprove('workerPreamble')}
+              />
+            </div>
           </Field>
           <Field label="initial workers (optional)">
             <input
@@ -308,5 +369,29 @@ function Field({
       <span className="block text-xs uppercase tracking-wide text-slate-400 mb-1">{label}</span>
       {children}
     </label>
+  );
+}
+
+function ImproveButton({
+  field,
+  improving,
+  onClick,
+}: {
+  field: 'leadPrompt' | 'leadPreamble' | 'workerPreamble';
+  improving: 'leadPrompt' | 'leadPreamble' | 'workerPreamble' | null;
+  onClick: () => void;
+}) {
+  const isThis = improving === field;
+  const disabled = improving !== null;
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title="Améliorer avec Claude Opus 4.7"
+      className="absolute top-1 right-1 text-[10px] px-1.5 py-0.5 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-slate-100"
+    >
+      {isThis ? '… Amélioration' : '✨ Améliorer'}
+    </button>
   );
 }

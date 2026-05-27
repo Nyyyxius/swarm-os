@@ -12,6 +12,8 @@ import { createWsTicketRouter } from './routes/ws-ticket.js';
 import { createHooksRouter } from './routes/hooks.js';
 import { createRolesRouter } from './routes/roles.js';
 import { createMetricsRouter } from './routes/metrics.js';
+import { createPreamblesRouter } from './routes/preambles.js';
+import { createAiRouter } from './routes/ai.js';
 import type { RoleStore } from '../modules/roles/index.js';
 import type { MessagesAggregator } from '../modules/metrics/aggregator.js';
 import type { BusMetricsCollector } from '../modules/metrics/busMetrics.js';
@@ -173,6 +175,8 @@ export function createApp(
   app.use(createSessionsRouter(spawner, config));
   app.use(createWsTicketRouter(spawner));
   app.use(createRolesRouter(roleStore, config));
+  app.use(createPreamblesRouter());
+  app.use(createAiRouter(config));
   // S9 + S8 — `GET /metrics/messages` and `GET /metrics/bus`. Mounted
   // after the auth middleware so they return 401 without X-Auth-Token
   // (parity with `/orchestrators`). `/metrics/bus` is only mounted when

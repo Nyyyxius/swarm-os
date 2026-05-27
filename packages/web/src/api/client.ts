@@ -265,6 +265,12 @@ export const api = {
       '/orchestrators',
       body,
     ),
+  getPreambleDefaults: () =>
+    request<{ lead: string; worker: string }>('GET', '/preambles/defaults'),
+  improveText: (body: {
+    field: 'leadPrompt' | 'leadPreamble' | 'workerPreamble';
+    text: string;
+  }) => request<{ text: string }>('POST', '/ai/improve-text', body),
   listRoles: () => request<{ roles: RoleView[] }>('GET', '/roles'),
   getRole: (id: string) => request<{ role: RoleView }>('GET', `/roles/${id}`),
   createRole: (body: Partial<RoleInput> & { label: string }) =>

@@ -43,12 +43,12 @@ function loadDefault(file: string): string {
   }
 }
 
-function getLeadDefault(): string {
+export function getLeadDefault(): string {
   if (cachedLeadDefault === null) cachedLeadDefault = loadDefault('default-lead.md');
   return cachedLeadDefault;
 }
 
-function getWorkerDefault(): string {
+export function getWorkerDefault(): string {
   if (cachedWorkerDefault === null) cachedWorkerDefault = loadDefault('default-worker.md');
   return cachedWorkerDefault;
 }
