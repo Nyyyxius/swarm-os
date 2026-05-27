@@ -174,6 +174,48 @@ function throwAsMcp(err: MessageError): never {
 }
 
 /**
+ * Resolve the Discord channel + ready bot for the calling orch's role. Shared
+ * by `discord.send_message` and `discord.create_thread` — both need the same
+ * triplet of validations (channel configured, token configured, bot ready)
+ * and throw the same error codes so the LLM can pattern-match uniformly.
+ */
+function resolveDiscordContext(
+  ctx: ToolContext,
+  toolName: string,
+): {
+  bot: NonNullable<ReturnType<NonNullable<Spawner['discordBotPool']>['botForOrch']>>;
+  channelId: string;
+} {
+  const roleId = ctx.orchestrator.roleId;
+  const role = roleId && ctx.spawner.roleStore ? ctx.spawner.roleStore.get(roleId) : null;
+  const discord = role?.connectors.find((c) => c.type === 'discord');
+  const channelId = discord?.channelId;
+  if (!channelId) {
+    logCall(toolName, ctx, false, 'NO_DISCORD_CHANNEL');
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      "NO_DISCORD_CHANNEL: this orchestrator's role has no Discord channelId configured",
+    );
+  }
+  if (!discord?.botToken) {
+    logCall(toolName, ctx, false, 'DISCORD_BOT_NOT_CONFIGURED');
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      "DISCORD_BOT_NOT_CONFIGURED: this orchestrator's role has no Discord botToken configured",
+    );
+  }
+  const bot = ctx.spawner.discordBotPool?.botForOrch(ctx.orchestrator.id);
+  if (!bot || !bot.isReady()) {
+    logCall(toolName, ctx, false, 'DISCORD_BOT_DISABLED');
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      'DISCORD_BOT_DISABLED: the Discord bot for this role failed to start or is not yet connected',
+    );
+  }
+  return { bot, channelId };
+}
+
+/**
  * Register all team-comms tools on a freshly-constructed `McpServer`.
  * `ctxResolver` returns the per-call ToolContext (a thunk because the same
  * SDK server may eventually be reused across requests in a future Phase).
@@ -305,6 +347,18 @@ export function registerTeamCommsTools(
                 lead_name: z.string(),
               })
               .optional(),
+            // Present only for messages originating from an external bridge
+            // (currently: Discord). Carries the native message id + thread
+            // context so the lead can address `discord.send_message` /
+            // `discord.create_thread` with the right snowflakes.
+            source: z
+              .object({
+                kind: z.literal('discord'),
+                discord_message_id: z.string(),
+                thread_id: z.string().optional(),
+                thread_name: z.string().optional(),
+              })
+              .optional(),
           }),
         ),
       },
@@ -346,6 +400,16 @@ export function registerTeamCommsTools(
                 id: m.fromOrchestratorId,
                 name: m.fromOrchestratorName ?? m.fromOrchestratorId,
                 lead_name: m.fromSessionName ?? m.from,
+              },
+            }
+          : {}),
+        ...(m.sourceKind === 'discord' && m.sourceMessageId
+          ? {
+              source: {
+                kind: 'discord' as const,
+                discord_message_id: m.sourceMessageId,
+                ...(m.threadId ? { thread_id: m.threadId } : {}),
+                ...(m.threadName ? { thread_name: m.threadName } : {}),
               },
             }
           : {}),
@@ -747,56 +811,108 @@ export function registerTeamCommsTools(
     {
       title: 'Post a message to the role\'s Discord channel (lead-only)',
       description:
-        "Lead-only. Posts `content` to the Discord channel bound to this orchestrator's role (role.connectors[type=discord].channelId). Errors NO_DISCORD_CHANNEL when the role has no channel, DISCORD_BOT_NOT_CONFIGURED when the role has no bot token, DISCORD_BOT_DISABLED when the bot failed to start. Discord's hard limit is 2000 chars — chunk longer messages yourself.",
+        "Lead-only. Posts `content` to the Discord channel bound to this orchestrator's role (role.connectors[type=discord].channelId). When `thread_id` is provided, posts into that thread instead of the channel root — use the `source.thread_id` returned by `team.read_inbox` to stay in the same fil. When `reply_to_message_id` is provided, attaches a Discord native reply reference (use the `source.discord_message_id` from the inbound message). Returns the freshly-posted `message_id` (Discord snowflake) so you can chain follow-ups. Errors NO_DISCORD_CHANNEL when the role has no channel, DISCORD_BOT_NOT_CONFIGURED when the role has no bot token, DISCORD_BOT_DISABLED when the bot failed to start, DISCORD_SEND_FAILED on Discord-side errors. Discord's hard limit is 2000 chars — chunk longer messages yourself.",
       inputSchema: {
         content: z.string().min(1).max(2000),
+        thread_id: z.string().optional(),
+        reply_to_message_id: z.string().optional(),
       },
       outputSchema: {
         delivered: z.boolean(),
         channel_id: z.string(),
+        message_id: z.string(),
+        thread_id: z.string().optional(),
       },
     },
     async (args) => {
       const ctx = ctxResolver();
       requireLead(ctx, 'discord.send_message');
-      const a = args as { content: string };
+      const a = args as {
+        content: string;
+        thread_id?: string;
+        reply_to_message_id?: string;
+      };
 
-      const roleId = ctx.orchestrator.roleId;
-      const role = roleId && ctx.spawner.roleStore ? ctx.spawner.roleStore.get(roleId) : null;
-      const discord = role?.connectors.find((c) => c.type === 'discord');
-      const channelId = discord?.channelId;
-      if (!channelId) {
-        logCall('discord.send_message', ctx, false, 'NO_DISCORD_CHANNEL');
-        throw new McpError(
-          ErrorCode.InvalidRequest,
-          'NO_DISCORD_CHANNEL: this orchestrator\'s role has no Discord channelId configured',
-        );
-      }
-      if (!discord?.botToken) {
-        logCall('discord.send_message', ctx, false, 'DISCORD_BOT_NOT_CONFIGURED');
-        throw new McpError(
-          ErrorCode.InvalidRequest,
-          'DISCORD_BOT_NOT_CONFIGURED: this orchestrator\'s role has no Discord botToken configured',
-        );
-      }
-
-      const bot = ctx.spawner.discordBotPool?.botForOrch(ctx.orchestrator.id);
-      if (!bot || !bot.isReady()) {
-        logCall('discord.send_message', ctx, false, 'DISCORD_BOT_DISABLED');
-        throw new McpError(
-          ErrorCode.InvalidRequest,
-          'DISCORD_BOT_DISABLED: the Discord bot for this role failed to start or is not yet connected',
-        );
-      }
+      const { bot, channelId } = resolveDiscordContext(ctx, 'discord.send_message');
 
       try {
-        await bot.sendMessage(channelId, a.content);
+        const sent = await bot.sendMessage(channelId, a.content, {
+          ...(a.thread_id ? { threadId: a.thread_id } : {}),
+          ...(a.reply_to_message_id ? { replyToMessageId: a.reply_to_message_id } : {}),
+        });
         logCall('discord.send_message', ctx, true);
-        return ok({ delivered: true, channel_id: channelId });
+        return ok({
+          delivered: true,
+          channel_id: channelId,
+          message_id: sent.messageId,
+          ...(a.thread_id ? { thread_id: a.thread_id } : {}),
+        });
       } catch (err) {
         const msg = err instanceof Error ? err.message : String(err);
         logCall('discord.send_message', ctx, false, msg);
         throw new McpError(ErrorCode.InternalError, `DISCORD_SEND_FAILED: ${msg}`);
+      }
+    },
+  );
+
+  // ---- discord.create_thread (lead-only) -------------------------------
+  // Open a new Discord thread on the role's channel. Two modes:
+  //  - `from_message_id` set: anchor the thread on that message (the message
+  //    becomes the thread's "starter"). Use the `source.discord_message_id`
+  //    from the inbound message to spin a thread off the human's question.
+  //  - `from_message_id` absent: create a free-standing thread on the channel.
+  // Returns `{ thread_id, thread_name, channel_id }`. The lead can then post
+  // into the new thread via `discord.send_message({ thread_id })`.
+  server.registerTool(
+    'discord.create_thread',
+    {
+      title: "Open a new thread on the role's Discord channel (lead-only)",
+      description:
+        "Lead-only. Creates a new Discord thread. If `from_message_id` is provided, the thread is anchored to that message (use `source.discord_message_id` from inbox). Otherwise a free-standing thread is opened on the channel root. `auto_archive_minutes` controls when Discord hides the thread (default 1440 = 24h; Discord supports 60, 1440, 4320, 10080). Returns the new `thread_id`, which you pass back into `discord.send_message({ thread_id })` to keep the conversation in the fil. Errors DISCORD_THREAD_PARENT_MESSAGE_NOT_FOUND (anchor message gone), DISCORD_THREAD_CHANNEL_NOT_THREADABLE (channel doesn't support threads), DISCORD_THREAD_CREATE_FAILED (Discord-side failure).",
+      inputSchema: {
+        name: z.string().min(1).max(100),
+        from_message_id: z.string().optional(),
+        auto_archive_minutes: z.number().int().positive().optional(),
+      },
+      outputSchema: {
+        thread_id: z.string(),
+        thread_name: z.string(),
+        channel_id: z.string(),
+      },
+    },
+    async (args) => {
+      const ctx = ctxResolver();
+      requireLead(ctx, 'discord.create_thread');
+      const a = args as {
+        name: string;
+        from_message_id?: string;
+        auto_archive_minutes?: number;
+      };
+
+      const { bot, channelId } = resolveDiscordContext(ctx, 'discord.create_thread');
+
+      try {
+        const { threadId, threadName } = await bot.createThread(channelId, {
+          name: a.name,
+          ...(a.from_message_id ? { fromMessageId: a.from_message_id } : {}),
+          ...(a.auto_archive_minutes ? { autoArchiveMinutes: a.auto_archive_minutes } : {}),
+        });
+        logCall('discord.create_thread', ctx, true);
+        return ok({
+          thread_id: threadId,
+          thread_name: threadName,
+          channel_id: channelId,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        // Surface the specific error code if `bot.createThread` raised one of
+        // the typed messages; otherwise fall back to the generic
+        // DISCORD_THREAD_CREATE_FAILED bucket.
+        logCall('discord.create_thread', ctx, false, msg);
+        if (/^DISCORD_THREAD_/.test(msg)) {
+          throw new McpError(ErrorCode.InternalError, msg);
+        }
+        throw new McpError(ErrorCode.InternalError, `DISCORD_THREAD_CREATE_FAILED: ${msg}`);
       }
     },
   );

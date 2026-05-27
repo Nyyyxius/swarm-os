@@ -87,6 +87,10 @@ function msgRow(over: Partial<MailboxMessageRow> = {}): MailboxMessageRow {
     from_orchestrator_name: null,
     from_session_name: null,
     delivered_at: null,
+    source_kind: null,
+    source_message_id: null,
+    thread_id: null,
+    thread_name: null,
     ...over,
   };
 }
@@ -165,6 +169,27 @@ describe('mailbox_messages persistence', () => {
     db.markMailboxMessagesDelivered(['m1']);
     const stillPending = db.selectPendingMailboxMessagesForOrch('X');
     expect(stillPending.map((r) => r.id)).toEqual(['m2']);
+  });
+
+  it('round-trips Discord source/thread columns through insert + select', () => {
+    db.upsertOrchestrator(orchRow({ id: 'D' }));
+    db.upsertSession(sessRow({ id: 'sD', orchestrator_id: 'D' }));
+    db.insertMailboxMessage(
+      msgRow({
+        id: 'd1',
+        orchestrator_id: 'D',
+        to_session_id: 'sD',
+        source_kind: 'discord',
+        source_message_id: 'snowflake-100',
+        thread_id: 'thread-200',
+        thread_name: 'support-fr',
+      }),
+    );
+    const [row] = db.selectPendingMailboxMessagesForOrch('D');
+    expect(row?.source_kind).toBe('discord');
+    expect(row?.source_message_id).toBe('snowflake-100');
+    expect(row?.thread_id).toBe('thread-200');
+    expect(row?.thread_name).toBe('support-fr');
   });
 
   it('insertMailboxMessagesBatch wraps in a single transaction', () => {

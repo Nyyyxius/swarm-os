@@ -6,8 +6,10 @@
  *
  *  - **Inbound** (Discord → lead inbox): every `messageCreate` event for a
  *    subscribed channel is pushed into each matching lead's mailbox via the
- *    existing `Mailbox.push` primitive. Bot/system messages are dropped to
- *    avoid loops.
+ *    existing `Mailbox.push` primitive, then `notifyLead` is invoked so the
+ *    spawner can wake the (idle) lead via the standard PTY signal — the same
+ *    path `team.send_message` / `team.broadcast` use. Bot/system messages
+ *    are dropped to avoid loops.
  *  - **Outbound** (lead → Discord): the MCP tool `discord.send_message`
  *    resolves the orch's role channel and calls `sendMessage()`.
  *
@@ -24,6 +26,7 @@
 import {
   Client,
   GatewayIntentBits,
+  ChannelType,
   type Message,
   type Channel,
 } from 'discord.js';
@@ -36,6 +39,36 @@ const DEFAULT_SEND_TIMEOUT_MS = 5000;
 const READY_TIMEOUT_MS = 15_000;
 
 /**
+ * Payload accepted by `TextChannel.send` / `ThreadChannel.send`. We narrow to
+ * the fields we actually use (content + optional Discord native reply) so the
+ * private channel cast stays tight.
+ */
+type SendPayload = {
+  content: string;
+  reply?: {
+    messageReference: string;
+    failIfNotExists?: boolean;
+  };
+};
+
+/**
+ * Minimal structural type of a thread-capable parent channel
+ * (`TextChannel` / `NewsChannel` / `ForumChannel` at runtime). We only call
+ * `messages.fetch` and `threads.create`, so we keep the shape narrow and
+ * sidestep importing the full channel union from discord.js.
+ */
+type ThreadParentChannel = {
+  messages?: { fetch: (id: string) => Promise<unknown> };
+  threads?: {
+    create: (opts: {
+      name: string;
+      autoArchiveDuration: number;
+      type: number;
+    }) => Promise<{ id: string; name: string }>;
+  };
+};
+
+/**
  * One live orchestrator listening on a Discord channel. The lead session id
  * is read lazily because, while the current code does not respawn the lead,
  * the indirection costs nothing and keeps us forward-compatible.
@@ -45,6 +78,13 @@ export interface OrchSubscription {
   channelId: string;
   getLeadSessionId: () => string | null;
   mailbox: Mailbox;
+  /**
+   * Wake the lead session after a successful mailbox push, so Claude calls
+   * `team.read_inbox` instead of leaving the message stranded until the next
+   * idle window. Best-effort: the spawner gates on `isIdle` and swallows
+   * write errors. Same pattern as `messaging.ts` for in-process traffic.
+   */
+  notifyLead: () => void;
 }
 
 export interface DiscordBotServiceOptions {
@@ -178,15 +218,36 @@ export class DiscordBotService {
   }
 
   /**
-   * Post `content` to `channelId`. Wrapped in a 5 s timeout. Throws on
-   * any failure so the MCP tool can surface a clean error to the lead.
+   * Post `content` to a channel. Wrapped in a 5 s timeout. Throws on any
+   * failure so the MCP tool can surface a clean error to the lead.
+   *
+   * - `opts.threadId`: post into that thread instead of the channel root.
+   *   A `ThreadChannel` is itself a `Channel`, so we just `fetch` by id.
+   * - `opts.replyToMessageId`: attach a Discord native reply reference.
+   *   `failIfNotExists: false` keeps the post as a normal message if the
+   *   referenced message has been deleted (friendlier than throwing).
+   *
+   * Returns the freshly-posted message id (Discord snowflake) so the lead
+   * can chain follow-ups (reply, start_thread).
    */
-  async sendMessage(channelId: string, content: string): Promise<void> {
+  async sendMessage(
+    channelId: string,
+    content: string,
+    opts?: { threadId?: string; replyToMessageId?: string },
+  ): Promise<{ messageId: string; channelId: string }> {
     if (!this.ready) {
       throw new Error('discord bot not ready');
     }
-    const channel = await this.fetchSendableChannel(channelId);
-    const sendPromise = channel.send({ content });
+    const target = opts?.threadId ?? channelId;
+    const channel = await this.fetchSendableChannel(target);
+    const payload: SendPayload = { content };
+    if (opts?.replyToMessageId) {
+      payload.reply = {
+        messageReference: opts.replyToMessageId,
+        failIfNotExists: false,
+      };
+    }
+    const sendPromise = channel.send(payload);
     let timer: NodeJS.Timeout | undefined;
     const timeoutPromise = new Promise<never>((_, reject) => {
       timer = setTimeout(
@@ -195,15 +256,106 @@ export class DiscordBotService {
       );
     });
     try {
-      await Promise.race([sendPromise, timeoutPromise]);
+      const sent = await Promise.race([sendPromise, timeoutPromise]);
       log.info({
         event: 'discord.bot.sent',
-        channelId,
+        channelId: target,
+        threadId: opts?.threadId,
         length: content.length,
       });
+      return { messageId: sent.id, channelId: target };
     } catch (err) {
       log.warn({
         event: 'discord.bot.send_failed',
+        channelId: target,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /**
+   * Open a new Discord thread on `channelId`. Two modes:
+   *  - `opts.fromMessageId` set → anchored to that message via
+   *    `Message.startThread()`; the new thread inherits the message as its
+   *    starter.
+   *  - `opts.fromMessageId` absent → free-standing thread created on the
+   *    channel itself via `channel.threads.create({ type: PublicThread })`.
+   *
+   * Both paths are wrapped in the same 5 s timeout as `sendMessage`.
+   * Returns the new thread's id and name so the lead can immediately post
+   * into it via `sendMessage({ threadId })`.
+   */
+  async createThread(
+    channelId: string,
+    opts: { name: string; fromMessageId?: string; autoArchiveMinutes?: number },
+  ): Promise<{ threadId: string; threadName: string }> {
+    if (!this.ready) {
+      throw new Error('discord bot not ready');
+    }
+    const autoArchiveDuration = opts.autoArchiveMinutes ?? 1440;
+    const cached = this.client.channels.cache.get(channelId);
+    const channel = cached ?? (await this.client.channels.fetch(channelId));
+    if (!channel) {
+      throw new Error(`discord channel not found: ${channelId}`);
+    }
+    const createPromise = (async () => {
+      if (opts.fromMessageId) {
+        const parent = channel as ThreadParentChannel;
+        if (!parent.messages || typeof parent.messages.fetch !== 'function') {
+          throw new Error(
+            `DISCORD_THREAD_CHANNEL_NOT_THREADABLE: ${channelId} cannot host threads`,
+          );
+        }
+        let msg: { startThread?: (o: unknown) => Promise<{ id: string; name: string }> };
+        try {
+          msg = (await parent.messages.fetch(opts.fromMessageId)) as typeof msg;
+        } catch (err) {
+          const m = err instanceof Error ? err.message : String(err);
+          throw new Error(`DISCORD_THREAD_PARENT_MESSAGE_NOT_FOUND: ${m}`);
+        }
+        if (!msg || typeof msg.startThread !== 'function') {
+          throw new Error(
+            `DISCORD_THREAD_CHANNEL_NOT_THREADABLE: message ${opts.fromMessageId} cannot start a thread`,
+          );
+        }
+        const t = await msg.startThread({ name: opts.name, autoArchiveDuration });
+        return { threadId: t.id, threadName: t.name };
+      }
+      const parent = channel as ThreadParentChannel;
+      if (!parent.threads || typeof parent.threads.create !== 'function') {
+        throw new Error(
+          `DISCORD_THREAD_CHANNEL_NOT_THREADABLE: ${channelId} cannot host threads`,
+        );
+      }
+      const t = await parent.threads.create({
+        name: opts.name,
+        autoArchiveDuration,
+        type: ChannelType.PublicThread,
+      });
+      return { threadId: t.id, threadName: t.name };
+    })();
+    let timer: NodeJS.Timeout | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`discord create_thread timed out after ${this.sendTimeoutMs}ms`)),
+        this.sendTimeoutMs,
+      );
+    });
+    try {
+      const result = await Promise.race([createPromise, timeoutPromise]);
+      log.info({
+        event: 'discord.bot.thread_created',
+        channelId,
+        threadId: result.threadId,
+        fromMessageId: opts.fromMessageId,
+      });
+      return result;
+    } catch (err) {
+      log.warn({
+        event: 'discord.bot.thread_create_failed',
         channelId,
         error: err instanceof Error ? err.message : String(err),
       });
@@ -216,7 +368,7 @@ export class DiscordBotService {
   // -- internals ----------------------------------------------------------
 
   private async fetchSendableChannel(channelId: string): Promise<
-    Channel & { send: (payload: { content: string }) => Promise<unknown> }
+    Channel & { send: (payload: SendPayload) => Promise<{ id: string }> }
   > {
     const cached = this.client.channels.cache.get(channelId);
     const channel = cached ?? (await this.client.channels.fetch(channelId));
@@ -226,7 +378,7 @@ export class DiscordBotService {
     if (!channel.isTextBased() || !('send' in channel)) {
       throw new Error(`discord channel ${channelId} is not text-based`);
     }
-    return channel as Channel & { send: (payload: { content: string }) => Promise<unknown> };
+    return channel as Channel & { send: (payload: SendPayload) => Promise<{ id: string }> };
   }
 
   /**
@@ -238,17 +390,33 @@ export class DiscordBotService {
   handleMessageCreate(msg: Message): void {
     if (msg.author?.bot === true) return;
     if (msg.system === true) return;
-    const subs = this.subscriptions.get(msg.channelId);
+    // When the message is posted inside a thread, `msg.channelId` is the
+    // thread's own snowflake and `msg.channel.parentId` is the parent text
+    // channel. Subscriptions are keyed by the PARENT id (that's what the
+    // role's `channelId` resolves to), so we must resolve to the parent
+    // before lookup — otherwise thread messages would never reach the lead.
+    const channel = msg.channel as {
+      isThread?: () => boolean;
+      parentId?: string | null;
+      name?: string;
+    };
+    const isThread = typeof channel.isThread === 'function' && channel.isThread();
+    const parentChannelId = isThread
+      ? channel.parentId ?? msg.channelId
+      : msg.channelId;
+    const subs = this.subscriptions.get(parentChannelId);
     if (!subs || subs.size === 0) return;
 
     const content = renderMessage(msg);
+    const threadId = isThread ? msg.channelId : undefined;
+    const threadName = isThread ? channel.name : undefined;
     for (const sub of subs) {
       const leadSessionId = sub.getLeadSessionId();
       if (!leadSessionId) {
         log.warn({
           event: 'discord.bot.skip_no_lead',
           orchId: sub.orchestratorId,
-          channelId: msg.channelId,
+          channelId: parentChannelId,
         });
         continue;
       }
@@ -256,11 +424,16 @@ export class DiscordBotService {
         sub.mailbox.push(leadSessionId, {
           from: `discord:${msg.author.username}`,
           content,
+          sourceKind: 'discord',
+          sourceMessageId: msg.id,
+          ...(threadId ? { threadId } : {}),
+          ...(threadName ? { threadName } : {}),
         });
         log.info({
           event: 'discord.bot.message_received',
           orchId: sub.orchestratorId,
-          channelId: msg.channelId,
+          channelId: parentChannelId,
+          threadId,
           authorId: msg.author.id,
           length: content.length,
         });
@@ -268,7 +441,20 @@ export class DiscordBotService {
         log.warn({
           event: 'discord.bot.push_failed',
           orchId: sub.orchestratorId,
-          channelId: msg.channelId,
+          channelId: parentChannelId,
+          threadId,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        continue;
+      }
+      try {
+        sub.notifyLead();
+      } catch (err) {
+        log.warn({
+          event: 'discord.bot.notify_failed',
+          orchId: sub.orchestratorId,
+          channelId: parentChannelId,
+          threadId,
           error: err instanceof Error ? err.message : String(err),
         });
       }

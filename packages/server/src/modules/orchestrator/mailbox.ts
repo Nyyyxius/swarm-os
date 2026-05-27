@@ -40,6 +40,24 @@ export interface Message {
   fromOrchestratorName?: string;
   /** Denormalized source session name (cross-team only). */
   fromSessionName?: string;
+  /**
+   * External source kind. Present only when the message originates from an
+   * external bridge (currently: `'discord'`). Absent for intra-team and
+   * cross-team swarm-internal traffic.
+   */
+  sourceKind?: 'discord';
+  /**
+   * Native source platform message id (e.g. Discord snowflake). Lets the lead
+   * reference the original message in subsequent calls (reply, thread anchor).
+   */
+  sourceMessageId?: string;
+  /**
+   * Thread id of the source platform (e.g. Discord thread snowflake). Present
+   * only when the inbound message was posted inside a thread.
+   */
+  threadId?: string;
+  /** Human-readable thread name, denormalized alongside `threadId`. */
+  threadName?: string;
 }
 
 export interface PushResult {
@@ -160,6 +178,10 @@ export class Mailbox {
       ...(msg.fromOrchestratorId ? { fromOrchestratorId: msg.fromOrchestratorId } : {}),
       ...(msg.fromOrchestratorName ? { fromOrchestratorName: msg.fromOrchestratorName } : {}),
       ...(msg.fromSessionName ? { fromSessionName: msg.fromSessionName } : {}),
+      ...(msg.sourceKind ? { sourceKind: msg.sourceKind } : {}),
+      ...(msg.sourceMessageId ? { sourceMessageId: msg.sourceMessageId } : {}),
+      ...(msg.threadId ? { threadId: msg.threadId } : {}),
+      ...(msg.threadName ? { threadName: msg.threadName } : {}),
     };
     q.push(full);
     if (!opts.silent) {
@@ -241,6 +263,10 @@ export class Mailbox {
         ...(msg.fromOrchestratorId ? { fromOrchestratorId: msg.fromOrchestratorId } : {}),
         ...(msg.fromOrchestratorName ? { fromOrchestratorName: msg.fromOrchestratorName } : {}),
         ...(msg.fromSessionName ? { fromSessionName: msg.fromSessionName } : {}),
+        ...(msg.sourceKind ? { sourceKind: msg.sourceKind } : {}),
+        ...(msg.sourceMessageId ? { sourceMessageId: msg.sourceMessageId } : {}),
+        ...(msg.threadId ? { threadId: msg.threadId } : {}),
+        ...(msg.threadName ? { threadName: msg.threadName } : {}),
       };
       q.push(full);
       this._messagesTotal++;

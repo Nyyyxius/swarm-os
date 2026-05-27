@@ -77,6 +77,10 @@ function messageToRow(
     from_orchestrator_name: msg.fromOrchestratorName ?? null,
     from_session_name: msg.fromSessionName ?? null,
     delivered_at: deliveredAt,
+    source_kind: msg.sourceKind ?? null,
+    source_message_id: msg.sourceMessageId ?? null,
+    thread_id: msg.threadId ?? null,
+    thread_name: msg.threadName ?? null,
   };
 }
 
@@ -143,6 +147,10 @@ export function rehydrateMailbox(spawner: Spawner, db: SwarmDb): {
           fromOrchestratorId: row.from_orchestrator_id ?? undefined,
           fromOrchestratorName: row.from_orchestrator_name ?? undefined,
           fromSessionName: row.from_session_name ?? undefined,
+          sourceKind: (row.source_kind as 'discord' | null) ?? undefined,
+          sourceMessageId: row.source_message_id ?? undefined,
+          threadId: row.thread_id ?? undefined,
+          threadName: row.thread_name ?? undefined,
         },
         { silent: true },
       );

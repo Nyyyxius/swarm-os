@@ -53,6 +53,35 @@ describe('Mailbox.push', () => {
     expect(() => new Mailbox({ maxSize: -1 })).toThrow();
     expect(() => new Mailbox({ maxSize: 1.5 })).toThrow();
   });
+
+  it('round-trips Discord source/thread metadata when present', () => {
+    const m = new Mailbox();
+    m.push('a', {
+      from: 'discord:alice',
+      content: 'hello from thread',
+      sourceKind: 'discord',
+      sourceMessageId: 'snowflake-42',
+      threadId: 'thread-7',
+      threadName: 'general-questions',
+    });
+    const [msg] = m.peek('a');
+    expect(msg?.sourceKind).toBe('discord');
+    expect(msg?.sourceMessageId).toBe('snowflake-42');
+    expect(msg?.threadId).toBe('thread-7');
+    expect(msg?.threadName).toBe('general-questions');
+  });
+
+  it('omits Discord source/thread keys entirely when not provided', () => {
+    const m = new Mailbox();
+    m.push('a', { from: 's', content: 'plain' });
+    const [msg] = m.peek('a');
+    // The spread idiom should leave undefined keys absent rather than
+    // adding `key: undefined` (matters for shallow-equality comparisons
+    // and JSON serialization).
+    expect(msg).toBeDefined();
+    expect('sourceKind' in (msg as object)).toBe(false);
+    expect('threadId' in (msg as object)).toBe(false);
+  });
 });
 
 describe('Mailbox.read', () => {

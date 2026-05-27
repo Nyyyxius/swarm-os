@@ -96,6 +96,10 @@ export interface MailboxMessageRow {
   from_orchestrator_name: string | null;
   from_session_name: string | null;
   delivered_at: string | null;
+  source_kind: string | null;
+  source_message_id: string | null;
+  thread_id: string | null;
+  thread_name: string | null;
 }
 
 /**
@@ -334,19 +338,23 @@ export class SwarmDb {
     this.insertMessageStmt = this.db.prepare<MailboxMessageRow>(`
       INSERT INTO mailbox_messages (
         id, orchestrator_id, to_session_id, from_id, content, ts,
-        from_orchestrator_id, from_orchestrator_name, from_session_name, delivered_at
+        from_orchestrator_id, from_orchestrator_name, from_session_name, delivered_at,
+        source_kind, source_message_id, thread_id, thread_name
       ) VALUES (
         @id, @orchestrator_id, @to_session_id, @from_id, @content, @ts,
-        @from_orchestrator_id, @from_orchestrator_name, @from_session_name, @delivered_at
+        @from_orchestrator_id, @from_orchestrator_name, @from_session_name, @delivered_at,
+        @source_kind, @source_message_id, @thread_id, @thread_name
       )
     `);
     this.insertMessageOrIgnoreStmt = this.db.prepare<MailboxMessageRow>(`
       INSERT OR IGNORE INTO mailbox_messages (
         id, orchestrator_id, to_session_id, from_id, content, ts,
-        from_orchestrator_id, from_orchestrator_name, from_session_name, delivered_at
+        from_orchestrator_id, from_orchestrator_name, from_session_name, delivered_at,
+        source_kind, source_message_id, thread_id, thread_name
       ) VALUES (
         @id, @orchestrator_id, @to_session_id, @from_id, @content, @ts,
-        @from_orchestrator_id, @from_orchestrator_name, @from_session_name, @delivered_at
+        @from_orchestrator_id, @from_orchestrator_name, @from_session_name, @delivered_at,
+        @source_kind, @source_message_id, @thread_id, @thread_name
       )
     `);
     this.selectPendingMessagesForOrchStmt = this.db.prepare<[string], MailboxMessageRow>(`
@@ -417,6 +425,12 @@ export class SwarmDb {
       // Phase 8 — auto-resume audit columns.
       { table: 'orchestrators', column: 'last_resumed_at', ddl: 'ALTER TABLE orchestrators ADD COLUMN last_resumed_at TEXT' },
       { table: 'orchestrators', column: 'resume_count', ddl: 'ALTER TABLE orchestrators ADD COLUMN resume_count INTEGER NOT NULL DEFAULT 0' },
+      // Discord thread / reply support — additive nullable columns. `source_kind`
+      // lets us extend to other bridges (Slack, Telegram) without another migration.
+      { table: 'mailbox_messages', column: 'source_kind',       ddl: 'ALTER TABLE mailbox_messages ADD COLUMN source_kind TEXT' },
+      { table: 'mailbox_messages', column: 'source_message_id', ddl: 'ALTER TABLE mailbox_messages ADD COLUMN source_message_id TEXT' },
+      { table: 'mailbox_messages', column: 'thread_id',         ddl: 'ALTER TABLE mailbox_messages ADD COLUMN thread_id TEXT' },
+      { table: 'mailbox_messages', column: 'thread_name',       ddl: 'ALTER TABLE mailbox_messages ADD COLUMN thread_name TEXT' },
     ];
     for (const a of additions) {
       try {
@@ -936,6 +950,10 @@ CREATE TABLE IF NOT EXISTS mailbox_messages (
   from_orchestrator_name TEXT,
   from_session_name TEXT,
   delivered_at TEXT,
+  source_kind TEXT,
+  source_message_id TEXT,
+  thread_id TEXT,
+  thread_name TEXT,
   FOREIGN KEY (orchestrator_id) REFERENCES orchestrators(id) ON DELETE CASCADE
 );
 CREATE INDEX IF NOT EXISTS idx_mailbox_pending_by_orch
