@@ -784,24 +784,30 @@ export class Session extends EventEmitter {
   /**
    * Inject a short, single-line signal into the PTY (Phase 3 mailbox).
    *
-   * Wrapped in `\n…\n` so it always lands on its own line — claude can be
-   * mid-write at any column. Best-effort: if the underlying agent has
-   * exited or the write throws, we swallow and log; the mailbox push is
-   * the source of truth, the signal is just a wake-up hint.
+   * Two-step write: the text first, then a `\r` ~150 ms later. Claude
+   * Code's Ink TUI groups a single multi-byte chunk as a paste and treats
+   * embedded `\r` as a newline inside the buffer rather than a submit —
+   * so a one-shot `\r${text}\r` lands in the prompt without firing. By
+   * sending the trailing CR in its own write after the PTY has drained,
+   * Ink parses it as a standalone Enter keypress and submits.
+   *
+   * Best-effort: if the agent has exited or the write throws, we swallow
+   * and log; the mailbox push is the source of truth, the signal is just
+   * a wake-up hint.
    *
    * Also written to the session log so a human attaching after the fact
    * can see why the agent suddenly checked its inbox.
    */
   notifySignal(text: string): void {
+    const intro = `\r${text}`;
     if (!this.agent) {
       // skipSpawn / no-process sessions still get the signal in their log
       // for testability.
-      this._appendLog(`\n${text}\n`);
+      this._appendLog(`${intro}\r`);
       return;
     }
-    const payload = `\n${text}\n`;
     try {
-      this.agent.write(payload);
+      this.agent.write(intro);
     } catch (err) {
       log.error({
         event: 'notifySignal.write_failed',
@@ -809,10 +815,24 @@ export class Session extends EventEmitter {
         error: err instanceof Error ? err.message : String(err),
       });
     }
-    // Also append to the log so it shows up in replays / log dumps. We do
-    // NOT bump lastActivityAt here: the signal is server-injected, not
-    // agent-produced output, so it must not extend the busy window.
-    this._appendLog(payload);
+    this._appendLog(intro);
+    // Submit on the next tick so the TUI sees a standalone CR keypress
+    // instead of a pasted chunk. We do NOT bump lastActivityAt here: the
+    // signal is server-injected, not agent-produced output, so it must
+    // not extend the busy window.
+    setTimeout(() => {
+      if (!this.agent) return;
+      try {
+        this.agent.write('\r');
+        this._appendLog('\r');
+      } catch (err) {
+        log.error({
+          event: 'notifySignal.submit_failed',
+          sessionId: this.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }, 150);
   }
 
   resize(cols: number, rows: number): void {
