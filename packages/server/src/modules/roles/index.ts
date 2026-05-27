@@ -24,6 +24,25 @@ export type ConnectorType = 'discord';
 export interface DiscordConnector {
   type: 'discord';
   webhookUrl: string;
+  /**
+   * Discord channel id (snowflake) the lead converses in. Optional —
+   * when set AND `botToken` is also set, the bot subscribes to this
+   * channel: every human message becomes an entry in the lead's inbox
+   * (`from: 'discord:<username>'`) and the lead can write back via
+   * the `discord.send_message` MCP tool.
+   * When absent, only the outbound webhook (system notifications) is
+   * active for this role.
+   */
+  channelId?: string;
+  /**
+   * Discord bot OAuth token for this role. When set, swarm-os opens a
+   * dedicated Gateway connection so the role's leads listen on
+   * `channelId` and post via `discord.send_message` under this bot's
+   * identity. Multiple roles can share the same token (the pool dedups),
+   * but each role can also have its own bot user — that's the whole
+   * point of moving from a global token to a per-role one.
+   */
+  botToken?: string;
 }
 
 export type Connector = DiscordConnector;

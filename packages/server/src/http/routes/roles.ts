@@ -15,7 +15,16 @@ const VALID_PERMS: ReadonlySet<string> = new Set([
 interface ConnectorBody {
   type?: unknown;
   webhookUrl?: unknown;
+  channelId?: unknown;
+  botToken?: unknown;
 }
+
+const DISCORD_SNOWFLAKE_RE = /^\d{17,20}$/;
+// Discord bot tokens encode the application id in base64 + a timestamp +
+// HMAC, separated by dots; the canonical length is ~60–80 chars. We
+// keep the bound generous because Discord has tweaked the format twice
+// in five years and might do it again.
+const DISCORD_BOT_TOKEN_MAX = 256;
 
 interface RoleBody {
   label?: unknown;
@@ -81,7 +90,44 @@ function parseConnectors(
     if (!/^https?:\/\//i.test(c.webhookUrl)) {
       return { ok: false, error: `connectors[${i}].webhookUrl must be a http(s) URL` };
     }
-    out.push({ type: 'discord', webhookUrl: c.webhookUrl });
+    let channelId: string | undefined;
+    if (c.channelId != null && c.channelId !== '') {
+      if (typeof c.channelId !== 'string') {
+        return { ok: false, error: `connectors[${i}].channelId must be a string` };
+      }
+      if (!DISCORD_SNOWFLAKE_RE.test(c.channelId)) {
+        return {
+          ok: false,
+          error: `connectors[${i}].channelId must be a Discord snowflake (17–20 digits)`,
+        };
+      }
+      channelId = c.channelId;
+    }
+    let botToken: string | undefined;
+    if (c.botToken != null && c.botToken !== '') {
+      if (typeof c.botToken !== 'string') {
+        return { ok: false, error: `connectors[${i}].botToken must be a string` };
+      }
+      if (c.botToken.length > DISCORD_BOT_TOKEN_MAX) {
+        return { ok: false, error: `connectors[${i}].botToken is too long` };
+      }
+      // The bot needs a channel to listen on — without one the token is
+      // useless. We catch the misconfig here rather than letting the spawner
+      // silently start a connection that never serves a message.
+      if (!channelId) {
+        return {
+          ok: false,
+          error: `connectors[${i}].botToken requires connectors[${i}].channelId to be set`,
+        };
+      }
+      botToken = c.botToken;
+    }
+    out.push({
+      type: 'discord',
+      webhookUrl: c.webhookUrl,
+      ...(channelId ? { channelId } : {}),
+      ...(botToken ? { botToken } : {}),
+    });
   }
   return { ok: true, value: out };
 }

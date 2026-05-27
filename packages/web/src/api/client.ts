@@ -59,6 +59,19 @@ export interface OrchestratorView {
 export interface DiscordConnectorView {
   type: 'discord';
   webhookUrl: string;
+  /**
+   * Discord channel id (snowflake). Optional — when set AND `botToken` is
+   * also set, the lead reads humans' messages from this channel and posts
+   * replies via the `discord.send_message` MCP tool.
+   */
+  channelId?: string;
+  /**
+   * Per-role Discord bot OAuth token. Optional — when set, swarm-os opens
+   * a dedicated Gateway connection for this role, so each role gets its
+   * own Discord user identity. Replaces the previous `SWARM_OS_DISCORD_BOT_TOKEN`
+   * global env var.
+   */
+  botToken?: string;
 }
 export type ConnectorView = DiscordConnectorView;
 

@@ -62,6 +62,11 @@ const REDACT_PATHS = [
   'discordWebhookUrl',
   '*.webhookUrl',
   '*.discordWebhookUrl',
+  // Discord bot token — full account credential. Held per-role on the
+  // `DiscordConnector.botToken` field; pino redact walks objects by key,
+  // so the wildcard catches it wherever the connector is logged.
+  'botToken',
+  '*.botToken',
 ];
 
 export function buildLogger(config?: Pick<Config, 'logLevel' | 'logPretty' | 'projectName'>): Logger {

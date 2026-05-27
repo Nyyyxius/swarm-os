@@ -732,4 +732,72 @@ export function registerTeamCommsTools(
       }
     },
   );
+
+  // ---- discord.send_message (lead-only) --------------------------------
+  // Outbound conversational write to the role's Discord channel. The channel
+  // and bot identity are both per-role: the role must carry a
+  // `DiscordConnector` with `channelId` AND `botToken`. We route via the
+  // pool's `botForOrch(orchId)` — that's the bot this orch subscribed to at
+  // create/resume time, which may differ from the role's *current* token
+  // if the operator edited the role mid-flight (decision: orchs stay on
+  // their original bot until termination). Inbound humans land back in
+  // the lead's inbox via the bot's `messageCreate` handler.
+  server.registerTool(
+    'discord.send_message',
+    {
+      title: 'Post a message to the role\'s Discord channel (lead-only)',
+      description:
+        "Lead-only. Posts `content` to the Discord channel bound to this orchestrator's role (role.connectors[type=discord].channelId). Errors NO_DISCORD_CHANNEL when the role has no channel, DISCORD_BOT_NOT_CONFIGURED when the role has no bot token, DISCORD_BOT_DISABLED when the bot failed to start. Discord's hard limit is 2000 chars — chunk longer messages yourself.",
+      inputSchema: {
+        content: z.string().min(1).max(2000),
+      },
+      outputSchema: {
+        delivered: z.boolean(),
+        channel_id: z.string(),
+      },
+    },
+    async (args) => {
+      const ctx = ctxResolver();
+      requireLead(ctx, 'discord.send_message');
+      const a = args as { content: string };
+
+      const roleId = ctx.orchestrator.roleId;
+      const role = roleId && ctx.spawner.roleStore ? ctx.spawner.roleStore.get(roleId) : null;
+      const discord = role?.connectors.find((c) => c.type === 'discord');
+      const channelId = discord?.channelId;
+      if (!channelId) {
+        logCall('discord.send_message', ctx, false, 'NO_DISCORD_CHANNEL');
+        throw new McpError(
+          ErrorCode.InvalidRequest,
+          'NO_DISCORD_CHANNEL: this orchestrator\'s role has no Discord channelId configured',
+        );
+      }
+      if (!discord?.botToken) {
+        logCall('discord.send_message', ctx, false, 'DISCORD_BOT_NOT_CONFIGURED');
+        throw new McpError(
+          ErrorCode.InvalidRequest,
+          'DISCORD_BOT_NOT_CONFIGURED: this orchestrator\'s role has no Discord botToken configured',
+        );
+      }
+
+      const bot = ctx.spawner.discordBotPool?.botForOrch(ctx.orchestrator.id);
+      if (!bot || !bot.isReady()) {
+        logCall('discord.send_message', ctx, false, 'DISCORD_BOT_DISABLED');
+        throw new McpError(
+          ErrorCode.InvalidRequest,
+          'DISCORD_BOT_DISABLED: the Discord bot for this role failed to start or is not yet connected',
+        );
+      }
+
+      try {
+        await bot.sendMessage(channelId, a.content);
+        logCall('discord.send_message', ctx, true);
+        return ok({ delivered: true, channel_id: channelId });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logCall('discord.send_message', ctx, false, msg);
+        throw new McpError(ErrorCode.InternalError, `DISCORD_SEND_FAILED: ${msg}`);
+      }
+    },
+  );
 }

@@ -7,6 +7,7 @@ import { initRootLogger, withModule } from './logger.js';
 import { SwarmDb } from './modules/db/index.js';
 import { DbPersistence } from './modules/orchestrator/persistence.js';
 import { DiscordWebhookNotifier, NoOpNotifier, type Notifier } from './modules/notify/index.js';
+import { DiscordBotPool } from './modules/discord/pool.js';
 import { initClaudeRuntime } from './runtime/claude-init.js';
 import { RoleStore } from './modules/roles/index.js';
 import { MessagesAggregator } from './modules/metrics/aggregator.js';
@@ -133,8 +134,18 @@ const notifier: Notifier = config.discordWebhookUrl
     })
   : new NoOpNotifier();
 
+// ---- Discord bot pool (bidirectional). One bot per distinct role token. ----
+// The pool is created empty; bots come up lazily when an orch with a
+// `botToken`-bearing role subscribes (create or resume path).
+const discordBotPool = new DiscordBotPool();
+
 const roleStore = new RoleStore(db);
-const spawner = new Spawner(config, { notifier, persistence, roleStore });
+const spawner = new Spawner(config, {
+  notifier,
+  persistence,
+  roleStore,
+  discordBotPool,
+});
 
 // ---- S9: in-memory `/metrics/messages` aggregator -------------------------
 // Owns a 60-pt global ring + 8-pt per-orch rings, ticked every 60 s. Lost on
@@ -239,6 +250,7 @@ async function shutdown(signal: string): Promise<void> {
     // Stop MCP first (per-request transport instances will tear down with
     // their sockets) then the main HTTP listener.
     await mcp.stop();
+    await discordBotPool.stopAll();
     await handle.close();
     db.close();
   } catch (err) {

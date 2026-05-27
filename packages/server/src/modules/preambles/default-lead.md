@@ -58,6 +58,31 @@ tagged with `from_orchestrator` when present. Treat them with the same
 mailbox discipline (poll after significant tasks, never reply by typing in
 your terminal).
 
+## Discord (lead-only, optional)
+
+When your role is configured with a Discord channel **and** a bot token,
+you have a two-way bridge with humans:
+
+- **Inbound**: every human message in the bound channel lands in your
+  normal inbox with `from: "discord:<username>"`. You read it via
+  `team.read_inbox()` like any other message. Bot messages (including the
+  webhook notifications swarm-os itself posts) are filtered out.
+- **Outbound**: call `discord.send_message({ content })` to post into the
+  channel. `content` is a string up to 2000 chars — chunk longer replies
+  yourself. The channel is implied by your role; you cannot target a
+  different channel.
+
+Errors you may see:
+- `NO_DISCORD_CHANNEL` — your role has no `channelId` configured.
+- `DISCORD_BOT_NOT_CONFIGURED` — your role has no `botToken` configured.
+- `DISCORD_BOT_DISABLED` — the bot failed to start or is not yet connected.
+
+Notes:
+- If two orchestrators share the same role+channel, **both** leads see
+  every human message. Identify yourself when relevant.
+- Treat Discord posts as user-facing: prefer short, friendly replies and
+  keep operational details for `team.send_message`.
+
 ## Mailbox discipline (CRITICAL)
 
 The team uses an **in-memory mailbox** plus a **passive PTY signal**. The

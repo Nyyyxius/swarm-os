@@ -10,6 +10,7 @@ import { NoOpNotifier } from '../notify/null.js';
 import { NoOpPersistence } from '../orchestrator/persistence.js';
 import type { RoleStore, Role } from '../roles/index.js';
 import type { SessionRow } from '../db/index.js';
+import type { DiscordBotPool } from '../discord/pool.js';
 
 const log = withModule('spawner');
 
@@ -46,6 +47,13 @@ export interface SpawnerDeps {
    * (b) spawn the role's initial workers right after the lead is up.
    */
   roleStore?: RoleStore;
+  /**
+   * Optional Discord bot pool. When set AND a role's DiscordConnector
+   * has BOTH `channelId` and `botToken`, the orchestrator is subscribed
+   * at create/resume time and unsubscribed at destroy/hide/shutdown.
+   * The pool starts a bot per distinct token, lazily.
+   */
+  discordBotPool?: DiscordBotPool;
 }
 
 export class Spawner {
@@ -53,6 +61,7 @@ export class Spawner {
   readonly notifier: Notifier;
   readonly persistence: Persistence;
   readonly roleStore: RoleStore | null;
+  readonly discordBotPool: DiscordBotPool | null;
 
   constructor(
     private readonly config: Config,
@@ -61,6 +70,34 @@ export class Spawner {
     this.notifier = deps.notifier ?? new NoOpNotifier();
     this.persistence = deps.persistence ?? new NoOpPersistence();
     this.roleStore = deps.roleStore ?? null;
+    this.discordBotPool = deps.discordBotPool ?? null;
+  }
+
+  /**
+   * Hook the orchestrator up to its role's Discord bot when the role has
+   * BOTH a `channelId` and a `botToken`. Fire-and-forget: the pool's
+   * `subscribeOrch` lazily starts a Gateway connection if needed, which
+   * can take a few seconds; we don't make `create()` async over it,
+   * because the orch can serve traffic immediately while Discord wires up.
+   */
+  private wireDiscordBot(orch: Orchestrator, role: Role | null): void {
+    if (!this.discordBotPool || !role) return;
+    const discord = role.connectors.find((c) => c.type === 'discord');
+    if (!discord?.channelId || !discord.botToken) return;
+    void this.discordBotPool
+      .subscribeOrch(discord.botToken, {
+        orchestratorId: orch.id,
+        channelId: discord.channelId,
+        getLeadSessionId: () => orch.leadSessionId,
+        mailbox: orch.mailbox,
+      })
+      .catch((err) => {
+        log.warn({
+          event: 'spawner.discord_subscribe_failed',
+          orchId: orch.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
   }
 
   /**
@@ -135,6 +172,11 @@ export class Spawner {
     this.persistence.writeSession(lead, { force: true });
     this.persistence.writeOrchestrator(orch);
 
+    // Subscribe the orch to its Discord channel (if any) as soon as the lead
+    // is up. Skipped silently when the bot is disabled or the role has no
+    // `channelId` — webhook notifications remain unaffected either way.
+    if (orch.status === 'running') this.wireDiscordBot(orch, role);
+
     // Spawn N initial workers if the role asks for them. Lead failure is
     // non-recoverable — skip spawning workers in that case. WorkerCapError
     // stops the loop without failing the whole orchestrator creation.
@@ -203,6 +245,9 @@ export class Spawner {
       if (orch.status !== 'stopped' && orch.status !== 'failed') return false;
       this.orchestrators.delete(id);
     }
+    // Drop any Discord subscription so a recycled orch id with a different
+    // role can't piggyback on a stale channel binding.
+    void this.discordBotPool?.unsubscribeOrch(id);
     // Whether or not the in-memory row was present, flip the DB rows.
     // history-only orchestrators (server restarted, never re-added to the
     // Map) still need to be hidable.
@@ -234,6 +279,8 @@ export class Spawner {
       return false;
     }
     orch.stop(reason);
+    // Stop forwarding Discord messages to a terminating lead.
+    void this.discordBotPool?.unsubscribeOrch(id);
     eventBus.emitEvent({
       kind: 'orchestrator.destroyed',
       orchestratorId: id,
@@ -379,6 +426,11 @@ export class Spawner {
       try {
         await orch.resume({ leadRow, workerRows, staggerMs });
         resumed++;
+        // Re-attach the Discord subscription so a restarted server keeps
+        // delivering channel messages to the rehydrated lead. The mailbox is
+        // already rehydrated from `mailbox_messages`, so resumed orchs will
+        // see both pre-restart and post-restart messages in order.
+        this.wireDiscordBot(orch, role);
         eventBus.emitEvent({
           kind: 'orchestrator.created',
           orchestratorId: orch.id,

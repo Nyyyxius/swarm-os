@@ -94,6 +94,12 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedRole]);
 
+  // Reset the nested role dialog when the parent closes, otherwise it would
+  // pop back up the next time NewOrchestratorDialog re-opens.
+  useEffect(() => {
+    if (!open) setRoleDialogOpen(false);
+  }, [open]);
+
   if (!open) return null;
 
   function onRolePicked(value: string) {
@@ -138,6 +144,7 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
   }
 
   return (
+    <>
     <div className="modal-backdrop" onClick={onClose}>
       <div className="modal wide" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
@@ -302,23 +309,27 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
           </button>
         </div>
       </div>
-
-      <RoleDialog
-        open={roleDialogOpen}
-        onClose={() => setRoleDialogOpen(false)}
-        onSubmit={async (body) => {
-          const r = await createRole(body);
-          // `useRoles().create` awaits a refresh() before returning, so
-          // r.id is guaranteed to be in `roles[]` by the time we land here
-          // — the auto-fill effect will pick it up on next render.
-          setSelectedRoleId(r.id);
-          return r;
-        }}
-        // z-index workaround : RoleDialog still uses Tailwind `z-40` which
-        // sits *below* our `.modal-backdrop` (z-index 100). Once RoleDialog
-        // is ported to v2 (Step 10) this override can be dropped.
-        containerStyle={{ zIndex: 110 }}
-      />
     </div>
+
+    {/* Rendered as a sibling (not a child) of `.modal-backdrop` so clicks
+        inside the nested role dialog don't bubble up to the backdrop's
+        onClose handler and dismiss both modals. */}
+    <RoleDialog
+      open={roleDialogOpen}
+      onClose={() => setRoleDialogOpen(false)}
+      onSubmit={async (body) => {
+        const r = await createRole(body);
+        // `useRoles().create` awaits a refresh() before returning, so
+        // r.id is guaranteed to be in `roles[]` by the time we land here
+        // — the auto-fill effect will pick it up on next render.
+        setSelectedRoleId(r.id);
+        return r;
+      }}
+      // z-index workaround : RoleDialog still uses Tailwind `z-40` which
+      // sits *below* our `.modal-backdrop` (z-index 100). Once RoleDialog
+      // is ported to v2 (Step 10) this override can be dropped.
+      containerStyle={{ zIndex: 110 }}
+    />
+    </>
   );
 }

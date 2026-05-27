@@ -670,22 +670,45 @@ function ConnectorsSection({
 }) {
   const discord = role.connectors.find((c) => c.type === 'discord');
   const [url, setUrl] = useState(discord?.webhookUrl ?? '');
+  const [channelId, setChannelId] = useState(discord?.channelId ?? '');
+  const [botToken, setBotToken] = useState(discord?.botToken ?? '');
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setUrl(discord?.webhookUrl ?? '');
+    setChannelId(discord?.channelId ?? '');
+    setBotToken(discord?.botToken ?? '');
     setError(null);
-  }, [role.id, discord?.webhookUrl, editing]);
+  }, [role.id, discord?.webhookUrl, discord?.channelId, discord?.botToken, editing]);
 
   async function save() {
     setError(null);
     const u = url.trim();
+    const cid = channelId.trim();
+    const tok = botToken.trim();
     if (u && !/^https?:\/\//i.test(u)) {
       setError('Webhook URL must start with http:// or https://');
       return;
     }
+    if (cid && !/^\d{17,20}$/.test(cid)) {
+      setError('Channel ID must be 17–20 digits (a Discord snowflake)');
+      return;
+    }
+    if (tok && !cid) {
+      setError('Set a channel ID alongside the bot token (the bot needs a channel to listen on)');
+      return;
+    }
+    if (!u && (cid || tok)) {
+      setError('Set a webhook URL before adding a channel ID or bot token');
+      return;
+    }
     const connectors: ConnectorView[] = u
-      ? [{ type: 'discord', webhookUrl: u }]
+      ? [{
+          type: 'discord',
+          webhookUrl: u,
+          ...(cid ? { channelId: cid } : {}),
+          ...(tok ? { botToken: tok } : {}),
+        }]
       : [];
     try {
       await onSave({ connectors });
@@ -730,19 +753,43 @@ function ConnectorsSection({
 
       {!editing ? (
         discord ? (
-          <div className="cfg-kv">
-            <span className="k">DISCORD</span>
-            <span
-              className="v"
-              style={{
-                fontSize: 10.5,
-                color: 'var(--text-dim)',
-                wordBreak: 'break-all',
-              }}
-            >
-              {discord.webhookUrl}
-            </span>
-          </div>
+          <>
+            <div className="cfg-kv">
+              <span className="k">DISCORD</span>
+              <span
+                className="v"
+                style={{
+                  fontSize: 10.5,
+                  color: 'var(--text-dim)',
+                  wordBreak: 'break-all',
+                }}
+              >
+                {discord.webhookUrl}
+              </span>
+            </div>
+            {discord.channelId && (
+              <div className="cfg-kv">
+                <span className="k">CHANNEL ID</span>
+                <span
+                  className="v"
+                  style={{ fontSize: 10.5, color: 'var(--text-dim)' }}
+                >
+                  {discord.channelId}
+                </span>
+              </div>
+            )}
+            {discord.botToken && (
+              <div className="cfg-kv">
+                <span className="k">BOT TOKEN</span>
+                <span
+                  className="v"
+                  style={{ fontSize: 10.5, color: 'var(--text-dim)' }}
+                >
+                  configured
+                </span>
+              </div>
+            )}
+          </>
         ) : (
           <div className="field-help">
             No Discord webhook. Configure to relay session-waiting events to a
@@ -763,6 +810,39 @@ function ConnectorsSection({
               When set, orchestrators created with this role route their
               notifications to this webhook instead of the global one. Leave
               empty to remove.
+            </div>
+          </div>
+          <div className="field">
+            <label>DISCORD CHANNEL ID (optional)</label>
+            <input
+              type="text"
+              inputMode="numeric"
+              pattern="\d{17,20}"
+              value={channelId}
+              onChange={(e) => setChannelId(e.target.value)}
+              placeholder="1234567890123456789"
+            />
+            <div className="field-help">
+              When set AND a bot token is configured below, the role's bot
+              subscribes to this channel: every human message lands in the
+              lead's inbox, and the lead can write back via the{' '}
+              <code>discord.send_message</code> tool. Enable Developer Mode in
+              Discord, right-click the channel → Copy Channel ID.
+            </div>
+          </div>
+          <div className="field">
+            <label>DISCORD BOT TOKEN (optional)</label>
+            <input
+              type="password"
+              autoComplete="off"
+              value={botToken}
+              onChange={(e) => setBotToken(e.target.value)}
+              placeholder="MTAxxxxxxxxxxxxxxxxx.xxxxxx.xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+            />
+            <div className="field-help">
+              Bot OAuth token from the Discord Developer Portal. Each role can
+              have its own bot user (e.g. Marketing-Bot, Support-Bot). Leave
+              empty to disable bidirectional Discord for this role.
             </div>
           </div>
           {discord && (

@@ -58,6 +58,8 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
   const [effort, setEffort] = useState<string>('');
   const [perm, setPerm] = useState<string>('');
   const [discordUrl, setDiscordUrl] = useState<string>('');
+  const [discordChannelId, setDiscordChannelId] = useState<string>('');
+  const [discordBotToken, setDiscordBotToken] = useState<string>('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
@@ -75,6 +77,8 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
       setPerm(initial.defaultPermissionMode ?? '');
       const discord = initial.connectors.find((c) => c.type === 'discord');
       setDiscordUrl(discord?.webhookUrl ?? '');
+      setDiscordChannelId(discord?.channelId ?? '');
+      setDiscordBotToken(discord?.botToken ?? '');
     } else {
       setLabel('');
       setLeadPrompt('');
@@ -85,6 +89,8 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
       setEffort('');
       setPerm('');
       setDiscordUrl('');
+      setDiscordChannelId('');
+      setDiscordBotToken('');
     }
   }, [open, initial]);
 
@@ -96,11 +102,26 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
     try {
       const connectors: ConnectorView[] = [];
       const url = discordUrl.trim();
+      const channelId = discordChannelId.trim();
+      const botToken = discordBotToken.trim();
       if (url) {
         if (!/^https?:\/\//i.test(url)) {
           throw new Error('Discord webhook URL must start with http(s)://');
         }
-        connectors.push({ type: 'discord', webhookUrl: url });
+        if (channelId && !/^\d{17,20}$/.test(channelId)) {
+          throw new Error('Discord channel ID must be 17–20 digits (a Discord snowflake)');
+        }
+        if (botToken && !channelId) {
+          throw new Error('Set a Discord channel ID alongside the bot token (the bot needs a channel to listen on)');
+        }
+        connectors.push({
+          type: 'discord',
+          webhookUrl: url,
+          ...(channelId ? { channelId } : {}),
+          ...(botToken ? { botToken } : {}),
+        });
+      } else if (channelId || botToken) {
+        throw new Error('Set a Discord webhook URL before adding a channel ID or bot token');
       }
       let parsedCount: number | null = null;
       if (workerCount.trim()) {
@@ -215,6 +236,39 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
             <p className="mt-1 text-[11px] leading-snug text-slate-400">
               When set, orchestrators created with this role will route their notifications to
               this webhook instead of the global one.
+            </p>
+          </Field>
+          <Field label="Discord channel ID (optional — enables bot bidirectional)" wide>
+            <input
+              className={inputCls}
+              type="text"
+              inputMode="numeric"
+              pattern="\d{17,20}"
+              placeholder="e.g. 1234567890123456789"
+              value={discordChannelId}
+              onChange={(e) => setDiscordChannelId(e.target.value)}
+            />
+            <p className="mt-1 text-[11px] leading-snug text-slate-400">
+              When set AND a <code>Bot token</code> is configured below, the role's bot
+              subscribes to this channel: every human message lands in the lead's inbox
+              (<code>from: discord:&lt;username&gt;</code>) and the lead can write back via the{' '}
+              <code>discord.send_message</code> tool. Enable Developer Mode in Discord, right-click
+              the channel, → Copy Channel ID.
+            </p>
+          </Field>
+          <Field label="Discord bot token (optional — per-role Discord identity)" wide>
+            <input
+              className={inputCls}
+              type="password"
+              autoComplete="off"
+              placeholder="MTAxxxxxxxxxxxxxxxxx.xxxxxx.xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
+              value={discordBotToken}
+              onChange={(e) => setDiscordBotToken(e.target.value)}
+            />
+            <p className="mt-1 text-[11px] leading-snug text-slate-400">
+              Bot OAuth token from the Discord Developer Portal. Each role can have its own
+              bot user (e.g. Marketing-Bot, Support-Bot). Leave empty to disable bidirectional
+              Discord for this role — the webhook above keeps owning system notifications.
             </p>
           </Field>
         </div>
