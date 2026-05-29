@@ -115,3 +115,20 @@ CREATE TABLE IF NOT EXISTS mailbox_messages (
 CREATE INDEX IF NOT EXISTS idx_mailbox_pending_by_orch
   ON mailbox_messages(orchestrator_id, delivered_at, ts)
   WHERE delivered_at IS NULL;
+
+-- Per-instance visual settings (singleton row, id='current'). Lets the operator
+-- distinguish multiple swarm-os instances running in parallel via accent color,
+-- label, and a few typography knobs. Read by both server (`GET /settings`) and
+-- web (applied as CSS vars on `:root`). Defaults live in code (modules/settings)
+-- so an empty DB still renders correctly — the row is upserted lazily on first
+-- PATCH from the UI.
+CREATE TABLE IF NOT EXISTS instance_settings (
+  id TEXT PRIMARY KEY,                  -- always 'current'
+  instance_label TEXT,                  -- nullable, max 16 chars (UI-enforced)
+  accent TEXT NOT NULL,                 -- hex #rrggbb
+  bg_tint TEXT NOT NULL,                -- 'warm'|'neutral'|'cool'
+  font_size INTEGER NOT NULL,           -- px, 11..16
+  density TEXT NOT NULL,                -- 'compact'|'regular'|'comfy'
+  dark_mode INTEGER NOT NULL DEFAULT 1, -- 1=dark (v1 only supports dark; toggle is UI stub)
+  updated_at TEXT NOT NULL              -- ISO 8601
+);

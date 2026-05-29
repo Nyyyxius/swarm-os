@@ -21,6 +21,7 @@ import { McpServer } from '../../src/modules/mcp/server.js';
 import { SwarmDb } from '../../src/modules/db/index.js';
 import { DbPersistence } from '../../src/modules/orchestrator/persistence.js';
 import { RoleStore } from '../../src/modules/roles/index.js';
+import { SettingsStore } from '../../src/modules/settings/index.js';
 import { MessagesAggregator } from '../../src/modules/metrics/aggregator.js';
 import { BusMetricsCollector } from '../../src/modules/metrics/busMetrics.js';
 import { createApp, startServer } from '../../src/http/main.js';
@@ -50,6 +51,8 @@ export interface TestStack {
   mainPort: number | null;
   db: SwarmDb;
   persistence: DbPersistence;
+  /** Exposed so settings tests can read the singleton row without re-instantiating. */
+  settingsStore: SettingsStore;
   /** S9 — exposed so integration tests can call `tick()` synchronously. */
   aggregator: MessagesAggregator;
   /** S8 — exposed so integration tests can call `tick()` / `snapshot()`. */
@@ -116,6 +119,7 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
   const db = new SwarmDb(dataDir);
   const persistence = new DbPersistence(db);
   const roleStore = new RoleStore(db);
+  const settingsStore = new SettingsStore(db);
   // Default to no-op so a notifier wasn't passed
   const notifier = opts.notifier ?? new NoOpNotifier();
   const spawner = new Spawner(config, { notifier, persistence, roleStore });
@@ -136,7 +140,14 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
 
   let http: HttpServer | null = null;
   if (!opts.skipMainHttp) {
-    const handle = startServer(config, spawner, roleStore, aggregator, busMetrics);
+    const handle = startServer(
+      config,
+      spawner,
+      roleStore,
+      settingsStore,
+      aggregator,
+      busMetrics,
+    );
     http = handle.http;
     // Wait until the listener is actually accepting connections.
     await new Promise<void>((resolve) => {
@@ -154,6 +165,7 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
       mainPort: config.port,
       db,
       persistence,
+      settingsStore,
       aggregator,
       busMetrics,
       workspaceRoot,
@@ -183,6 +195,7 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
     mainPort: null,
     db,
     persistence,
+    settingsStore,
     aggregator,
     busMetrics,
     workspaceRoot,

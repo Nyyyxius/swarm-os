@@ -121,6 +121,42 @@ export interface SessionView {
   lastActivityAt: string;
 }
 
+/**
+ * Per-instance visual settings — backs the APPEARANCE section of the
+ * settings drawer. Server source-of-truth lives at
+ * `packages/server/src/modules/settings/index.ts`; if you add a field there,
+ * mirror it in this interface (and `INSTANCE_SETTINGS_DEFAULTS` below).
+ */
+export type InstanceBgTint = 'warm' | 'neutral' | 'cool';
+export type InstanceDensity = 'compact' | 'regular' | 'comfy';
+
+export interface InstanceSettingsView {
+  instanceLabel: string | null;
+  accent: string;
+  bgTint: InstanceBgTint;
+  fontSize: number;
+  density: InstanceDensity;
+  darkMode: boolean;
+  updatedAt: string;
+}
+
+export type InstanceSettingsPatch = Partial<Omit<InstanceSettingsView, 'updatedAt'>>;
+
+/**
+ * Hard-coded defaults — same values as the server module. Used by the hook
+ * for synchronous first-paint before the server's GET resolves and as a
+ * fallback when no localStorage cache exists yet.
+ */
+export const INSTANCE_SETTINGS_DEFAULTS: InstanceSettingsView = {
+  instanceLabel: null,
+  accent: '#ffb060',
+  bgTint: 'warm',
+  fontSize: 13,
+  density: 'regular',
+  darkMode: true,
+  updatedAt: '1970-01-01T00:00:00.000Z',
+};
+
 export interface HealthView {
   status: string;
   project_name: string;
@@ -372,6 +408,17 @@ export const api = {
    */
   getMetricsBus: () =>
     request<BusMetricsSnapshot>('GET', '/metrics/bus'),
+  /**
+   * Per-instance visual settings (theme + label). Singleton on the server.
+   * The GET returns hard-coded defaults until the first PATCH seeds the DB
+   * row, so the response always parses.
+   */
+  getInstanceSettings: () =>
+    request<{ settings: InstanceSettingsView }>('GET', '/settings'),
+  patchInstanceSettings: (patch: InstanceSettingsPatch) =>
+    request<{ settings: InstanceSettingsView }>('PATCH', '/settings', patch),
+  resetInstanceSettings: () =>
+    request<{ settings: InstanceSettingsView }>('POST', '/settings/reset'),
 };
 
 export { HttpError };

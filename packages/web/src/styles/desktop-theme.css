@@ -71,6 +71,21 @@
   .brand-text { font-family: "Geist Mono", monospace; font-size: 12px; letter-spacing: 0.18em; line-height: 1; }
   .brand-text .sub { color: var(--text-mute); font-size: 9px; letter-spacing: 0.16em; margin-top: 4px; }
   .brand-text .sub b { color: var(--text-dim); font-weight: 400; }
+  /* Instance label pill — only rendered when the operator has set a label
+     in APPEARANCE. Uses the accent CSS var so the chosen color is part of
+     the differentiation signal between parallel instances. */
+  .instance-pill {
+    appearance: none; cursor: pointer;
+    font-family: "Geist Mono", monospace; font-size: 9.5px;
+    letter-spacing: 0.18em; line-height: 1;
+    color: var(--amber);
+    background: rgba(255, 176, 96, 0.10);
+    border: 1px solid var(--amber);
+    padding: 6px 10px;
+    border-radius: 2px;
+    transition: background 120ms ease;
+  }
+  .instance-pill:hover { background: rgba(255, 176, 96, 0.20); }
 
   .health-strip {
     display: flex; gap: 1px; height: 100%; min-width: 0;

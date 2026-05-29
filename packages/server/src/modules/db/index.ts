@@ -122,6 +122,23 @@ export interface RoleRow {
   updated_at: string;
 }
 
+/**
+ * Per-instance visual settings. Singleton row (`id='current'`). The defaults
+ * are seeded in code by the SettingsStore the first time `update` is called,
+ * not at schema-create time — read methods return `null` when the row is
+ * absent and the module layer substitutes hard-coded defaults.
+ */
+export interface InstanceSettingsRow {
+  id: string;
+  instance_label: string | null;
+  accent: string;
+  bg_tint: string;
+  font_size: number;
+  density: string;
+  dark_mode: number;
+  updated_at: string;
+}
+
 export interface SessionRow {
   id: string;
   orchestrator_id: string;
@@ -172,6 +189,8 @@ export class SwarmDb {
   private readonly getRoleStmt;
   private readonly listRolesStmt;
   private readonly deleteRoleStmt;
+  private readonly getInstanceSettingsStmt;
+  private readonly upsertInstanceSettingsStmt;
   // Phase 8 — auto-resume + persisted mailbox.
   private readonly markOrchInterruptedByIdStmt;
   private readonly markSessionsInterruptedByOrchIdStmt;
@@ -409,6 +428,25 @@ export class SwarmDb {
     this.deleteRoleStmt = this.db.prepare<[string]>(
       'DELETE FROM roles WHERE id = ?',
     );
+
+    this.getInstanceSettingsStmt = this.db.prepare<[string], InstanceSettingsRow>(
+      'SELECT * FROM instance_settings WHERE id = ?',
+    );
+    this.upsertInstanceSettingsStmt = this.db.prepare<InstanceSettingsRow>(`
+      INSERT INTO instance_settings (
+        id, instance_label, accent, bg_tint, font_size, density, dark_mode, updated_at
+      ) VALUES (
+        @id, @instance_label, @accent, @bg_tint, @font_size, @density, @dark_mode, @updated_at
+      )
+      ON CONFLICT(id) DO UPDATE SET
+        instance_label = excluded.instance_label,
+        accent = excluded.accent,
+        bg_tint = excluded.bg_tint,
+        font_size = excluded.font_size,
+        density = excluded.density,
+        dark_mode = excluded.dark_mode,
+        updated_at = excluded.updated_at
+    `);
   }
 
   /**
@@ -847,6 +885,35 @@ export class SwarmDb {
     }
   }
 
+  // --- Instance settings --------------------------------------------------
+
+  /**
+   * Read the singleton instance settings row (`id='current'`). Returns null
+   * if the row hasn't been seeded yet — caller substitutes hard-coded
+   * defaults from `modules/settings` rather than us touching the DB on read.
+   */
+  getInstanceSettings(): InstanceSettingsRow | null {
+    try {
+      return this.getInstanceSettingsStmt.get('current') ?? null;
+    } catch (err) {
+      log.warn({ event: 'db.read_failed', op: 'getInstanceSettings', error: String(err) });
+      return null;
+    }
+  }
+
+  upsertInstanceSettings(row: InstanceSettingsRow): void {
+    try {
+      this.upsertInstanceSettingsStmt.run(row);
+    } catch (err) {
+      log.warn({
+        event: 'db.write_failed',
+        op: 'upsertInstanceSettings',
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    }
+  }
+
   /** Helper for tests / verify scripts — both predicates exposed. */
   static isTerminalOrch(s: OrchestratorStatusRow): boolean {
     return TERMINAL_ORCH.has(s);
@@ -959,4 +1026,15 @@ CREATE TABLE IF NOT EXISTS mailbox_messages (
 CREATE INDEX IF NOT EXISTS idx_mailbox_pending_by_orch
   ON mailbox_messages(orchestrator_id, delivered_at, ts)
   WHERE delivered_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS instance_settings (
+  id TEXT PRIMARY KEY,
+  instance_label TEXT,
+  accent TEXT NOT NULL,
+  bg_tint TEXT NOT NULL,
+  font_size INTEGER NOT NULL,
+  density TEXT NOT NULL,
+  dark_mode INTEGER NOT NULL DEFAULT 1,
+  updated_at TEXT NOT NULL
+);
 `;

@@ -14,7 +14,10 @@ import { createRolesRouter } from './routes/roles.js';
 import { createMetricsRouter } from './routes/metrics.js';
 import { createPreamblesRouter } from './routes/preambles.js';
 import { createAiRouter } from './routes/ai.js';
+import { createDiscordRouter } from './routes/discord.js';
+import { createSettingsRouter } from './routes/settings.js';
 import type { RoleStore } from '../modules/roles/index.js';
+import type { SettingsStore } from '../modules/settings/index.js';
 import type { MessagesAggregator } from '../modules/metrics/aggregator.js';
 import type { BusMetricsCollector } from '../modules/metrics/busMetrics.js';
 import { TerminalHub } from './ws/terminal.js';
@@ -73,6 +76,7 @@ export function createApp(
   config: Config,
   spawner: Spawner,
   roleStore: RoleStore,
+  settingsStore: SettingsStore,
   aggregator: MessagesAggregator,
   busMetrics?: BusMetricsCollector,
   bootGate?: BootGate,
@@ -175,8 +179,10 @@ export function createApp(
   app.use(createSessionsRouter(spawner, config));
   app.use(createWsTicketRouter(spawner));
   app.use(createRolesRouter(roleStore, config));
+  app.use(createSettingsRouter(settingsStore));
   app.use(createPreamblesRouter());
   app.use(createAiRouter(config));
+  app.use(createDiscordRouter());
   // S9 + S8 — `GET /metrics/messages` and `GET /metrics/bus`. Mounted
   // after the auth middleware so they return 401 without X-Auth-Token
   // (parity with `/orchestrators`). `/metrics/bus` is only mounted when
@@ -211,11 +217,20 @@ export function startServer(
   config: Config,
   spawner: Spawner,
   roleStore: RoleStore,
+  settingsStore: SettingsStore,
   aggregator: MessagesAggregator,
   busMetrics?: BusMetricsCollector,
   bootGate?: BootGate,
 ): ServerHandle {
-  const { app } = createApp(config, spawner, roleStore, aggregator, busMetrics, bootGate);
+  const { app } = createApp(
+    config,
+    spawner,
+    roleStore,
+    settingsStore,
+    aggregator,
+    busMetrics,
+    bootGate,
+  );
   const http = createServer(app);
 
   const terminalHub = new TerminalHub(spawner);

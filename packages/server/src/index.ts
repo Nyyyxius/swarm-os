@@ -10,6 +10,7 @@ import { DiscordWebhookNotifier, NoOpNotifier, type Notifier } from './modules/n
 import { DiscordBotPool } from './modules/discord/pool.js';
 import { initClaudeRuntime } from './runtime/claude-init.js';
 import { RoleStore } from './modules/roles/index.js';
+import { SettingsStore } from './modules/settings/index.js';
 import { MessagesAggregator } from './modules/metrics/aggregator.js';
 import { BusMetricsCollector } from './modules/metrics/busMetrics.js';
 import {
@@ -140,6 +141,7 @@ const notifier: Notifier = config.discordWebhookUrl
 const discordBotPool = new DiscordBotPool();
 
 const roleStore = new RoleStore(db);
+const settingsStore = new SettingsStore(db);
 const spawner = new Spawner(config, {
   notifier,
   persistence,
@@ -164,7 +166,15 @@ busMetrics.start();
 // Phase 8 — bootGate: HTTP listens immediately so /health stays green for
 // Docker, but business routes return 503 until auto-resume finishes.
 const bootGate: BootGate = { value: false };
-const handle = startServer(config, spawner, roleStore, aggregator, busMetrics, bootGate);
+const handle = startServer(
+  config,
+  spawner,
+  roleStore,
+  settingsStore,
+  aggregator,
+  busMetrics,
+  bootGate,
+);
 
 // Start MCP HTTP listener on its own port (loopback only, plan §14).
 // Phase 8 — MCP must be listening BEFORE we respawn PTYs, otherwise the

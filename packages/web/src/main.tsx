@@ -3,6 +3,12 @@ import { createRoot } from 'react-dom/client';
 import App from './App';
 import './index.css';
 import './styles/desktop-theme.css';
+import { applyCachedInstanceSettings } from './hooks/useInstanceSettings';
+
+// Apply the cached instance theme BEFORE React renders so the first paint
+// already has the operator's chosen accent / label / bg-tint / density.
+// The hook later reconciles with the server's value.
+applyCachedInstanceSettings();
 
 const root = document.getElementById('root');
 if (!root) {

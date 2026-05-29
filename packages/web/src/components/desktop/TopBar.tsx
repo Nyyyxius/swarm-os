@@ -2,6 +2,7 @@
 import { useEffect, useState } from 'react';
 import { ICON } from './icons';
 import { formatClock, formatMsgCount, formatUptimeShort } from '../../lib/format';
+import { useInstanceSettings } from '../../hooks/useInstanceSettings';
 
 /** Forme attendue par la TopBar pour chaque team-pill. */
 export interface TopBarTeam {
@@ -58,6 +59,10 @@ export default function TopBar({
     const i = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(i);
   }, []);
+  // Per-instance label — the whole point of the APPEARANCE feature: spot
+  // which swarm-os instance is in this tab without reading the URL. Click
+  // jumps straight back into the panel to change it.
+  const { settings: instanceSettings } = useInstanceSettings();
 
   // L'uptime est recalculé à chaque tick : le re-render déclenché par
   // `setNow(...)` ré-évalue `formatUptimeShort` qui lit `Date.now()`.
@@ -75,6 +80,16 @@ export default function TopBar({
             <b>{info.projectName}</b> · {info.version} · {uptime} up
           </div>
         </div>
+        {instanceSettings.instanceLabel && (
+          <button
+            type="button"
+            className="instance-pill"
+            onClick={onOpenSettings}
+            title="instance label — click to edit"
+          >
+            {instanceSettings.instanceLabel}
+          </button>
+        )}
       </div>
 
       <div className="health-strip">

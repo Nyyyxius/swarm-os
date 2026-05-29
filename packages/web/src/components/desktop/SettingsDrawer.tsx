@@ -29,6 +29,7 @@ import {
 } from '../../api/client';
 import { useNow } from '../../lib/useNow';
 import { formatUptime, formatClockShort } from '../../lib/format';
+import { AppearanceSection } from './AppearanceSection';
 
 export type AuthState = 'unknown' | 'ok' | 'missing' | 'invalid';
 
@@ -236,6 +237,9 @@ export default function SettingsDrawer({
               waiting signals.
             </div>
           </div>
+
+          {/* ── APPEARANCE ──────────────────────────────── */}
+          <AppearanceSection />
         </div>
       </aside>
     </>
