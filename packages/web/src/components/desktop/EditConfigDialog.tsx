@@ -36,7 +36,7 @@ interface Props {
 const GAP_TOOLTIP = 'available in v2 — see workaround below (gap §4-2)';
 
 export default function EditConfigDialog({ open, team, onClose }: Props) {
-  const [model, setModel] = useState<string>('claude-opus-4-7');
+  const [model, setModel] = useState<string>('claude-opus-4-8');
   const [effort, setEffort] = useState<Effort>('high');
   const [perm, setPerm] = useState<PermissionMode>('default');
 

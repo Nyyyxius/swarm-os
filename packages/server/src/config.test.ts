@@ -58,7 +58,7 @@ describe('loadConfig', () => {
     expect(cfg.port).toBe(8787);
     expect(cfg.mcpPort).toBe(8788);
     expect(cfg.host).toBe('127.0.0.1');
-    expect(cfg.defaultModel).toBe('claude-opus-4-7');
+    expect(cfg.defaultModel).toBe('claude-opus-4-8');
     expect(cfg.defaultEffort).toBe('xhigh');
     expect(cfg.defaultPermissionMode).toBe('bypassPermissions');
     expect(cfg.maxOrchestrators).toBe(10);

@@ -41,7 +41,7 @@ const PERMS = ['auto', 'acceptEdits', 'bypassPermissions', 'default', 'dontAsk',
 // need to see the exact model id they're committing to. Source of truth for
 // supported models — do NOT replace with the proto's outdated list.
 const MODELS = [
-  { value: 'claude-opus-4-7', label: 'Opus 4.7 (claude-opus-4-7)' },
+  { value: 'claude-opus-4-8', label: 'Opus 4.8 (claude-opus-4-8)' },
   { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6 (claude-sonnet-4-6)' },
   { value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5 (claude-haiku-4-5-20251001)' },
 ] as const;
@@ -56,7 +56,7 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
   const [cwd, setCwd] = useState('/');
   const [prompt, setPrompt] = useState('');
   const [preamble, setPreamble] = useState('');
-  const [model, setModel] = useState<string>('claude-opus-4-7');
+  const [model, setModel] = useState<string>('claude-opus-4-8');
   const [effort, setEffort] = useState<(typeof EFFORTS)[number]>('xhigh');
   const [perm, setPerm] = useState<(typeof PERMS)[number]>('bypassPermissions');
   const [submitting, setSubmitting] = useState(false);

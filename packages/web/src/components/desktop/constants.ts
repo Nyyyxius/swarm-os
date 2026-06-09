@@ -9,7 +9,7 @@
 // changes, there is one source of truth.
 //
 // Note: `NewOrchestratorDialog` keeps its own `MODELS` array with verbose
-// labels ("Opus 4.7 (claude-opus-4-7)") because operators on the CREATE
+// labels ("Opus 4.8 (claude-opus-4-8)") because operators on the CREATE
 // surface need to see the exact model id they're committing to. The
 // short-label variant exported here matches the proto v2 EditConfigDialog
 // (`label: m.replace('claude-', '')`).
@@ -28,7 +28,7 @@ export const PERMS = [
 export type PermissionMode = (typeof PERMS)[number];
 
 export const MODELS = [
-  { value: 'claude-opus-4-7', label: 'opus-4-7' },
+  { value: 'claude-opus-4-8', label: 'opus-4-8' },
   { value: 'claude-sonnet-4-6', label: 'sonnet-4-6' },
   { value: 'claude-haiku-4-5-20251001', label: 'haiku-4-5' },
 ] as const;

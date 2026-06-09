@@ -53,7 +53,7 @@ function buildSshArgs(config: Config): string[] {
     '-p', String(config.sshPort),
     config.sshTarget,
     '--',
-    `bash -lc ${shellQuote('claude -p --model claude-opus-4-7 --output-format text')}`,
+    `bash -lc ${shellQuote('claude -p --model claude-opus-4-8 --output-format text')}`,
   ];
 }
 

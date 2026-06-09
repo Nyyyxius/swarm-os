@@ -271,7 +271,7 @@ export function loadConfig(): Config {
   // Project name is technically required, but for `pnpm dev` convenience we default to 'dev'.
   const projectName = process.env.SWARM_OS_PROJECT_NAME ?? 'dev';
 
-  const defaultModel = process.env.SWARM_OS_DEFAULT_MODEL ?? 'claude-opus-4-7';
+  const defaultModel = process.env.SWARM_OS_DEFAULT_MODEL ?? 'claude-opus-4-8';
 
   const effortRaw = process.env.SWARM_OS_DEFAULT_EFFORT ?? 'xhigh';
   if (!VALID_EFFORTS.has(effortRaw)) {
