@@ -630,6 +630,101 @@ export function registerTeamCommsTools(
     },
   );
 
+  // ---- team.context_compact (self) -------------------------------------
+  // Lifecycle tool: the caller declares it is PAUSING (blocked on info from a
+  // teammate, a human, or an external service). The server summarizes the
+  // caller's own context with `/compact` at its next idle boundary so it can
+  // resume later without a bloated transcript. Never fires mid-turn.
+  server.registerTool(
+    'team.context_compact',
+    {
+      title: 'Compact your own context (pausing on a blocker)',
+      description:
+        'Call when you are pausing because you are blocked waiting on information (a teammate reply, a human, an external service). The server injects /compact at your next idle moment: your conversation is summarized and you continue. Your role/instructions are preserved. Optionally pass a `reason` to steer the summary. Idempotent — returns { scheduled:false } if a reset is already armed.',
+      inputSchema: {
+        reason: z
+          .string()
+          .optional()
+          .describe('Optional summary guidance, e.g. "waiting on db-worker for the schema"'),
+      },
+      outputSchema: {
+        scheduled: z.boolean(),
+      },
+    },
+    (args) => {
+      const ctx = ctxResolver();
+      const a = args as { reason?: string };
+      const scheduled = ctx.session.requestContextReset('/compact', {
+        idleMs: ctx.messagingDefaults.idleThresholdMs,
+        instructions: a.reason,
+      });
+      logCall('team.context_compact', ctx, true);
+      return ok({ scheduled });
+    },
+  );
+
+  // ---- team.context_clear (self) ---------------------------------------
+  // Lifecycle tool: the caller declares ALL its work is DONE and its inbox is
+  // empty. The server wipes the caller's context with `/clear` at its next
+  // idle boundary, leaving it alive and ready for the next assignment. The
+  // role survives the clear (it lives in the system prompt). Intended for the
+  // lead when the whole mission is complete; a worker that finishes should
+  // instead report to the lead and let the lead decide (team.clear_worker).
+  server.registerTool(
+    'team.context_clear',
+    {
+      title: 'Clear your own context (all work done)',
+      description:
+        'Call ONLY when you have finished ALL your work and your inbox is empty. The server injects /clear at your next idle moment: your conversation is wiped and you start fresh, still knowing your role. Use this (as the lead) when the whole mission is complete and you want to sit idle ready for the next request. Workers should report completion to the lead instead of self-clearing. Idempotent — returns { scheduled:false } if a reset is already armed.',
+      inputSchema: {},
+      outputSchema: {
+        scheduled: z.boolean(),
+      },
+    },
+    () => {
+      const ctx = ctxResolver();
+      const scheduled = ctx.session.requestContextReset('/clear', {
+        idleMs: ctx.messagingDefaults.idleThresholdMs,
+      });
+      logCall('team.context_clear', ctx, true);
+      return ok({ scheduled });
+    },
+  );
+
+  // ---- team.clear_worker (lead-only) -----------------------------------
+  // The lead resets a worker it judges done. `/clear` (default) leaves the
+  // worker alive with a fresh context, ready to be reassigned; `compact:true`
+  // summarizes instead of wiping. Mirrors team.kill_worker's id contract.
+  server.registerTool(
+    'team.clear_worker',
+    {
+      title: 'Reset a worker\'s context (lead-only)',
+      description:
+        'Lead-only. Resets a worker you deem finished but want to keep alive for a future task. Default injects /clear (fresh context, role preserved) at the worker\'s next idle moment; pass compact:true to /compact instead. Returns { scheduled:false } for unknown/non-worker/terminated ids or if a reset is already armed.',
+      inputSchema: {
+        id: z.string().describe('Worker session id (use team.list to discover ids)'),
+        compact: z
+          .boolean()
+          .optional()
+          .describe('When true, /compact (summarize) instead of /clear (wipe).'),
+      },
+      outputSchema: {
+        scheduled: z.boolean(),
+      },
+    },
+    (args) => {
+      const ctx = ctxResolver();
+      requireLead(ctx, 'team.clear_worker');
+      const a = args as { id: string; compact?: boolean };
+      const scheduled = ctx.orchestrator.requestWorkerContextReset(
+        a.id,
+        a.compact ? '/compact' : '/clear',
+      );
+      logCall('team.clear_worker', ctx, true);
+      return ok({ scheduled });
+    },
+  );
+
   // ---- swarm.list_teams (lead-only) ------------------------------------
   // Cross-team discovery: returns the other active orchestrators and their
   // leads. Workers cannot use this — coordination across teams is the

@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { Session, type SessionStatus } from './session.js';
+import { Session, buildClaudeArgs, type SessionStatus } from './session.js';
 import { FakeAgentProcess } from './agent-process.js';
 import { eventBus } from '../../events.js';
 
@@ -336,5 +336,158 @@ describe('FakeAgentProcess — SIGSTOP/SIGCONT do not exit', () => {
     fake.write('post-stop');
     expect(fake.writes).toContain('post-stop');
     expect(exits).toBe(0);
+  });
+});
+
+describe('buildClaudeArgs — preamble routing', () => {
+  const base = {
+    model: 'test-model',
+    effort: 'low' as const,
+    permissionMode: 'bypassPermissions' as const,
+  };
+
+  it('routes the preamble to --append-system-prompt (survives /clear)', () => {
+    const args = buildClaudeArgs({
+      ...base,
+      preamble: 'ROLE INSTRUCTIONS',
+      initialPrompt: 'do the task',
+    });
+    const i = args.indexOf('--append-system-prompt');
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(args[i + 1]).toBe('ROLE INSTRUCTIONS');
+    // The preamble must NOT be concatenated into the positional prompt.
+    expect(args).toContain('do the task');
+    expect(args.some((a) => a.includes('ROLE INSTRUCTIONS') && a.includes('do the task'))).toBe(
+      false,
+    );
+  });
+
+  it('keeps only the initial prompt as the trailing positional argument', () => {
+    const args = buildClaudeArgs({
+      ...base,
+      preamble: 'ROLE',
+      initialPrompt: 'TASK',
+      mcpConfigPath: '/tmp/mcp.json',
+    });
+    expect(args[args.length - 1]).toBe('TASK');
+    expect(args).toContain('--mcp-config=/tmp/mcp.json');
+  });
+
+  it('prefixes the resume notice onto the positional prompt, not the system prompt', () => {
+    const args = buildClaudeArgs({
+      ...base,
+      preamble: 'ROLE',
+      initialPrompt: 'TASK',
+      resumeNotice: '## Server restart notice',
+    });
+    const positional = args[args.length - 1];
+    expect(positional.startsWith('## Server restart notice')).toBe(true);
+    expect(positional).toContain('TASK');
+    // The system prompt is the durable role only — never the notice.
+    const i = args.indexOf('--append-system-prompt');
+    expect(args[i + 1]).toBe('ROLE');
+  });
+
+  it('omits the positional arg entirely when there is no prompt or notice', () => {
+    const args = buildClaudeArgs({ ...base, preamble: 'ROLE', initialPrompt: null });
+    expect(args).toContain('--append-system-prompt');
+    expect(args[args.length - 1]).toBe('ROLE'); // last token is the preamble value, no positional
+  });
+});
+
+describe('Session — requestContextReset (deferred /clear & /compact)', () => {
+  function makeRunning(): { s: Session; fake: FakeAgentProcess } {
+    const fake = new FakeAgentProcess({ command: 'fake', args: [], cwd });
+    const s = new Session({
+      orchestratorId: 'orch-ctx-test',
+      name: 'ctx-test',
+      role: 'tester',
+      type: 'worker',
+      cwd,
+      initialPrompt: null,
+      preamble: null,
+      model: 'test-model',
+      effort: 'low',
+      permissionMode: 'bypassPermissions',
+      logsDir,
+      mcpRuntimeDir,
+      mcpHost: '127.0.0.1',
+      mcpPort: 0,
+      agentProcessOverride: fake,
+      hookToken: 'test-hook',
+      mainHttpPort: 12345,
+      claudeConfigRoot: claudeRuntimeDir,
+    });
+    openSessions.push(s);
+    return { s, fake };
+  }
+
+  it('fires /clear into the PTY once the session has been idle', async () => {
+    const { s, fake } = makeRunning();
+    expect(s.requestContextReset('/clear', { idleMs: 10 })).toBe(true);
+    expect(s.hasPendingContextReset).toBe(true);
+    await new Promise((r) => setTimeout(r, 350));
+    const joined = fake.writes.join('');
+    expect(joined).toContain('/clear');
+    // submit keypress (solo CR) was sent after the command
+    expect(fake.writes).toContain('\r');
+    expect(s.hasPendingContextReset).toBe(false);
+  });
+
+  it('is idempotent — a second arm while one is pending returns false', () => {
+    const { s } = makeRunning();
+    expect(s.requestContextReset('/clear', { idleMs: 50 })).toBe(true);
+    expect(s.requestContextReset('/compact', { idleMs: 50 })).toBe(false);
+  });
+
+  it('passes /compact instructions through to the PTY', async () => {
+    const { s, fake } = makeRunning();
+    s.requestContextReset('/compact', { idleMs: 10, instructions: 'keep the API contract' });
+    await new Promise((r) => setTimeout(r, 350));
+    expect(fake.writes.join('')).toContain('/compact keep the API contract');
+  });
+
+  it('defers firing while the agent keeps producing output', async () => {
+    const { s, fake } = makeRunning();
+    s.requestContextReset('/clear', { idleMs: 60 });
+    // Keep it "busy": emit output before the idle window elapses.
+    const chatter = setInterval(() => fake._emitData('working...'), 20);
+    await new Promise((r) => setTimeout(r, 200));
+    expect(fake.writes.join('')).not.toContain('/clear');
+    clearInterval(chatter);
+    // Now it can go idle and fire.
+    await new Promise((r) => setTimeout(r, 400));
+    expect(fake.writes.join('')).toContain('/clear');
+  });
+
+  it('auto-arms a /compact once output crosses the byte threshold', async () => {
+    const fake = new FakeAgentProcess({ command: 'fake', args: [], cwd });
+    const s = new Session({
+      orchestratorId: 'orch-auto-test',
+      name: 'auto-test',
+      role: 'tester',
+      type: 'worker',
+      cwd,
+      initialPrompt: null,
+      preamble: null,
+      model: 'test-model',
+      effort: 'low',
+      permissionMode: 'bypassPermissions',
+      logsDir,
+      mcpRuntimeDir,
+      mcpHost: '127.0.0.1',
+      mcpPort: 0,
+      agentProcessOverride: fake,
+      hookToken: 'test-hook',
+      mainHttpPort: 12345,
+      claudeConfigRoot: claudeRuntimeDir,
+      idleThresholdMs: 10,
+      autoCompactBytes: 50,
+    });
+    openSessions.push(s);
+    fake._emitData('x'.repeat(60)); // crosses the 50-byte threshold
+    expect(s.hasPendingContextReset).toBe(true);
+    await new Promise((r) => setTimeout(r, 350));
+    expect(fake.writes.join('')).toContain('/compact');
   });
 });

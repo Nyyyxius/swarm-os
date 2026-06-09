@@ -60,7 +60,19 @@ function safeEqualBytes(a: string, b: string): boolean {
   return crypto.timingSafeEqual(bufA, bufB);
 }
 
-export function createHooksRouter(spawner: Spawner, hookToken: string, notifier: Notifier): Router {
+export interface HooksRouterOptions {
+  /** Safety net: arm a /compact when a session reports it is waiting. */
+  compactOnWaiting: boolean;
+  /** Idle window the armed /compact waits for before firing. */
+  idleThresholdMs: number;
+}
+
+export function createHooksRouter(
+  spawner: Spawner,
+  hookToken: string,
+  notifier: Notifier,
+  options: HooksRouterOptions,
+): Router {
   const router = Router();
 
   router.post('/hooks/notification', async (req: Request, res: Response) => {
@@ -134,6 +146,24 @@ export function createHooksRouter(spawner: Spawner, hookToken: string, notifier:
       sessionId: session.id,
       payload: { status: 'waiting', reason: 'notification-hook' },
     });
+
+    // Context-management safety net (opt-in): a "waiting" session is paused
+    // on a blocker, so arm a /compact to keep its context from growing while
+    // it idles. The agent-driven `team.context_compact` is the primary path;
+    // this only catches agents that pause without calling it. The command
+    // fires at the next idle boundary and is a no-op if one is already armed.
+    if (options.compactOnWaiting) {
+      const armed = session.requestContextReset('/compact', {
+        idleMs: options.idleThresholdMs,
+      });
+      if (armed) {
+        log.info({
+          event: 'hooks.auto_compact_armed',
+          orchId: orch.id,
+          sessionId: session.id,
+        });
+      }
+    }
 
     // Discord notification — fire-and-forget (Notifier swallows internally).
     void notifier

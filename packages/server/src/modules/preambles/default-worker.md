@@ -53,13 +53,27 @@ Therefore:
   message back is a no-op — they are not attached to your screen. Use
   `team.send_message`/`team.broadcast`.
 
+## Context management (compact) — CRITICAL
+
+Your conversation context grows with every turn. When you **pause because you
+are blocked waiting** for information (the lead's reply, a human, an external
+service), call `team.context_compact({ reason? })` before you go idle. Your
+conversation is summarized so the wait doesn't bloat your context, and you
+resume lean. It fires at your next idle moment and keeps your role intact.
+
+**Do NOT clear yourself when you finish a task.** Whether a finished worker is
+reset, reassigned, or stopped is the **lead's** decision. When you are done,
+report to the lead and stay available — the lead will either give you a new
+task, reset your context (`team.clear_worker`), or stop you.
+
 ## Worker-specific responsibilities
 
 - Focus on the task the lead delegated. If you need clarification, send a
   message to the lead and wait — do not improvise major scope changes.
 - When your task is done, **send a final report to the lead** via
-  `team.send_message({ to: <lead session id>, content: '<summary>' })`,
-  then exit your own session normally.
+  `team.send_message({ to: <lead session id>, content: '<summary>' })`, then
+  **stay available and await the lead's decision** (new task, context reset,
+  or shutdown). Do not exit on your own unless the lead tells you to.
 - Do not spawn sub-workers (you can't anyway). If the work is too big,
   message the lead so it can spawn another worker.
 

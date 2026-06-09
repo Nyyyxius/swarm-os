@@ -1,8 +1,13 @@
 import * as crypto from 'node:crypto';
-import { Session, type SessionView, type SessionSshTransport } from './session.js';
+import {
+  Session,
+  type SessionView,
+  type SessionSshTransport,
+  type ContextResetCommand,
+} from './session.js';
 import { Mailbox } from './mailbox.js';
 import { buildPreamble } from './preamble.js';
-import { emitMailboxMessage } from './messaging.js';
+import { emitMailboxMessage, SIGNAL_TEXT } from './messaging.js';
 import { eventBus } from '../../events.js';
 import { withModule } from '../../logger.js';
 import type { AgentProcess } from './agent-process.js';
@@ -150,9 +155,10 @@ export interface WorkerSpec {
   existingId?: string;
   startedAt?: string;
   /**
-   * Phase 8 — auto-resume only. Appended to the preamble (after any
-   * customOverride) so the agent sees the "## Server restart notice"
-   * block at the start of its replayed prompt.
+   * Phase 8 — auto-resume only. Prefixed to the worker's positional prompt
+   * (NOT the durable system prompt) so the agent sees the "## Server restart
+   * notice" block at the start of its replayed prompt, and so a later `/clear`
+   * discards it instead of re-surfacing it on every reset.
    */
   resumeNotice?: string;
 }
@@ -351,6 +357,9 @@ export class Orchestrator {
       skipSpawn: opts.skipSpawn,
       agentProcessOverride: opts.agentProcessOverride,
       onStateChange: (s, force) => this._onSessionState(s, force),
+      onContextReset: (s, cmd) => this._onSessionContextReset(s, cmd),
+      idleThresholdMs: this.config.idleThresholdMs,
+      autoCompactBytes: this.config.contextAutoCompactBytes,
       // Phase 4: lead session writes a per-session settings.json injecting
       // the Notification hook. The CLAUDE_CONFIG_DIR sub-tree lives under
       // <dataDir>/.claude-runtime/sessions/<id>/. We pass the resolved
@@ -432,7 +441,6 @@ export class Orchestrator {
       },
       isLead: true,
       customOverride: this.init.lead.preamble ?? this.leadPreamble,
-      resumeNotice: leadNotice,
     });
 
     const lead = new Session({
@@ -445,6 +453,7 @@ export class Orchestrator {
       cwd: leadRow.cwd,
       initialPrompt: leadRow.initial_prompt,
       preamble,
+      resumeNotice: leadNotice,
       model: leadRow.model,
       effort: leadRow.effort as EffortLevel,
       permissionMode: leadRow.permission_mode as PermissionMode,
@@ -453,6 +462,9 @@ export class Orchestrator {
       mcpHost: '127.0.0.1',
       mcpPort: this.config.mcpPort,
       onStateChange: (s, force) => this._onSessionState(s, force),
+      onContextReset: (s, cmd) => this._onSessionContextReset(s, cmd),
+      idleThresholdMs: this.config.idleThresholdMs,
+      autoCompactBytes: this.config.contextAutoCompactBytes,
       hookToken: this.config.hookToken,
       mainHttpPort: this.config.port,
       claudeConfigRoot: this.config.claudeRuntimeDir,
@@ -562,7 +574,6 @@ export class Orchestrator {
       },
       isLead: false,
       customOverride: spec.preamble ?? this.workerPreamble,
-      resumeNotice: spec.resumeNotice,
     });
 
     const worker = new Session({
@@ -575,6 +586,7 @@ export class Orchestrator {
       cwd,
       initialPrompt: spec.prompt,
       preamble: preambleText,
+      resumeNotice: spec.resumeNotice ?? null,
       model,
       effort,
       permissionMode,
@@ -585,6 +597,9 @@ export class Orchestrator {
       skipSpawn: spec.skipSpawn,
       agentProcessOverride: spec.agentProcessOverride,
       onStateChange: (s, force) => this._onSessionState(s, force),
+      onContextReset: (s, cmd) => this._onSessionContextReset(s, cmd),
+      idleThresholdMs: this.config.idleThresholdMs,
+      autoCompactBytes: this.config.contextAutoCompactBytes,
       hookToken: this.config.hookToken,
       mainHttpPort: this.config.port,
       claudeConfigRoot: this.config.claudeRuntimeDir,
@@ -623,6 +638,52 @@ export class Orchestrator {
         error: err instanceof Error ? err.message : String(err),
       });
     }
+  }
+
+  /**
+   * Fired right after a session injected a `/clear` or `/compact`. A `/clear`
+   * wipes the agent's awareness of its inbox, but the mailbox itself is
+   * server-side and survives. If undelivered mail is still queued, re-emit the
+   * idle wake-up signal (after a short grace so the reset finishes processing)
+   * so the agent calls `team.read_inbox` instead of silently dropping it.
+   */
+  private _onSessionContextReset(session: Session, cmd: ContextResetCommand): void {
+    if (cmd !== '/clear') return;
+    if (this.mailbox.size(session.id) === 0) return;
+    setTimeout(() => {
+      // Re-check: the session may have died, or drained its inbox, in the gap.
+      if (!this._isActive(session)) return;
+      if (this.mailbox.size(session.id) === 0) return;
+      try {
+        session.notifySignal(SIGNAL_TEXT);
+      } catch (err) {
+        log.warn({
+          event: 'context_reset.resignal_failed',
+          sessionId: session.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }, 2000);
+  }
+
+  /**
+   * Lead-driven context reset of a specific session in this team. Used by the
+   * `team.clear_worker` MCP tool: a worker that reports "done" is reset by the
+   * lead (the worker never self-clears — that decision is the lead's). Returns
+   * `false` for unknown / non-worker / terminated targets, or when a reset is
+   * already armed. The command fires at the worker's next idle boundary.
+   */
+  requestWorkerContextReset(
+    id: string,
+    cmd: ContextResetCommand,
+    instructions?: string,
+  ): boolean {
+    const s = this.sessions.get(id);
+    if (!s || s.type !== 'worker') return false;
+    return s.requestContextReset(cmd, {
+      idleMs: this.config.idleThresholdMs,
+      instructions,
+    });
   }
 
   /**

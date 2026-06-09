@@ -90,6 +90,21 @@ export interface Config {
    * agent's current output stream.
    */
   idleThresholdMs: number;
+  /**
+   * Context-management safety net. When `true`, a session that fires Claude
+   * Code's `Notification` hook (i.e. it is blocked waiting on input) gets an
+   * auto-`/compact` armed at its next idle boundary — a backstop for agents
+   * that pause without calling `team.context_compact` themselves. Default
+   * `false`: the agent-driven path is primary. Env: `SWARM_OS_COMPACT_ON_WAITING`.
+   */
+  contextCompactOnWaiting: boolean;
+  /**
+   * Context-management safety net. Coarse proxy for "context is getting huge":
+   * cumulative bytes of PTY output a session emits since its last reset. Past
+   * this, an auto-`/compact` is armed at the next idle boundary. `0` disables
+   * it (default). Env: `SWARM_OS_AUTO_COMPACT_BYTES`.
+   */
+  contextAutoCompactBytes: number;
   token: string;
   /**
    * Phase 4: separate token used by Claude Code's `Notification` hook to
@@ -205,6 +220,15 @@ function intEnv(name: string, def: number): number {
   return n;
 }
 
+function boolEnv(name: string, def: boolean): boolean {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return def;
+  const v = raw.trim().toLowerCase();
+  if (v === '1' || v === 'true' || v === 'yes' || v === 'on') return true;
+  if (v === '0' || v === 'false' || v === 'no' || v === 'off') return false;
+  throw new Error(`Env ${name} must be a boolean (true/false/1/0), got: ${raw}`);
+}
+
 function ensureDir(p: string): void {
   fs.mkdirSync(p, { recursive: true });
 }
@@ -299,6 +323,10 @@ export function loadConfig(): Config {
   // 2000 ms ; we expose it as an env so tests can drop it to ~50 ms without
   // racing.
   const idleThresholdMs = intEnv('SWARM_OS_IDLE_THRESHOLD_MS', 2000);
+  // Context-management safety nets (agent-driven path is primary; these are
+  // backstops). Both default to "off" so behaviour is unchanged unless opted in.
+  const contextCompactOnWaiting = boolEnv('SWARM_OS_COMPACT_ON_WAITING', false);
+  const contextAutoCompactBytes = intEnv('SWARM_OS_AUTO_COMPACT_BYTES', 0);
 
   const workspaceRoot = path.resolve(process.env.SWARM_OS_WORKSPACE_ROOT ?? '/workspace');
   const dataDir = path.resolve(process.env.SWARM_OS_DATA_DIR ?? '/data');
@@ -455,6 +483,8 @@ export function loadConfig(): Config {
     maxMessageSizeBytes: maxMessageSizeKb * 1024,
     maxInboxSize,
     idleThresholdMs,
+    contextCompactOnWaiting,
+    contextAutoCompactBytes,
     token,
     hookToken,
     discordWebhookUrl,

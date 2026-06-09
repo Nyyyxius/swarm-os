@@ -55,25 +55,8 @@ describe('buildPreamble', () => {
     expect(buildPreamble({ identity: ID, isLead: true, customOverride: '   ' })).toBe(baseline);
   });
 
-  it('Phase 8 — appends resumeNotice AT THE END after customOverride', () => {
-    const out = buildPreamble({
-      identity: ID,
-      isLead: true,
-      customOverride: 'team override here',
-      resumeNotice: '## Server restart notice\n\nThe previous session was interrupted',
-    });
-    // Override comes before the notice; notice comes last so the agent sees
-    // it just before its replayed initial prompt.
-    const idxOverride = out.indexOf('team override here');
-    const idxNotice = out.indexOf('## Server restart notice');
-    expect(idxOverride).toBeGreaterThan(0);
-    expect(idxNotice).toBeGreaterThan(idxOverride);
-  });
-
-  it('Phase 8 — empty/null resumeNotice leaves preamble unchanged', () => {
-    const baseline = buildPreamble({ identity: ID, isLead: true });
-    expect(buildPreamble({ identity: ID, isLead: true, resumeNotice: null })).toBe(baseline);
-    expect(buildPreamble({ identity: ID, isLead: true, resumeNotice: '' })).toBe(baseline);
-    expect(buildPreamble({ identity: ID, isLead: true, resumeNotice: '  \n' })).toBe(baseline);
-  });
+  // NOTE: the resume notice is no longer folded into the preamble. It now
+  // rides the positional prompt (durable preamble → `--append-system-prompt`,
+  // one-shot notice → positional argv) so a `/clear` discards it instead of
+  // re-surfacing a stale restart notice. See `buildClaudeArgs` tests.
 });

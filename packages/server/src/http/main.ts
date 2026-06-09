@@ -117,7 +117,12 @@ export function createApp(
 
   // Phase 4: hook endpoint — Bearer-auth, NOT X-Auth-Token. Mounted before
   // the X-Auth-Token middleware so the user-facing token never leaks here.
-  app.use(createHooksRouter(spawner, config.hookToken, spawner.notifier));
+  app.use(
+    createHooksRouter(spawner, config.hookToken, spawner.notifier, {
+      compactOnWaiting: config.contextCompactOnWaiting,
+      idleThresholdMs: config.idleThresholdMs,
+    }),
+  );
 
   // Phase 6: serve the built web bundle (PWA shell + JS/CSS + manifest +
   // icons + sw.js) WITHOUT auth so it can install as a PWA. Authenticated

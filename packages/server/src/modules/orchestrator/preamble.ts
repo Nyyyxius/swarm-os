@@ -70,15 +70,6 @@ export interface BuildPreambleInput {
    * mailbox-discipline language always survives.
    */
   customOverride?: string | null;
-  /**
-   * Phase 8 — auto-resume only. When the orchestrator is being respawned
-   * after a server restart, this block is appended at the very end of the
-   * preamble so the agent sees a defensive "## Server restart notice"
-   * (with a tail of the previous PTY log) right before its replayed
-   * initial prompt. Empty/null/undefined = no notice = normal first-spawn
-   * preamble.
-   */
-  resumeNotice?: string | null;
 }
 
 /**
@@ -88,6 +79,12 @@ export interface BuildPreambleInput {
  * optionally followed by the orchestrator-level override prefixed with a
  * separator so the agent can tell where the project-specific instructions
  * begin.
+ *
+ * This text is DURABLE: it is passed to the CLI via `--append-system-prompt`,
+ * so it survives a `/clear` (which only wipes the conversation). The one-shot
+ * resume notice is therefore NOT folded in here — it rides the positional
+ * prompt instead (see `Session.resumeNotice` / `buildClaudeArgs`) so it does
+ * not re-surface on every context reset.
  */
 export function buildPreamble(input: BuildPreambleInput): string {
   const base = input.isLead ? getLeadDefault() : getWorkerDefault();
@@ -98,20 +95,11 @@ export function buildPreamble(input: BuildPreambleInput): string {
     .replace(/\{\{orchName\}\}/g, input.identity.orchName);
 
   const override = input.customOverride?.trim();
-  let out = filled;
   if (override) {
-    out = `${out}\n\n---\n\n## Project-specific instructions\n\n${override}\n`;
+    return `${filled}\n\n---\n\n## Project-specific instructions\n\n${override}\n`;
   }
 
-  // Phase 8 — resume notice goes LAST so it sits just before the initial
-  // prompt the CLI receives via argv. Operators / agents see it first
-  // every time the team is auto-resumed.
-  const notice = input.resumeNotice?.trim();
-  if (notice) {
-    out = `${out}\n\n${notice}\n`;
-  }
-
-  return out;
+  return filled;
 }
 
 /** Test-only — drop the cached defaults so a test can swap the files on disk. */

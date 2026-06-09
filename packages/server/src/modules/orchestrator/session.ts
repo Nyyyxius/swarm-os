@@ -49,6 +49,14 @@ const LOG_CAP_BYTES = 50 * 1024 * 1024; // 50 MB per plan §15
 const RING_BUFFER_LINES = 200;
 
 export type SessionType = 'lead' | 'worker';
+
+/**
+ * Context-reset commands the server can inject into a live PTY at a task
+ * boundary. `/clear` wipes the conversation (role survives via the system
+ * prompt — see `buildClaudeArgs`); `/compact` summarizes and continues.
+ */
+export type ContextResetCommand = '/clear' | '/compact';
+
 export type SessionStatus =
   | 'starting'
   | 'running'
@@ -80,6 +88,13 @@ export interface SessionInit {
   cwd: string;
   initialPrompt: string | null;
   preamble: string | null;
+  /**
+   * One-shot context prepended to the positional prompt on spawn (e.g. the
+   * Phase 8 "## Server restart notice"). Rides the positional argv — NOT the
+   * system prompt — so a later `/clear` discards it instead of re-surfacing a
+   * stale restart notice on every reset. Empty/null = no notice.
+   */
+  resumeNotice?: string | null;
   model: string;
   effort: EffortLevel;
   permissionMode: PermissionMode;
@@ -101,6 +116,25 @@ export interface SessionInit {
    * `Persistence.writeSession`.
    */
   onStateChange?: (session: Session, force: boolean) => void;
+  /**
+   * Fired right after a context-reset command (`/clear` / `/compact`) has been
+   * submitted to the PTY. The Orchestrator wires this to re-deliver an inbox
+   * wake-up signal when a `/clear` left undelivered mail behind (the mailbox
+   * is server-side, so it survives the reset — only the agent's awareness of
+   * it is wiped).
+   */
+  onContextReset?: (session: Session, cmd: ContextResetCommand) => void;
+  /**
+   * Idle window (ms) a self-armed context reset waits for before firing. Used
+   * by the byte-based auto-compact backstop below. Defaults to 2000ms.
+   */
+  idleThresholdMs?: number;
+  /**
+   * Context-management safety net: when >0, the session auto-arms a `/compact`
+   * once it has emitted this many bytes of PTY output since its last reset.
+   * `0` (default) disables the backstop — the agent-driven path is primary.
+   */
+  autoCompactBytes?: number;
   /**
    * Phase 4: hook token + main HTTP port. When both are set, `Session`
    * writes a per-session `settings.json` under
@@ -188,6 +222,8 @@ export function buildClaudeArgs(opts: {
   permissionMode: PermissionMode;
   initialPrompt: string | null;
   preamble: string | null;
+  /** One-shot prefix for the positional prompt (e.g. the resume notice). */
+  resumeNotice?: string | null;
   /** Absolute path to the per-session mcp.json. Optional in test paths. */
   mcpConfigPath?: string | null;
 }): string[] {
@@ -199,20 +235,31 @@ export function buildClaudeArgs(opts: {
     '--permission-mode',
     opts.permissionMode,
   ];
+  // The preamble (role + team-comms instructions) goes into the system
+  // prompt via `--append-system-prompt`, NOT into the positional user prompt.
+  // Rationale: a `/clear` wipes the conversation (and therefore anything we
+  // passed positionally) but PRESERVES the system prompt — so routing the
+  // preamble here is what lets an agent reset its context without forgetting
+  // its role. `--append-system-prompt` is non-variadic (single value), so the
+  // two-token form is safe and won't swallow the positional prompt the way a
+  // bare `--mcp-config <path>` would.
+  if (opts.preamble) {
+    args.push('--append-system-prompt', opts.preamble);
+  }
   if (opts.mcpConfigPath) {
     // `=` form is mandatory: `--mcp-config <path>` would consume the
     // following prompt argv as a second config file (variadic flag).
     args.push(`--mcp-config=${opts.mcpConfigPath}`);
   }
-  // Phase 1 carryover: prepend preamble to the initial prompt if provided.
-  // Phase 2 still uses this for the lead's seed prompt; Phase 3 will switch
-  // to per-session settings.json for the worker preamble proper.
-  const prompt =
-    opts.preamble && opts.initialPrompt
-      ? `${opts.preamble}\n\n${opts.initialPrompt}`
-      : (opts.initialPrompt ?? opts.preamble ?? null);
-  if (prompt) {
-    args.push(prompt);
+  // The positional argv is the seed task prompt, optionally prefixed by the
+  // one-shot resume notice. This is the part a `/clear` is meant to discard;
+  // durable instructions live in the system prompt above.
+  const positional =
+    opts.resumeNotice && opts.initialPrompt
+      ? `${opts.resumeNotice}\n\n${opts.initialPrompt}`
+      : (opts.resumeNotice ?? opts.initialPrompt ?? null);
+  if (positional) {
+    args.push(positional);
   }
   return args;
 }
@@ -263,11 +310,29 @@ export class Session extends EventEmitter {
   private _killTimer: NodeJS.Timeout | null = null;
   private _agentDataDisp: Disposable | null = null;
   private _agentExitDisp: Disposable | null = null;
+  /**
+   * Armed context-reset request, fired once the session goes idle (so a
+   * `/clear` or `/compact` never lands mid-turn). `null` when nothing is
+   * pending. `idleMs` is captured so the re-arm loop knows how long the PTY
+   * must stay quiet before the command is safe to inject.
+   */
+  private _pendingContextReset: { cmd: ContextResetCommand; instructions?: string; idleMs: number } | null = null;
+  private _pendingContextTimer: NodeJS.Timeout | null = null;
+  /** Bytes of PTY output emitted since the last context reset (auto-compact backstop). */
+  private _bytesSinceReset = 0;
+  private readonly _idleThresholdMs: number;
+  private readonly _autoCompactBytes: number;
 
   /** Phase 4 — set during construction, fired on every state mutation. */
   private readonly _onStateChange: ((session: Session, force: boolean) => void) | null;
+  /** Fired right after a context-reset command is submitted to the PTY. */
+  private readonly _onContextReset:
+    | ((session: Session, cmd: ContextResetCommand) => void)
+    | null;
   /** Phase 4 — initial prompt is needed by persistence (not normally exposed). */
   readonly initialPromptRaw: string | null;
+  /** One-shot resume notice prefixed to the positional prompt on spawn. */
+  private readonly resumeNotice: string | null;
 
   constructor(init: SessionInit) {
     super();
@@ -280,6 +345,7 @@ export class Session extends EventEmitter {
     this.cwd = init.cwd;
     this.initialPrompt = init.initialPrompt;
     this.initialPromptRaw = init.initialPrompt;
+    this.resumeNotice = init.resumeNotice ?? null;
     this.model = init.model;
     this.effort = init.effort;
     this.permissionMode = init.permissionMode;
@@ -292,6 +358,9 @@ export class Session extends EventEmitter {
     this.mcpRuntimeDir = init.mcpRuntimeDir;
     this.sshTransport = init.sshTransport ?? null;
     this._onStateChange = init.onStateChange ?? null;
+    this._onContextReset = init.onContextReset ?? null;
+    this._idleThresholdMs = init.idleThresholdMs ?? 2000;
+    this._autoCompactBytes = init.autoCompactBytes ?? 0;
 
     const orchLogDir = path.join(init.logsDir, this.orchestratorId);
     fs.mkdirSync(orchLogDir, { recursive: true });
@@ -835,6 +904,141 @@ export class Session extends EventEmitter {
     }, 150);
   }
 
+  /**
+   * Arm a context-reset (`/clear` or `/compact`) to fire at the next task
+   * boundary. We never inject mid-turn: the command is held until the PTY has
+   * been quiet for `idleMs` (the same idle window the mailbox uses), so it
+   * lands on an idle prompt instead of garbling the agent's current output.
+   *
+   * `/clear` wipes the conversation but the role/preamble survives because it
+   * lives in the system prompt (`--append-system-prompt`). `/compact`
+   * summarizes and continues — pass `instructions` to steer the summary.
+   *
+   * Idempotent: if a reset is already armed, this is a no-op and returns
+   * `false` (the first request wins). Returns `false` too when there is no
+   * live PTY or the session is terminating.
+   */
+  requestContextReset(
+    cmd: ContextResetCommand,
+    opts: { idleMs: number; instructions?: string },
+  ): boolean {
+    if (this._pendingContextReset) return false;
+    if (!this.agent) return false;
+    if (this._status !== 'running' && this._status !== 'waiting') return false;
+    this._pendingContextReset = {
+      cmd,
+      instructions: opts.instructions,
+      idleMs: Math.max(0, opts.idleMs),
+    };
+    this._appendLog(
+      `[swarm-os] context ${cmd} armed — will fire once idle for ${opts.idleMs}ms\n`,
+    );
+    log.info({ event: 'session.context_reset_armed', sessionId: this.id, cmd });
+    this._scheduleContextReset();
+    return true;
+  }
+
+  /**
+   * (Re)arm the deferred fire. The PTY data handler resets `_idleSince` on
+   * every byte, so we sleep for whatever idle time remains and re-check on
+   * wake — if the agent spoke in the meantime we sleep again. No tight poll:
+   * one timer at a time, sized to the remaining idle gap.
+   */
+  private _scheduleContextReset(): void {
+    const pending = this._pendingContextReset;
+    if (!pending) return;
+    if (this._pendingContextTimer) clearTimeout(this._pendingContextTimer);
+    const elapsed = Date.now() - this._idleSince;
+    const wait = Math.max(1, pending.idleMs - elapsed);
+    this._pendingContextTimer = setTimeout(() => {
+      this._pendingContextTimer = null;
+      if (!this._pendingContextReset) return;
+      // Still busy (the agent produced output within the idle window)? Wait again.
+      if (Date.now() - this._idleSince < this._pendingContextReset.idleMs) {
+        this._scheduleContextReset();
+        return;
+      }
+      this._fireContextReset();
+    }, wait);
+  }
+
+  /** Inject the armed command into the PTY using the notifySignal cadence. */
+  private _fireContextReset(): void {
+    const pending = this._pendingContextReset;
+    this._pendingContextReset = null;
+    if (!pending || !this.agent) return;
+    // The reset shrinks the context, so restart the auto-compact accounting.
+    this._bytesSinceReset = 0;
+    const line = pending.instructions ? `${pending.cmd} ${pending.instructions}` : pending.cmd;
+    const intro = `\r${line}`;
+    try {
+      this.agent.write(intro);
+      this._appendLog(intro);
+    } catch (err) {
+      log.error({
+        event: 'session.context_reset_write_failed',
+        sessionId: this.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+    // Submit the command on its own tick so the slash-command menu in the Ink
+    // TUI runs the highlighted entry (same trick as notifySignal). A slightly
+    // longer delay than the mailbox signal gives the autocomplete menu time to
+    // populate before the Enter keypress lands.
+    setTimeout(() => {
+      if (!this.agent) return;
+      try {
+        this.agent.write('\r');
+        this._appendLog('\r');
+      } catch (err) {
+        log.error({
+          event: 'session.context_reset_submit_failed',
+          sessionId: this.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        return;
+      }
+      log.info({ event: 'session.context_reset_fired', sessionId: this.id, cmd: pending.cmd });
+      // Hand off to the orchestrator so it can re-wake the agent if a `/clear`
+      // left undelivered mail behind (the mailbox is server-side and survives).
+      try {
+        this._onContextReset?.(this, pending.cmd);
+      } catch (err) {
+        log.warn({
+          event: 'session.context_reset_callback_failed',
+          sessionId: this.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }, 250);
+  }
+
+  /** True when a `/clear` or `/compact` is armed but not yet fired. */
+  get hasPendingContextReset(): boolean {
+    return this._pendingContextReset !== null;
+  }
+
+  /**
+   * Byte-based auto-compact backstop. Fires at most once per accumulation
+   * window: we leave `_bytesSinceReset` untouched here (it is zeroed when the
+   * reset actually fires) but the `_pendingContextReset` guard inside
+   * `requestContextReset` prevents re-arming while one is queued. Logged at
+   * WARN so an operator can see the backstop engaging (no silent caps).
+   */
+  private _maybeAutoCompact(): void {
+    if (this._autoCompactBytes <= 0) return;
+    if (this._bytesSinceReset < this._autoCompactBytes) return;
+    if (this._pendingContextReset) return;
+    log.warn({
+      event: 'session.auto_compact_triggered',
+      sessionId: this.id,
+      bytesSinceReset: this._bytesSinceReset,
+      threshold: this._autoCompactBytes,
+    });
+    this.requestContextReset('/compact', { idleMs: this._idleThresholdMs });
+  }
+
   resize(cols: number, rows: number): void {
     this.agent?.resize(cols, rows);
   }
@@ -1069,6 +1273,7 @@ export class Session extends EventEmitter {
           permissionMode: this.permissionMode,
           initialPrompt: this.initialPrompt,
           preamble: init.preamble,
+          resumeNotice: this.resumeNotice,
           mcpConfigPath: hostMcp,
         });
         const remoteEnv: Record<string, string> = {};
@@ -1095,6 +1300,7 @@ export class Session extends EventEmitter {
           permissionMode: this.permissionMode,
           initialPrompt: this.initialPrompt,
           preamble: init.preamble,
+          resumeNotice: this.resumeNotice,
           mcpConfigPath: this.mcpConfigPath,
         });
         const env: NodeJS.ProcessEnv = {};
@@ -1129,6 +1335,12 @@ export class Session extends EventEmitter {
       this._lastActivityAt = new Date().toISOString();
       this._idleSince = Date.now();
       this._appendLog(d);
+      // Context-management backstop: track output volume since the last reset
+      // and auto-arm a /compact once it crosses the configured threshold.
+      if (this._autoCompactBytes > 0) {
+        this._bytesSinceReset += Buffer.byteLength(d, 'utf8');
+        this._maybeAutoCompact();
+      }
       // Phase 4: throttled persistence write so the lastActivityAt freshens
       // ~1× per second without hammering SQLite on chatty PTY data.
       this._notifyState(false);
@@ -1177,6 +1389,12 @@ export class Session extends EventEmitter {
       clearTimeout(this._killTimer);
       this._killTimer = null;
     }
+    // Drop any armed context-reset — the PTY it targeted is gone.
+    if (this._pendingContextTimer) {
+      clearTimeout(this._pendingContextTimer);
+      this._pendingContextTimer = null;
+    }
+    this._pendingContextReset = null;
     // Drop our PTY-side listener disposables (the underlying impl already
     // clears its callback sets on exit, but be explicit for the case where a
     // session is recycled or replaced in tests).

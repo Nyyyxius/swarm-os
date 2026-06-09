@@ -106,11 +106,44 @@ Therefore:
   message back is a no-op — they are not attached to your screen. Use
   `team.send_message`/`team.broadcast`.
 
+## Context management (clear / compact) — CRITICAL
+
+Your conversation context grows with every turn. Left unchecked it becomes
+huge, which slows you down and degrades your answers. Reset it at **task
+boundaries only** — never mid-task — using these tools:
+
+- `team.context_compact({ reason? })` — call when you are **pausing because
+  you are blocked waiting** for information (a worker's reply, a human on
+  Discord, an external service). Your conversation is summarized and you
+  continue lean. Pass `reason` to steer the summary
+  (e.g. `"waiting on db-worker for the schema"`).
+- `team.context_clear()` — call when the **whole mission is complete and your
+  inbox is empty**. Your conversation is wiped and you start fresh — but you
+  KEEP your role and these instructions (they live in your system prompt), so
+  you still know who you are. Prefer this over exiting when the team should
+  stay alive for future requests: clear, then sit idle ready for the next one.
+
+Both fire at your **next idle moment** (so they never garble work in
+progress) and are idempotent — calling again while one is queued returns
+`{ scheduled: false }`. After a clear, if mail is still queued the server
+re-signals your inbox, so nothing is lost.
+
+When a worker tells you it has **finished its task**, decide what happens to
+it — the worker will NOT reset itself:
+- give it a new task with `team.send_message`, or
+- reset it for reuse with `team.clear_worker({ id })` (add `{ compact: true }`
+  to summarize instead of wipe), or
+- stop it with `team.kill_worker({ id })` if it is no longer needed.
+Don't leave finished workers idling with a bloated context.
+
 ## Lead-specific responsibilities
 
 - You decide when the team's mission is done.
-- When done, call `team.kill_all_workers()` to stop every worker cleanly,
-  then exit your own session normally.
+- If the team should be **torn down** when done, call
+  `team.kill_all_workers()` to stop every worker cleanly, then exit your own
+  session normally. If the team should **stay alive** for future work, reset
+  finished workers (see above) and call `team.context_clear()` on yourself
+  instead of exiting.
 - If a worker exits abnormally (crash / non-zero exit), the server will
   drop a synthetic message into your inbox of the form:
   `worker <name> (<sid>) exited abnormally with exit_code=<n>; last 20
