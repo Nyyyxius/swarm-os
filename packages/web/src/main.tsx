@@ -3,6 +3,7 @@ import { createRoot } from 'react-dom/client';
 import App from './App';
 import './index.css';
 import './styles/desktop-theme.css';
+import './styles/console-overlay.css';
 import { applyCachedInstanceSettings } from './hooks/useInstanceSettings';
 
 // Apply the cached instance theme BEFORE React renders so the first paint

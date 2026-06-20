@@ -21,6 +21,8 @@ export const ICON: Record<string, ReactElement> = {
   back:     <svg viewBox="0 0 24 24"><path d="M14 6 L8 12 L14 18"/></svg>,
   copy:     <svg viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12"/><path d="M16 8 V4 H4 V16 H8"/></svg>,
   link:     <svg viewBox="0 0 24 24"><path d="M10 14 a4 4 0 0 0 5.66 0 L19 11 a4 4 0 0 0 -5.66 -5.66 L12 7"/><path d="M14 10 a4 4 0 0 0 -5.66 0 L5 13 a4 4 0 0 0 5.66 5.66 L12 17"/></svg>,
+  expand:   <svg viewBox="0 0 24 24"><path d="M4 9 V4 H9"/><path d="M20 9 V4 H15"/><path d="M4 15 V20 H9"/><path d="M20 15 V20 H15"/></svg>,
+  collapse: <svg viewBox="0 0 24 24"><path d="M9 4 V9 H4"/><path d="M15 4 V9 H20"/><path d="M9 20 V15 H4"/><path d="M15 20 V15 H20"/></svg>,
 };
 
 export type IconName = keyof typeof ICON;

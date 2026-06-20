@@ -5,6 +5,7 @@ import { ICON } from './icons';
 import ConfigTab, { type ConfigTabTeam } from './ConfigTab';
 import Composer, { type ComposerAudience, type ComposerMode } from './Composer';
 import ConfirmModal, { type ConfirmModalVariant } from './ConfirmModal';
+import ConsoleOverlay from './ConsoleOverlay';
 import { Terminal } from '../Terminal';
 import {
   formatUptime, formatClockShort, formatRelative,
@@ -98,6 +99,7 @@ export default function RightPanel({
   const [draft, setDraft] = useState('');
   const [composerMode, setComposerMode] = useState<ComposerMode>('pty');
   const [audience, setAudience] = useState<ComposerAudience>('agent');
+  const [enlarged, setEnlarged] = useState(false);
   const [confirm, setConfirm] = useState<
     { action: AgentAction; label: string; body: string; cls: ConfirmModalVariant } | null
   >(null);
@@ -106,6 +108,7 @@ export default function RightPanel({
     setDraft('');
     setComposerMode('pty');
     setAudience('agent');
+    setEnlarged(false);        // close the fullscreen console when switching agents.
     setConfirm(null);          // Step 14, défensif : ferme une modale orpheline.
   }, [selected?.id]);
 
@@ -219,7 +222,14 @@ export default function RightPanel({
               {team.name} :: {isLead ? 'LEAD' : 'WORKER'} :: {selected.id.toUpperCase()}
             </div>
           </div>
-          <button className="pr-close" onClick={onClose} title="close">×</button>
+          <div className="pr-top-actions">
+            {activeTab === 'console' && !stopped && !isFailed && (
+              <button className="pr-enlarge"
+                onClick={() => setEnlarged(true)}
+                title="enlarge console (fullscreen)">{ICON.expand}</button>
+            )}
+            <button className="pr-close" onClick={onClose} title="close">×</button>
+          </div>
         </div>
         <div className="pr-name">
           {selected.name}
@@ -229,6 +239,15 @@ export default function RightPanel({
             <span className={`dot ${statusChipClass(status)}`} />
             {statusLabel(status)}
           </span>
+          {activeTab === 'console' && !stopped && !isFailed && (
+            <span className={`chip ${writer ? 'writer' : 'reader'}`}
+              title={writer
+                ? 'PTY writer — keystrokes will reach the agent'
+                : 'PTY reader — passive view, no writes'}>
+              <span className={`dot ${writer ? 'ok' : 'stopped'}`} />
+              {writer ? 'WRITER' : 'READER'}
+            </span>
+          )}
         </div>
         <div className="pr-role">
           <span>{selected.role}</span>
@@ -360,17 +379,6 @@ export default function RightPanel({
           onClick={() => setActiveTab('chat')}>MESSAGES</button>
         <button className={`pr-tab ${activeTab === 'config' ? 'active' : ''}`}
           onClick={() => setActiveTab('config')}>CONFIG</button>
-        <div className="pr-tabs-meta">
-          {activeTab === 'console' && !stopped && !isFailed && (
-            <span className={`chip ${writer ? 'writer' : 'reader'}`}
-              title={writer
-                ? 'PTY writer — keystrokes will reach the agent'
-                : 'PTY reader — passive view, no writes'}>
-              <span className={`dot ${writer ? 'ok' : 'stopped'}`} />
-              {writer ? 'WRITER' : 'READER'}
-            </span>
-          )}
-        </div>
       </div>
 
       <div className="pr-body">
@@ -381,6 +389,12 @@ export default function RightPanel({
                 {isFailed
                   ? '— agent failed — see EXIT REASON in CONFIG tab —'
                   : '— agent stopped, no log output —'}
+              </div>
+            ) : enlarged ? (
+              // The single live Terminal moves into the fullscreen overlay so it
+              // keeps the PTY writer role (one writer per session). See ConsoleOverlay.
+              <div style={{ color: 'var(--text-mute)', padding: '8px 0' }}>
+                — console opened in fullscreen —
               </div>
             ) : (
               <Terminal
@@ -453,6 +467,43 @@ export default function RightPanel({
               setConfirm(null);
             }}
           />
+        )}
+
+        {enlarged && activeTab === 'console' && !stopped && !isFailed && (
+          <ConsoleOverlay
+            sessionId={selected.id}
+            onClose={() => setEnlarged(false)}
+            onRoleChange={onTerminalRoleChange}
+            onDataFrame={onTerminalDataFrame}
+            title={selected.name}
+            headerExtra={
+              <>
+                <span className={`chip ${statusChipClass(status)}`}>
+                  <span className={`dot ${statusChipClass(status)}`} />
+                  {statusLabel(status)}
+                </span>
+                <span className={`chip ${writer ? 'writer' : 'reader'}`}>
+                  <span className={`dot ${writer ? 'ok' : 'stopped'}`} />
+                  {writer ? 'WRITER' : 'READER'}
+                </span>
+              </>
+            }
+          >
+            <Composer
+              selectedName={selected.name}
+              teamName={team.name}
+              isLead={isLead}
+              stopped={stopped || isFailed}
+              draft={draft}
+              setDraft={setDraft}
+              onKey={onKey}
+              onSend={doSend}
+              composerMode={composerMode}
+              setComposerMode={setComposerMode}
+              audience={audience}
+              setAudience={setAudience}
+            />
+          </ConsoleOverlay>
         )}
       </>
     );

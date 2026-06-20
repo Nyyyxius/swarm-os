@@ -530,7 +530,6 @@
 
   .pr-tabs {
     display: flex; border-bottom: 1px solid var(--border);
-    position: relative;
   }
   .pr-tab {
     flex: 1; background: none; border: none; color: var(--text-mute);
@@ -542,11 +541,6 @@
     margin-bottom: -1px;
   }
   .pr-tab.active { color: var(--amber); border-bottom-color: var(--amber); }
-  .pr-tabs-meta {
-    position: absolute; right: 12px; top: 50%; transform: translateY(-50%);
-    display: flex; align-items: center; gap: 8px;
-    pointer-events: none;
-  }
 
   .pr-body { flex: 1; overflow: hidden; display: flex; flex-direction: column; }
   .console {
