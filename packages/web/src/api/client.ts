@@ -348,8 +348,14 @@ export const api = {
     return request<void>('DELETE', `/orchestrators/${id}${qs}`);
   },
   getSession: (id: string) => request<SessionView>('GET', `/sessions/${id}`),
-  postSessionInput: (id: string, data: string) =>
-    request<{ ok: boolean; bytes: number }>('POST', `/sessions/${id}/input`, { data }),
+  /**
+   * Push input to a session's PTY. `submit: true` types the line and fires
+   * Enter (standalone CR) server-side so it actually executes — otherwise the
+   * bytes are forwarded verbatim (raw keystroke pass-through). Do NOT append
+   * `\n`/`\r` yourself when submitting; the server owns the CR.
+   */
+  postSessionInput: (id: string, data: string, submit = false) =>
+    request<{ ok: boolean; bytes: number }>('POST', `/sessions/${id}/input`, { data, submit }),
   /**
    * S5 — stop a single worker session. Lead → 409 LEAD_NOT_STOPPABLE.
    * `opts.hideAfterExit` collapses stop-then-remove into one request: the

@@ -229,10 +229,10 @@ function QuickReply({ sessionId }: { sessionId: string }) {
     if (!v || pending) return;
     setPending(true);
     try {
-      // Append a newline so the agent treats it as a submitted line, not a
-      // partial keystroke run. The /sessions/:id/input endpoint forwards
-      // bytes verbatim to the PTY.
-      await api.postSessionInput(sessionId, v.endsWith('\n') ? v : v + '\n');
+      // submit:true → the server types the line and fires Enter as a
+      // standalone CR (Session.submitInput). A pasted `\n` only lands in the
+      // prompt buffer without executing, so the agent never ran the line.
+      await api.postSessionInput(sessionId, v, true);
       setText('');
     } catch {
       /* noop — UI surfaces the failure as terminal silence; users can retry */

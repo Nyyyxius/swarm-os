@@ -734,9 +734,10 @@ export default function DesktopShell({
         console.warn('AGENT/MAILBOX disabled v1 (gap §4-5)');
         return;
       }
-      // AGENT + PTY : raw keystrokes. Append \n so the line is submitted.
-      const data = trimmed.endsWith('\n') ? trimmed : `${trimmed}\n`;
-      await api.postSessionInput(agentId, data);
+      // AGENT + PTY : type the line and submit it. The server fires Enter as
+      // a standalone CR (Session.submitInput) — a pasted `\n`/`\r` only lands
+      // in the prompt buffer without executing, which is the bug this fixes.
+      await api.postSessionInput(agentId, trimmed, true);
     } catch (err) {
       console.error('send failed:', err);
     }

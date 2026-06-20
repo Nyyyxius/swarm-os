@@ -46,12 +46,21 @@ export function createSessionsRouter(spawner: Spawner, config: Config): Router {
       res.status(404).json({ error: 'not found' });
       return;
     }
-    const data = (req.body ?? {}).data;
+    const body = req.body ?? {};
+    const data = body.data;
     if (typeof data !== 'string') {
       res.status(400).json({ error: 'body.data must be a string' });
       return;
     }
-    found.session.writeInput(data);
+    // `submit: true` → type the line and fire Enter as a standalone CR on the
+    // next tick (Ink needs the CR in its own write, not pasted with the text;
+    // see Session.submitInput). Otherwise forward bytes verbatim — raw
+    // keystroke pass-through for the xterm console.
+    if (body.submit === true) {
+      found.session.submitInput(data);
+    } else {
+      found.session.writeInput(data);
+    }
     res.json({ ok: true, bytes: Buffer.byteLength(data, 'utf8') });
   });
 

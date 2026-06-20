@@ -851,6 +851,53 @@ export class Session extends EventEmitter {
   }
 
   /**
+   * Type a line of human input and submit it, the way a person at the
+   * keyboard would: write the text, then send a standalone CR (`\r`) in its
+   * own write on the next tick.
+   *
+   * The two-step write is the crux. Claude Code's Ink TUI groups a single
+   * multi-byte chunk (`text` + trailing CR) as a *paste* and treats the
+   * embedded CR as a literal newline inside the prompt buffer rather than an
+   * Enter keypress — so the line is typed but never fires, which is exactly
+   * why composer SEND left text sitting in the prompt until the human hit
+   * Enter manually. Sending the CR alone, after the PTY has drained the
+   * text, makes Ink parse it as a real submit. Note also that Enter in a PTY
+   * is CR (`\r`, 0x0D), never LF (`\n`); appending `\n` never submitted.
+   *
+   * Same submit dance as `notifySignal`, minus the leading CR / wake-up
+   * semantics: this is direct human composer input.
+   */
+  submitInput(text: string): void {
+    if (!this.agent) return;
+    // We own the submit, so strip any trailing newlines a caller appended.
+    const body = text.replace(/[\r\n]+$/, '');
+    try {
+      this.agent.write(body);
+      this._appendLog(body);
+    } catch (err) {
+      log.error({
+        event: 'submitInput.write_failed',
+        sessionId: this.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+    setTimeout(() => {
+      if (!this.agent) return;
+      try {
+        this.agent.write('\r');
+        this._appendLog('\r');
+      } catch (err) {
+        log.error({
+          event: 'submitInput.submit_failed',
+          sessionId: this.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }, 150);
+  }
+
+  /**
    * Inject a short, single-line signal into the PTY (Phase 3 mailbox).
    *
    * Two-step write: the text first, then a `\r` ~150 ms later. Claude
