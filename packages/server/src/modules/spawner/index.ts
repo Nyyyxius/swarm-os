@@ -11,6 +11,7 @@ import { NoOpPersistence } from '../orchestrator/persistence.js';
 import type { RoleStore, Role } from '../roles/index.js';
 import type { SessionRow } from '../db/index.js';
 import type { DiscordBotPool } from '../discord/pool.js';
+import { isIdle, SIGNAL_TEXT } from '../orchestrator/messaging.js';
 
 const log = withModule('spawner');
 
@@ -90,6 +91,17 @@ export class Spawner {
         channelId: discord.channelId,
         getLeadSessionId: () => orch.leadSessionId,
         mailbox: orch.mailbox,
+        // Mirror messaging.ts: after the mailbox push, wake the lead PTY
+        // when idle so Claude calls team.read_inbox. `isIdle` already
+        // suppresses signals on `paused` sessions.
+        notifyLead: () => {
+          const leadId = orch.leadSessionId;
+          if (!leadId) return;
+          const lead = orch.getSession(leadId);
+          if (!lead) return;
+          if (!isIdle(lead, Date.now(), this.config.idleThresholdMs)) return;
+          lead.notifySignal(SIGNAL_TEXT);
+        },
       })
       .catch((err) => {
         log.warn({
@@ -102,14 +114,16 @@ export class Spawner {
 
   /**
    * Pick the notifier to attach to a new orchestrator. If the role has a
-   * Discord webhook connector, build a dedicated `DiscordWebhookNotifier`
-   * pointed at it (overriding the global one). Otherwise fall back to the
-   * spawner-level notifier.
+   * Discord webhook connector with a `webhookUrl`, build a dedicated
+   * `DiscordWebhookNotifier` pointed at it (overriding the global one).
+   * A discord connector with only `botToken`+`channelId` (no webhook) is
+   * legitimate — system notifications then fall back to the spawner-level
+   * notifier.
    */
   private notifierFor(role: Role | null): Notifier {
     if (!role) return this.notifier;
     const discord = role.connectors.find((c) => c.type === 'discord');
-    if (!discord) return this.notifier;
+    if (!discord || !discord.webhookUrl) return this.notifier;
     return new DiscordWebhookNotifier({
       webhookUrl: discord.webhookUrl,
       projectName: this.config.projectName,

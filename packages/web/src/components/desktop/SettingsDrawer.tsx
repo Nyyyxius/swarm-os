@@ -30,6 +30,7 @@ import {
 import { useNow } from '../../lib/useNow';
 import { formatUptime, formatClockShort } from '../../lib/format';
 import { AppearanceSection } from './AppearanceSection';
+import { MaintenanceSection } from './MaintenanceSection';
 
 export type AuthState = 'unknown' | 'ok' | 'missing' | 'invalid';
 
@@ -215,6 +216,9 @@ export default function SettingsDrawer({
               </div>
             </div>
           </div>
+
+          {/* ── MAINTENANCE ─────────────────────────────── */}
+          <MaintenanceSection />
 
           {/* ── EVENTS ──────────────────────────────────── */}
           <div className="drawer-section">

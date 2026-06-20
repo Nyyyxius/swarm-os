@@ -55,6 +55,32 @@ describe('REST: /roles CRUD', () => {
     expect(r.status).toBe(400);
   });
 
+  it('rejects an empty Discord connector (no webhook, no bot+channel)', async () => {
+    const r = await postRole({
+      label: 'empty',
+      connectors: [{ type: 'discord' }],
+    });
+    expect(r.status).toBe(400);
+  });
+
+  it('accepts a bot-only Discord connector (token + channelId, no webhookUrl)', async () => {
+    const r = await postRole({
+      label: 'bot-only',
+      connectors: [
+        {
+          type: 'discord',
+          channelId: '123456789012345678',
+          botToken: 'MTA1234567890abcdef.ABCDEF.fakebottokenforintegrationtest',
+        },
+      ],
+    });
+    expect(r.status).toBe(201);
+    expect(r.body.role.connectors).toHaveLength(1);
+    expect(r.body.role.connectors[0].webhookUrl).toBeUndefined();
+    expect(r.body.role.connectors[0].channelId).toBe('123456789012345678');
+    expect(r.body.role.connectors[0].botToken).toBeDefined();
+  });
+
   it('rejects workerCount above the configured cap', async () => {
     const r = await postRole({
       label: 'huge',
@@ -105,6 +131,61 @@ describe('REST: /roles CRUD', () => {
       headers: authHeaders(stack.config.token),
     });
     expect(gone.status).toBe(404);
+  });
+
+  it('persists a per-role schedule + message and round-trips it', async () => {
+    const created = await postRole({
+      label: 'market-analysis',
+      schedule: '0 6,12,20 * * *',
+      scheduleMessage: 'run cycle cycle_window_id={{fire}}',
+    });
+    expect(created.status).toBe(201);
+    expect(created.body.role.schedule).toBe('0 6,12,20 * * *');
+    expect(created.body.role.scheduleMessage).toBe('run cycle cycle_window_id={{fire}}');
+
+    const id = created.body.role.id as string;
+    const got = await fetch(`http://127.0.0.1:${stack.mainPort}/roles/${id}`, {
+      headers: authHeaders(stack.config.token),
+    });
+    const gotBody = (await got.json()) as { role: { schedule: string; scheduleMessage: string } };
+    expect(gotBody.role.schedule).toBe('0 6,12,20 * * *');
+    expect(gotBody.role.scheduleMessage).toBe('run cycle cycle_window_id={{fire}}');
+  });
+
+  it('rejects an invalid cron expression', async () => {
+    const r = await postRole({ label: 'bad-cron', schedule: 'not a cron', scheduleMessage: 'x' });
+    expect(r.status).toBe(400);
+  });
+
+  it('rejects a schedule without a scheduleMessage', async () => {
+    const r = await postRole({ label: 'no-msg', schedule: '*/5 * * * *' });
+    expect(r.status).toBe(400);
+  });
+
+  it('rejects clearing the message via PATCH while the schedule remains', async () => {
+    const created = await postRole({
+      label: 'cadenced',
+      schedule: '*/5 * * * *',
+      scheduleMessage: 'tick',
+    });
+    expect(created.status).toBe(201);
+    const id = created.body.role.id as string;
+    const patched = await fetch(`http://127.0.0.1:${stack.mainPort}/roles/${id}`, {
+      method: 'PATCH',
+      headers: authHeaders(stack.config.token),
+      body: JSON.stringify({ scheduleMessage: null }),
+    });
+    expect(patched.status).toBe(400);
+
+    // But clearing BOTH (schedule:null) is allowed.
+    const cleared = await fetch(`http://127.0.0.1:${stack.mainPort}/roles/${id}`, {
+      method: 'PATCH',
+      headers: authHeaders(stack.config.token),
+      body: JSON.stringify({ schedule: null, scheduleMessage: null }),
+    });
+    expect(cleared.status).toBe(200);
+    const clearedBody = (await cleared.json()) as { role: { schedule: string | null } };
+    expect(clearedBody.role.schedule).toBeNull();
   });
 });
 

@@ -20,6 +20,7 @@
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",
     "better-sqlite3": "^12.10.0",
+    "croner": "^10.0.1",
     "discord.js": "^14.16.0",
     "express": "^5.0.1",
     "node-pty": "^1.0.0",

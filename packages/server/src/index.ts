@@ -13,6 +13,8 @@ import { RoleStore } from './modules/roles/index.js';
 import { SettingsStore } from './modules/settings/index.js';
 import { MessagesAggregator } from './modules/metrics/aggregator.js';
 import { BusMetricsCollector } from './modules/metrics/busMetrics.js';
+import { BackupScheduler } from './modules/backup/index.js';
+import { RoleScheduler } from './modules/schedule/index.js';
 import {
   rehydrateMailbox,
   mailboxJanitor,
@@ -163,6 +165,35 @@ aggregator.start();
 const busMetrics = new BusMetricsCollector(spawner);
 busMetrics.start();
 
+// ---- Hot SQLite backup scheduler ------------------------------------------
+// In-process online snapshots of swarm-os.db into <dataDir>/backups (bind-
+// mounted to the host). No OS cron / sidecar — see modules/backup for the
+// rationale. Disabled when interval or keep is 0.
+const backup = new BackupScheduler({
+  db: db.db,
+  dataDir: config.dataDir,
+  intervalMs: config.backupIntervalMs,
+  keep: config.backupKeep,
+});
+backup.start();
+
+// ---- Per-role cron scheduler ----------------------------------------------
+// In-process; for each role carrying a `schedule` cron, delivers its
+// `scheduleMessage` to the lead inbox of every live instance at each tick.
+// Re-armed on every role mutation via the onRolesChanged hook below. Host-
+// independent (no OS cron / sidecar) — see modules/schedule for the rationale.
+const scheduler = new RoleScheduler({
+  roleStore,
+  spawner,
+  defaults: {
+    maxMessageSizeBytes: config.maxMessageSizeBytes,
+    idleThresholdMs: config.idleThresholdMs,
+  },
+  timezone: config.scheduleTimezone,
+  enabled: config.scheduleEnabled,
+});
+scheduler.start();
+
 // Phase 8 — bootGate: HTTP listens immediately so /health stays green for
 // Docker, but business routes return 503 until auto-resume finishes.
 const bootGate: BootGate = { value: false };
@@ -172,8 +203,10 @@ const handle = startServer(
   roleStore,
   settingsStore,
   aggregator,
+  backup,
   busMetrics,
   bootGate,
+  () => scheduler.reload(),
 );
 
 // Start MCP HTTP listener on its own port (loopback only, plan §14).
@@ -256,6 +289,10 @@ async function shutdown(signal: string): Promise<void> {
     // can't observe a half-torn-down mailbox.
     aggregator.stop();
     busMetrics.stop();
+    // Stop the backup timer before db.close() so no snapshot races teardown.
+    backup.stop();
+    // Disarm per-role crons so no tick fires into a half-torn-down spawner.
+    scheduler.stop();
     spawner.shutdownAll(`signal:${signal}`);
     // Stop MCP first (per-request transport instances will tear down with
     // their sockets) then the main HTTP listener.

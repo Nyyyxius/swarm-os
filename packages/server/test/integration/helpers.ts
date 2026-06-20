@@ -24,6 +24,7 @@ import { RoleStore } from '../../src/modules/roles/index.js';
 import { SettingsStore } from '../../src/modules/settings/index.js';
 import { MessagesAggregator } from '../../src/modules/metrics/aggregator.js';
 import { BusMetricsCollector } from '../../src/modules/metrics/busMetrics.js';
+import { BackupScheduler } from '../../src/modules/backup/index.js';
 import { createApp, startServer } from '../../src/http/main.js';
 import { loadConfig, _resetConfigCacheForTesting } from '../../src/config.js';
 import type { Config } from '../../src/config.js';
@@ -131,6 +132,14 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
   // `tick()` manually. The collector is still instantiated so MCP requests
   // can record latency/error counts even without an interval running.
   const busMetrics = new BusMetricsCollector(spawner);
+  // Backup scheduler — instantiated so the /backup routes resolve, but NOT
+  // started (tests force snapshots via the HTTP route, not the interval).
+  const backup = new BackupScheduler({
+    db: db.db,
+    dataDir,
+    intervalMs: config.backupIntervalMs,
+    keep: config.backupKeep,
+  });
 
   let mcp: McpServer | null = null;
   if (!opts.skipMcp) {
@@ -146,6 +155,7 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
       roleStore,
       settingsStore,
       aggregator,
+      backup,
       busMetrics,
     );
     http = handle.http;

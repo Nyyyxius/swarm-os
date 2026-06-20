@@ -12,6 +12,7 @@ import { createWsTicketRouter } from './routes/ws-ticket.js';
 import { createHooksRouter } from './routes/hooks.js';
 import { createRolesRouter } from './routes/roles.js';
 import { createMetricsRouter } from './routes/metrics.js';
+import { createBackupRouter } from './routes/backup.js';
 import { createPreamblesRouter } from './routes/preambles.js';
 import { createAiRouter } from './routes/ai.js';
 import { createDiscordRouter } from './routes/discord.js';
@@ -20,6 +21,7 @@ import type { RoleStore } from '../modules/roles/index.js';
 import type { SettingsStore } from '../modules/settings/index.js';
 import type { MessagesAggregator } from '../modules/metrics/aggregator.js';
 import type { BusMetricsCollector } from '../modules/metrics/busMetrics.js';
+import type { BackupScheduler } from '../modules/backup/index.js';
 import { TerminalHub } from './ws/terminal.js';
 import { EventsHub } from './ws/events.js';
 import { withModule } from '../logger.js';
@@ -78,8 +80,10 @@ export function createApp(
   roleStore: RoleStore,
   settingsStore: SettingsStore,
   aggregator: MessagesAggregator,
+  backup: BackupScheduler,
   busMetrics?: BusMetricsCollector,
   bootGate?: BootGate,
+  onRolesChanged?: () => void,
 ): { app: express.Express } {
   const app = express();
   app.disable('x-powered-by');
@@ -183,7 +187,7 @@ export function createApp(
   app.use(createOrchestratorsRouter(spawner, config));
   app.use(createSessionsRouter(spawner, config));
   app.use(createWsTicketRouter(spawner));
-  app.use(createRolesRouter(roleStore, config));
+  app.use(createRolesRouter(roleStore, config, onRolesChanged));
   app.use(createSettingsRouter(settingsStore));
   app.use(createPreamblesRouter());
   app.use(createAiRouter(config));
@@ -193,6 +197,9 @@ export function createApp(
   // (parity with `/orchestrators`). `/metrics/bus` is only mounted when
   // a `BusMetricsCollector` was provided.
   app.use(createMetricsRouter(aggregator, busMetrics));
+  // Operator backup: force a snapshot now + list existing snapshots. Same
+  // X-Auth-Token gate as the rest; reuses the live BackupScheduler.
+  app.use(createBackupRouter(backup));
 
   // JSON error handler — must be the LAST middleware. Without this, body-parser
   // failures (entity.too.large, malformed JSON) return Express' default HTML
@@ -224,8 +231,10 @@ export function startServer(
   roleStore: RoleStore,
   settingsStore: SettingsStore,
   aggregator: MessagesAggregator,
+  backup: BackupScheduler,
   busMetrics?: BusMetricsCollector,
   bootGate?: BootGate,
+  onRolesChanged?: () => void,
 ): ServerHandle {
   const { app } = createApp(
     config,
@@ -233,8 +242,10 @@ export function startServer(
     roleStore,
     settingsStore,
     aggregator,
+    backup,
     busMetrics,
     bootGate,
+    onRolesChanged,
   );
   const http = createServer(app);
 

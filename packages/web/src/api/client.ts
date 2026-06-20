@@ -58,7 +58,13 @@ export interface OrchestratorView {
 
 export interface DiscordConnectorView {
   type: 'discord';
-  webhookUrl: string;
+  /**
+   * Discord webhook URL for outbound system notifications. Optional — a
+   * role can run bidirectional bot only (botToken + channelId) without any
+   * webhook. At least one of `webhookUrl` or `botToken`+`channelId` must
+   * be set; the server rejects empty connectors.
+   */
+  webhookUrl?: string;
   /**
    * Discord channel id (snowflake). Optional — when set AND `botToken` is
    * also set, the lead reads humans' messages from this channel and posts
@@ -86,6 +92,12 @@ export interface RoleView {
   defaultEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null;
   defaultPermissionMode: string | null;
   connectors: ConnectorView[];
+  /** 5-field cron expression, or null. When set, the server's in-process
+   * scheduler pokes the lead inbox of every live instance of this role. */
+  schedule: string | null;
+  /** Message template delivered at each cron tick ({{fire}}, {{now}},
+   * {{window:Nh}}). Required when `schedule` is set. */
+  scheduleMessage: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -314,6 +326,18 @@ export const api = {
   updateRole: (id: string, body: Partial<RoleInput>) =>
     request<{ role: RoleView }>('PATCH', `/roles/${id}`, body),
   deleteRole: (id: string) => request<void>('DELETE', `/roles/${id}`),
+  validateDiscordToken: (token: string) =>
+    request<
+      | {
+          ok: true;
+          bot: { id: string; username: string; discriminator?: string; avatar: string | null };
+        }
+      | { ok: false; status: number; error: string }
+    >('POST', '/api/discord/validate-token', { token }),
+  createDiscordWebhook: (body: { token: string; channelId: string; name?: string }) =>
+    request<
+      { ok: true; webhookUrl: string } | { ok: false; status: number; error: string }
+    >('POST', '/api/discord/create-webhook', body),
   /**
    * Destroy an orchestrator. `opts.hide` collapses stop-then-remove into one
    * request: the team is soft-deleted from the map as soon as the lead PTY
@@ -419,6 +443,18 @@ export const api = {
     request<{ settings: InstanceSettingsView }>('PATCH', '/settings', patch),
   resetInstanceSettings: () =>
     request<{ settings: InstanceSettingsView }>('POST', '/settings/reset'),
+  /**
+   * Operator backups. `triggerBackup` forces an online SQLite snapshot now
+   * (`ok:false` on failure/overlap); `listBackups` lists existing snapshots
+   * newest-first. Both reuse the server-side BackupScheduler.
+   */
+  triggerBackup: () =>
+    request<{ ok: boolean; file: string | null; pruned: number }>('POST', '/backup'),
+  listBackups: () =>
+    request<{ backups: Array<{ name: string; sizeBytes: number; mtimeMs: number }> }>(
+      'GET',
+      '/backups',
+    ),
 };
 
 export { HttpError };

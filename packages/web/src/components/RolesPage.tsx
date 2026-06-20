@@ -30,6 +30,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useRoles } from '../hooks/useRoles';
 import { api, type ConnectorView, type RoleView, type RoleInput } from '../api/client';
+import { DiscordOnboarding } from './DiscordOnboarding';
 
 interface Props {
   /** When `false`, the overlay is not rendered. The caller (App.tsx today,
@@ -65,7 +66,8 @@ type SectionId =
   | 'leadPrompt'
   | 'leadPreamble'
   | 'workerPreamble'
-  | 'connectors';
+  | 'connectors'
+  | 'cadence';
 
 export function RolesPage({ open, onClose }: Props) {
   const { roles, loading, error, create, update, destroy } = useRoles();
@@ -158,6 +160,8 @@ export function RolesPage({ open, onClose }: Props) {
         defaultEffort: role.defaultEffort,
         defaultPermissionMode: role.defaultPermissionMode,
         connectors: role.connectors,
+        schedule: role.schedule,
+        scheduleMessage: role.scheduleMessage,
       });
       setSelectedRoleId(r.id);
       setEditingSection(null);
@@ -236,6 +240,7 @@ export function RolesPage({ open, onClose }: Props) {
                   <span className="tag-pill discord">DISCORD</span>
                 )}
                 {r.leadPrompt && <span className="tag-pill">LEAD-PROMPT</span>}
+                {r.schedule && <span className="tag-pill">🕐 {r.schedule}</span>}
               </div>
             </div>
           ))}
@@ -313,6 +318,14 @@ export function RolesPage({ open, onClose }: Props) {
               role={role}
               editing={editingSection === 'connectors'}
               onEdit={() => setEditingSection('connectors')}
+              onCancel={() => setEditingSection(null)}
+              onSave={(body) => patchSelected(body)}
+            />
+
+            <CadenceSection
+              role={role}
+              editing={editingSection === 'cadence'}
+              onEdit={() => setEditingSection('cadence')}
               onCancel={() => setEditingSection(null)}
               onSave={(body) => patchSelected(body)}
             />
@@ -725,6 +738,108 @@ function PreambleSection({
   );
 }
 
+// ───────────────────────────── CADENCE ──────────────────────────────────────
+function CadenceSection({
+  role,
+  editing,
+  onEdit,
+  onCancel,
+  onSave,
+}: {
+  role: RoleView;
+  editing: boolean;
+  onEdit: () => void;
+  onCancel: () => void;
+  onSave: (body: Partial<RoleInput>) => Promise<void>;
+}) {
+  const [schedule, setSchedule] = useState(role.schedule ?? '');
+  const [message, setMessage] = useState(role.scheduleMessage ?? '');
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setSchedule(role.schedule ?? '');
+    setMessage(role.scheduleMessage ?? '');
+    setError(null);
+  }, [role.id, editing]);
+
+  async function save() {
+    setError(null);
+    const sch = schedule.trim();
+    if (sch && !message.trim()) {
+      setError('Un message de tick est requis quand une cadence (cron) est définie.');
+      return;
+    }
+    try {
+      await onSave({
+        schedule: sch || null,
+        scheduleMessage: message.trim() ? message : null,
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  return (
+    <div className="role-section">
+      <h3>
+        <span>CADENCE</span>
+        {editing ? (
+          <span style={{ display: 'flex', gap: 6 }}>
+            <button className="h-edit" onClick={onCancel}>
+              CANCEL
+            </button>
+            <button className="h-edit" onClick={() => void save()} style={{ color: 'var(--amber)' }}>
+              SAVE
+            </button>
+          </span>
+        ) : (
+          <button className="h-edit" onClick={onEdit}>
+            EDIT
+          </button>
+        )}
+      </h3>
+
+      {!editing ? (
+        <div className="cfg-pre">
+          {role.schedule ? `🕐 ${role.schedule}  →  ${role.scheduleMessage ?? ''}` : '— (no cadence) —'}
+        </div>
+      ) : (
+        <>
+          <label className="field-help" style={{ display: 'block', marginBottom: 4 }}>
+            cron (5 champs, TZ serveur — défaut UTC)
+          </label>
+          <input
+            value={schedule}
+            onChange={(e) => setSchedule(e.target.value)}
+            placeholder="0 6,12,20 * * *"
+            style={{ width: '100%' }}
+          />
+          <label className="field-help" style={{ display: 'block', margin: '10px 0 4px' }}>
+            message du tick — tokens {'{{fire}}'} / {'{{now}}'} / {'{{window:6h}}'}
+          </label>
+          <input
+            value={message}
+            onChange={(e) => setMessage(e.target.value)}
+            placeholder="run cycle cycle_window_id={{fire}}"
+            style={{ width: '100%' }}
+          />
+          <div className="field-help" style={{ marginTop: 8 }}>
+            Déposé dans l’inbox du lead de chaque instance vivante de ce rôle à chaque tic.
+          </div>
+          {error && (
+            <div
+              className="field-warn"
+              style={{ color: 'var(--bad)', borderLeftColor: 'var(--bad)' }}
+            >
+              {error}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
 // ───────────────────────────── CONNECTORS ───────────────────────────────────
 function ConnectorsSection({
   role,
@@ -769,14 +884,19 @@ function ConnectorsSection({
       setError('Set a channel ID alongside the bot token (the bot needs a channel to listen on)');
       return;
     }
-    if (!u && (cid || tok)) {
-      setError('Set a webhook URL before adding a channel ID or bot token');
-      return;
+    if (!u && !(tok && cid)) {
+      if (u === '' && cid === '' && tok === '') {
+        // operator cleared everything — treat as "remove the connector"
+      } else {
+        setError('Set a webhook URL, or a bot token + channel ID (or both)');
+        return;
+      }
     }
-    const connectors: ConnectorView[] = u
+    const hasAny = !!u || !!(tok && cid);
+    const connectors: ConnectorView[] = hasAny
       ? [{
           type: 'discord',
-          webhookUrl: u,
+          ...(u ? { webhookUrl: u } : {}),
           ...(cid ? { channelId: cid } : {}),
           ...(tok ? { botToken: tok } : {}),
         }]
@@ -789,7 +909,7 @@ function ConnectorsSection({
   }
 
   async function remove() {
-    if (!confirm('Remove Discord webhook from this role?')) return;
+    if (!confirm('Remove Discord connector from this role?')) return;
     setError(null);
     try {
       await onSave({ connectors: [] });
@@ -825,19 +945,21 @@ function ConnectorsSection({
       {!editing ? (
         discord ? (
           <>
-            <div className="cfg-kv">
-              <span className="k">DISCORD</span>
-              <span
-                className="v"
-                style={{
-                  fontSize: 10.5,
-                  color: 'var(--text-dim)',
-                  wordBreak: 'break-all',
-                }}
-              >
-                {discord.webhookUrl}
-              </span>
-            </div>
+            {discord.webhookUrl && (
+              <div className="cfg-kv">
+                <span className="k">DISCORD</span>
+                <span
+                  className="v"
+                  style={{
+                    fontSize: 10.5,
+                    color: 'var(--text-dim)',
+                    wordBreak: 'break-all',
+                  }}
+                >
+                  {discord.webhookUrl}
+                </span>
+              </div>
+            )}
             {discord.channelId && (
               <div className="cfg-kv">
                 <span className="k">CHANNEL ID</span>
@@ -863,66 +985,27 @@ function ConnectorsSection({
           </>
         ) : (
           <div className="field-help">
-            No Discord webhook. Configure to relay session-waiting events to a
-            channel.
+            No Discord connector. Configure system notifications (webhook) or a
+            bidirectional bot (token + channel) — or both.
           </div>
         )
       ) : (
         <div style={{ display: 'grid', gap: 12 }}>
-          <div className="field">
-            <label>DISCORD WEBHOOK URL</label>
-            <input
-              type="url"
-              value={url}
-              onChange={(e) => setUrl(e.target.value)}
-              placeholder="https://discord.com/api/webhooks/…"
-            />
-            <div className="field-help">
-              When set, orchestrators created with this role route their
-              notifications to this webhook instead of the global one. Leave
-              empty to remove.
-            </div>
-          </div>
-          <div className="field">
-            <label>DISCORD CHANNEL ID (optional)</label>
-            <input
-              type="text"
-              inputMode="numeric"
-              pattern="\d{17,20}"
-              value={channelId}
-              onChange={(e) => setChannelId(e.target.value)}
-              placeholder="1234567890123456789"
-            />
-            <div className="field-help">
-              When set AND a bot token is configured below, the role's bot
-              subscribes to this channel: every human message lands in the
-              lead's inbox, and the lead can write back via the{' '}
-              <code>discord.send_message</code> tool. Enable Developer Mode in
-              Discord, right-click the channel → Copy Channel ID.
-            </div>
-          </div>
-          <div className="field">
-            <label>DISCORD BOT TOKEN (optional)</label>
-            <input
-              type="password"
-              autoComplete="off"
-              value={botToken}
-              onChange={(e) => setBotToken(e.target.value)}
-              placeholder="MTAxxxxxxxxxxxxxxxxx.xxxxxx.xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-            />
-            <div className="field-help">
-              Bot OAuth token from the Discord Developer Portal. Each role can
-              have its own bot user (e.g. Marketing-Bot, Support-Bot). Leave
-              empty to disable bidirectional Discord for this role.
-            </div>
-          </div>
+          <DiscordOnboarding
+            webhookUrl={url}
+            setWebhookUrl={setUrl}
+            channelId={channelId}
+            setChannelId={setChannelId}
+            botToken={botToken}
+            setBotToken={setBotToken}
+          />
           {discord && (
             <button
               className="btn danger"
               style={{ alignSelf: 'flex-start' }}
               onClick={() => void remove()}
             >
-              REMOVE WEBHOOK
+              REMOVE DISCORD
             </button>
           )}
           {error && (

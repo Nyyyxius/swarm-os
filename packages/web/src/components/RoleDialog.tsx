@@ -1,5 +1,6 @@
 import { useEffect, useState, type CSSProperties } from 'react';
 import { api, type ConnectorView, type RoleView } from '../api/client';
+import { DiscordOnboarding } from './DiscordOnboarding';
 
 interface SubmitBody {
   label: string;
@@ -11,6 +12,8 @@ interface SubmitBody {
   defaultEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null;
   defaultPermissionMode: string | null;
   connectors: ConnectorView[];
+  schedule: string | null;
+  scheduleMessage: string | null;
 }
 
 interface Props {
@@ -60,6 +63,8 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
   const [discordUrl, setDiscordUrl] = useState<string>('');
   const [discordChannelId, setDiscordChannelId] = useState<string>('');
   const [discordBotToken, setDiscordBotToken] = useState<string>('');
+  const [schedule, setSchedule] = useState<string>('');
+  const [scheduleMessage, setScheduleMessage] = useState<string>('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [defaults, setDefaults] = useState<{ lead: string; worker: string } | null>(null);
@@ -99,6 +104,8 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
       setDiscordUrl(discord?.webhookUrl ?? '');
       setDiscordChannelId(discord?.channelId ?? '');
       setDiscordBotToken(discord?.botToken ?? '');
+      setSchedule(initial.schedule ?? '');
+      setScheduleMessage(initial.scheduleMessage ?? '');
     } else {
       setLabel('');
       setLeadPrompt('');
@@ -111,6 +118,8 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
       setDiscordUrl('');
       setDiscordChannelId('');
       setDiscordBotToken('');
+      setSchedule('');
+      setScheduleMessage('');
     }
   }, [open, initial]);
 
@@ -142,24 +151,26 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
       const url = discordUrl.trim();
       const channelId = discordChannelId.trim();
       const botToken = discordBotToken.trim();
-      if (url) {
-        if (!/^https?:\/\//i.test(url)) {
-          throw new Error('Discord webhook URL must start with http(s)://');
-        }
-        if (channelId && !/^\d{17,20}$/.test(channelId)) {
-          throw new Error('Discord channel ID must be 17–20 digits (a Discord snowflake)');
-        }
-        if (botToken && !channelId) {
-          throw new Error('Set a Discord channel ID alongside the bot token (the bot needs a channel to listen on)');
-        }
+      if (url && !/^https?:\/\//i.test(url)) {
+        throw new Error('L’URL du webhook Discord doit commencer par http(s)://');
+      }
+      if (channelId && !/^\d{17,20}$/.test(channelId)) {
+        throw new Error('Le channel ID Discord doit être un snowflake (17–20 chiffres).');
+      }
+      if (botToken && !channelId) {
+        throw new Error('Renseigne un channel ID avec le bot token (le bot doit écouter quelque part).');
+      }
+      const hasAny = !!url || !!(botToken && channelId);
+      if (hasAny) {
         connectors.push({
           type: 'discord',
-          webhookUrl: url,
+          ...(url ? { webhookUrl: url } : {}),
           ...(channelId ? { channelId } : {}),
           ...(botToken ? { botToken } : {}),
         });
-      } else if (channelId || botToken) {
-        throw new Error('Set a Discord webhook URL before adding a channel ID or bot token');
+      } else if (url || channelId || botToken) {
+        // Some fields set but no complete mechanism — e.g. channelId alone.
+        throw new Error('Configure soit un webhook URL, soit un bot token + channel ID (ou les deux).');
       }
       let parsedCount: number | null = null;
       if (workerCount.trim()) {
@@ -168,6 +179,10 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
           throw new Error('workerCount must be a non-negative integer');
         }
         parsedCount = n;
+      }
+      const trimmedSchedule = schedule.trim();
+      if (trimmedSchedule && !scheduleMessage.trim()) {
+        throw new Error('Un message de tick est requis quand une cadence (cron) est définie.');
       }
       await onSubmit({
         label: label.trim(),
@@ -179,6 +194,8 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
         defaultEffort: (effort || null) as SubmitBody['defaultEffort'],
         defaultPermissionMode: perm || null,
         connectors,
+        schedule: trimmedSchedule || null,
+        scheduleMessage: scheduleMessage.trim() ? scheduleMessage : null,
       });
       onClose();
     } catch (err) {
@@ -286,52 +303,41 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
               ))}
             </select>
           </Field>
-          <Field label="Discord webhook URL (optional)" wide>
+          <Field label="cadence — cron (optional)">
             <input
               className={inputCls}
-              type="url"
-              placeholder="https://discord.com/api/webhooks/…"
-              value={discordUrl}
-              onChange={(e) => setDiscordUrl(e.target.value)}
+              placeholder="0 6,12,20 * * *"
+              value={schedule}
+              onChange={(e) => setSchedule(e.target.value)}
             />
-            <p className="mt-1 text-[11px] leading-snug text-slate-400">
-              When set, orchestrators created with this role will route their notifications to
-              this webhook instead of the global one.
-            </p>
           </Field>
-          <Field label="Discord channel ID (optional — enables bot bidirectional)" wide>
+          <Field label="tick message (required if cadence set)">
             <input
               className={inputCls}
-              type="text"
-              inputMode="numeric"
-              pattern="\d{17,20}"
-              placeholder="e.g. 1234567890123456789"
-              value={discordChannelId}
-              onChange={(e) => setDiscordChannelId(e.target.value)}
+              placeholder="run cycle cycle_window_id={{fire}}"
+              value={scheduleMessage}
+              onChange={(e) => setScheduleMessage(e.target.value)}
             />
-            <p className="mt-1 text-[11px] leading-snug text-slate-400">
-              When set AND a <code>Bot token</code> is configured below, the role's bot
-              subscribes to this channel: every human message lands in the lead's inbox
-              (<code>from: discord:&lt;username&gt;</code>) and the lead can write back via the{' '}
-              <code>discord.send_message</code> tool. Enable Developer Mode in Discord, right-click
-              the channel, → Copy Channel ID.
-            </p>
           </Field>
-          <Field label="Discord bot token (optional — per-role Discord identity)" wide>
-            <input
-              className={inputCls}
-              type="password"
-              autoComplete="off"
-              placeholder="MTAxxxxxxxxxxxxxxxxx.xxxxxx.xxxxxxxxxxxxxxxxxxxxxxxxxxxx"
-              value={discordBotToken}
-              onChange={(e) => setDiscordBotToken(e.target.value)}
+          {schedule.trim() && (
+            <p className="col-span-2 -mt-1 text-[11px] text-slate-400">
+              Tic horloge-murale (TZ serveur, défaut UTC) → déposé dans l’inbox du lead de chaque
+              instance vivante. Tokens : <code>{'{{fire}}'}</code> (clé idempotente,
+              ex. <code>2026-06-18T20:00Z</code>), <code>{'{{now}}'}</code>,{' '}
+              <code>{'{{window:6h}}'}</code>.
+            </p>
+          )}
+          <div className="col-span-2 mt-2">
+            <DiscordOnboarding
+              webhookUrl={discordUrl}
+              setWebhookUrl={setDiscordUrl}
+              channelId={discordChannelId}
+              setChannelId={setDiscordChannelId}
+              botToken={discordBotToken}
+              setBotToken={setDiscordBotToken}
+              inputClassName={inputCls}
             />
-            <p className="mt-1 text-[11px] leading-snug text-slate-400">
-              Bot OAuth token from the Discord Developer Portal. Each role can have its own
-              bot user (e.g. Marketing-Bot, Support-Bot). Leave empty to disable bidirectional
-              Discord for this role — the webhook above keeps owning system notifications.
-            </p>
-          </Field>
+          </div>
         </div>
         {error && <div className="mt-3 text-sm text-red-400 break-words">{error}</div>}
         <div className="mt-5 flex justify-end gap-2">

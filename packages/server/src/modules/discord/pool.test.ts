@@ -78,6 +78,7 @@ function makeSubscription(over: Partial<OrchSubscription> = {}): OrchSubscriptio
     channelId: 'channel-1',
     getLeadSessionId: () => 'lead-1',
     mailbox: new Mailbox(),
+    notifyLead: () => {},
     ...over,
   };
 }

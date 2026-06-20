@@ -118,6 +118,8 @@ export interface RoleRow {
   default_effort: string | null;
   default_permission_mode: string | null;
   connectors_json: string | null;
+  schedule: string | null;
+  schedule_message: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -398,10 +400,12 @@ export class SwarmDb {
       INSERT INTO roles (
         id, label, lead_prompt, lead_preamble, worker_preamble, worker_count,
         default_model, default_effort, default_permission_mode, connectors_json,
+        schedule, schedule_message,
         created_at, updated_at
       ) VALUES (
         @id, @label, @lead_prompt, @lead_preamble, @worker_preamble, @worker_count,
         @default_model, @default_effort, @default_permission_mode, @connectors_json,
+        @schedule, @schedule_message,
         @created_at, @updated_at
       )
     `);
@@ -416,6 +420,8 @@ export class SwarmDb {
         default_effort = @default_effort,
         default_permission_mode = @default_permission_mode,
         connectors_json = @connectors_json,
+        schedule = @schedule,
+        schedule_message = @schedule_message,
         updated_at = @updated_at
       WHERE id = @id
     `);
@@ -469,6 +475,9 @@ export class SwarmDb {
       { table: 'mailbox_messages', column: 'source_message_id', ddl: 'ALTER TABLE mailbox_messages ADD COLUMN source_message_id TEXT' },
       { table: 'mailbox_messages', column: 'thread_id',         ddl: 'ALTER TABLE mailbox_messages ADD COLUMN thread_id TEXT' },
       { table: 'mailbox_messages', column: 'thread_name',       ddl: 'ALTER TABLE mailbox_messages ADD COLUMN thread_name TEXT' },
+      // Per-role cadence (modules/schedule) — additive nullable columns.
+      { table: 'roles', column: 'schedule',         ddl: 'ALTER TABLE roles ADD COLUMN schedule TEXT' },
+      { table: 'roles', column: 'schedule_message', ddl: 'ALTER TABLE roles ADD COLUMN schedule_message TEXT' },
     ];
     for (const a of additions) {
       try {

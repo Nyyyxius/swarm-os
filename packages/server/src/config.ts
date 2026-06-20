@@ -105,6 +105,32 @@ export interface Config {
    * it (default). Env: `SWARM_OS_AUTO_COMPACT_BYTES`.
    */
   contextAutoCompactBytes: number;
+  /**
+   * Hot-backup interval in ms. The server takes an online SQLite snapshot of
+   * `swarm-os.db` into `<dataDir>/backups/` every `backupIntervalMs`. Since
+   * `/data` is bind-mounted, snapshots land on the host. `0` disables the
+   * scheduler. Default 6h. Env: `SWARM_OS_BACKUP_INTERVAL_MS`.
+   */
+  backupIntervalMs: number;
+  /**
+   * How many of the newest snapshots to retain; older ones are pruned each
+   * run. `0` disables backups (same as `backupIntervalMs=0`). Default 14.
+   * Env: `SWARM_OS_BACKUP_KEEP`.
+   */
+  backupKeep: number;
+  /**
+   * Per-role cron scheduler (modules/schedule): master switch. When `true`
+   * (default), a role carrying a `schedule` gets an in-process cron that
+   * delivers its `scheduleMessage` to the lead inbox of every live instance.
+   * Env: `SWARM_OS_SCHEDULE_ENABLED`.
+   */
+  scheduleEnabled: boolean;
+  /**
+   * IANA timezone the per-role cron expressions are evaluated in. Default
+   * `UTC` — explicit so cadence does not drift with the container's TZ.
+   * Env: `SWARM_OS_SCHEDULE_TZ`.
+   */
+  scheduleTimezone: string;
   token: string;
   /**
    * Phase 4: separate token used by Claude Code's `Notification` hook to
@@ -328,6 +354,14 @@ export function loadConfig(): Config {
   const contextCompactOnWaiting = boolEnv('SWARM_OS_COMPACT_ON_WAITING', false);
   const contextAutoCompactBytes = intEnv('SWARM_OS_AUTO_COMPACT_BYTES', 0);
 
+  // Hot SQLite backup scheduler (in-process; writes to <dataDir>/backups).
+  const backupIntervalMs = intEnv('SWARM_OS_BACKUP_INTERVAL_MS', 6 * 60 * 60 * 1000);
+  const backupKeep = intEnv('SWARM_OS_BACKUP_KEEP', 14);
+
+  // Per-role cron scheduler (in-process; modules/schedule).
+  const scheduleEnabled = boolEnv('SWARM_OS_SCHEDULE_ENABLED', true);
+  const scheduleTimezone = process.env.SWARM_OS_SCHEDULE_TZ ?? 'UTC';
+
   const workspaceRoot = path.resolve(process.env.SWARM_OS_WORKSPACE_ROOT ?? '/workspace');
   const dataDir = path.resolve(process.env.SWARM_OS_DATA_DIR ?? '/data');
 
@@ -485,6 +519,10 @@ export function loadConfig(): Config {
     idleThresholdMs,
     contextCompactOnWaiting,
     contextAutoCompactBytes,
+    backupIntervalMs,
+    backupKeep,
+    scheduleEnabled,
+    scheduleTimezone,
     token,
     hookToken,
     discordWebhookUrl,

@@ -1,6 +1,7 @@
 import { Router, type Request, type Response } from 'express';
 import type { RoleStore, Connector, RoleInit, RolePatch } from '../../modules/roles/index.js';
 import type { Config, EffortLevel, PermissionMode } from '../../config.js';
+import { isValidCron } from '../../modules/schedule/index.js';
 
 const VALID_EFFORTS: ReadonlySet<string> = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const VALID_PERMS: ReadonlySet<string> = new Set([
@@ -36,6 +37,8 @@ interface RoleBody {
   defaultEffort?: unknown;
   defaultPermissionMode?: unknown;
   connectors?: unknown;
+  schedule?: unknown;
+  scheduleMessage?: unknown;
 }
 
 function isNonEmptyString(x: unknown): x is string {
@@ -54,6 +57,24 @@ function parseNullableString(
   if (x == null) return { ok: true, value: null };
   if (typeof x !== 'string') return { ok: false, error: `${field} must be a string or null` };
   return { ok: true, value: x.length === 0 ? null : x };
+}
+
+/**
+ * A 5/6-field cron expression, or null/'' (= no cadence). Validated with the
+ * same croner parser the scheduler uses, so the UI can't store a pattern the
+ * scheduler would later reject at reload.
+ */
+function parseCron(
+  x: unknown,
+): { ok: true; value: string | null } | { ok: false; error: string } {
+  if (x == null) return { ok: true, value: null };
+  if (typeof x !== 'string') return { ok: false, error: 'schedule must be a string or null' };
+  const trimmed = x.trim();
+  if (trimmed === '') return { ok: true, value: null };
+  if (!isValidCron(trimmed)) {
+    return { ok: false, error: 'schedule must be a valid cron expression (e.g. "0 6,12,20 * * *")' };
+  }
+  return { ok: true, value: trimmed };
 }
 
 function parseWorkerCount(
@@ -84,11 +105,15 @@ function parseConnectors(
     if (c.type !== 'discord') {
       return { ok: false, error: `connectors[${i}].type must be 'discord'` };
     }
-    if (!isNonEmptyString(c.webhookUrl)) {
-      return { ok: false, error: `connectors[${i}].webhookUrl must be a non-empty string` };
-    }
-    if (!/^https?:\/\//i.test(c.webhookUrl)) {
-      return { ok: false, error: `connectors[${i}].webhookUrl must be a http(s) URL` };
+    let webhookUrl: string | undefined;
+    if (c.webhookUrl != null && c.webhookUrl !== '') {
+      if (!isNonEmptyString(c.webhookUrl)) {
+        return { ok: false, error: `connectors[${i}].webhookUrl must be a non-empty string` };
+      }
+      if (!/^https?:\/\//i.test(c.webhookUrl)) {
+        return { ok: false, error: `connectors[${i}].webhookUrl must be a http(s) URL` };
+      }
+      webhookUrl = c.webhookUrl;
     }
     let channelId: string | undefined;
     if (c.channelId != null && c.channelId !== '') {
@@ -122,9 +147,18 @@ function parseConnectors(
       }
       botToken = c.botToken;
     }
+    // Empty connector — neither outbound webhook nor inbound bot — has no
+    // effect and is almost certainly a UI mistake. Reject loudly instead
+    // of silently dropping configuration.
+    if (!webhookUrl && !(botToken && channelId)) {
+      return {
+        ok: false,
+        error: `connectors[${i}] must set webhookUrl, or both botToken and channelId`,
+      };
+    }
     out.push({
       type: 'discord',
-      webhookUrl: c.webhookUrl,
+      ...(webhookUrl ? { webhookUrl } : {}),
       ...(channelId ? { channelId } : {}),
       ...(botToken ? { botToken } : {}),
     });
@@ -132,7 +166,16 @@ function parseConnectors(
   return { ok: true, value: out };
 }
 
-export function createRolesRouter(store: RoleStore, config: Config): Router {
+export function createRolesRouter(
+  store: RoleStore,
+  config: Config,
+  /**
+   * Invoked after any successful role create/update/delete so the in-process
+   * RoleScheduler can re-arm its crons (there is no role-change event bus, so
+   * the mutating route is the re-arm trigger). Optional — tests omit it.
+   */
+  onRolesChanged?: () => void,
+): Router {
   const router = Router();
 
   router.get('/roles', (_req: Request, res: Response) => {
@@ -179,6 +222,15 @@ export function createRolesRouter(store: RoleStore, config: Config): Router {
     if (!wc.ok) return res.status(400).json({ error: wc.error });
     const cn = parseConnectors(body.connectors);
     if (!cn.ok) return res.status(400).json({ error: cn.error });
+    const sch = parseCron(body.schedule);
+    if (!sch.ok) return res.status(400).json({ error: sch.error });
+    const smsg = parseNullableString(body.scheduleMessage, 'scheduleMessage');
+    if (!smsg.ok) return res.status(400).json({ error: smsg.error });
+    if (sch.value != null && smsg.value == null) {
+      return res
+        .status(400)
+        .json({ error: 'scheduleMessage is required when schedule is set' });
+    }
 
     const init: RoleInit = {
       label: body.label,
@@ -190,8 +242,11 @@ export function createRolesRouter(store: RoleStore, config: Config): Router {
       defaultEffort: effort,
       defaultPermissionMode: perm,
       connectors: cn.value,
+      schedule: sch.value,
+      scheduleMessage: smsg.value,
     };
     const role = store.create(init);
+    onRolesChanged?.();
     res.status(201).json({ role });
   });
 
@@ -275,17 +330,40 @@ export function createRolesRouter(store: RoleStore, config: Config): Router {
       if (!r.ok) return res.status(400).json({ error: r.error });
       patch.connectors = r.value;
     }
+    if (body.schedule !== undefined) {
+      const r = parseCron(body.schedule);
+      if (!r.ok) return res.status(400).json({ error: r.error });
+      patch.schedule = r.value;
+    }
+    if (body.scheduleMessage !== undefined) {
+      const r = parseNullableString(body.scheduleMessage, 'scheduleMessage');
+      if (!r.ok) return res.status(400).json({ error: r.error });
+      patch.scheduleMessage = r.value;
+    }
+    // Enforce the schedule⇒message invariant against the MERGED role: a patch
+    // can set a schedule without a message, or clear the message while the
+    // schedule stays — both would leave a cron with nothing to deliver.
+    const effSchedule = patch.schedule !== undefined ? patch.schedule : existing.schedule;
+    const effMessage =
+      patch.scheduleMessage !== undefined ? patch.scheduleMessage : existing.scheduleMessage;
+    if (effSchedule != null && effMessage == null) {
+      return res
+        .status(400)
+        .json({ error: 'scheduleMessage is required when schedule is set' });
+    }
 
     const updated = store.update(req.params.id, patch);
     if (!updated) {
       res.status(404).json({ error: 'not found' });
       return;
     }
+    onRolesChanged?.();
     res.json({ role: updated });
   });
 
   router.delete('/roles/:id', (req: Request<{ id: string }>, res: Response) => {
     store.delete(req.params.id);
+    onRolesChanged?.();
     res.status(204).end();
   });
 

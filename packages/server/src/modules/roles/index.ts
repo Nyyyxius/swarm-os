@@ -23,15 +23,21 @@ export type ConnectorType = 'discord';
 
 export interface DiscordConnector {
   type: 'discord';
-  webhookUrl: string;
+  /**
+   * Discord webhook URL for outbound system notifications (session waiting,
+   * orchestrator ended, exit anomaly). Optional — a connector can run with
+   * only the bot (`botToken`+`channelId`) when the operator does not want
+   * system embeds in the channel.
+   * At least one of `webhookUrl` or (`botToken`+`channelId`) must be set;
+   * the route layer enforces that invariant.
+   */
+  webhookUrl?: string;
   /**
    * Discord channel id (snowflake) the lead converses in. Optional —
    * when set AND `botToken` is also set, the bot subscribes to this
    * channel: every human message becomes an entry in the lead's inbox
    * (`from: 'discord:<username>'`) and the lead can write back via
    * the `discord.send_message` MCP tool.
-   * When absent, only the outbound webhook (system notifications) is
-   * active for this role.
    */
   channelId?: string;
   /**
@@ -58,6 +64,20 @@ export interface Role {
   defaultEffort: EffortLevel | null;
   defaultPermissionMode: PermissionMode | null;
   connectors: Connector[];
+  /**
+   * 5-field cron expression. When set, the in-process RoleScheduler
+   * (modules/schedule) delivers `scheduleMessage` to the lead inbox of every
+   * live orchestrator of this role at each tick (TZ = SWARM_OS_SCHEDULE_TZ,
+   * default UTC). NULL = no cadence.
+   */
+  schedule: string | null;
+  /**
+   * Message template delivered to the lead at each cron tick. Supports
+   * `{{fire}}` (fire time truncated to the minute, e.g. `2026-06-18T20:00Z`),
+   * `{{now}}` (full ISO), and `{{window:Nh}}`/`{{window:Nm}}`. Required when
+   * `schedule` is set (route-enforced).
+   */
+  scheduleMessage: string | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -72,6 +92,8 @@ export interface RoleInit {
   defaultEffort?: EffortLevel | null;
   defaultPermissionMode?: PermissionMode | null;
   connectors?: Connector[];
+  schedule?: string | null;
+  scheduleMessage?: string | null;
 }
 
 export type RolePatch = Partial<RoleInit>;
@@ -101,6 +123,8 @@ function rowToRole(row: RoleRow): Role {
     defaultEffort: row.default_effort as EffortLevel | null,
     defaultPermissionMode: row.default_permission_mode as PermissionMode | null,
     connectors,
+    schedule: row.schedule,
+    scheduleMessage: row.schedule_message,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -118,6 +142,8 @@ function roleToRow(r: Role): RoleRow {
     default_effort: r.defaultEffort,
     default_permission_mode: r.defaultPermissionMode,
     connectors_json: r.connectors.length ? JSON.stringify(r.connectors) : null,
+    schedule: r.schedule,
+    schedule_message: r.scheduleMessage,
     created_at: r.createdAt,
     updated_at: r.updatedAt,
   };
@@ -139,6 +165,8 @@ export class RoleStore {
       defaultEffort: init.defaultEffort ?? null,
       defaultPermissionMode: init.defaultPermissionMode ?? null,
       connectors: init.connectors ?? [],
+      schedule: init.schedule ?? null,
+      scheduleMessage: init.scheduleMessage ?? null,
       createdAt: now,
       updatedAt: now,
     };
@@ -172,6 +200,9 @@ export class RoleStore {
           ? patch.defaultPermissionMode
           : existing.defaultPermissionMode,
       connectors: patch.connectors !== undefined ? patch.connectors : existing.connectors,
+      schedule: patch.schedule !== undefined ? patch.schedule : existing.schedule,
+      scheduleMessage:
+        patch.scheduleMessage !== undefined ? patch.scheduleMessage : existing.scheduleMessage,
       updatedAt: new Date().toISOString(),
     };
     this.db.updateRole(roleToRow(updated));
