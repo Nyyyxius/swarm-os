@@ -17,15 +17,23 @@ interface Props {
   items: readonly WaitingToast[];
   onOpen: (t: WaitingToast) => void;
   onDismiss: (id: string) => void;
+  /** Shift left of the 400px right panel when it is open (same reason as EventsPip). */
+  panelOpen?: boolean;
 }
 
-export default function Toasts({ items, onOpen, onDismiss }: Props) {
+export default function Toasts({ items, onOpen, onDismiss, panelOpen }: Props) {
   const visible = items.slice(0, TOAST_MAX_VISIBLE);
   const olderCount = items.length - visible.length;
   const firstOlder = items[TOAST_MAX_VISIBLE];
 
   return (
-    <div className="toasts">
+    <div
+      className="toasts"
+      style={{
+        right: panelOpen ? 416 : undefined,
+        transition: 'right 280ms cubic-bezier(.2,.7,.2,1)',
+      }}
+    >
       {olderCount > 0 && firstOlder && (
         <div className="toasts-older" onClick={() => onOpen(firstOlder)}>
           + {olderCount} older waiting →

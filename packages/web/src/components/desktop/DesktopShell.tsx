@@ -539,6 +539,12 @@ export default function DesktopShell({
     return buildRightPanelAgent(selectedSession, logLines, writer);
   }, [selectedSession, logLines, writer]);
 
+  // Right detail panel is open when both projections resolve (mirrors
+  // RightPanel's `isClosed = !selected || !team`). The fixed bottom-right
+  // EventsPip / Toasts shift left of the 400px panel when this is true so
+  // they don't float over its composer / SEND button.
+  const panelOpen = !!(selectedAgent && selectedTeam);
+
   // ── Inbox poll (3 s) for the MESSAGES tab. Distinct from the
   // MapView inbox-count poller (which wants {count} per session for
   // every active session, not the full messages array for one). Two
@@ -884,9 +890,10 @@ export default function DesktopShell({
           items={waitingToasts}
           onOpen={handleToastOpen}
           onDismiss={dismiss}
+          panelOpen={panelOpen}
         />
       ) : (
-        <EventsPip connected={eventsConnected} />
+        <EventsPip connected={eventsConnected} panelOpen={panelOpen} />
       )}
     </div>
   );
