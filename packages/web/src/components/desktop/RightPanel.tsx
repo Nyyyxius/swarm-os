@@ -336,8 +336,10 @@ export default function RightPanel({
           </button>
         )}
         <button className="pr-action primary"
-          disabled={stopped || isFailed || isLead /* lead non restartable, S5 409 */}
-          title={isLead ? 'lead is restarted via STOP + recreate' : 'restart this worker'}
+          /* Lead: restart the whole team in place — enabled only when the team
+             is terminal. Worker: S5 single-session restart while running. */
+          disabled={isLead ? !(stopped || isFailed) : (stopped || isFailed)}
+          title={isLead ? 'restart this team in place (same id/config)' : 'restart this worker'}
           onClick={() => onAction(selected.id, 'restart')}>
           {ICON.reload}<span>RESTART</span>
         </button>
@@ -351,8 +353,7 @@ export default function RightPanel({
           </button>
         ) : (stopped || isFailed) ? (
           <button className="pr-action go"
-            disabled                                  /* gap §4-8 */
-            title="reactivate available in v2"
+            title="relaunch this team in place (same id/config)"
             onClick={() => onAction(selected.id, 'start')}>
             {ICON.start}<span>REACTIVATE</span>
           </button>

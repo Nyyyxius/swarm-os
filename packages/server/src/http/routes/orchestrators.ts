@@ -271,6 +271,28 @@ export function createOrchestratorsRouter(spawner: Spawner, config: Config): Rou
     res.status(204).end();
   });
 
+  // Relaunch a terminal orchestrator in place — same id/config/history,
+  // reusing the auto-resume mechanic. Backs the desktop RESTART / REACTIVATE
+  // button so a dead team can come back without a KILL + create-new-team.
+  router.post(
+    '/orchestrators/:id/restart',
+    (req: Request<{ id: string }>, res: Response) => {
+      try {
+        const orch = spawner.restartOrchestrator(req.params.id);
+        res.status(200).json({ orchestrator: orch.toView() });
+      } catch (err) {
+        if (err instanceof SpawnerError) {
+          res.status(err.httpStatus).json({ error: err.message, code: err.code });
+          return;
+        }
+        res.status(500).json({
+          error: 'failed to restart orchestrator',
+          reason: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+  );
+
   // Soft-delete from the map. Orchestrator must be terminal (stopped/failed).
   // Cascades to hide every session of the orchestrator.
   router.post('/orchestrators/:id/hide', (req: Request<{ id: string }>, res: Response) => {

@@ -347,6 +347,14 @@ export const api = {
     const qs = opts.hide ? '?hide=true' : '';
     return request<void>('DELETE', `/orchestrators/${id}${qs}`);
   },
+  /**
+   * Relaunch a terminal orchestrator in place — same id/config/history,
+   * reusing the auto-resume mechanic server-side. Backs the desktop RESTART /
+   * REACTIVATE button on a dead team's lead. 404 if unknown, 409 if still
+   * running.
+   */
+  restartOrchestrator: (id: string) =>
+    request<{ orchestrator: OrchestratorView }>('POST', `/orchestrators/${id}/restart`),
   getSession: (id: string) => request<SessionView>('GET', `/sessions/${id}`),
   /**
    * Push input to a session's PTY. `submit: true` types the line and fires

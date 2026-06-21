@@ -480,6 +480,83 @@ export class Spawner {
 
     return { resumed, failed };
   }
+
+  /**
+   * On-demand restart of a single terminal orchestrator — relaunches the team
+   * IN PLACE: same id, name, role, config, preambles and `createdAt`, but a
+   * brand-new lead session. Backs the desktop RESTART / REACTIVATE button so
+   * the operator no longer has to KILL + create a brand-new team (which would
+   * mint a new id and lose the team's identity/history).
+   *
+   * Why a fresh `start()` and NOT the auto-resume path: a *resumed* lead
+   * re-runs claude with a "server restart" notice and — on the SSH transport —
+   * reliably exits 1 within seconds (this is exactly why teams are found dead
+   * after a host reboot). A *fresh* lead (identical to create-new-team) stays
+   * up. So restart reuses `create()`, which also re-spawns the role's initial
+   * workers and re-wires Discord. `resume_count` is bumped for the audit chip.
+   *
+   * Throws `SpawnerError`:
+   *   - `NOT_FOUND` (404)       — no DB row for `id`.
+   *   - `ALREADY_RUNNING` (409) — orch is live in the map and not terminal.
+   *   - `NO_LEAD` (409)         — no lead session row to copy cwd/prompt from.
+   */
+  restartOrchestrator(id: string, opts: StartOptions = {}): Orchestrator {
+    const live = this.orchestrators.get(id);
+    if (live && live.status !== 'stopped' && live.status !== 'failed') {
+      throw new SpawnerError(
+        `orchestrator ${id} is ${live.status}; nothing to restart`,
+        'ALREADY_RUNNING',
+        409,
+      );
+    }
+
+    const row = this.persistence.db.getOrchestrator(id);
+    if (!row) {
+      throw new SpawnerError(`orchestrator ${id} not found`, 'NOT_FOUND', 404);
+    }
+
+    // `listSessions` is ordered started_at ASC, so the LAST lead row is the
+    // most recent incarnation — copy its cwd/prompt into the fresh lead.
+    const leadRow = [...this.persistence.db.listSessions(id)]
+      .reverse()
+      .find((s) => s.type === 'lead');
+    if (!leadRow) {
+      throw new SpawnerError(
+        `orchestrator ${id} has no lead session row — cannot restart`,
+        'NO_LEAD',
+        409,
+      );
+    }
+
+    // Drop the stale terminal in-memory entry + its Discord sub so `create()`
+    // can rebuild under the same id without a key collision.
+    if (live) this.orchestrators.delete(id);
+    void this.discordBotPool?.unsubscribeOrch(id);
+
+    const { orchestrator } = this.create(
+      {
+        id: row.id,
+        createdAt: row.created_at,
+        resumeCount: row.resume_count + 1,
+        name: row.name,
+        role: row.role,
+        roleId: row.role_id,
+        defaultModel: row.default_model,
+        defaultEffort: row.default_effort as EffortLevel,
+        defaultPermissionMode: row.default_permission_mode as PermissionMode,
+        leadPreamble: row.lead_preamble,
+        workerPreamble: row.worker_preamble,
+        lead: {
+          cwd: leadRow.cwd,
+          prompt: leadRow.initial_prompt ?? '',
+          preamble: row.lead_preamble,
+        },
+      },
+      opts,
+    );
+    log.info({ event: 'spawner.orch_restarted', orchId: id, name: orchestrator.name });
+    return orchestrator;
+  }
 }
 
 // Re-export for callers that don't want to import from persistence directly.

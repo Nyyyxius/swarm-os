@@ -677,10 +677,12 @@ export default function DesktopShell({
           await api.resumeSession(agentId);
           return;
         case 'restart': {
-          // Lead is NOT restartable (S5 → 409 LEAD_NOT_RESTARTABLE). The
-          // button is `disabled` for leads but we keep the guard here too.
+          // Lead → restart the WHOLE team in place (same orch id/config/
+          // history) via the auto-resume mechanic. Worker → S5 single-session
+          // restart. The lead button is enabled only when the team is terminal.
           if (actingOnLead) {
-            console.warn('lead restart not supported by server (S5)');
+            const { orchestrator } = await api.restartOrchestrator(selectedOrch.id);
+            setSelectedSessionId(orchestrator.leadSessionId ?? null);
             return;
           }
           const { newSession } = await api.restartSession(agentId);
@@ -699,10 +701,13 @@ export default function DesktopShell({
           }
           setSelectedSessionId(null);
           return;
-        case 'start':
-          // REACTIVATE — disabled in the UI (gap §4-8). No-op fallback.
-          console.warn('start/reactivate not supported v1 (gap §4-8)');
+        case 'start': {
+          // REACTIVATE — relaunch a terminal team in place (same path as the
+          // lead RESTART action). Replaces the old gap §4-8 no-op.
+          const { orchestrator } = await api.restartOrchestrator(selectedOrch.id);
+          setSelectedSessionId(orchestrator.leadSessionId ?? null);
           return;
+        }
         case 'remove':
           // Soft-delete from the map. Lead → cascade to whole team.
           if (actingOnLead) {
