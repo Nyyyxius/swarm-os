@@ -71,6 +71,9 @@ export interface DesktopShellProps {
    *  in-shell placeholder state for backwards-compat with callers that
    *  haven't been migrated yet. */
   onOpenRoles?: () => void;
+  /** TopBar IDE button → route `#/ide` (VS Code web fullscreen overlay,
+   *  rendered by App.tsx). No-op fallback when omitted. */
+  onOpenIde?: () => void;
 }
 
 export default function DesktopShell({
@@ -78,6 +81,7 @@ export default function DesktopShell({
   onOpenOrchestrator,
   onCloseRightPanel,
   onOpenRoles,
+  onOpenIde,
 }: DesktopShellProps) {
   // ── live orchestrators (Step 3 : résolution :id → leadSessionId ;
   //    Step 4 : alimente aussi la TopBar — un seul appel partagé pour
@@ -772,6 +776,7 @@ export default function DesktopShell({
           if (onOpenRoles) onOpenRoles();
           else setShowRoles(true);
         }}
+        onOpenIde={() => onOpenIde?.()}
         onOpenSettings={() => setSettingsOpen(true)}
       />
       <div className="main">

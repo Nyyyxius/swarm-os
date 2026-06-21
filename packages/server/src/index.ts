@@ -15,6 +15,7 @@ import { MessagesAggregator } from './modules/metrics/aggregator.js';
 import { BusMetricsCollector } from './modules/metrics/busMetrics.js';
 import { BackupScheduler } from './modules/backup/index.js';
 import { RoleScheduler } from './modules/schedule/index.js';
+import { IdeSupervisor } from './modules/ide/index.js';
 import {
   rehydrateMailbox,
   mailboxJanitor,
@@ -194,6 +195,18 @@ const scheduler = new RoleScheduler({
 });
 scheduler.start();
 
+// ---- VS Code web (`code serve-web`) supervisor -----------------------------
+// In-container child process serving the official Microsoft VS Code web at the
+// root of its own port (config.idePort), guarded by a connection-token. Edits
+// the same /workspace tree the agents work in. Independent of the orchestrator
+// stack, so started here (no auto-resume dependency). Disabled when
+// SWARM_OS_IDE_ENABLED=false.
+const ide = new IdeSupervisor(config);
+ide.start();
+if (config.ideEnabled) {
+  log.info({ event: 'boot.ide', port: config.idePort, cli: config.ideCliPath });
+}
+
 // Phase 8 — bootGate: HTTP listens immediately so /health stays green for
 // Docker, but business routes return 503 until auto-resume finishes.
 const bootGate: BootGate = { value: false };
@@ -293,6 +306,8 @@ async function shutdown(signal: string): Promise<void> {
     backup.stop();
     // Disarm per-role crons so no tick fires into a half-torn-down spawner.
     scheduler.stop();
+    // Stop the VS Code web child (suppresses its restart loop, SIGTERM→SIGKILL).
+    await ide.stop();
     spawner.shutdownAll(`signal:${signal}`);
     // Stop MCP first (per-request transport instances will tear down with
     // their sockets) then the main HTTP listener.

@@ -109,7 +109,34 @@ RUN apt-get update \
       git \
       ca-certificates \
       openssh-client \
+      libatomic1 \
  && rm -rf /var/lib/apt/lists/*
+
+# VS Code web — official Microsoft standalone CLI (`code`). Provides the
+# `code serve-web` command the IDE supervisor (modules/ide) launches at runtime.
+# The CLI downloads the web-server payload on first run into the serve-web
+# `--server-data-dir` (under /data/ide, persisted on the host); the container
+# has outbound network, so no build-time pre-warm is required.
+#
+# Marketplace: the official build uses the Microsoft Marketplace (unlike
+# code-server / openvscode-server which use Open VSX).
+#
+# `latest` resolves to the newest stable; pin VSCODE_CLI_CHANNEL to a specific
+# version for reproducible builds. `libatomic1` (installed above) is required
+# by the VS Code server on bookworm-slim.
+ARG VSCODE_CLI_CHANNEL=latest
+ARG TARGETARCH
+RUN set -eux; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) VSARCH=x64 ;; \
+      arm64) VSARCH=arm64 ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    mkdir -p /opt/vscode-cli; \
+    curl -fsSL "https://update.code.visualstudio.com/${VSCODE_CLI_CHANNEL}/cli-linux-${VSARCH}/stable" -o /tmp/vscode-cli.tar.gz; \
+    tar -xzf /tmp/vscode-cli.tar.gz -C /opt/vscode-cli; \
+    rm /tmp/vscode-cli.tar.gz; \
+    /opt/vscode-cli/code --version
 
 # Claude Code CLI — pinned to the version validated by the spike (§Phase 0 bis,
 # H1: "2.1.142 (Claude Code)"). Bumping requires re-running `pnpm verify:claude`
@@ -148,11 +175,16 @@ ENV NODE_ENV=production \
     SWARM_OS_DATA_DIR=/data \
     SWARM_OS_WORKSPACE_ROOT=/workspace \
     SWARM_OS_CLAUDE_SOURCE_DIR=/claude-source \
-    SWARM_OS_CLAUDE_RUNTIME_DIR=/data/.claude-runtime
+    SWARM_OS_CLAUDE_RUNTIME_DIR=/data/.claude-runtime \
+    SWARM_OS_IDE_PORT=8790 \
+    SWARM_OS_VSCODE_CLI=/opt/vscode-cli/code
 
 EXPOSE 8787
-# Note: 8788 (MCP) is intentionally NOT exposed. Plan §14 — intra-container
-# only. If you EXPOSE it here you're punching a hole in the security model.
+# Note: neither 8788 (MCP) nor 8790 (VS Code web `code serve-web`) is exposed.
+# Plan §14 — single ingress. The MCP server is intra-container only; the editor
+# binds loopback and is reverse-proxied by the main server under SWARM_OS_IDE_
+# BASE_PATH (default /ide) on 8787, so it rides on the same port + TLS. Set
+# SWARM_OS_IDE_ENABLED=false to disable the editor entirely.
 
 HEALTHCHECK --interval=30s --timeout=5s --start-period=10s --retries=3 \
   CMD curl -fsS http://127.0.0.1:8787/health > /dev/null || exit 1

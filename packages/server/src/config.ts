@@ -222,6 +222,51 @@ export interface Config {
    * as the remote `cd` target. Env: `SWARM_OS_HOST_WORKSPACE_ROOT`.
    */
   hostWorkspaceRoot: string | null;
+  /**
+   * VS Code web (official Microsoft `code serve-web`) integration master
+   * switch. When `true` (default), a `code serve-web` child process is
+   * launched in-container and exposed on its own port (see `idePort`); the
+   * web UI surfaces an IDE overlay on `/workspace`. Env `SWARM_OS_IDE_ENABLED`.
+   */
+  ideEnabled: boolean;
+  /**
+   * Loopback port the in-container `code serve-web` listens on. NOT exposed:
+   * the main HTTP server reverse-proxies it under `ideBasePath` so the editor
+   * rides on the existing single ingress (port 8787 + its TLS). serve-web is
+   * launched with `--server-base-path <ideBasePath>` so all its asset URLs are
+   * emitted under that prefix (verified). Env `SWARM_OS_IDE_PORT`, default 8790.
+   */
+  idePort: number;
+  /**
+   * URL path the VS Code web UI is mounted under, on the SAME origin as the
+   * app (e.g. `/ide` → `https://<host>:8787/ide`). Used by: the serve-web
+   * `--server-base-path` flag, the Express reverse-proxy mount, and the
+   * iframe URL the web client builds. Env `SWARM_OS_IDE_BASE_PATH`, default
+   * `/ide`. Must start with `/` and have no trailing slash.
+   */
+  ideBasePath: string;
+  /**
+   * Connection-token guarding the IDE port. **Distinct** from `token` (the
+   * user-facing X-Auth-Token): the IDE iframe is a browser navigation and
+   * cannot send the X-Auth-Token header, so serve-web's own connection-token
+   * is the guard. Generated + persisted at `<dataDir>/ide-token` (mode 0600)
+   * unless supplied via `SWARM_OS_IDE_TOKEN`. Handed to the authenticated web
+   * client via `GET /ide-info`.
+   */
+  ideToken: string;
+  /** Absolute path to the standalone VS Code CLI binary (`code`). The
+   *  Dockerfile installs it at `/opt/vscode-cli/code`. Env `SWARM_OS_VSCODE_CLI`. */
+  ideCliPath: string;
+  /** serve-web `--server-data-dir`: user settings + installed extensions.
+   *  Under `<dataDir>/ide` so it persists across container restarts. */
+  ideServerDataDir: string;
+  /** `VSCODE_CLI_DATA_DIR` for the VS Code CLI — where it downloads the web
+   *  server payload (`.../serve-web/<commit>/`). Defaults to `$HOME/.vscode/cli`
+   *  which is EPHEMERAL in the container, so we redirect it under `<dataDir>/ide`
+   *  to persist the (large) payload across container recreations — otherwise
+   *  every redeploy re-downloads it and shows serve-web's "downloading latest
+   *  version" interstitial. */
+  ideCliDataDir: string;
   startedAt: string;
   version: string;
 }
@@ -293,6 +338,34 @@ function loadOrCreateHookToken(dataDir: string): string {
   if (explicit && explicit.length > 0) return explicit;
 
   const tokenPath = path.join(dataDir, 'hook-token');
+  try {
+    const existing = fs.readFileSync(tokenPath, 'utf8').trim();
+    if (existing.length > 0) return existing;
+  } catch {
+    /* fall through */
+  }
+  const fresh = crypto.randomUUID();
+  fs.writeFileSync(tokenPath, fresh + '\n', { mode: 0o600 });
+  try {
+    fs.chmodSync(tokenPath, 0o600);
+  } catch {
+    /* best-effort */
+  }
+  return fresh;
+}
+
+/**
+ * Connection-token guarding the VS Code web port. Kept SEPARATE from
+ * `SWARM_OS_TOKEN` for the same defence-in-depth reason as the hook token:
+ * it travels through the IDE iframe URL (`?tkn=`) and serve-web's cookie, a
+ * different trust path than the user-facing X-Auth-Token. Persisted at
+ * `<dataDir>/ide-token` (mode 0600).
+ */
+function loadOrCreateIdeToken(dataDir: string): string {
+  const explicit = process.env.SWARM_OS_IDE_TOKEN;
+  if (explicit && explicit.length > 0) return explicit;
+
+  const tokenPath = path.join(dataDir, 'ide-token');
   try {
     const existing = fs.readFileSync(tokenPath, 'utf8').trim();
     if (existing.length > 0) return existing;
@@ -394,6 +467,31 @@ export function loadConfig(): Config {
 
   const token = loadOrCreateToken(dataDir);
   const hookToken = loadOrCreateHookToken(dataDir);
+
+  // VS Code web (`code serve-web`) — own port, own connection-token. State
+  // (server payload, settings, extensions) lives under <dataDir>/ide so it
+  // persists across container restarts (the /data volume is bind-mounted).
+  const ideEnabled = boolEnv('SWARM_OS_IDE_ENABLED', true);
+  const idePort = intEnv('SWARM_OS_IDE_PORT', 8790);
+  // Normalise base path: ensure a leading '/', strip any trailing '/'.
+  let ideBasePath = process.env.SWARM_OS_IDE_BASE_PATH ?? '/ide';
+  if (!ideBasePath.startsWith('/')) ideBasePath = '/' + ideBasePath;
+  ideBasePath = ideBasePath.replace(/\/+$/, '') || '/ide';
+  const ideToken = loadOrCreateIdeToken(dataDir);
+  const ideCliPath = process.env.SWARM_OS_VSCODE_CLI ?? '/opt/vscode-cli/code';
+  const ideServerDataDir = path.join(dataDir, 'ide', 'server-data');
+  const ideCliDataDir = path.join(dataDir, 'ide', 'cli');
+  if (ideEnabled) {
+    // Pre-create so the serve-web child never races a missing dir on first
+    // spawn. Best-effort: the supervisor also mkdir's defensively.
+    for (const d of [ideServerDataDir, ideCliDataDir]) {
+      try {
+        ensureDir(d);
+      } catch {
+        /* best-effort */
+      }
+    }
+  }
 
   // Phase 4 — Discord webhook + public URL (plan §12/§13).
   const discordWebhookUrl =
@@ -539,6 +637,13 @@ export function loadConfig(): Config {
     hostDataDir,
     hostClaudeDir,
     hostWorkspaceRoot,
+    ideEnabled,
+    idePort,
+    ideBasePath,
+    ideToken,
+    ideCliPath,
+    ideServerDataDir,
+    ideCliDataDir,
     startedAt: new Date().toISOString(),
     version: '0.6.0-phase6',
   };

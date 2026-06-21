@@ -44,6 +44,8 @@ interface Props {
   onSelectTeam: (sessionId: string) => void;
   onNewTeam: () => void;
   onOpenRoles: () => void;
+  /** Open the VS Code web IDE on the deployment workspace (fullscreen overlay). */
+  onOpenIde: () => void;
   onOpenSettings: () => void;
 }
 
@@ -51,7 +53,7 @@ const EMPTY_FLASH_SET: ReadonlySet<string> = new Set();
 
 export default function TopBar({
   teams, selectedTeamId, flashTeamIds, totalAgents, info,
-  onSelectTeam, onNewTeam, onOpenRoles, onOpenSettings,
+  onSelectTeam, onNewTeam, onOpenRoles, onOpenIde, onOpenSettings,
 }: Props) {
   const flashSet = flashTeamIds ?? EMPTY_FLASH_SET;
   const [now, setNow] = useState(new Date());
@@ -149,6 +151,9 @@ export default function TopBar({
         </button>
         <button className="tb-action" onClick={onOpenRoles} title="manage roles">
           {ICON.template}<span className="label">ROLES</span>
+        </button>
+        <button className="tb-action" onClick={onOpenIde} title="open workspace IDE (VS Code)">
+          {ICON.code}<span className="label">IDE</span>
         </button>
         <button className="tb-action" onClick={onOpenSettings} title="settings / token">
           {ICON.cog}

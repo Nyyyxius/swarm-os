@@ -1,8 +1,13 @@
 import { useEffect, useState } from 'react';
 import DesktopShell from './components/desktop/DesktopShell';
 import { RolesPage } from './components/RolesPage';
+import IdeOverlay from './components/desktop/IdeOverlay';
 
-type Route = { kind: 'list' } | { kind: 'detail'; id: string } | { kind: 'roles' };
+type Route =
+  | { kind: 'list' }
+  | { kind: 'detail'; id: string }
+  | { kind: 'roles' }
+  | { kind: 'ide' };
 
 /**
  * Parse the current URL hash into a Route. We use the URL fragment so deep
@@ -17,6 +22,7 @@ function parseHash(): Route {
   const m = /^#\/orchestrators\/([a-zA-Z0-9-]+)$/.exec(h);
   if (m && m[1]) return { kind: 'detail', id: m[1] };
   if (h === '#/roles') return { kind: 'roles' };
+  if (h === '#/ide') return { kind: 'ide' };
   return { kind: 'list' };
 }
 
@@ -24,6 +30,7 @@ function setHashRoute(route: Route): void {
   let target: string;
   if (route.kind === 'list') target = '#/';
   else if (route.kind === 'roles') target = '#/roles';
+  else if (route.kind === 'ide') target = '#/ide';
   else target = `#/orchestrators/${route.id}`;
   if (window.location.hash !== target) {
     window.location.hash = target;
@@ -62,6 +69,7 @@ export default function App() {
           routeOrchestratorId={route.kind === 'detail' ? route.id : null}
           onOpenOrchestrator={(id) => setRoute({ kind: 'detail', id })}
           onOpenRoles={() => setRoute({ kind: 'roles' })}
+          onOpenIde={() => setRoute({ kind: 'ide' })}
           onCloseRightPanel={() => {
             if (route.kind === 'detail') setRoute({ kind: 'list' });
           }}
@@ -75,6 +83,11 @@ export default function App() {
           open={route.kind === 'roles'}
           onClose={() => setRoute({ kind: 'list' })}
         />
+        {/* VS Code web fullscreen overlay. Mounted only while on `#/ide` so the
+            iframe (and its serve-web WebSocket) tears down on close. */}
+        {route.kind === 'ide' && (
+          <IdeOverlay onClose={() => setRoute({ kind: 'list' })} />
+        )}
       </main>
     </div>
   );

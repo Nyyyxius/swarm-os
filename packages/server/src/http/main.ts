@@ -1,8 +1,10 @@
 import { createServer, type Server } from 'node:http';
+import type { Socket } from 'node:net';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import express, { type Request, type Response, type NextFunction } from 'express';
+import { createProxyMiddleware, type RequestHandler as ProxyHandler } from 'http-proxy-middleware';
 import { Spawner } from '../modules/spawner/index.js';
 import type { Config } from '../config.js';
 import { makeAuthMiddleware, consumeTicket } from './auth.js';
@@ -17,6 +19,7 @@ import { createPreamblesRouter } from './routes/preambles.js';
 import { createAiRouter } from './routes/ai.js';
 import { createDiscordRouter } from './routes/discord.js';
 import { createSettingsRouter } from './routes/settings.js';
+import { createIdeRouter } from './routes/ide.js';
 import type { RoleStore } from '../modules/roles/index.js';
 import type { SettingsStore } from '../modules/settings/index.js';
 import type { MessagesAggregator } from '../modules/metrics/aggregator.js';
@@ -84,7 +87,7 @@ export function createApp(
   busMetrics?: BusMetricsCollector,
   bootGate?: BootGate,
   onRolesChanged?: () => void,
-): { app: express.Express } {
+): { app: express.Express; ideProxy: ProxyHandler | null } {
   const app = express();
   app.disable('x-powered-by');
   // Body-parser limit gets the prompt cap PLUS headroom for JSON envelope
@@ -163,6 +166,25 @@ export function createApp(
     log.warn({ event: 'http.no_web_bundle', note: 'dev mode — Vite serves the bundle on its own port' });
   }
 
+  // VS Code web (`code serve-web`) reverse-proxy. serve-web runs on loopback
+  // (config.idePort) with `--server-base-path`, so we forward `<ideBasePath>/*`
+  // verbatim (no rewrite). Mounted BEFORE the X-Auth-Token middleware: an
+  // iframe navigation cannot send that header, so the editor is guarded by
+  // serve-web's own connection-token instead (handed to the authenticated
+  // client via `GET /ide-info`). The matching WebSocket upgrades are wired in
+  // `startServer`'s `http.on('upgrade')` via the returned handler.
+  let ideProxy: ProxyHandler | null = null;
+  if (config.ideEnabled) {
+    const base = config.ideBasePath;
+    ideProxy = createProxyMiddleware({
+      target: `http://127.0.0.1:${config.idePort}`,
+      changeOrigin: true,
+      ws: true,
+      pathFilter: (pathname: string) => pathname === base || pathname.startsWith(base + '/'),
+    });
+    app.use(ideProxy);
+  }
+
   // Phase 8 — bootGate: while auto-resume is rebuilding teams, business
   // routes return 503 (health/info/static stay green). Mounted BEFORE the
   // auth middleware so an operator polling `/orchestrators` during a
@@ -189,6 +211,11 @@ export function createApp(
   app.use(createWsTicketRouter(spawner));
   app.use(createRolesRouter(roleStore, config, onRolesChanged));
   app.use(createSettingsRouter(settingsStore));
+  // `GET /ide-info` — VS Code web connection details for the authenticated
+  // client. Mounted after the auth gate so it 401s without X-Auth-Token
+  // (parity with the other business routes). The IDE itself runs on its own
+  // port (config.idePort), NOT proxied here.
+  app.use(createIdeRouter(config));
   app.use(createPreamblesRouter());
   app.use(createAiRouter(config));
   app.use(createDiscordRouter());
@@ -222,7 +249,7 @@ export function createApp(
     });
   });
 
-  return { app };
+  return { app, ideProxy };
 }
 
 export function startServer(
@@ -236,7 +263,7 @@ export function startServer(
   bootGate?: BootGate,
   onRolesChanged?: () => void,
 ): ServerHandle {
-  const { app } = createApp(
+  const { app, ideProxy } = createApp(
     config,
     spawner,
     roleStore,
@@ -295,6 +322,20 @@ export function startServer(
           return;
         }
         eventsHub.handleUpgrade(req, socket, head);
+        return;
+      }
+
+      // VS Code web WebSocket (the editor's remote connection) — proxied to
+      // the loopback serve-web. No ticket: guarded by serve-web's
+      // connection-token like the rest of `<ideBasePath>/*`.
+      if (
+        ideProxy &&
+        (url.pathname === config.ideBasePath ||
+          url.pathname.startsWith(config.ideBasePath + '/'))
+      ) {
+        // The upgrade event types `socket` as Duplex; at runtime it is a
+        // net.Socket, which is what http-proxy-middleware's upgrade expects.
+        ideProxy.upgrade?.(req, socket as Socket, head);
         return;
       }
 

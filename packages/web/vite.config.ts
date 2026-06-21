@@ -16,6 +16,11 @@ export default defineConfig({
       '/orchestrators': { target: SERVER_TARGET, changeOrigin: true },
       '/sessions': { target: SERVER_TARGET, changeOrigin: true },
       '/health': { target: SERVER_TARGET, changeOrigin: true },
+      // VS Code web: `/ide-info` (connection details) + `/ide` (the editor
+      // itself, reverse-proxied by the server under that base path, incl. its
+      // WebSocket). Both ride on the server's single port.
+      '/ide-info': { target: SERVER_TARGET, changeOrigin: true },
+      '/ide': { target: SERVER_TARGET, ws: true, changeOrigin: true },
       '/ws': { target: SERVER_TARGET, ws: true, changeOrigin: true },
     },
   },

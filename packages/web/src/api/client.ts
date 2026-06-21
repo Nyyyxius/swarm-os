@@ -469,6 +469,15 @@ export const api = {
       'GET',
       '/backups',
     ),
+  /**
+   * VS Code web (`code serve-web`) connection details. The editor is
+   * reverse-proxied under `basePath` (e.g. `/ide`) on the same origin, so the
+   * caller builds a same-origin iframe URL:
+   *   `${basePath}/?folder=${folder}&tkn=${token}`
+   * 404s when the instance was started with SWARM_OS_IDE_ENABLED=false.
+   */
+  getIdeInfo: () =>
+    request<{ basePath: string; folder: string; token: string }>('GET', '/ide-info'),
 };
 
 export { HttpError };

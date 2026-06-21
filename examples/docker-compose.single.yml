@@ -25,6 +25,9 @@ services:
       # host on the tailnet; never write 0.0.0.0 here. Plan §14 critical.
       - "127.0.0.1:8787:8787"
       # MCP port 8788 is INTENTIONALLY NOT mapped — intra-container only.
+      # VS Code web (`code serve-web`) is reverse-proxied under /ide on 8787
+      # (single ingress), so it needs no extra port. Set SWARM_OS_IDE_ENABLED=
+      # false to turn the editor off.
     volumes:
       # The project the agents will work in. RW.
       - ${HOME}/dev/fyrel-cc-app:/workspace

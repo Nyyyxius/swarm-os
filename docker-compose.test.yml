@@ -23,6 +23,8 @@ services:
     init: true
     restart: unless-stopped
     ports:
+      # Single ingress: the VS Code web editor is reverse-proxied under /ide on
+      # this same port (8787), so no extra port mapping is needed.
       - "127.0.0.1:8787:8787"
     extra_hosts:
       # Linux docker — host.docker.internal isn't resolved by default. Add a

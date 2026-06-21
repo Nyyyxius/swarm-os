@@ -14,11 +14,15 @@
 //   - /api/*  (none today, reserved)
 //   - /orchestrators*, /sessions*, /health, /info, /ws-ticket, /hooks/*
 //   - /ws/* (WebSocket upgrades — SW can't proxy these anyway)
+//   - /ide* (VS Code web — reverse-proxied to serve-web. It owns its OWN
+//     resource + service-worker logic, so this SW must NEVER intercept its
+//     requests or the embedded workbench loads grey. Covers /ide/* and
+//     /ide-info.)
 //   - any request with Authorization or X-Auth-Token header
 
-const CACHE = 'swarm-os-shell-v1';
+const CACHE = 'swarm-os-shell-v2';
 const SHELL = ['/', '/index.html', '/manifest.webmanifest', '/icon-192.png', '/icon-512.png', '/apple-touch-icon.png'];
-const NEVER_CACHE = [/^\/orchestrators/, /^\/sessions/, /^\/health/, /^\/info/, /^\/ws-ticket/, /^\/hooks\//, /^\/ws(\/|$)/, /^\/api(\/|$)/];
+const NEVER_CACHE = [/^\/orchestrators/, /^\/sessions/, /^\/health/, /^\/info/, /^\/ws-ticket/, /^\/hooks\//, /^\/ws(\/|$)/, /^\/api(\/|$)/, /^\/ide(\/|-|$)/];
 
 self.addEventListener('install', (e) => {
   e.waitUntil(caches.open(CACHE).then((c) => c.addAll(SHELL)).then(() => self.skipWaiting()));
