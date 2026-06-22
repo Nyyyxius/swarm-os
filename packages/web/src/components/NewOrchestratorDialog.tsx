@@ -1,4 +1,4 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import type { OrchestratorView, RoleView } from '../api/client';
 import { useRoles } from '../hooks/useRoles';
 import { RoleDialog } from './RoleDialog';
@@ -62,6 +62,13 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [roleDialogOpen, setRoleDialogOpen] = useState(false);
+  // Track whether the user has hand-typed in the prompt/preamble. While these
+  // stay false the fields are "owned" by the role auto-fill, so switching role
+  // overwrites them with the new role's defaults. Once the user edits, we stop
+  // clobbering. Refs (not state) so reading them inside the auto-fill effect
+  // never goes stale and doesn't add an effect dependency.
+  const promptEditedRef = useRef(false);
+  const preambleEditedRef = useRef(false);
 
   // Pré-select the first role as soon as one arrives. Roles come from a
   // 5 s poll; we can't initialise this in `useState(...)` because the
@@ -78,7 +85,11 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
   );
 
   // Auto-fill from role: always overwrite the technical defaults
-  // (model/effort/permission), but spare the user-typed prompt/preamble.
+  // (model/effort/permission) AND the prompt/preamble — so switching role
+  // swaps in that role's prompt. The only exception is a prompt/preamble the
+  // user has hand-typed (tracked via the *EditedRef flags), which we never
+  // clobber. A role with no leadPrompt/leadPreamble clears the field rather
+  // than leaving the previous role's text behind.
   useEffect(() => {
     if (!selectedRole) return;
     setRole(selectedRole.label);
@@ -87,17 +98,37 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
     if (selectedRole.defaultPermissionMode) {
       setPerm(selectedRole.defaultPermissionMode as (typeof PERMS)[number]);
     }
-    if (!prompt.trim() && selectedRole.leadPrompt) setPrompt(selectedRole.leadPrompt);
-    if (!preamble.trim() && selectedRole.leadPreamble) setPreamble(selectedRole.leadPreamble);
+    if (!promptEditedRef.current) setPrompt(selectedRole.leadPrompt ?? '');
+    if (!preambleEditedRef.current) setPreamble(selectedRole.leadPreamble ?? '');
     // We intentionally depend only on `selectedRole` so retyping prompt/
     // preamble doesn't trigger an auto-fill loop.
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [selectedRole]);
 
-  // Reset the nested role dialog when the parent closes, otherwise it would
-  // pop back up the next time NewOrchestratorDialog re-opens.
+  // The dialog stays mounted across open/close (DesktopShell toggles `open`),
+  // so without an explicit reset every field would keep whatever the previous
+  // create/cancel left behind. On each fresh open we wipe back to defaults and
+  // drop `selectedRoleId` so the first-role pre-select + auto-fill re-run and
+  // repopulate the prompt from the role. On close we just tidy the nested
+  // role dialog so it doesn't pop back up next time.
   useEffect(() => {
-    if (!open) setRoleDialogOpen(false);
+    if (!open) {
+      setRoleDialogOpen(false);
+      return;
+    }
+    setName('');
+    setRole('');
+    setCwd('/');
+    setPrompt('');
+    setPreamble('');
+    setModel('claude-opus-4-8');
+    setEffort('xhigh');
+    setPerm('bypassPermissions');
+    setError(null);
+    setSubmitting(false);
+    promptEditedRef.current = false;
+    preambleEditedRef.current = false;
+    setSelectedRoleId('');
   }, [open]);
 
   if (!open) return null;
@@ -211,7 +242,10 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
             <textarea
               id="orch-prompt"
               value={prompt}
-              onChange={(e) => setPrompt(e.target.value)}
+              onChange={(e) => {
+                promptEditedRef.current = true;
+                setPrompt(e.target.value);
+              }}
               placeholder='Initial task for the lead. e.g. "Ship the new swarm.bin under the new constraints."'
             />
           </div>
@@ -223,7 +257,10 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
             <textarea
               id="orch-preamble"
               value={preamble}
-              onChange={(e) => setPreamble(e.target.value)}
+              onChange={(e) => {
+                preambleEditedRef.current = true;
+                setPreamble(e.target.value);
+              }}
               placeholder="System preamble injected before the lead prompt. Defaults from the role."
             />
           </div>
