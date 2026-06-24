@@ -12,3 +12,6 @@ coverage
 *.tsbuildinfo
 .claude/
 prototypes/
+
+# generated distribution artifact
+swarm-os-dist.zip

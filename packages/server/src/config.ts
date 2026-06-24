@@ -1,4 +1,5 @@
 import * as fs from 'node:fs';
+import * as os from 'node:os';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 
@@ -544,8 +545,11 @@ export function loadConfig(): Config {
     process.env.SWARM_OS_HOST_DATA_DIR && process.env.SWARM_OS_HOST_DATA_DIR.length > 0
       ? path.resolve(process.env.SWARM_OS_HOST_DATA_DIR)
       : null;
+  // SSH transport only: where the host keeps ~/.claude. Operators on SSH mode
+  // should set SWARM_OS_HOST_CLAUDE_DIR explicitly; the fallback derives from
+  // the running user's home rather than a hardcoded /home/ubuntu.
   const hostClaudeDir = path.resolve(
-    process.env.SWARM_OS_HOST_CLAUDE_DIR ?? '/home/ubuntu/.claude',
+    process.env.SWARM_OS_HOST_CLAUDE_DIR ?? path.join(os.homedir(), '.claude'),
   );
   const hostWorkspaceRoot =
     process.env.SWARM_OS_HOST_WORKSPACE_ROOT && process.env.SWARM_OS_HOST_WORKSPACE_ROOT.length > 0

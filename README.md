@@ -1,5 +1,5 @@
 <!-- swarm-os — agent-readable README. Plain Markdown only (no mermaid/HTML). -->
-<!-- TODO: choose a license. The repo currently ships without one. -->
+<!-- License: proprietary, all rights reserved — see LICENSE. -->
 
 # swarm-os
 
@@ -16,7 +16,26 @@ Status: **MVP implementation-complete.** Phases 0–7 implemented (see
 
 ---
 
-## Quickstart (Docker — single project)
+## Deploy (third party / fresh host)
+
+Pull the published image from GHCR and run the installer — no build toolchain
+required. Full bilingual guide in `docs/deploy/`.
+
+```sh
+cp .env.example .env     # edit WORKSPACE_PATH, DATA_PATH, SWARM_OS_IMAGE, project name
+./install.sh             # logs in/pulls, starts, waits for /health, prints the token
+```
+
+Prerequisite: an **authenticated Claude Code CLI on the host**
+(`~/.claude/.credentials.json` must exist) — agents launch the CLI and inherit
+those credentials. Remote access (Tailscale / reverse proxy / SSH tunnel) and
+troubleshooting are in `docs/deploy/install.en.md` (FR: `install.fr.md`).
+Image distribution is handled by `.github/workflows/release-image.yml` (push a
+`vX.Y.Z` tag) or `scripts/push-image.sh` for a manual publish.
+
+---
+
+## Build from source (dev — single project)
 
 Edit the host paths to your situation, then run from the repo root:
 
@@ -68,8 +87,10 @@ no-ops. See `docs/phase-1-spawner-lead.md` for the full local-dev wiring.
 
 - `packages/server/` — Express + WS + MCP HTTP + SQLite + Notifier
 - `packages/web/` — React + Vite + xterm.js UI + PWA shell
-- `scripts/` — `verify-claude-code.ts` (spike harness), `gen-icons.ts` (PWA icons)
-- `examples/` — `docker-compose.{single,multi}.yml` reference deployments
+- `scripts/` — `verify-claude-code.ts` (spike harness), `gen-icons.ts` (PWA icons), `push-image.sh` (manual GHCR publish)
+- `examples/` — `docker-compose.{single,multi,dist}.yml` reference deployments (`dist` = third-party, `.env`-driven)
+- `install.sh` + `.env.example` — one-shot installer + config template for a third-party deployment
+- `docs/deploy/` — bilingual install + usage guides for shipping to a third party
 - `docs/` — phase-by-phase implementation reports (mandatory pre-reading)
 - `archives/` — superseded plan revisions (historical, do not edit)
 - `plan.md` — canonical specification (sections 1–17)
@@ -146,3 +167,10 @@ Exit codes: `0` PASS, `1` FAIL, `2` prerequisites missing.
 - Discord embed deep-links never carry tokens.
 
 Full posture in `plan.md` §14 and `docs/phase-5-containerisation.md` §7.
+
+---
+
+## License
+
+Proprietary — all rights reserved. See `LICENSE`. The image bundles third-party
+tools (Claude Code CLI, VS Code CLI, npm deps), each under its own license.
