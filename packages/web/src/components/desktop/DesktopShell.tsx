@@ -81,6 +81,8 @@ export default function DesktopShell() {
           onClose={() => c.setSettingsOpen(false)}
           onTokenSaved={() => { void c.probeAuth(); }}
           onTokenCleared={c.setAuthMissing}
+          shellMode={c.shellMode}
+          setShellMode={c.setShellMode}
         />
       )}
       <BroadcastModal

@@ -17,6 +17,7 @@ import Sheet from './Sheet';
 import Composer, { type ComposerAudience, type ComposerMode } from '../desktop/Composer';
 import ConfirmModal, { type ConfirmModalVariant } from '../desktop/ConfirmModal';
 import ConsoleOverlay from '../desktop/ConsoleOverlay';
+import ConfigTab from '../desktop/ConfigTab';
 import { Terminal } from '../Terminal';
 import {
   statusChipClass, statusLabel, formatUptime, formatClockShort, formatRelative,
@@ -25,7 +26,7 @@ import { formatLoadPercent } from '../../lib/loadPercent';
 import { useSwarmController } from '../../controller/SwarmController';
 import type { AgentAction, RightPanelAgent, RightPanelTeam } from '../desktop/RightPanel';
 
-type Tab = 'console' | 'chat';
+type Tab = 'console' | 'chat' | 'config';
 
 export default function AgentSheet() {
   const c = useSwarmController();
@@ -166,6 +167,12 @@ export default function AgentSheet() {
             <span style={{ color: team.permissionMode === 'bypassPermissions' ? 'var(--warn)' : 'inherit' }}>
               {team.permissionMode}
             </span>
+            <button
+              type="button"
+              className="m-as-edit"
+              title="rotate model / effort / permission (v2 preview)"
+              onClick={() => c.handleEditConfig(team)}
+            >✎</button>
           </div>
           <div className="m-as-cwd"><span className="m-as-cfg-lbl">CWD ::</span> {team.cwd}</div>
 
@@ -213,12 +220,21 @@ export default function AgentSheet() {
             <button className="m-as-action danger" onClick={() => askConfirm('stop')}>STOP</button>
           )}
           <button className="m-as-action danger" onClick={() => askConfirm('kill')}>KILL</button>
+          {isLead && (
+            <button
+              className="m-as-action primary"
+              disabled={stopped || isFailed}
+              onClick={() => c.handleSpawnWorker(team)}
+              title="spawn worker (v2 preview)"
+            >+ WORKER</button>
+          )}
         </div>
 
         {/* ── Tabs ── */}
         <div className="m-as-tabs">
           <button className={`m-as-tab ${tab === 'console' ? 'active' : ''}`} onClick={() => setTab('console')}>CONSOLE</button>
           <button className={`m-as-tab ${tab === 'chat' ? 'active' : ''}`} onClick={() => setTab('chat')}>MESSAGES</button>
+          <button className={`m-as-tab ${tab === 'config' ? 'active' : ''}`} onClick={() => setTab('config')}>CONFIG</button>
           {tab === 'console' && !stopped && !isFailed && (
             <button className="m-as-enlarge" onClick={() => setEnlarged(true)} title="fullscreen console">⤢</button>
           )}
@@ -245,6 +261,15 @@ export default function AgentSheet() {
             </div>
           )}
 
+          {tab === 'config' && (
+            <ConfigTab
+              team={team}
+              agent={selected}
+              isLead={isLead}
+              onEdit={() => c.handleEditConfig(team)}
+            />
+          )}
+
           {tab === 'chat' && (
             <div className="m-messages">
               {c.messages.length === 0 && (
@@ -264,20 +289,22 @@ export default function AgentSheet() {
             </div>
           )}
 
-          <Composer
-            selectedName={selected.name}
-            teamName={team.name}
-            isLead={isLead}
-            stopped={stopped || isFailed}
-            draft={draft}
-            setDraft={setDraft}
-            onKey={onKey}
-            onSend={doSend}
-            composerMode={composerMode}
-            setComposerMode={setComposerMode}
-            audience={audience}
-            setAudience={setAudience}
-          />
+          {tab !== 'config' && (
+            <Composer
+              selectedName={selected.name}
+              teamName={team.name}
+              isLead={isLead}
+              stopped={stopped || isFailed}
+              draft={draft}
+              setDraft={setDraft}
+              onKey={onKey}
+              onSend={doSend}
+              composerMode={composerMode}
+              setComposerMode={setComposerMode}
+              audience={audience}
+              setAudience={setAudience}
+            />
+          )}
         </div>
 
         {confirm && (

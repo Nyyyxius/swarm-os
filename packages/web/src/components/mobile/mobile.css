@@ -449,11 +449,21 @@
 
 .m-as-actions {
   display: grid;
-  grid-template-columns: repeat(4, 1fr);
+  grid-template-columns: repeat(auto-fit, minmax(64px, 1fr));
   gap: 7px;
   padding: 12px 16px;
   border-bottom: 1px solid var(--border);
   flex: 0 0 auto;
+}
+.m-as-edit {
+  margin-left: auto;
+  width: 26px;
+  height: 24px;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 12px;
 }
 .m-as-action {
   padding: 11px 0;
@@ -590,4 +600,34 @@
   color: var(--amber);
   font-size: 11px;
   letter-spacing: 0.08em;
+}
+
+/* ── Reused desktop modals: near-full-width on a phone ──────
+   The desktop NewOrchestratorDialog / Broadcast / Spawn / Edit modals use
+   `.modal` (width 540/720px capped at 100vw-80px). 80px of side margin is too
+   much on a phone, so on coarse-pointer narrow viewports we widen them and
+   reduce the top/bottom inset. */
+@media (pointer: coarse) and (max-width: 820px) {
+  .modal,
+  .modal.wide {
+    width: calc(100vw - 20px);
+    max-width: calc(100vw - 20px);
+    max-height: calc(100vh - 32px);
+  }
+
+  /* RolesPage: the desktop 320px+1fr grid is unusable on a phone. Stack it —
+     the role list (with its own BACK button) sits on top and scrolls within
+     ~38vh; the selected role's sections fill the rest below. No JS change:
+     the component's own selectedRole state drives the detail panel. */
+  .roles-overlay {
+    inset: 0;
+    grid-template-columns: 1fr;
+    grid-template-rows: auto 1fr;
+  }
+  .roles-side {
+    border-right: none;
+    border-bottom: 1px solid var(--border);
+    max-height: 38vh;
+  }
+  .roles-main { padding: 18px 16px 60px; }
 }

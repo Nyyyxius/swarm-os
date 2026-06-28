@@ -31,6 +31,7 @@ import { useNow } from '../../lib/useNow';
 import { formatUptime, formatClockShort } from '../../lib/format';
 import { AppearanceSection } from './AppearanceSection';
 import { MaintenanceSection } from './MaintenanceSection';
+import { type ShellMode } from '../../hooks/useShellMode';
 
 export type AuthState = 'unknown' | 'ok' | 'missing' | 'invalid';
 
@@ -49,6 +50,11 @@ export interface SettingsDrawerProps {
   onTokenSaved?: () => void;
   /** Appelé après un CLEAR → le shell repasse à `authState='missing'`. */
   onTokenCleared?: () => void;
+  /** Shell-mode override (auto|desktop|mobile). When provided, a SHELL
+   *  section is rendered with an Auto/Desktop/Mobile toggle — the escape
+   *  hatch from the responsive aiguillage. */
+  shellMode?: ShellMode;
+  setShellMode?: (m: ShellMode) => void;
 }
 
 export default function SettingsDrawer({
@@ -59,6 +65,8 @@ export default function SettingsDrawer({
   onClose,
   onTokenSaved,
   onTokenCleared,
+  shellMode,
+  setShellMode,
 }: SettingsDrawerProps) {
   const [token, setTokenLocal] = useState<string>(() => getToken());
   const [show, setShow] = useState(false);
@@ -241,6 +249,28 @@ export default function SettingsDrawer({
               waiting signals.
             </div>
           </div>
+
+          {/* ── SHELL (responsive override) ─────────────── */}
+          {shellMode && setShellMode && (
+            <div className="drawer-section">
+              <div className="h">SHELL</div>
+              <div className="seg" role="group" aria-label="shell mode">
+                {(['auto', 'desktop', 'mobile'] as const).map((m) => (
+                  <button
+                    key={m}
+                    className={shellMode === m ? 'on' : ''}
+                    onClick={() => setShellMode(m)}
+                  >
+                    {m.toUpperCase()}
+                  </button>
+                ))}
+              </div>
+              <div className="field-help">
+                AUTO follows the device (touch + ≤820px → mobile). A manual
+                override persists locally and survives reloads.
+              </div>
+            </div>
+          )}
 
           {/* ── APPEARANCE ──────────────────────────────── */}
           <AppearanceSection />

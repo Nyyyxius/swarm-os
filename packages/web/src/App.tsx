@@ -68,10 +68,11 @@ export default function App() {
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
-  // Mobile v1 has no roles/ide overlay — redirect those routes to the list
-  // so a deep-link / bookmark doesn't land on a blank surface.
+  // Mobile has no IDE overlay (VS Code in an iframe on a phone is not useful),
+  // so `#/ide` redirects to the list. `#/roles` IS supported on mobile (the
+  // RolesPage overlay adapts responsively).
   useEffect(() => {
-    if (isMobile && (route.kind === 'roles' || route.kind === 'ide')) {
+    if (isMobile && route.kind === 'ide') {
       setRoute({ kind: 'list' });
     }
   }, [isMobile, route.kind]);
@@ -92,18 +93,16 @@ export default function App() {
         >
           {isMobile ? <MobileShell /> : <DesktopShell />}
 
-          {/* Desktop-only fullscreen overlays. Gated out entirely on mobile
-              (the redirect effect above keeps the route off these kinds). */}
-          {!isMobile && (
-            <>
-              <RolesPage
-                open={route.kind === 'roles'}
-                onClose={() => setRoute({ kind: 'list' })}
-              />
-              {route.kind === 'ide' && (
-                <IdeOverlay onClose={() => setRoute({ kind: 'list' })} />
-              )}
-            </>
+          {/* RolesPage overlay — supported on both shells (responsive). `open`
+              gates rendering, so it's safe to always mount. */}
+          <RolesPage
+            open={route.kind === 'roles'}
+            onClose={() => setRoute({ kind: 'list' })}
+          />
+
+          {/* IDE overlay is desktop-only (the #/ide redirect keeps mobile off it). */}
+          {!isMobile && route.kind === 'ide' && (
+            <IdeOverlay onClose={() => setRoute({ kind: 'list' })} />
           )}
         </SwarmControllerProvider>
       </main>

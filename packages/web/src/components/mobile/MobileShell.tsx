@@ -18,6 +18,10 @@ import SettingsDrawer from '../desktop/SettingsDrawer';
 import StatsSheet from './StatsSheet';
 import AgentSheet from './AgentSheet';
 import MobileToasts from './MobileToasts';
+import { NewOrchestratorDialog } from '../NewOrchestratorDialog';
+import BroadcastModal from '../desktop/BroadcastModal';
+import SpawnWorkerDialog from '../desktop/SpawnWorkerDialog';
+import EditConfigDialog from '../desktop/EditConfigDialog';
 import { useSwarmController } from '../../controller/SwarmController';
 import type { TopBarTeam } from '../desktop/TopBar';
 
@@ -119,20 +123,18 @@ export default function MobileShell() {
         <MobileToasts />
       </main>
 
-      {/* ── Dock (NEW/create lands in Slice 3) ─────────────── */}
+      {/* ── Dock ───────────────────────────────────────────── */}
       <nav className="m-dock">
-        <button
-          type="button"
-          className="m-dock-btn"
-          onClick={() => setStatsOpen(true)}
-        >
+        <button type="button" className="m-dock-btn" onClick={() => setStatsOpen(true)}>
           <span>STATS</span>
         </button>
-        <button
-          type="button"
-          className="m-dock-btn"
-          onClick={() => c.setSettingsOpen(true)}
-        >
+        <button type="button" className="m-dock-btn" onClick={() => c.setShowNew(true)}>
+          <span>+ TEAM</span>
+        </button>
+        <button type="button" className="m-dock-btn" onClick={() => c.onOpenRoles()}>
+          <span>ROLES</span>
+        </button>
+        <button type="button" className="m-dock-btn" onClick={() => c.setSettingsOpen(true)}>
           <span>SETTINGS</span>
         </button>
       </nav>
@@ -140,6 +142,29 @@ export default function MobileShell() {
       {/* ── Sheets ─────────────────────────────────────────── */}
       <StatsSheet open={statsOpen} onClose={() => setStatsOpen(false)} />
       <AgentSheet />
+
+      {/* ── Control-plane dialogs (reused desktop modals) ──── */}
+      <NewOrchestratorDialog
+        open={c.showNew}
+        onClose={() => c.setShowNew(false)}
+        onCreate={c.handleCreateOrchestrator}
+      />
+      <BroadcastModal
+        open={c.broadcastOpen}
+        orchestrators={c.orchestrators}
+        onClose={() => c.setBroadcastOpen(false)}
+      />
+      <SpawnWorkerDialog
+        open={c.spawnFor !== null}
+        team={c.spawnFor}
+        roles={c.roles}
+        onClose={() => c.setSpawnFor(null)}
+      />
+      <EditConfigDialog
+        open={c.editConfigFor !== null}
+        team={c.editConfigFor}
+        onClose={() => c.setEditConfigFor(null)}
+      />
 
       {/* ── Auth / settings (shared drawer; auto-opens on bad token) ── */}
       {c.settingsOpen && (
@@ -151,6 +176,8 @@ export default function MobileShell() {
           onClose={() => c.setSettingsOpen(false)}
           onTokenSaved={() => { void c.probeAuth(); }}
           onTokenCleared={c.setAuthMissing}
+          shellMode={c.shellMode}
+          setShellMode={c.setShellMode}
         />
       )}
     </div>
