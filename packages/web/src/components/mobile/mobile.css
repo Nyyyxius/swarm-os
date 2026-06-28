@@ -1,0 +1,593 @@
+/* packages/web/src/components/mobile/mobile.css
+ *
+ * Mobile shell styling — Slice 0 skeleton. Reuses the design tokens defined
+ * by desktop-theme.css (:root --bg/--panel/--text/--amber/--ok/...) which is
+ * loaded globally in main.tsx, so accent/backdrop stay consistent across
+ * shells. Fills the viewport (no bezel) and respects iOS safe areas
+ * (viewport-fit=cover is already set in index.html). */
+
+.mobile-shell {
+  position: fixed;
+  inset: 0;
+  display: flex;
+  flex-direction: column;
+  background: var(--bg);
+  color: var(--text);
+  font-family: 'Geist Mono', ui-monospace, 'SF Mono', Menlo, monospace;
+  -webkit-tap-highlight-color: transparent;
+  overflow: hidden;
+}
+
+/* ── Header ─────────────────────────────────────────────── */
+.m-header {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  padding: calc(env(safe-area-inset-top) + 10px) 16px 10px;
+  border-bottom: 1px solid var(--border);
+  background: var(--panel-solid);
+}
+.m-brand {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-weight: 600;
+  letter-spacing: 0.06em;
+  font-size: 14px;
+}
+.m-brand-mark {
+  width: 14px;
+  height: 14px;
+  border-radius: 3px;
+  background: linear-gradient(135deg, var(--amber), var(--amber-deep));
+  box-shadow: 0 0 10px rgba(255, 176, 96, 0.5);
+}
+.m-brand-dot { color: var(--amber); }
+.m-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+.m-sep { color: var(--text-mute); }
+.m-meta-strong { color: var(--text); }
+.m-desktop-btn {
+  margin-left: 6px;
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  border: 1px solid var(--border-strong);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 14px;
+  line-height: 1;
+}
+.m-desktop-btn:active { background: var(--panel-elev); }
+
+/* ── Health strip ───────────────────────────────────────── */
+.m-health-scroll {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px;
+  overflow-x: auto;
+  border-bottom: 1px solid var(--border);
+  scrollbar-width: none;
+}
+.m-health-scroll::-webkit-scrollbar { display: none; }
+.m-health-empty {
+  color: var(--text-mute);
+  font-size: 12px;
+  letter-spacing: 0.06em;
+  padding: 6px 4px;
+}
+.m-health-card {
+  flex: 0 0 auto;
+  min-width: 138px;
+  text-align: left;
+  padding: 9px 11px;
+  border-radius: 11px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  display: flex;
+  flex-direction: column;
+  gap: 7px;
+}
+.m-health-card.active {
+  border-color: var(--border-hot);
+  box-shadow: 0 0 0 1px var(--border-hot) inset;
+}
+.hc-row1 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 8px;
+}
+.hc-name {
+  font-size: 12px;
+  font-weight: 600;
+  letter-spacing: 0.03em;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  max-width: 96px;
+}
+.hc-status {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+}
+.hc-row2 {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--text-mute);
+}
+.hc-msg { color: var(--text-dim); }
+
+.m-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--text-mute);
+}
+.m-dot.ok { background: var(--ok); box-shadow: 0 0 6px var(--ok); }
+.m-dot.warn { background: var(--warn); box-shadow: 0 0 6px var(--warn); }
+.m-dot.bad { background: var(--bad); box-shadow: 0 0 6px var(--bad); }
+.m-dot.waiting { background: var(--info); box-shadow: 0 0 6px var(--info); }
+.m-dot.starting { background: var(--amber-soft); box-shadow: 0 0 6px var(--amber-soft); }
+.m-dot.stopped { background: var(--stopped); }
+
+/* ── Content ────────────────────────────────────────────── */
+.m-content {
+  flex: 1;
+  min-height: 0;
+  position: relative;
+}
+/* Host the reused desktop MapView; `.canvas-wrap` (position:relative, no
+   intrinsic size) fills this absolutely-positioned box. */
+.m-map {
+  position: absolute;
+  inset: 0;
+}
+.m-map .canvas-wrap {
+  width: 100%;
+  height: 100%;
+}
+
+/* ── Dock ───────────────────────────────────────────────── */
+.m-dock {
+  display: flex;
+  gap: 8px;
+  padding: 10px 12px calc(env(safe-area-inset-bottom) + 10px);
+  border-top: 1px solid var(--border);
+  background: var(--panel-solid);
+}
+.m-dock-btn {
+  flex: 1;
+  padding: 12px 0;
+  border-radius: 12px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 11px;
+  letter-spacing: 0.12em;
+}
+.m-dock-btn:disabled { color: var(--text-mute); opacity: 0.6; }
+.m-dock-btn:not(:disabled):active { background: var(--panel-elev); }
+
+/* ── Bottom sheet primitive ─────────────────────────────── */
+.m-scrim {
+  position: fixed;
+  inset: 0;
+  background: rgba(0, 0, 0, 0.55);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 0.25s ease;
+  z-index: 80;
+}
+.m-scrim.show { opacity: 1; pointer-events: auto; }
+.m-sheet {
+  position: fixed;
+  left: 0;
+  right: 0;
+  bottom: 0;
+  z-index: 81;
+  max-height: 88vh;
+  display: flex;
+  flex-direction: column;
+  background: var(--panel-solid);
+  border-top: 1px solid var(--border-strong);
+  border-radius: 18px 18px 0 0;
+  box-shadow: 0 -16px 40px rgba(0, 0, 0, 0.5);
+  transform: translateY(100%);
+  transition: transform 0.28s cubic-bezier(0.32, 0.72, 0, 1);
+  touch-action: none;
+  padding-bottom: env(safe-area-inset-bottom);
+}
+.m-sheet.open { transform: translateY(0); }
+.m-sheet-handle {
+  width: 38px;
+  height: 4px;
+  border-radius: 2px;
+  background: var(--border-strong);
+  margin: 9px auto 4px;
+  flex: 0 0 auto;
+}
+
+.m-sheet-head {
+  padding: 6px 16px 12px;
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.m-sheet-title-row {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.m-sheet-id {
+  font-size: 10px;
+  letter-spacing: 0.14em;
+  color: var(--amber);
+}
+.m-sheet-close {
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 18px;
+  line-height: 1;
+}
+.m-sheet-title { font-size: 19px; font-weight: 600; margin-top: 8px; }
+.m-sheet-sub {
+  font-size: 11px;
+  letter-spacing: 0.08em;
+  color: var(--text-mute);
+  margin-top: 2px;
+}
+.m-sheet-body {
+  overflow-y: auto;
+  -webkit-overflow-scrolling: touch;
+  padding: 16px;
+  flex: 1 1 auto;
+  min-height: 0;
+}
+
+/* ── Stats content ──────────────────────────────────────── */
+.m-big-number {
+  font-size: 34px;
+  font-weight: 600;
+  display: flex;
+  align-items: baseline;
+  gap: 10px;
+}
+.m-delta { font-size: 13px; color: var(--ok); }
+.m-big-sub {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--text-mute);
+  margin-top: 4px;
+}
+.m-graph { height: 110px; margin: 14px 0 4px; }
+.m-graph svg { width: 100%; height: 100%; }
+
+.m-sec {
+  font-size: 11px;
+  letter-spacing: 0.12em;
+  color: var(--text-dim);
+  margin: 22px 0 10px;
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+.m-count {
+  font-size: 10px;
+  color: var(--text-mute);
+  border: 1px solid var(--border);
+  border-radius: 5px;
+  padding: 1px 6px;
+}
+.m-stat-empty {
+  color: var(--text-mute);
+  font-size: 11px;
+  padding: 6px 0;
+}
+
+.m-team-row,
+.m-ended-row {
+  width: 100%;
+  text-align: left;
+  display: grid;
+  grid-template-columns: 1fr auto;
+  gap: 4px 8px;
+  padding: 11px 12px;
+  margin-bottom: 8px;
+  border-radius: 11px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+}
+.m-team-row:active,
+.m-ended-row:active { background: var(--panel-elev); }
+.m-tr-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 13px;
+  font-weight: 600;
+}
+.m-sw { width: 9px; height: 9px; border-radius: 2px; }
+.m-tr-count {
+  text-align: right;
+  font-size: 13px;
+  color: var(--text-dim);
+}
+.m-tr-meta {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--text-mute);
+}
+.m-tr-spark { grid-column: 1 / -1; height: 20px; }
+.m-tr-spark svg { width: 100%; height: 100%; }
+
+.m-ended-top {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+}
+.m-ended-name { font-size: 13px; font-weight: 600; }
+.m-ended-time { font-size: 10px; color: var(--text-mute); }
+.m-ended-meta {
+  grid-column: 1 / -1;
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  font-size: 10px;
+  letter-spacing: 0.06em;
+  color: var(--text-mute);
+}
+.m-spacer { flex: 1; }
+.m-badge-reason {
+  font-size: 9px;
+  letter-spacing: 0.08em;
+  padding: 1px 6px;
+  border-radius: 5px;
+  border: 1px solid var(--border-strong);
+  color: var(--text-dim);
+}
+.m-badge-reason.completed { color: var(--ok); border-color: var(--ok); }
+.m-badge-reason.failed,
+.m-badge-reason.killed { color: var(--bad); border-color: var(--bad); }
+.m-badge-reason.interrupted,
+.m-badge-reason.stopped { color: var(--warn); border-color: var(--warn); }
+
+.m-bus-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 10px;
+  padding-bottom: 12px;
+}
+.m-bus-cell { display: flex; flex-direction: column; gap: 3px; }
+.m-bus-k { font-size: 10px; letter-spacing: 0.1em; color: var(--text-mute); }
+.m-bus-v { font-size: 17px; }
+.m-bus-u { font-size: 10px; color: var(--text-mute); margin-left: 2px; }
+
+/* ── Agent sheet ────────────────────────────────────────── */
+.m-as-name {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-top: 8px;
+}
+.m-as-name-txt { font-size: 18px; font-weight: 600; }
+.m-as-role {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-top: 6px;
+  font-size: 11px;
+  letter-spacing: 0.06em;
+  color: var(--text-dim);
+}
+.m-as-cfg {
+  display: flex;
+  align-items: center;
+  gap: 5px;
+  flex-wrap: wrap;
+  margin-top: 8px;
+  font-size: 11px;
+  color: var(--text-dim);
+}
+.m-as-cfg-lbl { color: var(--text-mute); }
+.m-as-cfg-sep { color: var(--text-mute); }
+.m-as-cwd {
+  margin-top: 6px;
+  font-size: 10px;
+  color: var(--text-mute);
+  word-break: break-all;
+}
+.m-as-stats {
+  display: grid;
+  grid-template-columns: repeat(3, 1fr);
+  gap: 8px;
+  margin-top: 12px;
+}
+.m-as-stat {
+  border: 1px solid var(--border);
+  border-radius: 9px;
+  padding: 8px 6px;
+  text-align: center;
+  background: var(--panel);
+}
+.m-as-stat .v { font-size: 15px; color: var(--text); }
+.m-as-stat .k { font-size: 9px; letter-spacing: 0.1em; color: var(--text-mute); margin-top: 3px; }
+.m-as-meta {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  flex-wrap: wrap;
+  margin-top: 10px;
+  font-size: 10px;
+  color: var(--text-mute);
+}
+.m-as-meta b { color: var(--text-dim); font-weight: 600; }
+
+.m-as-actions {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 7px;
+  padding: 12px 16px;
+  border-bottom: 1px solid var(--border);
+  flex: 0 0 auto;
+}
+.m-as-action {
+  padding: 11px 0;
+  border-radius: 10px;
+  border: 1px solid var(--border);
+  background: var(--panel);
+  color: var(--text);
+  font-size: 11px;
+  letter-spacing: 0.06em;
+}
+.m-as-action:disabled { color: var(--text-mute); opacity: 0.5; }
+.m-as-action:not(:disabled):active { background: var(--panel-elev); }
+.m-as-action.go { border-color: var(--ok); color: var(--ok); }
+.m-as-action.primary { border-color: var(--border-hot); color: var(--amber); }
+.m-as-action.danger { border-color: var(--bad); color: var(--bad); }
+
+.m-as-tabs {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 10px 16px 0;
+  flex: 0 0 auto;
+}
+.m-as-tab {
+  padding: 7px 12px;
+  border: none;
+  background: transparent;
+  color: var(--text-mute);
+  font-size: 11px;
+  letter-spacing: 0.1em;
+  border-bottom: 2px solid transparent;
+}
+.m-as-tab.active { color: var(--text); border-bottom-color: var(--amber); }
+.m-as-enlarge {
+  margin-left: auto;
+  width: 30px;
+  height: 30px;
+  border-radius: 8px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 15px;
+}
+.m-as-body { padding-top: 12px; }
+
+.m-console {
+  height: 44vh;
+  min-height: 200px;
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  overflow: hidden;
+  background: #0d0a08;
+}
+.m-console-empty { color: var(--text-mute); font-size: 11px; padding: 10px; }
+
+.m-messages { display: flex; flex-direction: column; gap: 8px; min-height: 160px; }
+.m-bubble {
+  max-width: 86%;
+  padding: 8px 11px;
+  border-radius: 12px;
+  font-size: 13px;
+  line-height: 1.35;
+}
+.m-bubble.me { align-self: flex-end; background: var(--amber-deep); color: var(--text); }
+.m-bubble.them { align-self: flex-start; background: var(--panel-elev); border: 1px solid var(--border); }
+.m-bubble-who { font-size: 9px; letter-spacing: 0.08em; color: var(--text-mute); margin-bottom: 3px; }
+.m-bubble-via { margin-left: 6px; }
+
+/* ── Waiting toasts ─────────────────────────────────────── */
+.m-toasts {
+  position: absolute;
+  left: 10px;
+  right: 10px;
+  top: 10px;
+  z-index: 40;
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  pointer-events: none;
+}
+.m-toasts-older,
+.m-toast { pointer-events: auto; }
+.m-toasts-older {
+  align-self: center;
+  font-size: 10px;
+  letter-spacing: 0.08em;
+  color: var(--text-dim);
+  background: var(--panel-solid);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  padding: 5px 10px;
+}
+.m-toast {
+  border: 1px solid var(--border-hot);
+  border-radius: 12px;
+  background: var(--panel-solid);
+  padding: 10px 12px;
+  box-shadow: 0 10px 28px rgba(0, 0, 0, 0.45);
+}
+.m-toast-head {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+}
+.m-toast-title {
+  font-size: 10px;
+  letter-spacing: 0.12em;
+  color: var(--warn);
+}
+.m-toast-time { font-size: 9px; color: var(--text-mute); }
+.m-toast-id { font-size: 12px; font-weight: 600; margin-top: 4px; }
+.m-toast-reason { font-size: 11px; color: var(--text-dim); margin-top: 2px; }
+.m-toast-foot {
+  display: flex;
+  align-items: center;
+  justify-content: flex-end;
+  gap: 8px;
+  margin-top: 8px;
+}
+.m-toast-dismiss {
+  width: 28px;
+  height: 28px;
+  border-radius: 7px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-size: 15px;
+}
+.m-toast-open {
+  padding: 7px 12px;
+  border-radius: 7px;
+  border: 1px solid var(--border-hot);
+  background: transparent;
+  color: var(--amber);
+  font-size: 11px;
+  letter-spacing: 0.08em;
+}

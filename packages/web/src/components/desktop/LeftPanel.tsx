@@ -6,16 +6,12 @@
 // `useOrchestrators` poll) into the row models. Cf.
 // `docs/redesign-desktop/05_leftpanel-data-binding.md`.
 
-import { useEffect, useRef, useState } from 'react';
 import Sparkline from './Sparkline';
 import BigGraph from './BigGraph';
 import { formatRelative } from '../../lib/format';
 import { useNow } from '../../lib/useNow';
-import {
-  api,
-  type BusMetricsSnapshot,
-  type OrchestratorView,
-} from '../../api/client';
+import { type OrchestratorView } from '../../api/client';
+import { useBusHealth } from '../../hooks/useBusHealth';
 import {
   ENDED_DISPLAY_CAP,
   filterActive,
@@ -287,33 +283,4 @@ function BusHealthCell({
       </div>
     </div>
   );
-}
-
-/**
- * Poll `/metrics/bus` every `intervalMs`. Returns the latest successful
- * snapshot, or `null` until the first response arrives. Tolerates errors
- * (404 if server built without `BusMetricsCollector`, 401 token expired,
- * etc.) — cells stay at `—`.
- */
-function useBusHealth(intervalMs: number): BusMetricsSnapshot | null {
-  const [snap, setSnap] = useState<BusMetricsSnapshot | null>(null);
-  const cancelledRef = useRef(false);
-  useEffect(() => {
-    cancelledRef.current = false;
-    const fetchOnce = async () => {
-      try {
-        const s = await api.getMetricsBus();
-        if (!cancelledRef.current) setSnap(s);
-      } catch {
-        /* keep previous, transient errors OK */
-      }
-    };
-    void fetchOnce();
-    const t = setInterval(() => void fetchOnce(), intervalMs);
-    return () => {
-      cancelledRef.current = true;
-      clearInterval(t);
-    };
-  }, [intervalMs]);
-  return snap;
 }

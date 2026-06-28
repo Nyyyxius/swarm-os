@@ -1,7 +1,10 @@
 import { useEffect, useState } from 'react';
 import DesktopShell from './components/desktop/DesktopShell';
+import MobileShell from './components/mobile/MobileShell';
 import { RolesPage } from './components/RolesPage';
 import IdeOverlay from './components/desktop/IdeOverlay';
+import { SwarmControllerProvider } from './controller/SwarmController';
+import { useShellMode } from './hooks/useShellMode';
 
 type Route =
   | { kind: 'list' }
@@ -38,16 +41,19 @@ function setHashRoute(route: Route): void {
 }
 
 /**
- * Phase C — Step 11 : App.tsx is now a thin routing shell. All in-shell
- * state (auth probing, settings drawer, info/health polling) has migrated
- * into `DesktopShell` so the SettingsDrawer can co-locate with the single
- * `useEvents()` consumer (regression-guard for the duplicate WS bug
- * 584d9ec). The inline amber "Token required" banner + settings panel
- * that used to live here are replaced by the drawer's auto-open behaviour
- * driven by `authState === 'missing' | 'invalid'`.
+ * App.tsx is the sovereign router AND the aiguillage point. It keeps the
+ * hash ⇄ route state in sync, decides desktop vs mobile via `useShellMode`,
+ * and mounts the SINGLE `<SwarmControllerProvider>` ABOVE whichever shell
+ * is active. The provider (not the shell) owns `useEvents()` so the WS
+ * survives a desktop↔mobile swap — there is never a transient second
+ * consumer (regression-guard 584d9ec).
+ *
+ * `#/roles` and `#/ide` are desktop-only overlays in v1; on mobile they are
+ * redirected to `#/` (the mobile roles screen lands in a later slice).
  */
 export default function App() {
   const [route, setRoute] = useState<Route>(() => parseHash());
+  const { isMobile, mode: shellMode, setMode: setShellMode } = useShellMode();
 
   // Keep the hash in sync with state, AND honour back/forward navigation.
   useEffect(() => {
@@ -62,10 +68,18 @@ export default function App() {
     return () => window.removeEventListener('hashchange', onHashChange);
   }, []);
 
+  // Mobile v1 has no roles/ide overlay — redirect those routes to the list
+  // so a deep-link / bookmark doesn't land on a blank surface.
+  useEffect(() => {
+    if (isMobile && (route.kind === 'roles' || route.kind === 'ide')) {
+      setRoute({ kind: 'list' });
+    }
+  }, [isMobile, route.kind]);
+
   return (
     <div className="min-h-screen bg-slate-950 text-slate-100 flex flex-col">
       <main className="flex-1 min-h-0 relative">
-        <DesktopShell
+        <SwarmControllerProvider
           routeOrchestratorId={route.kind === 'detail' ? route.id : null}
           onOpenOrchestrator={(id) => setRoute({ kind: 'detail', id })}
           onOpenRoles={() => setRoute({ kind: 'roles' })}
@@ -73,21 +87,25 @@ export default function App() {
           onCloseRightPanel={() => {
             if (route.kind === 'detail') setRoute({ kind: 'list' });
           }}
-        />
-        {/* Phase C — Step 10 : RolesPage v2 fullscreen overlay.
-            The component owns its `.roles-overlay` positioning (fixed inset
-            56px 0 0 0, z-index 60), so we no longer wrap it in a Tailwind
-            placeholder. `open` gates rendering; `onClose` flips the hash
-            back to `#/` (caller stays sovereign over the route). */}
-        <RolesPage
-          open={route.kind === 'roles'}
-          onClose={() => setRoute({ kind: 'list' })}
-        />
-        {/* VS Code web fullscreen overlay. Mounted only while on `#/ide` so the
-            iframe (and its serve-web WebSocket) tears down on close. */}
-        {route.kind === 'ide' && (
-          <IdeOverlay onClose={() => setRoute({ kind: 'list' })} />
-        )}
+          shellMode={shellMode}
+          setShellMode={setShellMode}
+        >
+          {isMobile ? <MobileShell /> : <DesktopShell />}
+
+          {/* Desktop-only fullscreen overlays. Gated out entirely on mobile
+              (the redirect effect above keeps the route off these kinds). */}
+          {!isMobile && (
+            <>
+              <RolesPage
+                open={route.kind === 'roles'}
+                onClose={() => setRoute({ kind: 'list' })}
+              />
+              {route.kind === 'ide' && (
+                <IdeOverlay onClose={() => setRoute({ kind: 'list' })} />
+              )}
+            </>
+          )}
+        </SwarmControllerProvider>
       </main>
     </div>
   );
