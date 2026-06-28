@@ -1,5 +1,17 @@
 # UI Redesign — Intégration du prototype Mobile (parité complète)
 
+> **Statut (2026-06-28) : IMPLÉMENTÉ & déployé.** Jalon 1 (aiguillage +
+> monitoring + supervision) et Jalon 2 (control-plane + polish) livrés sur la
+> branche `feat/ui-mobile-jalon-1` (commits `15990b9`, `95b96da`) et déployés
+> sur `swarm-os-test`. Architecture clé : `controller/SwarmController` lifte le
+> `useEvents` unique + l'état partagé au-dessus des deux shells ; `App.tsx`
+> aiguille via `hooks/useShellMode` (`pointer:coarse && max-width:820px` +
+> override `swarm-os.shell-mode`). MapView/Terminal/Composer/ConfirmModal/
+> ConsoleOverlay/dialogs/SettingsDrawer réutilisés tels quels. Reste optionnel :
+> tweaks client (showIntra/showPulses), vérif PWA, et le **test device réel**
+> (single-WS à chaud, echo PTY clavier tactile). Vérifié : tsc + build + 311
+> tests web (0 régression).
+
 Plan d'intégration de la **variante mobile** (`prototypes/mobile/` +
 `prototypes/Swarm OS Mobile.html`) dans le code React de `packages/web/`.
 Pendant desktop de `docs/ui-redesign-desktop.md`, qui avait laissé le mobile
