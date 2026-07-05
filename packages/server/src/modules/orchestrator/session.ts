@@ -250,6 +250,14 @@ export function buildClaudeArgs(opts: {
     // `=` form is mandatory: `--mcp-config <path>` would consume the
     // following prompt argv as a second config file (variadic flag).
     args.push(`--mcp-config=${opts.mcpConfigPath}`);
+    // `--strict-mcp-config` scopes the session to team-comms ONLY. Without
+    // it the seed `.claude.json` (copied from the host) drags every
+    // user-level MCP server (claude.ai connectors…) into the agent: the
+    // tool count explodes, claude 2.1.201 defers MCP tools behind
+    // ToolSearch, and smaller models fail the ToolSearch→call dance —
+    // observed 2026-07-04 as a sentinel unable to invoke team.* at all
+    // ("1 MCP server needs authentication" + "no mechanism to call them").
+    args.push('--strict-mcp-config');
   }
   // The positional argv is the seed task prompt, optionally prefixed by the
   // one-shot resume notice. This is the part a `/clear` is meant to discard;
@@ -491,8 +499,18 @@ export class Session extends EventEmitter {
       // here makes the pre-acceptance survive the migration and keeps
       // the per-session `.claude.json` seed effective as a fallback for
       // older builds.
+      //
+      // `tui: 'default'` pins the classic inline renderer. claude-code
+      // 2.1.201 shows a "Try the new fullscreen renderer?" upsell dialog
+      // whenever `settings.tui` is undefined; inside a headless PTY the
+      // injected wake-up text can accept it, after which claude re-execs
+      // itself in fullscreen mode whose constant repaints make the session
+      // look permanently busy (idle detection never fires, inbox signals
+      // are never delivered). Any defined `tui` value suppresses the
+      // dialog entirely.
       const settings = {
         skipDangerousModePermissionPrompt: true,
+        tui: 'default',
         hooks: {
           Notification: [
             {
@@ -1325,6 +1343,13 @@ export class Session extends EventEmitter {
         });
         const remoteEnv: Record<string, string> = {};
         if (hostCfgDir) remoteEnv.CLAUDE_CONFIG_DIR = hostCfgDir;
+        // Force MCP tools INLINE (no ToolSearch deferral). claude 2.1.201
+        // defers MCP tools behind a ToolSearch meta-tool in interactive
+        // mode; smaller models (haiku) fail the ToolSearch→call dance and
+        // effectively lose team-comms (observed 2026-07-04: sentinel
+        // "unable to invoke MCP tools even after ToolSearch loads their
+        // schemas"). "false" pins the pre-2.1.2xx inline behaviour.
+        remoteEnv.ENABLE_TOOL_SEARCH = 'false';
         agent = new SshAgentProcess({
           sshTarget: t.sshTarget,
           sshKey: t.sshKey,
@@ -1352,6 +1377,8 @@ export class Session extends EventEmitter {
         });
         const env: NodeJS.ProcessEnv = {};
         if (this._claudeConfigDir) env.CLAUDE_CONFIG_DIR = this._claudeConfigDir;
+        // Same rationale as the SSH path: keep MCP tools inline for small models.
+        env.ENABLE_TOOL_SEARCH = 'false';
         agent = new PtyAgentProcess({
           command: init.claudeBin ?? 'claude',
           args,
