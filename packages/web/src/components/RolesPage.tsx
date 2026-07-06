@@ -31,6 +31,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useRoles } from '../hooks/useRoles';
 import { api, type ConnectorView, type RoleView, type RoleInput } from '../api/client';
 import { DiscordOnboarding } from './DiscordOnboarding';
+import { useShellMode } from '../hooks/useShellMode';
 
 interface Props {
   /** When `false`, the overlay is not rendered. The caller (App.tsx today,
@@ -71,10 +72,20 @@ type SectionId =
 
 export function RolesPage({ open, onClose }: Props) {
   const { roles, loading, error, create, update, destroy } = useRoles();
+  const { isMobile } = useShellMode();
   const [selectedRoleId, setSelectedRoleId] = useState<string | null>(null);
   const [editingSection, setEditingSection] = useState<SectionId | null>(null);
   const [opError, setOpError] = useState<string | null>(null);
   const [defaults, setDefaults] = useState<{ lead: string; worker: string } | null>(null);
+  // Mobile shows the list and the selected role's detail as two separate
+  // full-screen panes (the desktop 320px+1fr split is unreadable on a phone).
+  // `mobileView` is the navigated pane; ignored entirely on desktop.
+  const [mobileView, setMobileView] = useState<'list' | 'detail'>('list');
+
+  // Always (re)open on the list pane.
+  useEffect(() => {
+    if (open) setMobileView('list');
+  }, [open]);
 
   useEffect(() => {
     if (!open || defaults !== null) return;
@@ -117,10 +128,15 @@ export function RolesPage({ open, onClose }: Props) {
   }
 
   function trySelect(id: string) {
-    if (id === selectedRoleId) return;
-    if (editingSection && !confirm('Discard unsaved changes?')) return;
-    setEditingSection(null);
-    setSelectedRoleId(id);
+    if (id !== selectedRoleId) {
+      if (editingSection && !confirm('Discard unsaved changes?')) return;
+      setEditingSection(null);
+      setSelectedRoleId(id);
+    }
+    // Selecting a role navigates into its detail pane on mobile — even when it
+    // was already the selected one (so tapping the auto-selected first role
+    // still opens it instead of being a no-op).
+    if (isMobile) setMobileView('detail');
   }
 
   async function patchSelected(body: Partial<RoleInput>): Promise<void> {
@@ -142,6 +158,7 @@ export function RolesPage({ open, onClose }: Props) {
       const r = await create({ label: label.trim(), connectors: [] });
       setSelectedRoleId(r.id);
       setEditingSection(null);
+      if (isMobile) setMobileView('detail');
     } catch (e) {
       setOpError(e instanceof Error ? e.message : String(e));
     }
@@ -165,6 +182,7 @@ export function RolesPage({ open, onClose }: Props) {
       });
       setSelectedRoleId(r.id);
       setEditingSection(null);
+      if (isMobile) setMobileView('detail');
     } catch (e) {
       setOpError(e instanceof Error ? e.message : String(e));
     }
@@ -182,6 +200,7 @@ export function RolesPage({ open, onClose }: Props) {
     try {
       await destroy(role.id);
       // selectedRoleId fallback handled by the useEffect above.
+      if (isMobile) setMobileView('list');
     } catch (e) {
       setOpError(e instanceof Error ? e.message : String(e));
     }
@@ -190,7 +209,10 @@ export function RolesPage({ open, onClose }: Props) {
   if (!open) return null;
 
   return (
-    <div className="roles-overlay" onClick={(e) => e.stopPropagation()}>
+    <div
+      className={`roles-overlay${isMobile ? ` m-roles m-roles-${mobileView}` : ''}`}
+      onClick={(e) => e.stopPropagation()}
+    >
       <aside className="roles-side">
         <div className="roles-side-head">
           <button className="back" onClick={tryClose}>
@@ -258,6 +280,15 @@ export function RolesPage({ open, onClose }: Props) {
       </aside>
 
       <main className="roles-main">
+        {isMobile && (
+          <button
+            type="button"
+            className="m-roles-back"
+            onClick={() => setMobileView('list')}
+          >
+            ← ROLES
+          </button>
+        )}
         {role ? (
           <>
             <h2>{role.label.toUpperCase()}</h2>

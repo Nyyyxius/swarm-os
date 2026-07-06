@@ -614,20 +614,61 @@
     max-width: calc(100vw - 20px);
     max-height: calc(100vh - 32px);
   }
+}
 
-  /* RolesPage: the desktop 320px+1fr grid is unusable on a phone. Stack it —
-     the role list (with its own BACK button) sits on top and scrolls within
-     ~38vh; the selected role's sections fill the rest below. No JS change:
-     the component's own selectedRole state drives the detail panel. */
-  .roles-overlay {
-    inset: 0;
-    grid-template-columns: 1fr;
-    grid-template-rows: auto 1fr;
-  }
-  .roles-side {
-    border-right: none;
-    border-bottom: 1px solid var(--border);
-    max-height: 38vh;
-  }
-  .roles-main { padding: 18px 16px 60px; }
+/* ── RolesPage on mobile: list → detail navigation ─────────────
+   The desktop 320px+1fr split is unreadable on a phone, and the previous
+   stacked fallback put the detail in a `1fr` grid row whose default
+   min-height:auto let it grow past the fixed overlay — so `.roles-main`'s own
+   overflow:auto never engaged and the config sections were clipped with no way
+   to scroll. Instead we show ONE full-screen pane at a time: the role list, or
+   the selected role's detail with a "← ROLES" back button. Driven by the
+   `m-roles-{list,detail}` class (JS `isMobile`), so it holds in BOTH
+   orientations rather than depending on a width breakpoint that landscape
+   phones (>820px wide) routinely fail. */
+.roles-overlay.m-roles {
+  inset: 0;
+  display: block;                /* drop the 2-col grid */
+}
+.roles-overlay.m-roles .roles-side,
+.roles-overlay.m-roles .roles-main {
+  position: absolute;
+  inset: 0;
+  max-height: none;
+  border: none;
+  overflow: auto;
+  -webkit-overflow-scrolling: touch;
+}
+.roles-overlay.m-roles .roles-side {
+  display: flex;                 /* keep head / list / + NEW ROLE stacking */
+  flex-direction: column;
+}
+.roles-overlay.m-roles .roles-main {
+  padding: 16px;
+}
+/* Exactly one pane visible at a time. */
+.roles-overlay.m-roles-list .roles-main { display: none; }
+.roles-overlay.m-roles-detail .roles-side { display: none; }
+
+.m-roles-back {
+  position: sticky;
+  top: 0;
+  display: block;
+  width: 100%;
+  background: var(--panel-solid);
+  border: 1px solid var(--border);
+  color: var(--text-mute);
+  font-family: "Geist Mono", monospace;
+  font-size: 11px;
+  letter-spacing: 0.16em;
+  text-align: left;
+  padding: 10px 12px;
+  margin-bottom: 18px;
+  cursor: pointer;
+  z-index: 2;
+}
+.m-roles-back:hover,
+.m-roles-back:active {
+  color: var(--amber);
+  border-color: var(--border-strong);
 }
