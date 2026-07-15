@@ -23,7 +23,13 @@
  */
 
 import { withModule } from '../../logger.js';
-import type { Notifier, NotificationInput, NotificationKind } from './index.js';
+import type {
+  Notifier,
+  NotificationInput,
+  NotificationKind,
+  NotificationLevel,
+  CustomNotificationInput,
+} from './index.js';
 
 const log = withModule('notify');
 
@@ -65,6 +71,21 @@ const TITLE_GLYPHS: Record<NotificationKind, string> = {
   'orchestrator.ended': '[END]',
   'session.exit_anomaly': '[FAIL]',
 };
+
+/**
+ * Colors for plugin custom notifications (`notifyCustom`) — same palette as
+ * the built-in kinds: green (clean/OK), yellow (attention), red (anomaly).
+ */
+const LEVEL_COLORS: Record<NotificationLevel, number> = {
+  info: 0x00cc66, // green
+  warn: 0xffff00, // yellow
+  critical: 0xff0000, // red
+};
+
+/** Discord caps embed titles at 256 chars. */
+const EMBED_TITLE_MAX = 256;
+/** Consistent with `buildPayload` — descriptions are truncated to 4000. */
+const EMBED_DESCRIPTION_MAX = 4000;
 
 export interface DiscordWebhookNotifierOptions {
   webhookUrl: string;
@@ -134,7 +155,7 @@ export class DiscordWebhookNotifier implements Notifier {
 
     const embed: DiscordEmbed = {
       title: `${TITLE_GLYPHS[kind]} ${TITLES[kind]}`,
-      description: truncate(input.message ?? '', 4000),
+      description: truncate(input.message ?? '', EMBED_DESCRIPTION_MAX),
       color,
       fields,
       timestamp: new Date().toISOString(),
@@ -148,6 +169,29 @@ export class DiscordWebhookNotifier implements Notifier {
       embed.url = `${base}/#/orchestrators/${encodeURIComponent(orch.id)}`;
     }
 
+    return { embeds: [embed] };
+  }
+
+  /**
+   * Build the embed payload for a plugin custom notification
+   * (`api.notify.custom`). Public for the same reason as `buildPayload` —
+   * tests assert the embed shape without going through the network. The
+   * `[plugin:<name>]` prefix comes from `input.pluginName`, injected by the
+   * plugin façade (the caller never controls it). No deep-link URL: a custom
+   * notification carries no orchestrator to point at.
+   */
+  buildCustomPayload(input: CustomNotificationInput): DiscordPayload {
+    const embed: DiscordEmbed = {
+      title: truncate(`[plugin:${input.pluginName}] ${input.title}`, EMBED_TITLE_MAX),
+      description: truncate(input.message, EMBED_DESCRIPTION_MAX),
+      color: LEVEL_COLORS[input.level],
+      fields: [
+        { name: 'Project', value: this.projectName, inline: true },
+        { name: 'Plugin', value: input.pluginName, inline: true },
+        { name: 'Level', value: input.level, inline: true },
+      ],
+      timestamp: new Date().toISOString(),
+    };
     return { embeds: [embed] };
   }
 
@@ -168,7 +212,34 @@ export class DiscordWebhookNotifier implements Notifier {
       });
       return;
     }
-    const payload = this.buildPayload(input);
+    await this.deliver(this.buildPayload(input), {
+      kind: input.kind,
+      orchId: input.orchestrator.id,
+      sessionId: input.session?.id,
+    });
+  }
+
+  async notifyCustom(input: CustomNotificationInput): Promise<void> {
+    if (this.muteUntil !== undefined && Date.now() < this.muteUntil) {
+      log.info({
+        event: 'notify.discord.muted',
+        plugin: input.pluginName,
+        level: input.level,
+        remainsMs: this.muteUntil - Date.now(),
+      });
+      return;
+    }
+    await this.deliver(this.buildCustomPayload(input), {
+      plugin: input.pluginName,
+      level: input.level,
+    });
+  }
+
+  /**
+   * POST a payload to the webhook — timeout-bounded, never throws. Shared by
+   * `notify()` and `notifyCustom()`; `logCtx` is spread into every log line.
+   */
+  private async deliver(payload: DiscordPayload, logCtx: Record<string, unknown>): Promise<void> {
     const ac = new AbortController();
     const timer = setTimeout(() => ac.abort(), this.timeoutMs);
     try {
@@ -183,25 +254,19 @@ export class DiscordWebhookNotifier implements Notifier {
         // No retry in MVP — plan §12 prefers losing a notif over blocking.
         log.warn({
           event: 'notify.discord.bad_status',
-          kind: input.kind,
           status: res.status,
-          orchId: input.orchestrator.id,
-          sessionId: input.session?.id,
+          ...logCtx,
         });
         return;
       }
       log.info({
         event: 'notify.discord.sent',
-        kind: input.kind,
-        orchId: input.orchestrator.id,
-        sessionId: input.session?.id,
+        ...logCtx,
       });
     } catch (err) {
       log.warn({
         event: 'notify.discord.failed',
-        kind: input.kind,
-        orchId: input.orchestrator.id,
-        sessionId: input.session?.id,
+        ...logCtx,
         error: err instanceof Error ? err.message : String(err),
       });
     } finally {

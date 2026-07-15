@@ -12,8 +12,11 @@
  *  - `session.exit_anomaly`   — a worker exited abnormally (already wired in
  *                               Phase 3 to push a synthetic mail to the lead).
  *
- * The interface is **single-method** so wiring is identical regardless of
- * the implementation:
+ * Plugins additionally reach `Notifier.notifyCustom({...})` through the
+ * capability-gated `api.notify.custom` façade — a free-form title/message/level
+ * embed prefixed `[plugin:<name>]`, with no orchestrator snapshot.
+ *
+ * Wiring is identical regardless of the implementation:
  *
  *   - `DiscordWebhookNotifier`  → `discord.ts`
  *   - `NoOpNotifier`            → `null.ts` (fallback when no webhook URL)
@@ -33,6 +36,23 @@ export type NotificationKind =
   | 'session.waiting'
   | 'orchestrator.ended'
   | 'session.exit_anomaly';
+
+/** Severity of a plugin-originated custom notification (`api.notify.custom`). */
+export type NotificationLevel = 'info' | 'warn' | 'critical';
+
+/**
+ * Free-form notification emitted by a PLUGIN via `api.notify.custom`.
+ * Unlike `NotificationInput` it carries no orchestrator/session snapshot —
+ * the plugin façade injects `pluginName` so the embed title is always
+ * prefixed `[plugin:<name>]` (the caller cannot forge it).
+ */
+export interface CustomNotificationInput {
+  /** Injected by the plugin façade — never supplied by the caller. */
+  pluginName: string;
+  title: string;
+  message: string;
+  level: NotificationLevel;
+}
 
 export interface NotificationInput {
   kind: NotificationKind;
@@ -54,6 +74,12 @@ export interface NotificationInput {
 
 export interface Notifier {
   notify(input: NotificationInput): Promise<void>;
+  /**
+   * Plugin-originated free-form notification (`api.notify.custom`). Same
+   * invariants as `notify()`: timeout-bounded, never throws, no-op fallback
+   * when no webhook is configured.
+   */
+  notifyCustom(input: CustomNotificationInput): Promise<void>;
   /**
    * Phase 8 — optional mute window. When set to a future epoch ms, the
    * notifier returns immediately without sending. Used by the boot sequence

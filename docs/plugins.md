@@ -152,7 +152,7 @@ for `manifest ∩ granted`.
 | `messaging` | `messaging` | `sendToSession/sendToLead/broadcast/broadcastToLeads/readInbox`. `from` shows as `plugin:<name>`. |
 | `mcp.registerTool(def)` | `mcp-tools` | Exposes `<name>.<tool>` to agents (see §5). |
 | `http.registerRouter` / `registerPublicRouter` | `http-routes` / `http-public` | Dynamic Express routes (see §5). |
-| `notify.send(input)` | `notify` | Fire the operator's notifier (Discord webhook, …). |
+| `notify.send(input)` / `notify.custom({title, message, level?})` | `notify` | Fire the operator's notifier (Discord webhook, …). `custom` sends a free-form alert embed titled `[plugin:<name>] <title>` — the plugin name is injected by the host, never by the caller. `level` (`info` \| `warn` \| `critical`, default `info`) maps to the embed colour (green/yellow/red); `title` ≤ 200 chars, `message` ≤ 4000, both non-empty. No-op (logged) when no webhook is configured. |
 | `schedule.cron(expr, cb)` / `interval(ms, cb)` | `schedule` | croner + interval; callbacks guarded, timers unref'd. |
 | `connectors.register(type, provider)` | `connectors` | Provide a channel connector type (see §6). |
 | `settings.instance()` | `settings-read` | Read-only instance settings. |

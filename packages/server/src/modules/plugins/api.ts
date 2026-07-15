@@ -153,6 +153,14 @@ export function buildPluginApi(
 
   const from = `plugin:${name}`;
 
+  // api.notify.custom input — trimmed, non-empty, bounded (Discord caps the
+  // embed title at 256; the `[plugin:<name>]` prefix eats part of that budget).
+  const customNotifySchema = zod.object({
+    title: zod.string().trim().min(1).max(200),
+    message: zod.string().trim().min(1).max(4000),
+    level: zod.enum(['info', 'warn', 'critical']).default('info'),
+  });
+
   const api: SwarmPluginApi = {
     pluginName: name,
     log,
@@ -477,6 +485,19 @@ export function buildPluginApi(
         requireCap('notify');
         ensureLive();
         await need(deps.notifier, 'notify').notify(input);
+      },
+      async custom(input) {
+        requireCap('notify');
+        ensureLive();
+        // Validate BEFORE reaching the notifier — a bad input is the plugin's
+        // error (rejected), never a swallowed webhook failure.
+        const { title, message, level } = customNotifySchema.parse(input);
+        await need(deps.notifier, 'notify').notifyCustom({
+          pluginName: name,
+          title,
+          message,
+          level,
+        });
       },
     },
 

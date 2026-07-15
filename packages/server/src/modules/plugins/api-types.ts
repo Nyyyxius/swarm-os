@@ -27,7 +27,7 @@ import type {
   CrossBroadcastOutcome,
 } from '../orchestrator/messaging.js';
 import type { Message } from '../orchestrator/mailbox.js';
-import type { NotificationInput } from '../notify/index.js';
+import type { NotificationInput, NotificationLevel } from '../notify/index.js';
 import type { InstanceSettings } from '../settings/index.js';
 
 /**
@@ -242,6 +242,27 @@ export interface TeamView {
 }
 
 // ---------------------------------------------------------------------------
+// Notify — plugin custom notifications (api.notify.custom)
+// ---------------------------------------------------------------------------
+
+export type PluginNotificationLevel = NotificationLevel;
+
+/**
+ * Free-form notification a plugin sends via `api.notify.custom`. The embed
+ * title is prefixed `[plugin:<name>]` by the façade — the plugin name is
+ * injected, never supplied by the caller. `level` maps to the embed colour
+ * (info → green, warn → yellow, critical → red); default `info`.
+ */
+export interface PluginCustomNotification {
+  /** Non-empty, ≤ 200 chars after trim. */
+  title: string;
+  /** Non-empty, ≤ 4000 chars after trim. */
+  message: string;
+  /** Default `'info'`. */
+  level?: PluginNotificationLevel;
+}
+
+// ---------------------------------------------------------------------------
 // The injected API
 // ---------------------------------------------------------------------------
 
@@ -332,7 +353,11 @@ export interface SwarmPluginApi {
     registerPublicRouter(router: Router): Disposable; // /public/plugins/<name>/* — before auth
   };
 
-  readonly notify: { send(input: NotificationInput): Promise<void> };
+  readonly notify: {
+    send(input: NotificationInput): Promise<void>;
+    /** Free-form alert embed titled `[plugin:<name>] …` — see `PluginCustomNotification`. */
+    custom(input: PluginCustomNotification): Promise<void>;
+  };
 
   readonly schedule: {
     cron(expr: string, cb: () => void | Promise<void>): Disposable;

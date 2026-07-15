@@ -289,6 +289,24 @@ export interface NotificationInput {
   extra?: Record<string, unknown>;
 }
 
+/** Severity of a custom notification — maps to the embed colour. */
+export type NotificationLevel = 'info' | 'warn' | 'critical';
+
+/**
+ * Free-form notification sent via `api.notify.custom`. The embed title is
+ * prefixed `[plugin:<name>]` by the host — the plugin name is injected, never
+ * supplied by the caller. `level` maps to the embed colour (info → green,
+ * warn → yellow, critical → red); default `info`.
+ */
+export interface CustomNotificationInput {
+  /** Non-empty, ≤ 200 chars after trim. */
+  title: string;
+  /** Non-empty, ≤ 4000 chars after trim. */
+  message: string;
+  /** Default `'info'`. */
+  level?: NotificationLevel;
+}
+
 export interface InstanceSettings {
   instanceLabel: string | null;
   accent: string;
@@ -454,7 +472,11 @@ export interface SwarmPluginApi {
     registerPublicRouter(router: Router): Disposable;
   };
 
-  readonly notify: { send(input: NotificationInput): Promise<void> };
+  readonly notify: {
+    send(input: NotificationInput): Promise<void>;
+    /** Free-form alert embed titled `[plugin:<name>] …` — see `CustomNotificationInput`. */
+    custom(input: CustomNotificationInput): Promise<void>;
+  };
 
   readonly schedule: {
     cron(expr: string, cb: () => void | Promise<void>): Disposable;

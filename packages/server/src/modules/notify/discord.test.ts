@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { DiscordWebhookNotifier } from './discord.js';
-import type { NotificationInput } from './index.js';
+import type { NotificationInput, CustomNotificationInput } from './index.js';
 
 /**
  * Phase 7 — Discord webhook payload + reliability.
@@ -116,6 +116,119 @@ describe('DiscordWebhookNotifier.buildPayload', () => {
   it('truncates a giant description to <= 4000 chars', () => {
     const payload = notifier.buildPayload(makeInput({ message: 'x'.repeat(5000) }));
     expect(payload.embeds[0]?.description?.length).toBeLessThanOrEqual(4000);
+  });
+});
+
+function makeCustom(over: Partial<CustomNotificationInput> = {}): CustomNotificationInput {
+  return {
+    pluginName: 'trader',
+    title: 'position opened',
+    message: 'LONG 100 ABCD @ 4.20',
+    level: 'info',
+    ...over,
+  };
+}
+
+describe('DiscordWebhookNotifier.buildCustomPayload', () => {
+  const notifier = new DiscordWebhookNotifier({
+    webhookUrl: 'https://discord.example/webhooks/abcdef/secret-token',
+    projectName: 'fyrel',
+  });
+
+  it('prefixes the title with [plugin:<name>]', () => {
+    const payload = notifier.buildCustomPayload(makeCustom());
+    expect(payload.embeds[0]?.title).toBe('[plugin:trader] position opened');
+  });
+
+  it('uses green for info', () => {
+    const payload = notifier.buildCustomPayload(makeCustom({ level: 'info' }));
+    expect(payload.embeds[0]?.color).toBe(0x00cc66);
+  });
+
+  it('uses yellow for warn', () => {
+    const payload = notifier.buildCustomPayload(makeCustom({ level: 'warn' }));
+    expect(payload.embeds[0]?.color).toBe(0xffff00);
+  });
+
+  it('uses red for critical', () => {
+    const payload = notifier.buildCustomPayload(makeCustom({ level: 'critical' }));
+    expect(payload.embeds[0]?.color).toBe(0xff0000);
+  });
+
+  it('populates description, fields and timestamp — no deep-link url', () => {
+    const payload = notifier.buildCustomPayload(makeCustom());
+    const e = payload.embeds[0]!;
+    expect(e.description).toBe('LONG 100 ABCD @ 4.20');
+    expect(e.timestamp).toMatch(/^\d{4}-\d{2}-\d{2}T/);
+    expect(e.url).toBeUndefined();
+    const names = (e.fields ?? []).map((f) => f.name);
+    expect(names).toEqual(expect.arrayContaining(['Project', 'Plugin', 'Level']));
+  });
+
+  it('truncates a giant title to <= 256 chars and message to <= 4000', () => {
+    const payload = notifier.buildCustomPayload(
+      makeCustom({ title: 't'.repeat(500), message: 'm'.repeat(5000) }),
+    );
+    expect(payload.embeds[0]?.title.length).toBeLessThanOrEqual(256);
+    expect(payload.embeds[0]?.title).toContain('[plugin:trader]');
+    expect(payload.embeds[0]?.description?.length).toBeLessThanOrEqual(4000);
+  });
+});
+
+describe('DiscordWebhookNotifier.notifyCustom', () => {
+  it('POSTs JSON with the custom embed payload', async () => {
+    const seen: { url: string; init: RequestInit }[] = [];
+    const okFetch = vi.fn().mockImplementation(async (url: string, init: RequestInit) => {
+      seen.push({ url, init });
+      return new Response('{}', { status: 200 });
+    });
+    const n = new DiscordWebhookNotifier({
+      webhookUrl: 'https://discord.example/webhooks/x/y',
+      projectName: 'fyrel',
+      fetchImpl: okFetch as unknown as typeof fetch,
+    });
+    await n.notifyCustom(makeCustom({ level: 'warn' }));
+    expect(seen.length).toBe(1);
+    expect(seen[0]?.init.method).toBe('POST');
+    const body = JSON.parse(String(seen[0]?.init.body));
+    expect(body.embeds[0].title).toBe('[plugin:trader] position opened');
+    expect(body.embeds[0].color).toBe(0xffff00);
+  });
+
+  it('does not throw when fetch rejects', async () => {
+    const failingFetch = vi.fn().mockRejectedValue(new Error('network down'));
+    const n = new DiscordWebhookNotifier({
+      webhookUrl: 'https://discord.example/webhooks/x/y',
+      projectName: 'fyrel',
+      fetchImpl: failingFetch as unknown as typeof fetch,
+      timeoutMs: 100,
+    });
+    await expect(n.notifyCustom(makeCustom())).resolves.toBeUndefined();
+    expect(failingFetch).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not throw when fetch returns a non-2xx status', async () => {
+    const failingFetch = vi.fn().mockResolvedValue(
+      new Response('{"error":"rate limited"}', { status: 429 }),
+    );
+    const n = new DiscordWebhookNotifier({
+      webhookUrl: 'https://discord.example/webhooks/x/y',
+      projectName: 'fyrel',
+      fetchImpl: failingFetch as unknown as typeof fetch,
+    });
+    await expect(n.notifyCustom(makeCustom())).resolves.toBeUndefined();
+  });
+
+  it('respects the mute window', async () => {
+    const okFetch = vi.fn().mockResolvedValue(new Response('{}', { status: 200 }));
+    const n = new DiscordWebhookNotifier({
+      webhookUrl: 'https://discord.example/webhooks/x/y',
+      projectName: 'fyrel',
+      fetchImpl: okFetch as unknown as typeof fetch,
+    });
+    n.muteUntil = Date.now() + 60_000;
+    await n.notifyCustom(makeCustom());
+    expect(okFetch).not.toHaveBeenCalled();
   });
 });
 

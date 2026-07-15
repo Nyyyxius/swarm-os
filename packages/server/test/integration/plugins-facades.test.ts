@@ -1,11 +1,11 @@
 /**
- * J2 — plugin API façades (messaging / roles / teams / schedule.cron).
+ * J2 — plugin API façades (messaging / roles / teams / schedule.cron / notify).
  *
  * Builds the real `SwarmPluginApi` via `buildPluginApi` wired to a booted stack
  * (spawner + roleStore + settings + config) and drives the façades directly.
  */
 
-import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import { z } from 'zod';
 import { bootTestStack, type TestStack } from './helpers.js';
 import { buildPluginApi, type PluginGuard } from '../../src/modules/plugins/api.js';
@@ -16,6 +16,7 @@ import {
 } from '../../src/modules/plugins/api-types.js';
 import { PluginStore } from '../../src/modules/plugins/store.js';
 import { RoleStore } from '../../src/modules/roles/index.js';
+import { DiscordWebhookNotifier, type Notifier } from '../../src/modules/notify/index.js';
 import { eventBus, type SwarmEvent } from '../../src/events.js';
 import { withModule } from '../../src/logger.js';
 
@@ -39,7 +40,7 @@ const identityGuard: PluginGuard = <A extends unknown[]>(
   fn: (...a: A) => unknown,
 ) => (...a: A): unknown => fn(...a);
 
-function buildApi(caps: PluginCapability[]): {
+function buildApi(caps: PluginCapability[], notifier?: Notifier): {
   api: SwarmPluginApi;
   disposables: DisposableStore;
   rolesChanged: { count: number };
@@ -60,7 +61,7 @@ function buildApi(caps: PluginCapability[]): {
       spawner: stack.spawner,
       roleStore,
       settingsStore: stack.settingsStore,
-      notifier: stack.spawner.notifier,
+      notifier: notifier ?? stack.spawner.notifier,
       config: stack.config,
       onRolesChanged: () => {
         rolesChanged.count += 1;
@@ -182,5 +183,75 @@ describe('schedule.cron', () => {
   it('rejects an invalid cron expression', () => {
     const { api } = buildApi(['schedule']);
     expect(() => api.schedule.cron('not a cron', () => undefined)).toThrow();
+  });
+});
+
+describe('notify façade — custom', () => {
+  /** Real Discord notifier with a mocked fetch — captures the outgoing webhook payload. */
+  function webhookCapture(): { notifier: Notifier; seen: { url: string; body: string }[] } {
+    const seen: { url: string; body: string }[] = [];
+    const fetchImpl = vi.fn().mockImplementation(async (url: string, init: RequestInit) => {
+      seen.push({ url, body: String(init.body) });
+      return new Response('{}', { status: 200 });
+    });
+    const notifier = new DiscordWebhookNotifier({
+      webhookUrl: 'https://discord.example/webhooks/x/y',
+      projectName: 'fyrel',
+      fetchImpl: fetchImpl as unknown as typeof fetch,
+    });
+    return { notifier, seen };
+  }
+
+  it('sends a [plugin:<name>]-prefixed embed with the level colour', async () => {
+    const { notifier, seen } = webhookCapture();
+    const { api } = buildApi(['notify'], notifier);
+
+    await api.notify.custom({
+      title: 'breaker tripped',
+      message: 'daily loss limit reached',
+      level: 'critical',
+    });
+
+    expect(seen).toHaveLength(1);
+    const payload = JSON.parse(seen[0]!.body) as {
+      embeds: Array<{ title: string; description: string; color: number }>;
+    };
+    expect(payload.embeds[0]?.title).toBe(`[plugin:${PLUGIN}] breaker tripped`);
+    expect(payload.embeds[0]?.description).toBe('daily loss limit reached');
+    expect(payload.embeds[0]?.color).toBe(0xff0000);
+  });
+
+  it('defaults the level to info (green)', async () => {
+    const { notifier, seen } = webhookCapture();
+    const { api } = buildApi(['notify'], notifier);
+
+    await api.notify.custom({ title: 'hello', message: 'world' });
+
+    const payload = JSON.parse(seen[0]!.body) as { embeds: Array<{ color: number }> };
+    expect(payload.embeds[0]?.color).toBe(0x00cc66);
+  });
+
+  it('requires the notify capability', async () => {
+    const { notifier, seen } = webhookCapture();
+    const { api } = buildApi([], notifier); // no caps granted
+    await expect(
+      api.notify.custom({ title: 't', message: 'm' }),
+    ).rejects.toThrow(/notify/);
+    expect(seen).toHaveLength(0);
+  });
+
+  it('rejects an invalid input (empty title, bad level) without sending', async () => {
+    const { notifier, seen } = webhookCapture();
+    const { api } = buildApi(['notify'], notifier);
+    await expect(api.notify.custom({ title: '', message: 'm' })).rejects.toThrow();
+    await expect(api.notify.custom({ title: 't', message: '   ' })).rejects.toThrow();
+    await expect(
+      api.notify.custom({
+        title: 't',
+        message: 'm',
+        level: 'debug' as unknown as 'info',
+      }),
+    ).rejects.toThrow();
+    expect(seen).toHaveLength(0);
   });
 });

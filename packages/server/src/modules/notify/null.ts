@@ -7,7 +7,7 @@
  */
 
 import { withModule } from '../../logger.js';
-import type { Notifier, NotificationInput } from './index.js';
+import type { Notifier, NotificationInput, CustomNotificationInput } from './index.js';
 
 const log = withModule('notify');
 
@@ -21,6 +21,17 @@ export class NoOpNotifier implements Notifier {
       kind: input.kind,
       orchId: input.orchestrator.id,
       sessionId: input.session?.id,
+      message: input.message,
+    });
+  }
+
+  async notifyCustom(input: CustomNotificationInput): Promise<void> {
+    if (this.muteUntil !== undefined && Date.now() < this.muteUntil) return;
+    log.info({
+      event: 'notify.noop.custom',
+      plugin: input.pluginName,
+      level: input.level,
+      title: input.title,
       message: input.message,
     });
   }

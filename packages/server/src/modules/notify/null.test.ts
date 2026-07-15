@@ -19,4 +19,16 @@ describe('NoOpNotifier', () => {
       }),
     ).resolves.toBeUndefined();
   });
+
+  it('resolves silently for a plugin custom notification', async () => {
+    const n = new NoOpNotifier();
+    await expect(
+      n.notifyCustom({
+        pluginName: 'trader',
+        title: 'position opened',
+        message: 'LONG 100 ABCD @ 4.20',
+        level: 'critical',
+      }),
+    ).resolves.toBeUndefined();
+  });
 });

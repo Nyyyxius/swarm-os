@@ -37,7 +37,11 @@ import { z } from 'zod';
 import { createApp, startServer, type BootGate } from '../../src/http/main.js';
 import { loadConfig, _resetConfigCacheForTesting } from '../../src/config.js';
 import type { Config } from '../../src/config.js';
-import type { Notifier, NotificationInput } from '../../src/modules/notify/index.js';
+import type {
+  Notifier,
+  NotificationInput,
+  CustomNotificationInput,
+} from '../../src/modules/notify/index.js';
 import { NoOpNotifier } from '../../src/modules/notify/null.js';
 
 export interface TestStackOptions {
@@ -91,8 +95,12 @@ export interface TestStack {
 /** Recording notifier double — captures every call for assertions. */
 export class RecordingNotifier implements Notifier {
   readonly events: NotificationInput[] = [];
+  readonly customEvents: CustomNotificationInput[] = [];
   async notify(input: NotificationInput): Promise<void> {
     this.events.push(input);
+  }
+  async notifyCustom(input: CustomNotificationInput): Promise<void> {
+    this.customEvents.push(input);
   }
 }
 
