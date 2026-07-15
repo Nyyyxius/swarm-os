@@ -45,6 +45,11 @@ import {
   validateCwdUnderWorkspace,
 } from '../../http/validation.js';
 import {
+  hostExec,
+  HOST_EXEC_MAX_TIMEOUT_MS,
+  HOST_EXEC_MAX_OUTPUT_BYTES,
+} from '../orchestrator/ssh-exec.js';
+import {
   type SwarmPluginApi,
   type PluginCapability,
   type DisposableStore,
@@ -159,6 +164,16 @@ export function buildPluginApi(
     title: zod.string().trim().min(1).max(200),
     message: zod.string().trim().min(1).max(4000),
     level: zod.enum(['info', 'warn', 'critical']).default('info'),
+  });
+
+  // api.host.exec input — argv non-empty (each element a string); timeout and
+  // output cap bounded (an over-limit value is REJECTED, not silently clamped).
+  // Defaults for omitted timeout/output are applied by `hostExec`.
+  const hostExecSchema = zod.object({
+    argv: zod.array(zod.string()).min(1),
+    cwd: zod.string().min(1).optional(),
+    timeoutMs: zod.number().int().positive().max(HOST_EXEC_MAX_TIMEOUT_MS).optional(),
+    maxOutputBytes: zod.number().int().positive().max(HOST_EXEC_MAX_OUTPUT_BYTES).optional(),
   });
 
   const api: SwarmPluginApi = {
@@ -519,6 +534,18 @@ export function buildPluginApi(
           );
         }
         return deps.agentAssetsBasePath;
+      },
+    },
+
+    host: {
+      async exec(input) {
+        requireCap('host-exec');
+        ensureLive();
+        // Validate BEFORE reaching the host — a malformed input (empty argv,
+        // out-of-bounds timeout/output) is the plugin's error (rejected), not a
+        // silent no-op. `hostExec` gates the transport (rejects under `local`).
+        const parsed = hostExecSchema.parse(input);
+        return await hostExec(need(deps.config, 'host'), parsed);
       },
     },
 

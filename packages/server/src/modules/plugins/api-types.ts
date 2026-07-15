@@ -27,8 +27,11 @@ import type {
   CrossBroadcastOutcome,
 } from '../orchestrator/messaging.js';
 import type { Message } from '../orchestrator/mailbox.js';
+import type { HostExecInput, HostExecResult } from '../orchestrator/ssh-exec.js';
 import type { NotificationInput, NotificationLevel } from '../notify/index.js';
 import type { InstanceSettings } from '../settings/index.js';
+
+export type { HostExecInput, HostExecResult } from '../orchestrator/ssh-exec.js';
 
 /**
  * Capabilities a manifest may DECLARE. The operator then GRANTS a subset in
@@ -51,6 +54,7 @@ export const PLUGIN_CAPABILITIES = [
   'schedule',
   'connectors',
   'settings-read',
+  'host-exec',
 ] as const;
 
 export type PluginCapability = (typeof PLUGIN_CAPABILITIES)[number];
@@ -377,6 +381,25 @@ export interface SwarmPluginApi {
    * announcing its scripts to leads (e.g. `bash <basePath>/hello.sh`).
    */
   readonly agentAssets: { readonly basePath: string };
+
+  /**
+   * Run an arbitrary command on the HOST over SSH (capability `host-exec`).
+   *
+   * ⚠️ TRUST MODEL — this is the most powerful capability in the system: it is
+   * arbitrary code execution on the host, as the SSH user. Grant it ONLY to
+   * plugins you trust absolutely. It is available **only** under the `ssh`
+   * agent transport (`SWARM_OS_AGENT_TRANSPORT=ssh`); the call rejects with a
+   * clear error under the `local` transport (there is no host to reach).
+   *
+   * Semantics: `argv` is run directly (each element `shellQuote`d — no shell
+   * word-splitting), no interactive PTY. A non-zero exit is a normal result
+   * (`code` set); a timeout kills the ssh process and returns `timedOut: true`.
+   * `cwd` container paths (`/workspace`, `/data`) are translated to their host
+   * equivalents; anything else is treated as a host-native path.
+   */
+  readonly host: {
+    exec(input: HostExecInput): Promise<HostExecResult>;
+  };
 }
 
 // ---------------------------------------------------------------------------

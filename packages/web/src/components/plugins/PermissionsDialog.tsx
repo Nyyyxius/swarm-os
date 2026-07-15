@@ -39,6 +39,7 @@ const CAP_HELP: Record<string, string> = {
   schedule: 'run intervals / cron jobs',
   connectors: 'register channel connectors',
   'settings-read': 'read instance settings',
+  'host-exec': 'run commands on the host (ssh) — full trust',
 };
 
 export function PermissionsDialog({

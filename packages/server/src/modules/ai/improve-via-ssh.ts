@@ -1,6 +1,7 @@
 import { spawn } from 'node:child_process';
 import type { Config } from '../../config.js';
 import { shellQuote } from '../orchestrator/agent-process.js';
+import { buildSshBaseArgs } from '../orchestrator/ssh-exec.js';
 import { withModule } from '../../logger.js';
 
 const log = withModule('ai-improve');
@@ -38,21 +39,10 @@ const SYSTEM_PROMPTS: Record<ImproveField, string> = {
 };
 
 function buildSshArgs(config: Config): string[] {
-  if (!config.sshTarget) throw new Error('sshTarget is null');
-  const muxKey = config.sshTarget.replace(/[^a-zA-Z0-9]/g, '_');
+  // Shared connection-option prefix (ControlMaster mux, key, port, target),
+  // then this path's own remote command. No PTY (plain exec channel).
   return [
-    '-o', 'StrictHostKeyChecking=accept-new',
-    '-o', 'UserKnownHostsFile=/tmp/swarm-os-known-hosts',
-    '-o', 'ServerAliveInterval=30',
-    '-o', 'ServerAliveCountMax=4',
-    '-o', 'ControlMaster=auto',
-    '-o', `ControlPath=/tmp/swarm-os-ssh-mux-${muxKey}.sock`,
-    '-o', 'ControlPersist=600',
-    '-o', 'ExitOnForwardFailure=no',
-    '-i', config.sshKey,
-    '-p', String(config.sshPort),
-    config.sshTarget,
-    '--',
+    ...buildSshBaseArgs(config),
     `bash -lc ${shellQuote('claude -p --model claude-opus-4-8 --output-format text')}`,
   ];
 }

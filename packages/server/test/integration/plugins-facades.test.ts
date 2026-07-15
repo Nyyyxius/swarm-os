@@ -255,3 +255,32 @@ describe('notify façade — custom', () => {
     expect(seen).toHaveLength(0);
   });
 });
+
+describe('host façade — exec', () => {
+  // The test stack boots with the default `local` agent transport, so exec is
+  // never able to reach a real host — every case below rejects before spawn.
+  it('requires the host-exec capability', async () => {
+    const { api } = buildApi([]); // no caps granted
+    await expect(api.host.exec({ argv: ['echo', 'hi'] })).rejects.toThrow(/host-exec/);
+  });
+
+  it('rejects under the local agent transport with a clear message', async () => {
+    const { api } = buildApi(['host-exec']);
+    await expect(api.host.exec({ argv: ['echo', 'hi'] })).rejects.toThrow(
+      /ssh agent transport/,
+    );
+  });
+
+  it('rejects an empty argv (zod) before touching the transport', async () => {
+    const { api } = buildApi(['host-exec']);
+    await expect(api.host.exec({ argv: [] })).rejects.toThrow();
+  });
+
+  it('rejects an out-of-bounds timeout / output cap (zod)', async () => {
+    const { api } = buildApi(['host-exec']);
+    await expect(api.host.exec({ argv: ['echo'], timeoutMs: 999_999 })).rejects.toThrow();
+    await expect(
+      api.host.exec({ argv: ['echo'], maxOutputBytes: 999_999_999 }),
+    ).rejects.toThrow();
+  });
+});

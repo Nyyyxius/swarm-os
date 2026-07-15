@@ -157,6 +157,48 @@ for `manifest ∩ granted`.
 | `connectors.register(type, provider)` | `connectors` | Provide a channel connector type (see §6). |
 | `settings.instance()` | `settings-read` | Read-only instance settings. |
 | `agentAssets.basePath` | `agent-assets` | Transport-aware base path of your copied `agentAssets.dir` (see §7). |
+| `host.exec(input)` | `host-exec` | Run a command on the **host** over SSH (see §4.1). ⚠️ Arbitrary host code execution — full trust; `ssh` transport only. |
+
+### 4.1 `host.exec` — run a command on the host
+
+```ts
+const { code, stdout, stderr, timedOut } = await api.host.exec({
+  argv: ['git', 'status', '--porcelain'],  // program + args (element 0 is the binary)
+  cwd: '/workspace/my-repo',               // optional; /workspace + /data → host paths
+  timeoutMs: 30_000,                        // optional, default 30 000, capped at 120 000
+  maxOutputBytes: 1_048_576,                // optional, default 1 MiB, capped at 8 MiB
+});
+```
+
+Signature: `exec(input): Promise<{ code: number | null; stdout: string; stderr: string; timedOut: boolean }>`.
+
+Semantics:
+
+- **`argv` is run directly** — every element is POSIX-shell-quoted before it is
+  handed to the remote shell, so an argument with spaces or quotes is passed
+  verbatim; there is no shell word-splitting or glob expansion on your args.
+  `argv` must be non-empty; `argv[0]` resolves on the host user's login `PATH`.
+- **Exit handling** — a non-zero exit is a *normal* result (`code` is set, the
+  promise resolves). The promise rejects only for an infrastructure failure
+  (wrong transport, or the local `ssh` binary failing to spawn).
+- **Timeout** — after `timeoutMs` the ssh process is killed and the call resolves
+  with `timedOut: true` and `code: null`.
+- **Output cap** — stdout and stderr are each captured up to `maxOutputBytes`;
+  past that the stream is truncated with a `\n[output truncated at N bytes]`
+  marker. Over-limit `timeoutMs`/`maxOutputBytes` inputs are **rejected**, not
+  silently clamped.
+- **`cwd`** — a container path under `/workspace` or `/data` is translated to its
+  host equivalent (`hostWorkspaceRoot` / `hostDataDir`); any other path is used
+  as-is (assumed host-native). No PTY is allocated (never interactive).
+
+> **⚠️ TRUST MODEL.** `host-exec` is the single most powerful capability swarm-os
+> exposes: it is **arbitrary code execution on the host machine**, running as the
+> SSH user, with that user's full filesystem and network reach. It bypasses every
+> other capability boundary — a plugin with `host-exec` can do anything the host
+> user can. Grant it **only** to plugins whose code you have audited and trust
+> absolutely. It is refused outright unless swarm-os runs with the `ssh` agent
+> transport (`SWARM_OS_AGENT_TRANSPORT=ssh`): under the `local` transport there
+> is no separate host to reach and the call rejects with a clear error.
 
 ---
 

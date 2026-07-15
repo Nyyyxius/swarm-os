@@ -83,6 +83,7 @@ export const PLUGIN_CAPABILITIES = [
   'schedule',
   'connectors',
   'settings-read',
+  'host-exec',
 ] as const;
 
 export type PluginCapability = (typeof PLUGIN_CAPABILITIES)[number];
@@ -307,6 +308,34 @@ export interface CustomNotificationInput {
   level?: NotificationLevel;
 }
 
+// ---------------------------------------------------------------------------
+// Host exec (api.host.exec — capability `host-exec`)
+// ---------------------------------------------------------------------------
+
+/** Input to `api.host.exec` — a command to run on the host over SSH. */
+export interface HostExecInput {
+  /** Program + args. Non-empty; element 0 is the binary (resolved on the host PATH). */
+  argv: string[];
+  /** Working directory on the host. Container `/workspace` + `/data` paths are translated. */
+  cwd?: string;
+  /** Wall-clock timeout in ms. Default 30 000, capped at 120 000. */
+  timeoutMs?: number;
+  /** Per-stream capture cap in bytes. Default 1 MiB, capped at 8 MiB. */
+  maxOutputBytes?: number;
+}
+
+/** Result of `api.host.exec`. */
+export interface HostExecResult {
+  /** Exit code, or `null` when terminated by a signal (including timeout). */
+  code: number | null;
+  /** Captured stdout (utf8), truncated to `maxOutputBytes` with a marker suffix. */
+  stdout: string;
+  /** Captured stderr (utf8), truncated to `maxOutputBytes` with a marker suffix. */
+  stderr: string;
+  /** True when the process was killed because it exceeded `timeoutMs`. */
+  timedOut: boolean;
+}
+
 export interface InstanceSettings {
   instanceLabel: string | null;
   accent: string;
@@ -490,6 +519,20 @@ export interface SwarmPluginApi {
   readonly settings: { instance(): InstanceSettings };
 
   readonly agentAssets: { readonly basePath: string };
+
+  /**
+   * Run an arbitrary command on the HOST over SSH (capability `host-exec`).
+   *
+   * ⚠️ TRUST MODEL — the most powerful capability in the system: arbitrary code
+   * execution on the host as the SSH user. Grant it only to plugins you trust
+   * absolutely. Available ONLY under the `ssh` agent transport; rejects with a
+   * clear error under `local`. `argv` runs directly (no shell word-splitting),
+   * no interactive PTY; a non-zero exit is a normal result, a timeout returns
+   * `timedOut: true`.
+   */
+  readonly host: {
+    exec(input: HostExecInput): Promise<HostExecResult>;
+  };
 }
 
 // ---------------------------------------------------------------------------
