@@ -443,6 +443,9 @@ export function loadConfig(): Config {
   ensureDir(dataDir);
   const logsDir = path.join(dataDir, 'logs');
   ensureDir(logsDir);
+  // Plugin drop-in root (`/data/plugins/<name>/`). Created here so the
+  // PluginHost can scan it at boot; the host owns everything under it.
+  ensureDir(path.join(dataDir, 'plugins'));
 
   // Phase 5 — claude source (RO mount or host dir for dev) and runtime root
   // (RW per-container copy). The runtime dir is created here so downstream

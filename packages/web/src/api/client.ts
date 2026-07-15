@@ -104,6 +104,28 @@ export interface RoleView {
 
 export type RoleInput = Omit<RoleView, 'id' | 'createdAt' | 'updatedAt'>;
 
+export type PluginStatus = 'disabled' | 'enabled' | 'error' | 'crashed' | 'quarantined';
+
+/** Mirror of the server-side `PluginView` (modules/plugins/api-types.ts). */
+export interface PluginView {
+  name: string;
+  version: string;
+  displayName?: string;
+  status: PluginStatus;
+  enabled: boolean;
+  sourceKind: string;
+  apiVersion: number;
+  /** Capabilities the manifest requests. */
+  capabilities: string[];
+  /** Capabilities the operator granted (⊆ capabilities); null before first enable. */
+  grantedCapabilities: string[] | null;
+  failCount: number;
+  quarantinedUntil: string | null;
+  lastError: string | null;
+  installedAt: string;
+  updatedAt: string;
+}
+
 export interface SessionView {
   id: string;
   orchestratorId: string;
@@ -326,6 +348,27 @@ export const api = {
   updateRole: (id: string, body: Partial<RoleInput>) =>
     request<{ role: RoleView }>('PATCH', `/roles/${id}`, body),
   deleteRole: (id: string) => request<void>('DELETE', `/roles/${id}`),
+  // ---- Plugins (J1 socle) --------------------------------------------------
+  listPlugins: () => request<{ plugins: PluginView[] }>('GET', '/plugins'),
+  getPlugin: (name: string) =>
+    request<{ plugin: PluginView; manifest: unknown }>('GET', `/plugins/${name}`),
+  scanPlugins: () => request<{ plugins: PluginView[] }>('POST', '/plugins/scan'),
+  enablePlugin: (name: string, grantedCapabilities?: string[]) =>
+    request<{ plugin: PluginView }>(
+      'POST',
+      `/plugins/${name}/enable`,
+      grantedCapabilities === undefined ? {} : { grantedCapabilities },
+    ),
+  disablePlugin: (name: string) =>
+    request<{ plugin: PluginView }>('POST', `/plugins/${name}/disable`),
+  setPluginPermissions: (name: string, grantedCapabilities: string[]) =>
+    request<{ plugin: PluginView }>('PUT', `/plugins/${name}/permissions`, {
+      grantedCapabilities,
+    }),
+  setPluginConfig: (name: string, config: Record<string, unknown>) =>
+    request<{ plugin: PluginView }>('PUT', `/plugins/${name}/config`, config),
+  uninstallPlugin: (name: string, purge = false) =>
+    request<void>('DELETE', `/plugins/${name}${purge ? '?purge=true' : ''}`),
   validateDiscordToken: (token: string) =>
     request<
       | {

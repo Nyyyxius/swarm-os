@@ -25,6 +25,10 @@ import { SettingsStore } from '../../src/modules/settings/index.js';
 import { MessagesAggregator } from '../../src/modules/metrics/aggregator.js';
 import { BusMetricsCollector } from '../../src/modules/metrics/busMetrics.js';
 import { BackupScheduler } from '../../src/modules/backup/index.js';
+import { PluginStore } from '../../src/modules/plugins/store.js';
+import { PluginHost } from '../../src/modules/plugins/host.js';
+import { eventBus } from '../../src/events.js';
+import { z } from 'zod';
 import { createApp, startServer } from '../../src/http/main.js';
 import { loadConfig, _resetConfigCacheForTesting } from '../../src/config.js';
 import type { Config } from '../../src/config.js';
@@ -54,6 +58,9 @@ export interface TestStack {
   persistence: DbPersistence;
   /** Exposed so settings tests can read the singleton row without re-instantiating. */
   settingsStore: SettingsStore;
+  /** J1 plugins — host + plugins dir exposed so integration tests can drive scan/enable. */
+  pluginHost: PluginHost;
+  pluginsDir: string;
   /** S9 — exposed so integration tests can call `tick()` synchronously. */
   aggregator: MessagesAggregator;
   /** S8 — exposed so integration tests can call `tick()` / `snapshot()`. */
@@ -121,6 +128,17 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
   const persistence = new DbPersistence(db);
   const roleStore = new RoleStore(db);
   const settingsStore = new SettingsStore(db);
+  // J1 plugins — own tables on the raw Db handle + host over `<dataDir>/plugins`.
+  const pluginsDir = path.join(dataDir, 'plugins');
+  fs.mkdirSync(pluginsDir, { recursive: true });
+  const pluginStore = new PluginStore(db);
+  const pluginHost = new PluginHost({
+    store: pluginStore,
+    eventBus,
+    pluginsDir,
+    zod: z,
+    timeouts: { activateMs: 2000, deactivateMs: 1000 },
+  });
   // Default to no-op so a notifier wasn't passed
   const notifier = opts.notifier ?? new NoOpNotifier();
   const spawner = new Spawner(config, { notifier, persistence, roleStore });
@@ -157,6 +175,9 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
       aggregator,
       backup,
       busMetrics,
+      undefined,
+      undefined,
+      pluginHost,
     );
     http = handle.http;
     // Wait until the listener is actually accepting connections.
@@ -176,6 +197,8 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
       db,
       persistence,
       settingsStore,
+      pluginHost,
+      pluginsDir,
       aggregator,
       busMetrics,
       workspaceRoot,
@@ -183,6 +206,7 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
       teardown: async () => {
         aggregator.stop();
         busMetrics.stop();
+        await pluginHost.deactivateAll();
         spawner.shutdownAll('test-shutdown');
         await new Promise((r) => setTimeout(r, 50));
         if (mcp) await mcp.stop();
@@ -206,6 +230,8 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
     db,
     persistence,
     settingsStore,
+    pluginHost,
+    pluginsDir,
     aggregator,
     busMetrics,
     workspaceRoot,
@@ -213,6 +239,7 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
     teardown: async () => {
       aggregator.stop();
       busMetrics.stop();
+      await pluginHost.deactivateAll();
       spawner.shutdownAll('test-shutdown');
       await new Promise((r) => setTimeout(r, 50));
       if (mcp) await mcp.stop();

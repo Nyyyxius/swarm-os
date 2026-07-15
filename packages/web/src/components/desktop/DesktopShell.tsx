@@ -33,6 +33,7 @@ export default function DesktopShell() {
         onSelectTeam={c.handleSelectTeam}
         onNewTeam={() => c.setShowNew(true)}
         onOpenRoles={c.onOpenRoles}
+        onOpenPlugins={c.onOpenPlugins}
         onOpenIde={c.onOpenIde}
         onOpenSettings={() => c.setSettingsOpen(true)}
       />

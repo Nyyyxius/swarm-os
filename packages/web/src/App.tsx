@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import DesktopShell from './components/desktop/DesktopShell';
 import MobileShell from './components/mobile/MobileShell';
 import { RolesPage } from './components/RolesPage';
+import { PluginsPage } from './components/PluginsPage';
 import IdeOverlay from './components/desktop/IdeOverlay';
 import { SwarmControllerProvider } from './controller/SwarmController';
 import { useShellMode } from './hooks/useShellMode';
@@ -10,6 +11,7 @@ type Route =
   | { kind: 'list' }
   | { kind: 'detail'; id: string }
   | { kind: 'roles' }
+  | { kind: 'plugins' }
   | { kind: 'ide' };
 
 /**
@@ -25,6 +27,7 @@ function parseHash(): Route {
   const m = /^#\/orchestrators\/([a-zA-Z0-9-]+)$/.exec(h);
   if (m && m[1]) return { kind: 'detail', id: m[1] };
   if (h === '#/roles') return { kind: 'roles' };
+  if (h === '#/plugins') return { kind: 'plugins' };
   if (h === '#/ide') return { kind: 'ide' };
   return { kind: 'list' };
 }
@@ -33,6 +36,7 @@ function setHashRoute(route: Route): void {
   let target: string;
   if (route.kind === 'list') target = '#/';
   else if (route.kind === 'roles') target = '#/roles';
+  else if (route.kind === 'plugins') target = '#/plugins';
   else if (route.kind === 'ide') target = '#/ide';
   else target = `#/orchestrators/${route.id}`;
   if (window.location.hash !== target) {
@@ -84,6 +88,7 @@ export default function App() {
           routeOrchestratorId={route.kind === 'detail' ? route.id : null}
           onOpenOrchestrator={(id) => setRoute({ kind: 'detail', id })}
           onOpenRoles={() => setRoute({ kind: 'roles' })}
+          onOpenPlugins={() => setRoute({ kind: 'plugins' })}
           onOpenIde={() => setRoute({ kind: 'ide' })}
           onCloseRightPanel={() => {
             if (route.kind === 'detail') setRoute({ kind: 'list' });
@@ -97,6 +102,12 @@ export default function App() {
               gates rendering, so it's safe to always mount. */}
           <RolesPage
             open={route.kind === 'roles'}
+            onClose={() => setRoute({ kind: 'list' })}
+          />
+
+          {/* PluginsPage overlay — responsive, safe to always mount (gated by `open`). */}
+          <PluginsPage
+            open={route.kind === 'plugins'}
             onClose={() => setRoute({ kind: 'list' })}
           />
 

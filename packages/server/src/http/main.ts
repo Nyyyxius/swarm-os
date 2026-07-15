@@ -20,6 +20,8 @@ import { createAiRouter } from './routes/ai.js';
 import { createDiscordRouter } from './routes/discord.js';
 import { createSettingsRouter } from './routes/settings.js';
 import { createIdeRouter } from './routes/ide.js';
+import { createPluginsRouter } from './routes/plugins.js';
+import type { PluginHost } from '../modules/plugins/host.js';
 import type { RoleStore } from '../modules/roles/index.js';
 import type { SettingsStore } from '../modules/settings/index.js';
 import type { MessagesAggregator } from '../modules/metrics/aggregator.js';
@@ -87,6 +89,7 @@ export function createApp(
   busMetrics?: BusMetricsCollector,
   bootGate?: BootGate,
   onRolesChanged?: () => void,
+  pluginHost?: PluginHost,
 ): { app: express.Express; ideProxy: ProxyHandler | null } {
   const app = express();
   app.disable('x-powered-by');
@@ -227,6 +230,12 @@ export function createApp(
   // Operator backup: force a snapshot now + list existing snapshots. Same
   // X-Auth-Token gate as the rest; reuses the live BackupScheduler.
   app.use(createBackupRouter(backup));
+  // Plugin management REST (list/scan/enable/disable/permissions/config/
+  // uninstall). Same X-Auth-Token gate. The `/plugin-api` + `/public/plugins`
+  // dispatchers for plugin-owned routes land in J2 — this is the control plane.
+  if (pluginHost) {
+    app.use(createPluginsRouter(pluginHost, path.join(config.dataDir, 'plugins')));
+  }
 
   // JSON error handler — must be the LAST middleware. Without this, body-parser
   // failures (entity.too.large, malformed JSON) return Express' default HTML
@@ -262,6 +271,7 @@ export function startServer(
   busMetrics?: BusMetricsCollector,
   bootGate?: BootGate,
   onRolesChanged?: () => void,
+  pluginHost?: PluginHost,
 ): ServerHandle {
   const { app, ideProxy } = createApp(
     config,
@@ -273,6 +283,7 @@ export function startServer(
     busMetrics,
     bootGate,
     onRolesChanged,
+    pluginHost,
   );
   const http = createServer(app);
 

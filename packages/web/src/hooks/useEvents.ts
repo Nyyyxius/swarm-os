@@ -79,6 +79,19 @@ export interface OrchestratorCreatedEvent {
   orchestratorId: string;
 }
 
+/**
+ * Normalized `plugin.host.changed` frame — a plugin's enable/status changed.
+ * Payload is minimal so the UI can refresh the plugins list without a refetch
+ * of each row (see server events.ts PluginHostChangedPayload).
+ */
+export interface PluginHostChangedEvent {
+  kind: 'plugin.host.changed';
+  ts: string;
+  name: string;
+  status: string;
+  enabled: boolean;
+}
+
 export interface UseEventsOptions {
   /** Callback fired on every well-formed mailbox.message frame. */
   onMailboxMessage?: (ev: MailboxMessageEvent) => void;
@@ -86,6 +99,8 @@ export interface UseEventsOptions {
   onSessionCreated?: (ev: SessionCreatedEvent) => void;
   /** Callback fired on every orchestrator.created frame (Step 19). */
   onOrchestratorCreated?: (ev: OrchestratorCreatedEvent) => void;
+  /** Callback fired on every plugin.host.changed frame (J1 plugins). */
+  onPluginHostChanged?: (ev: PluginHostChangedEvent) => void;
 }
 
 const AUTO_DISMISS_MS = 30_000;
@@ -107,9 +122,11 @@ export function useEvents(opts: UseEventsOptions = {}): {
   const onMailRef = useRef<UseEventsOptions['onMailboxMessage']>(opts.onMailboxMessage);
   const onCreatedRef = useRef<UseEventsOptions['onSessionCreated']>(opts.onSessionCreated);
   const onOrchCreatedRef = useRef<UseEventsOptions['onOrchestratorCreated']>(opts.onOrchestratorCreated);
+  const onPluginRef = useRef<UseEventsOptions['onPluginHostChanged']>(opts.onPluginHostChanged);
   useEffect(() => { onMailRef.current = opts.onMailboxMessage; }, [opts.onMailboxMessage]);
   useEffect(() => { onCreatedRef.current = opts.onSessionCreated; }, [opts.onSessionCreated]);
   useEffect(() => { onOrchCreatedRef.current = opts.onOrchestratorCreated; }, [opts.onOrchestratorCreated]);
+  useEffect(() => { onPluginRef.current = opts.onPluginHostChanged; }, [opts.onPluginHostChanged]);
 
   const cancelTimer = (id: string): void => {
     const t = timersRef.current.get(id);
@@ -230,6 +247,21 @@ export function useEvents(opts: UseEventsOptions = {}): {
                     kind: 'orchestrator.created',
                     ts: ev.ts,
                     orchestratorId: ev.orchestratorId,
+                  });
+                }
+
+                // J1 plugins — plugin.host.changed: refresh the plugins list
+                // live. Payload carries { name, status, enabled }.
+                if (ev.kind === 'plugin.host.changed') {
+                  const p = ev.payload as
+                    | { name?: string; status?: string; enabled?: boolean }
+                    | undefined;
+                  onPluginRef.current?.({
+                    kind: 'plugin.host.changed',
+                    ts: ev.ts,
+                    name: typeof p?.name === 'string' ? p.name : '',
+                    status: typeof p?.status === 'string' ? p.status : '',
+                    enabled: p?.enabled === true,
                   });
                 }
 

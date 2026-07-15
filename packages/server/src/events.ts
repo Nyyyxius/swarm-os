@@ -1,13 +1,27 @@
 import { EventEmitter } from 'node:events';
 
-export type SwarmEventKind =
+/**
+ * Core event kinds emitted by the server itself. `plugin.host.changed` is a
+ * built-in surfaced when a plugin's enable/status changes — its minimal
+ * payload `{ name, status, enabled }` lets the UI patch a row without a refetch.
+ */
+export type BuiltinSwarmEventKind =
   | 'orchestrator.created'
   | 'orchestrator.updated'
   | 'orchestrator.destroyed'
   | 'session.created'
   | 'session.status_changed'
   | 'session.exited'
-  | 'mailbox.message';
+  | 'mailbox.message'
+  | 'plugin.host.changed';
+
+/**
+ * Open union: plugins emit `plugin.<name>.<subKind>` via `api.events.emit`
+ * (the host forces the prefix, so a plugin can never forge a core kind). The
+ * `EventsHub` rebroadcasts everything unfiltered and the web client matches
+ * kinds with independent `if`s, so unknown kinds are ignored gracefully.
+ */
+export type SwarmEventKind = BuiltinSwarmEventKind | `plugin.${string}`;
 
 export interface SwarmEvent {
   kind: SwarmEventKind;
@@ -15,6 +29,13 @@ export interface SwarmEvent {
   orchestratorId?: string;
   sessionId?: string;
   payload?: unknown;
+}
+
+/** Payload of the built-in `plugin.host.changed` event. */
+export interface PluginHostChangedPayload {
+  name: string;
+  status: string;
+  enabled: boolean;
 }
 
 /**
@@ -49,7 +70,7 @@ export interface MailboxMessagePayload {
   fromOrchestratorId?: string;
 }
 
-class SwarmEventBus extends EventEmitter {
+export class SwarmEventBus extends EventEmitter {
   emitEvent(ev: Omit<SwarmEvent, 'ts'>): void {
     const full: SwarmEvent = { ...ev, ts: new Date().toISOString() };
     this.emit('event', full);

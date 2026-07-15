@@ -1,0 +1,9 @@
+{
+  "name": "echo",
+  "version": "0.1.0",
+  "displayName": "Echo",
+  "description": "Minimal J1 example plugin: re-emits every mailbox.message as plugin.echo.seen and writes a heartbeat to its kv store.",
+  "main": "index.js",
+  "apiVersion": 1,
+  "capabilities": ["events", "events-emit", "db-kv", "schedule"]
+}

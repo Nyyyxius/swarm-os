@@ -71,6 +71,8 @@ export interface SwarmControllerProps {
   onCloseRightPanel: () => void;
   /** TopBar/Dock ROLES → route `#/roles`. */
   onOpenRoles?: () => void;
+  /** TopBar/Dock PLUGINS → route `#/plugins`. */
+  onOpenPlugins?: () => void;
   /** TopBar/Dock IDE → route `#/ide`. */
   onOpenIde?: () => void;
   /** Current shell-mode override (auto|desktop|mobile), from useShellMode. */
@@ -123,7 +125,10 @@ export interface SwarmControllerValue {
   setEditConfigFor: (o: OrchestratorView | null) => void;
   // route passthroughs
   onOpenRoles: () => void;
+  onOpenPlugins: () => void;
   onOpenIde: () => void;
+  /** Revision counter bumped on each plugin.host.changed WS event (live refresh). */
+  pluginsRev: number;
   // shell-mode override (escape hatch from auto breakpoint)
   shellMode: ShellMode;
   setShellMode: (m: ShellMode) => void;
@@ -163,6 +168,7 @@ export function SwarmControllerProvider({
   onOpenOrchestrator,
   onCloseRightPanel,
   onOpenRoles,
+  onOpenPlugins,
   onOpenIde,
   shellMode,
   setShellMode,
@@ -395,6 +401,13 @@ export function SwarmControllerProvider({
     }, 700);
   }, []);
 
+  // J1 plugins — bump a revision on each plugin.host.changed so the
+  // PluginsPage (via usePlugins) refetches live on top of its poll.
+  const [pluginsRev, setPluginsRev] = useState(0);
+  const handlePluginHostChanged = useCallback(() => {
+    setPluginsRev((v) => v + 1);
+  }, []);
+
   // ── THE single useEvents() — waiting + connected + pulses pipeline ─────
   const {
     connected: eventsConnected,
@@ -404,6 +417,7 @@ export function SwarmControllerProvider({
     onMailboxMessage: handleMailboxMessage,
     onSessionCreated: handleSessionCreated,
     onOrchestratorCreated: handleOrchestratorCreated,
+    onPluginHostChanged: handlePluginHostChanged,
   });
 
   useEffect(() => {
@@ -727,6 +741,7 @@ export function SwarmControllerProvider({
 
   const setAuthMissing = useCallback(() => setAuthState('missing'), []);
   const onOpenRolesResolved = useCallback(() => { onOpenRoles?.(); }, [onOpenRoles]);
+  const onOpenPluginsResolved = useCallback(() => { onOpenPlugins?.(); }, [onOpenPlugins]);
   const onOpenIdeResolved = useCallback(() => { onOpenIde?.(); }, [onOpenIde]);
 
   const value: SwarmControllerValue = {
@@ -764,7 +779,9 @@ export function SwarmControllerProvider({
     editConfigFor,
     setEditConfigFor,
     onOpenRoles: onOpenRolesResolved,
+    onOpenPlugins: onOpenPluginsResolved,
     onOpenIde: onOpenIdeResolved,
+    pluginsRev,
     shellMode,
     setShellMode,
     selectAgent,

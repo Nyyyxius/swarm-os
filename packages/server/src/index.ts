@@ -1,4 +1,5 @@
 import * as path from 'node:path';
+import { z } from 'zod';
 import { loadConfig } from './config.js';
 import { Spawner } from './modules/spawner/index.js';
 import { startServer, type BootGate } from './http/main.js';
@@ -16,6 +17,9 @@ import { BusMetricsCollector } from './modules/metrics/busMetrics.js';
 import { BackupScheduler } from './modules/backup/index.js';
 import { RoleScheduler } from './modules/schedule/index.js';
 import { IdeSupervisor } from './modules/ide/index.js';
+import { PluginStore } from './modules/plugins/store.js';
+import { PluginHost } from './modules/plugins/host.js';
+import { eventBus } from './events.js';
 import {
   rehydrateMailbox,
   mailboxJanitor,
@@ -207,6 +211,21 @@ if (config.ideEnabled) {
   log.info({ event: 'boot.ide', port: config.idePort, cli: config.ideCliPath });
 }
 
+// ---- Plugin system (J1 — socle) -------------------------------------------
+// PluginStore owns its own tables on the raw Db handle. PluginHost loads,
+// enable/disable/reload at runtime, guards every plugin callback against a
+// server-killing throw, and quarantines crash loops. Activated AFTER mcp.start
+// (so future bridges are up before auto-resume) but its activateEnabled()
+// never rejects — see the boot chain below.
+const pluginStore = new PluginStore(db);
+const pluginHost = new PluginHost({
+  store: pluginStore,
+  eventBus,
+  pluginsDir: path.join(config.dataDir, 'plugins'),
+  zod: z,
+  onRolesChanged: () => scheduler.reload(),
+});
+
 // Phase 8 — bootGate: HTTP listens immediately so /health stays green for
 // Docker, but business routes return 503 until auto-resume finishes.
 const bootGate: BootGate = { value: false };
@@ -220,6 +239,7 @@ const handle = startServer(
   busMetrics,
   bootGate,
   () => scheduler.reload(),
+  pluginHost,
 );
 
 // Start MCP HTTP listener on its own port (loopback only, plan §14).
@@ -274,6 +294,10 @@ async function runAutoResume(): Promise<void> {
 
 mcp
   .start()
+  // Plugins come up BEFORE auto-resume so any future bridge is live when the
+  // teams return. activateEnabled() catches per-plugin internally and NEVER
+  // rejects, so it can't trip the fatal .catch below.
+  .then(() => pluginHost.activateEnabled())
   .then(() => runAutoResume())
   .catch(async (err) => {
     log.error({ event: 'mcp.start_failed', error: err instanceof Error ? err.message : String(err) });
@@ -306,6 +330,9 @@ async function shutdown(signal: string): Promise<void> {
     backup.stop();
     // Disarm per-role crons so no tick fires into a half-torn-down spawner.
     scheduler.stop();
+    // Tear down active plugins (disposables + deactivate) before the spawner
+    // goes away, so a plugin's teardown can still observe live teams.
+    await pluginHost.deactivateAll();
     // Stop the VS Code web child (suppresses its restart loop, SIGTERM→SIGKILL).
     await ide.stop();
     spawner.shutdownAll(`signal:${signal}`);

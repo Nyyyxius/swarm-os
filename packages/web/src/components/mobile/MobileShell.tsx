@@ -134,6 +134,9 @@ export default function MobileShell() {
         <button type="button" className="m-dock-btn" onClick={() => c.onOpenRoles()}>
           <span>ROLES</span>
         </button>
+        <button type="button" className="m-dock-btn" onClick={() => c.onOpenPlugins()}>
+          <span>PLUGINS</span>
+        </button>
         <button type="button" className="m-dock-btn" onClick={() => c.setSettingsOpen(true)}>
           <span>SETTINGS</span>
         </button>
