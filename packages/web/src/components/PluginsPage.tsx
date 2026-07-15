@@ -5,6 +5,7 @@ import { useSwarmController } from '../controller/SwarmController';
 import { HttpError, type PluginView, type PluginStatus } from '../api/client';
 import { PermissionsDialog } from './plugins/PermissionsDialog';
 import { PluginConfigForm } from './plugins/PluginConfigForm';
+import { InstallPluginModal } from './plugins/InstallPluginModal';
 
 /**
  * Plugins management overlay — modeled on RolesPage. Lists installed plugins
@@ -51,9 +52,19 @@ function messageOf(err: unknown): string {
 
 export function PluginsPage({ open, onClose }: Props) {
   const c = useSwarmController();
-  const { plugins, loading, error, scan, enable, disable, setPermissions, uninstall } = usePlugins(
-    c.pluginsRev,
-  );
+  const {
+    plugins,
+    loading,
+    error,
+    scan,
+    enable,
+    disable,
+    setPermissions,
+    uninstall,
+    install,
+    upload,
+    upgrade,
+  } = usePlugins(c.pluginsRev);
   const { isMobile } = useShellMode();
 
   const [selectedName, setSelectedName] = useState<string | null>(null);
@@ -63,6 +74,7 @@ export function PluginsPage({ open, onClose }: Props) {
   // Permission dialog: 'enable' (first turn-on) or 'edit' (change grant).
   const [permMode, setPermMode] = useState<'enable' | 'edit' | null>(null);
   const [permError, setPermError] = useState<string | null>(null);
+  const [installOpen, setInstallOpen] = useState(false);
 
   useEffect(() => {
     if (open) setMobileView('list');
@@ -130,6 +142,26 @@ export function PluginsPage({ open, onClose }: Props) {
     try {
       await uninstall(p.name, true);
       setSelectedName(null);
+    } catch (e) {
+      setOpError(messageOf(e));
+    } finally {
+      setBusy(false);
+    }
+  }
+
+  async function doUpgrade(p: PluginView): Promise<void> {
+    setOpError(null);
+    setBusy(true);
+    try {
+      const r = await upgrade(p.name);
+      // An upgrade that requests NEW capabilities re-presents them for approval
+      // rather than granting silently — open the edit-grant dialog.
+      if (r.newCapabilities.length > 0) {
+        setPermError(
+          `New capabilities requested by v${r.plugin.version}: ${r.newCapabilities.join(', ')} — review the grant.`,
+        );
+        setPermMode('edit');
+      }
     } catch (e) {
       setOpError(messageOf(e));
     } finally {
@@ -207,9 +239,17 @@ export function PluginsPage({ open, onClose }: Props) {
           ))}
         </div>
 
-        <div className="roles-add">
+        <div className="roles-add" style={{ display: 'flex', gap: 8 }}>
+          <button
+            className="btn"
+            style={{ flex: 1, color: 'var(--amber)' }}
+            onClick={() => setInstallOpen(true)}
+            disabled={busy}
+          >
+            INSTALL
+          </button>
           <button className="btn" style={{ flex: 1 }} onClick={() => void doScan()} disabled={busy}>
-            {busy ? '…' : 'SCAN /data/plugins'}
+            {busy ? '…' : 'SCAN'}
           </button>
         </div>
       </aside>
@@ -330,6 +370,20 @@ export function PluginsPage({ open, onClose }: Props) {
                   ENABLE
                 </button>
               )}
+              {/* Upgrade re-fetches the recorded source; upload plugins need a
+                  fresh upload (server returns 409), so it is disabled for them. */}
+              <button
+                className="btn"
+                onClick={() => void doUpgrade(plugin)}
+                disabled={busy || plugin.sourceKind === 'upload'}
+                title={
+                  plugin.sourceKind === 'upload'
+                    ? 'Upload-source plugins require a new upload (use INSTALL)'
+                    : `Re-fetch from ${plugin.sourceKind} source`
+                }
+              >
+                UPGRADE
+              </button>
               <button className="btn danger" onClick={() => void doUninstall(plugin)} disabled={busy}>
                 UNINSTALL
               </button>
@@ -339,6 +393,19 @@ export function PluginsPage({ open, onClose }: Props) {
           <div className="field-help">No plugin selected.</div>
         )}
       </main>
+
+      {installOpen && (
+        <InstallPluginModal
+          install={install}
+          upload={upload}
+          onClose={() => setInstallOpen(false)}
+          onInstalled={(r) => {
+            setInstallOpen(false);
+            setSelectedName(r.plugin.name);
+            if (isMobile) setMobileView('detail');
+          }}
+        />
+      )}
 
       {permMode && plugin && (
         <PermissionsDialog

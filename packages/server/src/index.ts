@@ -21,6 +21,7 @@ import { PluginStore } from './modules/plugins/store.js';
 import { PluginHost } from './modules/plugins/host.js';
 import { PluginToolRegistry } from './modules/plugins/mcp-registry.js';
 import { PluginHttpRegistry } from './modules/plugins/http-registry.js';
+import { PluginInstaller } from './modules/plugins/installer.js';
 import { eventBus } from './events.js';
 import {
   rehydrateMailbox,
@@ -256,6 +257,15 @@ const pluginHost = new PluginHost({
     }
   },
 });
+// J3 — install/upgrade from npm/git/upload/dir. Shares the host's per-name lock
+// (via host.commitInstall) so a swap is never concurrent with an enable (I-8).
+const pluginInstaller = new PluginInstaller({
+  pluginsDir: path.join(config.dataDir, 'plugins'),
+  store: pluginStore,
+  host: pluginHost,
+});
+// Purge stale `.staging/*` (interrupted installs, `.bak-*` leftovers) at boot.
+pluginInstaller.purgeStaging();
 
 // Phase 8 — bootGate: HTTP listens immediately so /health stays green for
 // Docker, but business routes return 503 until auto-resume finishes.
@@ -272,6 +282,7 @@ const handle = startServer(
   () => scheduler.reload(),
   pluginHost,
   pluginHttpRegistry,
+  pluginInstaller,
 );
 
 // Start MCP HTTP listener on its own port (loopback only, plan §14).

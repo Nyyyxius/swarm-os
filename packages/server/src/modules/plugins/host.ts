@@ -27,7 +27,7 @@ import { PluginStore, type PluginRow } from './store.js';
 import { loadManifest, HOST_API_VERSION, type PluginManifest } from './manifest.js';
 import { loadPluginModule } from './loader.js';
 import { buildPluginApi, type PluginGuard } from './api.js';
-import { withTimeout, isThenable } from './util.js';
+import { withTimeout, isThenable, swapPluginDir } from './util.js';
 import type { PluginToolRegistry } from './mcp-registry.js';
 import type { PluginHttpRegistry } from './http-registry.js';
 import {
@@ -81,6 +81,26 @@ export class PluginActivationError extends Error {
     super(message);
     this.name = 'PluginActivationError';
   }
+}
+
+/** A validated staged folder handed to `PluginHost.commitInstall`. */
+export interface CommitInstallInput {
+  name: string;
+  /** `.staging/<uuid>` — moved into `<pluginsDir>/<name>` under the lock. */
+  stagingDir: string;
+  sourceKind: string;
+  sourceRef: string | null;
+  version: string;
+  apiVersion: number;
+  /** The new manifest's declared capabilities (for the new-capability gap). */
+  manifestCaps: PluginCapability[];
+}
+
+export interface CommitInstallResult {
+  view: PluginView;
+  isUpgrade: boolean;
+  /** Manifest capabilities not covered by the prior grant — need UI approval. */
+  newCapabilities: PluginCapability[];
 }
 
 // ---------------------------------------------------------------------------
@@ -651,8 +671,13 @@ export class PluginHost {
   }
 
   /**
-   * Uninstall: disable if active, remove the folder, drop the row. `purge`
-   * also drops the plugin's kv (config lives on the row, so it goes with it).
+   * Uninstall (red-team I-9): under the per-name lock — disable if active →
+   * remove the copied agentAssets → `fs.rm` the plugin folder → drop the row.
+   * `purge=true` additionally drops the plugin's kv, its `config_json` (on the
+   * row) AND every private `plugin_<name'>_*` table/index/trigger in one
+   * transaction (red-team I-6/I-7) so a later reinstall of the same name starts
+   * clean. Without `purge`, kv + private tables are LEFT in place (preserved
+   * for a re-drop of the same name).
    */
   async uninstall(name: string, purge = false): Promise<void> {
     return this.locks.run(name, async () => {
@@ -669,14 +694,88 @@ export class PluginHost {
           error: err instanceof Error ? err.message : String(err),
         });
       }
-      if (purge) this.store.purgeKv(name);
-      this.store.delete(name);
+      if (purge) this.store.purgeAndDelete(name);
+      else this.store.delete(name);
       this.crashedNames.delete(name);
       this.crashWindows.delete(name);
       this.eventBus.emitEvent({
         kind: 'plugin.host.changed',
         payload: { name, status: 'disabled', enabled: false },
       });
+    });
+  }
+
+  /**
+   * Commit a staged install/upgrade (called by the PluginInstaller AFTER it has
+   * fetched + `npm install`ed + validated a plugin under `.staging/<uuid>`).
+   *
+   * Runs entirely under the per-name lock SHARED with the installer (red-team
+   * I-8): a concurrent enable/disable/reload is serialised behind it, so it can
+   * never `import()` a half-swapped tree. Sequence — tear down the running
+   * instance (if any) → swap the folder on disk → persist the row → re-activate
+   * an upgraded plugin that was running, granting ONLY the prior intersection
+   * (new manifest capabilities stay ungranted; they are returned for the UI to
+   * re-present for approval).
+   */
+  async commitInstall(input: CommitInstallInput): Promise<CommitInstallResult> {
+    const { name, stagingDir } = input;
+    return this.locks.run(name, async () => {
+      const existing = this.store.get(name);
+      const isUpgrade = !!existing;
+      const wasActive = this.active.has(name);
+      const prevGranted = existing ? (this.parseGranted(existing) ?? []) : [];
+
+      // 1. Tear down the running instance BEFORE touching the disk.
+      if (wasActive) {
+        const inst = this.active.get(name);
+        if (inst) await this.deactivateInstance(name, inst);
+        if (this.config) removeAgentAssets(this.config, name);
+      }
+
+      // 2. Swap the code into place (same-device rename, EXDEV → copy fallback).
+      swapPluginDir(this.pluginsDir, name, stagingDir);
+
+      // 3. Persist the row.
+      const now = new Date().toISOString();
+      if (isUpgrade) {
+        this.store.patch(name, {
+          version: input.version,
+          source_kind: input.sourceKind,
+          source_ref: input.sourceRef,
+          api_version: input.apiVersion,
+        });
+      } else {
+        this.store.upsert({
+          name,
+          version: input.version,
+          source_kind: input.sourceKind,
+          source_ref: input.sourceRef,
+          enabled: 0,
+          config_json: null,
+          granted_capabilities_json: null,
+          api_version: input.apiVersion,
+          fail_count: 0,
+          quarantined_until: null,
+          installed_at: now,
+          updated_at: now,
+          last_error: null,
+        });
+      }
+
+      // Capabilities the new manifest wants that the prior grant didn't cover.
+      const newCapabilities = input.manifestCaps.filter((c) => !prevGranted.includes(c));
+
+      // 4. Re-activate an upgraded-and-running plugin with the PRIOR grant only
+      //    (doEnable ∩'s it against the new manifest). A failure surfaces as a
+      //    PluginActivationError (→ 422); the new code is already on disk and
+      //    the row shows enabled + last_error.
+      if (wasActive) {
+        const fresh = this.store.get(name);
+        if (fresh) await this.doEnable(name, fresh, prevGranted);
+      } else {
+        this.emitChanged(name);
+      }
+      return { view: this.viewOf(name), isUpgrade, newCapabilities };
     });
   }
 

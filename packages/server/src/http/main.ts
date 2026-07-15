@@ -23,6 +23,7 @@ import { createIdeRouter } from './routes/ide.js';
 import { createPluginsRouter } from './routes/plugins.js';
 import type { PluginHost } from '../modules/plugins/host.js';
 import type { PluginHttpRegistry } from '../modules/plugins/http-registry.js';
+import type { PluginInstaller } from '../modules/plugins/installer.js';
 import type { RoleStore } from '../modules/roles/index.js';
 import type { SettingsStore } from '../modules/settings/index.js';
 import type { MessagesAggregator } from '../modules/metrics/aggregator.js';
@@ -92,6 +93,7 @@ export function createApp(
   onRolesChanged?: () => void,
   pluginHost?: PluginHost,
   pluginHttpRegistry?: PluginHttpRegistry,
+  pluginInstaller?: PluginInstaller,
 ): { app: express.Express; ideProxy: ProxyHandler | null } {
   const app = express();
   app.disable('x-powered-by');
@@ -256,10 +258,13 @@ export function createApp(
   // X-Auth-Token gate as the rest; reuses the live BackupScheduler.
   app.use(createBackupRouter(backup));
   // Plugin management REST (list/scan/enable/disable/permissions/config/
-  // uninstall). Same X-Auth-Token gate. The `/plugin-api` + `/public/plugins`
-  // dispatchers for plugin-owned routes land in J2 — this is the control plane.
+  // install/upload/upgrade/uninstall). Same X-Auth-Token gate. The `/plugin-api`
+  // + `/public/plugins` dispatchers for plugin-owned routes are J2 — this is the
+  // control plane. `express.raw` is scoped to `/plugins/upload` inside the router.
   if (pluginHost) {
-    app.use(createPluginsRouter(pluginHost, path.join(config.dataDir, 'plugins')));
+    app.use(
+      createPluginsRouter(pluginHost, path.join(config.dataDir, 'plugins'), pluginInstaller),
+    );
   }
 
   // J2 — plugin AUTHENTICATED routes (`/plugin-api/:name/*`). Mounted AFTER the
@@ -307,6 +312,7 @@ export function startServer(
   onRolesChanged?: () => void,
   pluginHost?: PluginHost,
   pluginHttpRegistry?: PluginHttpRegistry,
+  pluginInstaller?: PluginInstaller,
 ): ServerHandle {
   const { app, ideProxy } = createApp(
     config,
@@ -320,6 +326,7 @@ export function startServer(
     onRolesChanged,
     pluginHost,
     pluginHttpRegistry,
+    pluginInstaller,
   );
   const http = createServer(app);
 

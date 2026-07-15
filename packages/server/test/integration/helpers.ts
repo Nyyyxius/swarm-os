@@ -29,6 +29,7 @@ import { PluginStore } from '../../src/modules/plugins/store.js';
 import { PluginHost } from '../../src/modules/plugins/host.js';
 import { PluginToolRegistry } from '../../src/modules/plugins/mcp-registry.js';
 import { PluginHttpRegistry } from '../../src/modules/plugins/http-registry.js';
+import { PluginInstaller } from '../../src/modules/plugins/installer.js';
 import { broadcastToLeadsFromExternal } from '../../src/modules/orchestrator/messaging.js';
 import { eventBus } from '../../src/events.js';
 import { z } from 'zod';
@@ -72,6 +73,8 @@ export interface TestStack {
   /** J2 — registries exposed so tests can assert registered tools/routers. */
   pluginToolRegistry: PluginToolRegistry;
   pluginHttpRegistry: PluginHttpRegistry;
+  /** J3 — installer exposed so tests can drive install/upgrade directly. */
+  pluginInstaller: PluginInstaller;
   /** S9 — exposed so integration tests can call `tick()` synchronously. */
   aggregator: MessagesAggregator;
   /** S8 — exposed so integration tests can call `tick()` / `snapshot()`. */
@@ -174,6 +177,13 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
       }
     },
   });
+  // J3 — installer over the same pluginsDir, sharing the host's per-name lock.
+  const pluginInstaller = new PluginInstaller({
+    pluginsDir,
+    store: pluginStore,
+    host: pluginHost,
+  });
+  pluginInstaller.purgeStaging();
   // S9 — aggregator. We DON'T call `start()` in tests: the integration tests
   // drive `tick()` synchronously to avoid 60 s waits, and starting the
   // interval would risk spurious ticks during the test.
@@ -211,6 +221,7 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
       undefined,
       pluginHost,
       pluginHttpRegistry,
+      pluginInstaller,
     );
     http = handle.http;
     // Wait until the listener is actually accepting connections.
@@ -234,6 +245,7 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
       pluginsDir,
       pluginToolRegistry,
       pluginHttpRegistry,
+      pluginInstaller,
       aggregator,
       busMetrics,
       workspaceRoot,
@@ -267,6 +279,9 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
     settingsStore,
     pluginHost,
     pluginsDir,
+    pluginToolRegistry,
+    pluginHttpRegistry,
+    pluginInstaller,
     aggregator,
     busMetrics,
     workspaceRoot,

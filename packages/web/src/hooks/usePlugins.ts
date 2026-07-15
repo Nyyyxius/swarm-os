@@ -1,5 +1,10 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, type PluginView } from '../api/client';
+import {
+  api,
+  type PluginView,
+  type InstallSourceInput,
+  type PluginInstallResult,
+} from '../api/client';
 
 interface State {
   plugins: PluginView[];
@@ -23,6 +28,9 @@ export function usePlugins(
   disable: (name: string) => Promise<PluginView>;
   setPermissions: (name: string, grantedCapabilities: string[]) => Promise<PluginView>;
   uninstall: (name: string, purge?: boolean) => Promise<void>;
+  install: (source: InstallSourceInput) => Promise<PluginInstallResult>;
+  upload: (file: File | Blob, name?: string) => Promise<PluginInstallResult>;
+  upgrade: (name: string) => Promise<PluginInstallResult>;
 } {
   const [state, setState] = useState<State>({ plugins: [], loading: true, error: null });
 
@@ -85,5 +93,43 @@ export function usePlugins(
     [refresh],
   );
 
-  return { ...state, refresh, scan, enable, disable, setPermissions, uninstall };
+  const install = useCallback(
+    async (source: InstallSourceInput) => {
+      const res = await api.installPlugin(source);
+      await refresh();
+      return res;
+    },
+    [refresh],
+  );
+
+  const upload = useCallback(
+    async (file: File | Blob, name?: string) => {
+      const res = await api.uploadPlugin(file, name);
+      await refresh();
+      return res;
+    },
+    [refresh],
+  );
+
+  const upgrade = useCallback(
+    async (name: string) => {
+      const res = await api.upgradePlugin(name);
+      await refresh();
+      return res;
+    },
+    [refresh],
+  );
+
+  return {
+    ...state,
+    refresh,
+    scan,
+    enable,
+    disable,
+    setPermissions,
+    uninstall,
+    install,
+    upload,
+    upgrade,
+  };
 }

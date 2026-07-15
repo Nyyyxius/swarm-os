@@ -126,6 +126,20 @@ export interface PluginView {
   updatedAt: string;
 }
 
+/** Body of `POST /plugins/install`. Upload is a separate raw-body endpoint. */
+export type InstallSourceInput =
+  | { source: 'npm'; spec: string }
+  | { source: 'git'; url: string; ref?: string }
+  | { source: 'dir'; dir: string };
+
+/** Response of install / upload / upgrade. */
+export interface PluginInstallResult {
+  plugin: PluginView;
+  isUpgrade: boolean;
+  /** Manifest capabilities not yet granted (re-present for approval on upgrade). */
+  newCapabilities: string[];
+}
+
 export interface SessionView {
   id: string;
   orchestratorId: string;
@@ -374,6 +388,26 @@ export const api = {
     request<{ plugin: PluginView }>('PUT', `/plugins/${name}/config`, config),
   uninstallPlugin: (name: string, purge = false) =>
     request<void>('DELETE', `/plugins/${name}${purge ? '?purge=true' : ''}`),
+  // ---- Plugins (J3 install from source / upgrade) --------------------------
+  installPlugin: (source: InstallSourceInput) =>
+    request<PluginInstallResult>('POST', '/plugins/install', source),
+  /** Upload a `.tgz` (npm pack format) — RAW body, NOT JSON. */
+  uploadPlugin: async (file: File | Blob, name?: string): Promise<PluginInstallResult> => {
+    const qs = name ? `?name=${encodeURIComponent(name)}` : '';
+    const res = await fetch(`/plugins/upload${qs}`, {
+      method: 'POST',
+      headers: { 'X-Auth-Token': getToken(), 'Content-Type': 'application/gzip' },
+      body: file,
+    });
+    const ct = res.headers.get('content-type') ?? '';
+    const parsed: unknown = ct.includes('application/json') ? await res.json() : await res.text();
+    if (!res.ok) {
+      throw new HttpError(`HTTP ${res.status} POST /plugins/upload`, res.status, parsed);
+    }
+    return parsed as PluginInstallResult;
+  },
+  upgradePlugin: (name: string) =>
+    request<PluginInstallResult>('POST', `/plugins/${name}/upgrade`),
   validateDiscordToken: (token: string) =>
     request<
       | {

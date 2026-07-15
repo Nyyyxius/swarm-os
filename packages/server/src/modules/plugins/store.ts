@@ -265,4 +265,50 @@ export class PluginStore {
       log.warn({ event: 'plugins.kv_write_failed', op: 'purge', plugin, error: String(err) });
     }
   }
+
+  /**
+   * Enumerate the private tables/indexes/triggers a plugin owns —
+   * `plugin_<name'>_%` where `name'` = name with `-`→`_` (a bare tiret is an
+   * invalid SQL identifier, so `defineTable` mandates the underscore form).
+   * The `_` in the prefix is a LIKE wildcard, so it is escaped to match
+   * literally (else `plugin_x_` would also match `plugin_xY`).
+   */
+  private pluginObjectNames(plugin: string): Array<{ type: string; name: string }> {
+    const namePrime = plugin.replace(/-/g, '_');
+    const prefix = `plugin_${namePrime}_`;
+    const like = `${prefix.replace(/([\\%_])/g, '\\$1')}%`;
+    return this.db
+      .prepare<[string], { type: string; name: string }>(
+        "SELECT type, name FROM sqlite_master WHERE type IN ('table','index','trigger') AND name LIKE ? ESCAPE '\\'",
+      )
+      .all(like);
+  }
+
+  /**
+   * Hard purge for `DELETE /plugins/:name?purge=true` (red-team I-6/I-7): in ONE
+   * transaction drop the plugin's `plugin_<name'>_*` tables/indexes/triggers,
+   * wipe `plugin_kv`, and delete the registry row (which carries `config_json`).
+   * Atomic so a crash can't leave a half-purged name that a later reinstall of
+   * the same name would silently inherit.
+   */
+  purgeAndDelete(plugin: string): void {
+    try {
+      const objects = this.pluginObjectNames(plugin);
+      // Drop order: triggers → indexes → tables (a table drop cascades its own
+      // indexes/triggers, but standalone ones are dropped explicitly first).
+      const rank: Record<string, number> = { trigger: 0, index: 1, table: 2 };
+      objects.sort((a, b) => (rank[a.type] ?? 9) - (rank[b.type] ?? 9));
+      const tx = this.db.transaction(() => {
+        for (const o of objects) {
+          const kw = o.type === 'trigger' ? 'TRIGGER' : o.type === 'index' ? 'INDEX' : 'TABLE';
+          this.db.exec(`DROP ${kw} IF EXISTS "${o.name.replace(/"/g, '""')}"`);
+        }
+        this.kvPurgeStmt.run(plugin);
+        this.deleteStmt.run(plugin);
+      });
+      tx();
+    } catch (err) {
+      log.warn({ event: 'plugins.purge_and_delete_failed', plugin, error: String(err) });
+    }
+  }
 }
