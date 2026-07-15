@@ -22,6 +22,11 @@ import { PluginHost } from './modules/plugins/host.js';
 import { PluginToolRegistry } from './modules/plugins/mcp-registry.js';
 import { PluginHttpRegistry } from './modules/plugins/http-registry.js';
 import { PluginInstaller } from './modules/plugins/installer.js';
+import {
+  ConnectorRegistry,
+  DiscordConnectorProvider,
+  DISCORD_CONNECTOR_SCHEMA,
+} from './modules/plugins/connector-registry.js';
 import { eventBus } from './events.js';
 import {
   rehydrateMailbox,
@@ -151,6 +156,18 @@ const notifier: Notifier = config.discordWebhookUrl
 // `botToken`-bearing role subscribes (create or resume path).
 const discordBotPool = new DiscordBotPool();
 
+// ---- J4: connector registry (channel bridges as plugins) ------------------
+// The built-in `discord` provider wraps the same `discordBotPool` (outbound
+// `discord.send_message` still routes via the pool directly). Plugin-provided
+// connector types register here at enable, and the Spawner consults it to wire
+// each role's connectors at create/resume.
+const connectorRegistry = new ConnectorRegistry();
+connectorRegistry.register('discord', new DiscordConnectorProvider(discordBotPool), {
+  label: 'Discord',
+  schema: DISCORD_CONNECTOR_SCHEMA,
+  builtin: true,
+});
+
 const roleStore = new RoleStore(db);
 const settingsStore = new SettingsStore(db);
 const spawner = new Spawner(config, {
@@ -158,6 +175,7 @@ const spawner = new Spawner(config, {
   persistence,
   roleStore,
   discordBotPool,
+  connectorRegistry,
 });
 
 // ---- S9: in-memory `/metrics/messages` aggregator -------------------------
@@ -243,6 +261,7 @@ const pluginHost = new PluginHost({
   config,
   toolRegistry: pluginToolRegistry,
   httpRegistry: pluginHttpRegistry,
+  connectorRegistry,
   // Signal leads of a plugin tool-set change via the external-origin broadcast
   // path (mailbox.push + emit + idle wake). Best-effort — never throws into
   // the enable/disable path.
@@ -283,6 +302,7 @@ const handle = startServer(
   pluginHost,
   pluginHttpRegistry,
   pluginInstaller,
+  connectorRegistry,
 );
 
 // Start MCP HTTP listener on its own port (loopback only, plan §14).

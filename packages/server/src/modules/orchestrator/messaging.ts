@@ -497,7 +497,7 @@ export function pushToLeadInbox(
   content: string,
   defaults: MessagingDefaults,
   meta?: {
-    sourceKind?: 'discord';
+    sourceKind?: string;
     sourceMessageId?: string;
     threadId?: string;
     threadName?: string;

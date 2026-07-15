@@ -8,10 +8,13 @@ import { DiscordWebhookNotifier } from '../notify/discord.js';
 import type { Persistence, ResumableState } from '../orchestrator/persistence.js';
 import { NoOpNotifier } from '../notify/null.js';
 import { NoOpPersistence } from '../orchestrator/persistence.js';
-import type { RoleStore, Role } from '../roles/index.js';
+import type { RoleStore, Role, Connector } from '../roles/index.js';
+import { connectorConfig, isDiscordConnector } from '../roles/index.js';
 import type { SessionRow } from '../db/index.js';
 import type { DiscordBotPool } from '../discord/pool.js';
-import { isIdle, SIGNAL_TEXT } from '../orchestrator/messaging.js';
+import type { ConnectorRegistry } from '../plugins/connector-registry.js';
+import type { PluginOrchSubscription } from '../plugins/api-types.js';
+import { isIdle, SIGNAL_TEXT, pushToLeadInbox } from '../orchestrator/messaging.js';
 
 const log = withModule('spawner');
 
@@ -49,12 +52,20 @@ export interface SpawnerDeps {
    */
   roleStore?: RoleStore;
   /**
-   * Optional Discord bot pool. When set AND a role's DiscordConnector
-   * has BOTH `channelId` and `botToken`, the orchestrator is subscribed
-   * at create/resume time and unsubscribed at destroy/hide/shutdown.
-   * The pool starts a bot per distinct token, lazily.
+   * Optional Discord bot pool. Retained for the OUTBOUND path
+   * (`discord.send_message` routes via `botForOrch`). Inbound wiring now flows
+   * through the `connectorRegistry` (the built-in `discord` provider wraps this
+   * same pool). The pool starts a bot per distinct token, lazily.
    */
   discordBotPool?: DiscordBotPool;
+  /**
+   * Optional connector registry (J4). When set, every role connector whose type
+   * has a registered provider is subscribed at create/resume time and detached
+   * at destroy/hide/restart. A provider registered LATE (a plugin enabled while
+   * teams run) retro-wires the matching live orchestrators. Absent in unit tests
+   * that don't exercise connectors.
+   */
+  connectorRegistry?: ConnectorRegistry;
 }
 
 export class Spawner {
@@ -63,6 +74,7 @@ export class Spawner {
   readonly persistence: Persistence;
   readonly roleStore: RoleStore | null;
   readonly discordBotPool: DiscordBotPool | null;
+  readonly connectorRegistry: ConnectorRegistry | null;
 
   constructor(
     private readonly config: Config,
@@ -72,44 +84,118 @@ export class Spawner {
     this.persistence = deps.persistence ?? new NoOpPersistence();
     this.roleStore = deps.roleStore ?? null;
     this.discordBotPool = deps.discordBotPool ?? null;
+    this.connectorRegistry = deps.connectorRegistry ?? null;
+    // Retro-wire live orchestrators when a connector provider registers late
+    // (a plugin enabled while teams are already running — red-team I1).
+    this.connectorRegistry?.setRetroactiveWirer((type) => this.retroWireConnectorType(type));
   }
 
   /**
-   * Hook the orchestrator up to its role's Discord bot when the role has
-   * BOTH a `channelId` and a `botToken`. Fire-and-forget: the pool's
-   * `subscribeOrch` lazily starts a Gateway connection if needed, which
-   * can take a few seconds; we don't make `create()` async over it,
-   * because the orch can serve traffic immediately while Discord wires up.
+   * Subscribe an orchestrator to every connector its role carries whose type
+   * has a registered provider (J4 — generalisation of the old `wireDiscordBot`).
+   * Fire-and-forget: a provider's `subscribeOrch` may lazily open a network
+   * connection (a few seconds for Discord's Gateway), so `create()` stays
+   * synchronous and the orch serves traffic while the connector wires up.
    */
-  private wireDiscordBot(orch: Orchestrator, role: Role | null): void {
-    if (!this.discordBotPool || !role) return;
-    const discord = role.connectors.find((c) => c.type === 'discord');
-    if (!discord?.channelId || !discord.botToken) return;
-    void this.discordBotPool
-      .subscribeOrch(discord.botToken, {
-        orchestratorId: orch.id,
-        channelId: discord.channelId,
-        getLeadSessionId: () => orch.leadSessionId,
-        mailbox: orch.mailbox,
-        // Mirror messaging.ts: after the mailbox push, wake the lead PTY
-        // when idle so Claude calls team.read_inbox. `isIdle` already
-        // suppresses signals on `paused` sessions.
-        notifyLead: () => {
-          const leadId = orch.leadSessionId;
-          if (!leadId) return;
-          const lead = orch.getSession(leadId);
-          if (!lead) return;
-          if (!isIdle(lead, Date.now(), this.config.idleThresholdMs)) return;
-          lead.notifySignal(SIGNAL_TEXT);
-        },
-      })
-      .catch((err) => {
+  private wireConnectors(orch: Orchestrator, role: Role | null): void {
+    if (!this.connectorRegistry || !role) return;
+    for (const connector of role.connectors) {
+      this.subscribeConnector(orch, connector);
+    }
+  }
+
+  /**
+   * Subscribe ONE connector. Builds the provider-agnostic
+   * `PluginOrchSubscription` (the inbound bridge: `pushToLeadInbox` reuses
+   * `mailbox.push` + `emitMailboxMessage` + idle wake; `notifyLead` wakes the
+   * lead PTY on demand) and hands it to the type's provider. Skips silently when
+   * no provider is registered for the type.
+   */
+  private subscribeConnector(orch: Orchestrator, connector: Connector): void {
+    const provider = this.connectorRegistry?.get(connector.type);
+    if (!provider) return;
+    const sub: PluginOrchSubscription = {
+      orchestratorId: orch.id,
+      getLeadSessionId: () => orch.leadSessionId,
+      pushToLeadInbox: (content, meta) => {
+        try {
+          pushToLeadInbox(
+            orch,
+            meta?.from ?? `connector:${connector.type}`,
+            content,
+            {
+              maxMessageSizeBytes: this.config.maxMessageSizeBytes,
+              idleThresholdMs: this.config.idleThresholdMs,
+            },
+            {
+              sourceKind: meta?.sourceKind,
+              sourceMessageId: meta?.sourceMessageId,
+              threadId: meta?.threadId,
+              threadName: meta?.threadName,
+            },
+          );
+        } catch (err) {
+          // Inbound delivery to a dead/oversize lead must never crash the
+          // connector — log and drop (24/7 safety).
+          log.warn({
+            event: 'spawner.connector_push_failed',
+            orchId: orch.id,
+            type: connector.type,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      },
+      notifyLead: () => {
+        const leadId = orch.leadSessionId;
+        if (!leadId) return;
+        const lead = orch.getSession(leadId);
+        if (!lead) return;
+        if (!isIdle(lead, Date.now(), this.config.idleThresholdMs)) return;
+        lead.notifySignal(SIGNAL_TEXT);
+      },
+    };
+    void Promise.resolve()
+      .then(() => provider.subscribeOrch(connectorConfig(connector), sub))
+      .catch((err: unknown) => {
         log.warn({
-          event: 'spawner.discord_subscribe_failed',
+          event: 'spawner.connector_subscribe_failed',
           orchId: orch.id,
+          type: connector.type,
           error: err instanceof Error ? err.message : String(err),
         });
       });
+  }
+
+  /**
+   * Wire every already-live orchestrator whose role carries `type` (red-team
+   * I1). Called by the `ConnectorRegistry` when a provider registers late.
+   */
+  private retroWireConnectorType(type: string): void {
+    if (!this.roleStore) return;
+    for (const orch of this.listActive()) {
+      if (orch.status !== 'running') continue;
+      const roleId = orch.roleId;
+      if (!roleId) continue;
+      const role = this.roleStore.get(roleId);
+      const connector = role?.connectors.find((c) => c.type === type);
+      if (!connector) continue;
+      this.subscribeConnector(orch, connector);
+      log.info({ event: 'spawner.connector_retro_wired', orchId: orch.id, type });
+    }
+  }
+
+  /**
+   * Detach an orchestrator from every connector provider (destroy / hide /
+   * restart). Routes through the connector registry when present (covers Discord
+   * + plugin connectors); otherwise falls back to the raw Discord pool for the
+   * back-compat path where only a pool was injected.
+   */
+  private unsubscribeConnectors(orchId: string): void {
+    if (this.connectorRegistry) {
+      void this.connectorRegistry.unsubscribeAll(orchId);
+      return;
+    }
+    void this.discordBotPool?.unsubscribeOrch(orchId);
   }
 
   /**
@@ -122,7 +208,7 @@ export class Spawner {
    */
   private notifierFor(role: Role | null): Notifier {
     if (!role) return this.notifier;
-    const discord = role.connectors.find((c) => c.type === 'discord');
+    const discord = role.connectors.find(isDiscordConnector);
     if (!discord || !discord.webhookUrl) return this.notifier;
     return new DiscordWebhookNotifier({
       webhookUrl: discord.webhookUrl,
@@ -186,10 +272,10 @@ export class Spawner {
     this.persistence.writeSession(lead, { force: true });
     this.persistence.writeOrchestrator(orch);
 
-    // Subscribe the orch to its Discord channel (if any) as soon as the lead
-    // is up. Skipped silently when the bot is disabled or the role has no
-    // `channelId` — webhook notifications remain unaffected either way.
-    if (orch.status === 'running') this.wireDiscordBot(orch, role);
+    // Subscribe the orch to its role's connectors (if any) as soon as the lead
+    // is up. Skipped silently when no provider is registered for a type —
+    // webhook notifications remain unaffected either way.
+    if (orch.status === 'running') this.wireConnectors(orch, role);
 
     // Spawn N initial workers if the role asks for them. Lead failure is
     // non-recoverable — skip spawning workers in that case. WorkerCapError
@@ -259,9 +345,9 @@ export class Spawner {
       if (orch.status !== 'stopped' && orch.status !== 'failed') return false;
       this.orchestrators.delete(id);
     }
-    // Drop any Discord subscription so a recycled orch id with a different
+    // Drop any connector subscription so a recycled orch id with a different
     // role can't piggyback on a stale channel binding.
-    void this.discordBotPool?.unsubscribeOrch(id);
+    this.unsubscribeConnectors(id);
     // Whether or not the in-memory row was present, flip the DB rows.
     // history-only orchestrators (server restarted, never re-added to the
     // Map) still need to be hidable.
@@ -293,8 +379,8 @@ export class Spawner {
       return false;
     }
     orch.stop(reason);
-    // Stop forwarding Discord messages to a terminating lead.
-    void this.discordBotPool?.unsubscribeOrch(id);
+    // Stop forwarding connector messages to a terminating lead.
+    this.unsubscribeConnectors(id);
     eventBus.emitEvent({
       kind: 'orchestrator.destroyed',
       orchestratorId: id,
@@ -440,11 +526,11 @@ export class Spawner {
       try {
         await orch.resume({ leadRow, workerRows, staggerMs });
         resumed++;
-        // Re-attach the Discord subscription so a restarted server keeps
-        // delivering channel messages to the rehydrated lead. The mailbox is
-        // already rehydrated from `mailbox_messages`, so resumed orchs will
+        // Re-attach the role's connector subscriptions so a restarted server
+        // keeps delivering channel messages to the rehydrated lead. The mailbox
+        // is already rehydrated from `mailbox_messages`, so resumed orchs will
         // see both pre-restart and post-restart messages in order.
-        this.wireDiscordBot(orch, role);
+        this.wireConnectors(orch, role);
         eventBus.emitEvent({
           kind: 'orchestrator.created',
           orchestratorId: orch.id,
@@ -528,10 +614,10 @@ export class Spawner {
       );
     }
 
-    // Drop the stale terminal in-memory entry + its Discord sub so `create()`
+    // Drop the stale terminal in-memory entry + its connector subs so `create()`
     // can rebuild under the same id without a key collision.
     if (live) this.orchestrators.delete(id);
-    void this.discordBotPool?.unsubscribeOrch(id);
+    this.unsubscribeConnectors(id);
 
     const { orchestrator } = this.create(
       {

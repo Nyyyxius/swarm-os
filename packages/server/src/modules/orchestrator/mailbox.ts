@@ -42,10 +42,11 @@ export interface Message {
   fromSessionName?: string;
   /**
    * External source kind. Present only when the message originates from an
-   * external bridge (currently: `'discord'`). Absent for intra-team and
-   * cross-team swarm-internal traffic.
+   * external bridge (`'discord'` built-in, or a plugin connector type such as
+   * `'slack'` — J4). Absent for intra-team and cross-team swarm-internal
+   * traffic.
    */
-  sourceKind?: 'discord';
+  sourceKind?: string;
   /**
    * Native source platform message id (e.g. Discord snowflake). Lets the lead
    * reference the original message in subsequent calls (reply, thread anchor).

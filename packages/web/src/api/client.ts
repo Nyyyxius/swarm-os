@@ -56,6 +56,30 @@ export interface OrchestratorView {
   lastResumedAt: string | null;
 }
 
+/** Sentinel returned for `format:'password'` fields; echoed back to preserve. */
+export const CONNECTOR_PASSWORD_SENTINEL = '•••';
+
+export interface ConnectorPropSchema {
+  type: 'string' | 'number' | 'boolean';
+  enum?: Array<string | number>;
+  default?: string | number | boolean;
+  title?: string;
+  description?: string;
+  format?: 'password';
+}
+export interface ConnectorSchema {
+  type: 'object';
+  properties: Record<string, ConnectorPropSchema>;
+  required?: string[];
+}
+/** One connector type available for a role connector (`GET /connector-types`). */
+export interface ConnectorTypeInfo {
+  type: string;
+  label: string;
+  schema: ConnectorSchema | null;
+  builtin: boolean;
+}
+
 export interface DiscordConnectorView {
   type: 'discord';
   /**
@@ -79,7 +103,18 @@ export interface DiscordConnectorView {
    */
   botToken?: string;
 }
-export type ConnectorView = DiscordConnectorView;
+/** A plugin-provided connector (J4): provider-specific fields under `config`. */
+export interface GenericConnectorView {
+  type: string;
+  config: Record<string, unknown>;
+}
+
+export type ConnectorView = DiscordConnectorView | GenericConnectorView;
+
+/** Narrow a connector to the flat built-in Discord shape. */
+export function isDiscordConnectorView(c: ConnectorView): c is DiscordConnectorView {
+  return c.type === 'discord';
+}
 
 export interface RoleView {
   id: string;
@@ -362,6 +397,9 @@ export const api = {
   updateRole: (id: string, body: Partial<RoleInput>) =>
     request<{ role: RoleView }>('PATCH', `/roles/${id}`, body),
   deleteRole: (id: string) => request<void>('DELETE', `/roles/${id}`),
+  /** J4 — connector types available for role connectors (built-in + plugins). */
+  listConnectorTypes: () =>
+    request<{ connectorTypes: ConnectorTypeInfo[] }>('GET', '/connector-types'),
   // ---- Plugins (J1 socle) --------------------------------------------------
   listPlugins: () => request<{ plugins: PluginView[] }>('GET', '/plugins'),
   getPlugin: (name: string) =>

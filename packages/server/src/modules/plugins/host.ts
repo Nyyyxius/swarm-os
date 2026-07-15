@@ -30,6 +30,7 @@ import { buildPluginApi, type PluginGuard } from './api.js';
 import { withTimeout, isThenable, swapPluginDir } from './util.js';
 import type { PluginToolRegistry } from './mcp-registry.js';
 import type { PluginHttpRegistry } from './http-registry.js';
+import type { ConnectorRegistry } from './connector-registry.js';
 import {
   agentAssetsBasePath,
   copyAgentAssets,
@@ -167,6 +168,8 @@ export interface PluginHostDeps {
   toolRegistry?: PluginToolRegistry;
   /** HTTP router registry consulted per-request by the main.ts dispatchers. */
   httpRegistry?: PluginHttpRegistry;
+  /** J4 — connector registry backing api.connectors.register + wireConnectors. */
+  connectorRegistry?: ConnectorRegistry;
   /**
    * Broadcast an informative line to every active team's lead — used to signal
    * a plugin's MCP tool set changed (already-running sessions only see new
@@ -197,6 +200,7 @@ export class PluginHost {
   private readonly config?: Config;
   private readonly toolRegistry?: PluginToolRegistry;
   private readonly httpRegistry?: PluginHttpRegistry;
+  private readonly connectorRegistry?: ConnectorRegistry;
   private readonly broadcastToLeads?: (from: string, content: string) => void;
   private readonly locks: PluginLockRegistry;
   private readonly clock: () => number;
@@ -226,6 +230,7 @@ export class PluginHost {
     this.config = deps.config;
     this.toolRegistry = deps.toolRegistry;
     this.httpRegistry = deps.httpRegistry;
+    this.connectorRegistry = deps.connectorRegistry;
     this.broadcastToLeads = deps.broadcastToLeads;
     this.locks = deps.locks ?? new PluginLockRegistry();
     this.clock = deps.now ?? Date.now;
@@ -401,6 +406,8 @@ export class PluginHost {
         onRolesChanged: this.onRolesChanged,
         toolRegistry: this.toolRegistry,
         httpRegistry: this.httpRegistry,
+        connectorRegistry: this.connectorRegistry,
+        connectorDecls: manifest.connectors,
         scheduleTimezone: this.config?.scheduleTimezone,
         agentAssetsBasePath: assetsBasePath,
       },

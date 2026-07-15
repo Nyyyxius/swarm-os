@@ -30,6 +30,8 @@ import type { Notifier } from '../notify/index.js';
 import type { Config, EffortLevel, PermissionMode } from '../../config.js';
 import type { PluginToolRegistry } from './mcp-registry.js';
 import type { PluginHttpRegistry } from './http-registry.js';
+import type { ConnectorRegistry } from './connector-registry.js';
+import { parseConfigSchema } from './config-schema.js';
 import {
   sendMessage,
   broadcast,
@@ -48,6 +50,7 @@ import {
   type DisposableStore,
   type TeamView,
   type PluginToolDef,
+  type ChannelConnectorProvider,
   PluginDisabledError,
   PluginCapabilityError,
 } from './api-types.js';
@@ -89,26 +92,14 @@ export interface PluginApiDeps {
   onRolesChanged?: () => void;
   toolRegistry?: PluginToolRegistry;
   httpRegistry?: PluginHttpRegistry;
+  /** J4 — connector registry backing api.connectors.register. */
+  connectorRegistry?: ConnectorRegistry;
+  /** J4 — the manifest's `connectors[]` declarations (label + schema per type). */
+  connectorDecls?: Array<{ type: string; label: string; schema?: unknown }>;
   /** TZ for schedule.cron (config.scheduleTimezone). */
   scheduleTimezone?: string;
   /** Transport-aware base path for this plugin's agentAssets (or null). */
   agentAssetsBasePath?: string | null;
-}
-
-/** Throwing stand-in for a group not materialised in this milestone. */
-function unavailableGroup(group: string): unknown {
-  return new Proxy(
-    {},
-    {
-      get(_target, prop) {
-        return () => {
-          throw new PluginCapabilityError(
-            `api.${group}.${String(prop)} is not materialised in this build`,
-          );
-        };
-      },
-    },
-  );
 }
 
 /** Snapshot projection of an orchestrator — never exposes session_secret. */
@@ -510,8 +501,39 @@ export function buildPluginApi(
       },
     },
 
-    // ---- Not materialised until J4 (declared for author compile-compat) ----
-    connectors: unavailableGroup('connectors') as SwarmPluginApi['connectors'],
+    connectors: {
+      register(type: string, provider: ChannelConnectorProvider) {
+        requireCap('connectors');
+        ensureLive();
+        if (!type || typeof type !== 'string') {
+          throw new Error('connector type must be a non-empty string');
+        }
+        const registry = need(deps.connectorRegistry, 'connectors');
+        // Label + schema come from the manifest's `connectors[]` declaration for
+        // this type (drives the UI form + role config validation). A registration
+        // without a matching decl still works, defaulting the label to the type.
+        const decl = deps.connectorDecls?.find((d) => d.type === type);
+        const schema = decl?.schema != null ? parseConfigSchema(decl.schema) : null;
+        const label = decl?.label ?? type;
+        // Crash-isolate every provider callback: a throw/rejection in the plugin's
+        // connector is charged to the quarantine counter, never a fatal escape.
+        const guarded: ChannelConnectorProvider = {
+          subscribeOrch: (cfg, s) =>
+            Promise.resolve(
+              guard('connector.subscribeOrch', () => provider.subscribeOrch(cfg, s))(),
+            ).then(() => undefined),
+          unsubscribeOrch: (orchId) =>
+            Promise.resolve(
+              guard('connector.unsubscribeOrch', () => provider.unsubscribeOrch(orchId))(),
+            ).then(() => undefined),
+          stopAll: () =>
+            Promise.resolve(guard('connector.stopAll', () => provider.stopAll())()).then(
+              () => undefined,
+            ),
+        };
+        return disposables.add(registry.register(type, guarded, { label, schema }));
+      },
+    },
   };
 
   return api;

@@ -1,5 +1,5 @@
 import { useEffect, useState, type CSSProperties } from 'react';
-import { api, type ConnectorView, type RoleView } from '../api/client';
+import { api, isDiscordConnectorView, type ConnectorView, type RoleView } from '../api/client';
 import { DiscordOnboarding } from './DiscordOnboarding';
 
 interface SubmitBody {
@@ -100,7 +100,7 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
       setModel(initial.defaultModel ?? '');
       setEffort(initial.defaultEffort ?? '');
       setPerm(initial.defaultPermissionMode ?? '');
-      const discord = initial.connectors.find((c) => c.type === 'discord');
+      const discord = initial.connectors.find(isDiscordConnectorView);
       setDiscordUrl(discord?.webhookUrl ?? '');
       setDiscordChannelId(discord?.channelId ?? '');
       setDiscordBotToken(discord?.botToken ?? '');

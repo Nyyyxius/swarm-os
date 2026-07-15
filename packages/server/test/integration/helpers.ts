@@ -30,6 +30,7 @@ import { PluginHost } from '../../src/modules/plugins/host.js';
 import { PluginToolRegistry } from '../../src/modules/plugins/mcp-registry.js';
 import { PluginHttpRegistry } from '../../src/modules/plugins/http-registry.js';
 import { PluginInstaller } from '../../src/modules/plugins/installer.js';
+import { ConnectorRegistry } from '../../src/modules/plugins/connector-registry.js';
 import { broadcastToLeadsFromExternal } from '../../src/modules/orchestrator/messaging.js';
 import { eventBus } from '../../src/events.js';
 import { z } from 'zod';
@@ -75,6 +76,8 @@ export interface TestStack {
   pluginHttpRegistry: PluginHttpRegistry;
   /** J3 — installer exposed so tests can drive install/upgrade directly. */
   pluginInstaller: PluginInstaller;
+  /** J4 — connector registry exposed so tests can register fake providers. */
+  connectorRegistry: ConnectorRegistry;
   /** S9 — exposed so integration tests can call `tick()` synchronously. */
   aggregator: MessagesAggregator;
   /** S8 — exposed so integration tests can call `tick()` / `snapshot()`. */
@@ -144,7 +147,15 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
   const settingsStore = new SettingsStore(db);
   // Default to no-op so a notifier wasn't passed
   const notifier = opts.notifier ?? new NoOpNotifier();
-  const spawner = new Spawner(config, { notifier, persistence, roleStore });
+  // J4 — connector registry. Discord is intentionally NOT registered here (no
+  // real Gateway in tests); a test that needs a connector registers a fake one.
+  const connectorRegistry = new ConnectorRegistry();
+  const spawner = new Spawner(config, {
+    notifier,
+    persistence,
+    roleStore,
+    connectorRegistry,
+  });
   // Plugins — own tables on the raw Db handle + host over `<dataDir>/plugins`.
   // J2 wires the full façade deps (spawner/roles/settings/config) + the MCP and
   // HTTP registries so the integration tests exercise the real dynamic surface.
@@ -165,6 +176,7 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
     config,
     toolRegistry: pluginToolRegistry,
     httpRegistry: pluginHttpRegistry,
+    connectorRegistry,
     onRolesChanged: () => undefined,
     broadcastToLeads: (from, content) => {
       try {
@@ -222,6 +234,7 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
       pluginHost,
       pluginHttpRegistry,
       pluginInstaller,
+      connectorRegistry,
     );
     http = handle.http;
     // Wait until the listener is actually accepting connections.
@@ -246,6 +259,7 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
       pluginToolRegistry,
       pluginHttpRegistry,
       pluginInstaller,
+      connectorRegistry,
       aggregator,
       busMetrics,
       workspaceRoot,
@@ -282,6 +296,7 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
     pluginToolRegistry,
     pluginHttpRegistry,
     pluginInstaller,
+    connectorRegistry,
     aggregator,
     busMetrics,
     workspaceRoot,

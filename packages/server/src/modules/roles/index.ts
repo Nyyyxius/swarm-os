@@ -19,7 +19,13 @@ import type { EffortLevel, PermissionMode } from '../../config.js';
 
 const log = withModule('roles');
 
-export type ConnectorType = 'discord';
+/**
+ * Connector type discriminant. `'discord'` is the built-in; any other string
+ * is a plugin-provided connector type (J4) whose provider lives in the
+ * `ConnectorRegistry`. The `(string & {})` keeps `'discord'` autocompletion
+ * while still accepting arbitrary plugin types.
+ */
+export type ConnectorType = 'discord' | (string & {});
 
 export interface DiscordConnector {
   type: 'discord';
@@ -51,7 +57,39 @@ export interface DiscordConnector {
   botToken?: string;
 }
 
-export type Connector = DiscordConnector;
+/**
+ * A plugin-provided connector (J4). Unlike the flat built-in `DiscordConnector`,
+ * its provider-specific fields live under `config` (validated at the route layer
+ * against the connector type's declared schema). `type` is any non-`'discord'`
+ * string with a provider registered in the `ConnectorRegistry`.
+ */
+export interface GenericConnector {
+  type: string;
+  config: Record<string, unknown>;
+}
+
+export type Connector = DiscordConnector | GenericConnector;
+
+/** Narrow a connector to the flat built-in Discord shape. */
+export function isDiscordConnector(c: Connector): c is DiscordConnector {
+  return c.type === 'discord';
+}
+
+/**
+ * Flatten a connector to the `Record<string, unknown>` config a
+ * `ChannelConnectorProvider.subscribeOrch` expects. Discord exposes its flat
+ * fields; a generic connector exposes its `config` object.
+ */
+export function connectorConfig(c: Connector): Record<string, unknown> {
+  if (isDiscordConnector(c)) {
+    const out: Record<string, unknown> = {};
+    if (c.webhookUrl != null) out.webhookUrl = c.webhookUrl;
+    if (c.channelId != null) out.channelId = c.channelId;
+    if (c.botToken != null) out.botToken = c.botToken;
+    return out;
+  }
+  return c.config ?? {};
+}
 
 export interface Role {
   id: string;

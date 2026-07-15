@@ -215,6 +215,7 @@ export interface PluginOrchSubscription {
       sourceKind?: string;
       sourceMessageId?: string;
       threadId?: string;
+      threadName?: string;
     },
   ): void;
   /** Wake the lead's PTY if idle — same path as the Discord bridge. */

@@ -1,7 +1,34 @@
 import { Router, type Request, type Response } from 'express';
-import type { RoleStore, Connector, RoleInit, RolePatch } from '../../modules/roles/index.js';
+import type {
+  RoleStore,
+  Connector,
+  Role,
+  RoleInit,
+  RolePatch,
+} from '../../modules/roles/index.js';
+import { isDiscordConnector } from '../../modules/roles/index.js';
 import type { Config, EffortLevel, PermissionMode } from '../../config.js';
 import { isValidCron } from '../../modules/schedule/index.js';
+import {
+  PASSWORD_SENTINEL,
+  redactConfigForRead,
+  mergeConfigForWrite,
+  validateConfig,
+  type PluginConfigSchema,
+} from '../../modules/plugins/config-schema.js';
+import type { ConnectorTypeInfo } from '../../modules/plugins/connector-registry.js';
+
+/**
+ * Narrow view of the `ConnectorRegistry` the roles layer needs (J4): which
+ * connector types have a provider, their declared schema (for form generation +
+ * password masking), and the full list for `GET /connector-types`. Kept as an
+ * interface so the roles route stays decoupled from the concrete registry class.
+ */
+export interface ConnectorTypeLookup {
+  has(type: string): boolean;
+  schemaFor(type: string): PluginConfigSchema | null;
+  types(): ConnectorTypeInfo[];
+}
 
 const VALID_EFFORTS: ReadonlySet<string> = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const VALID_PERMS: ReadonlySet<string> = new Set([
@@ -91,9 +118,89 @@ function parseWorkerCount(
   return { ok: true, value: x };
 }
 
-function parseConnectors(
-  x: unknown,
-): { ok: true; value: Connector[] } | { ok: false; error: string } {
+/** Parse result — `status` lets a caller map an unknown type to 422 vs 400. */
+type ParseConnectorsResult =
+  | { ok: true; value: Connector[] }
+  | { ok: false; error: string; status?: number; code?: string };
+
+interface ParseConnectorsOpts {
+  /** Registry of provider-backed connector types (J4). Absent → discord-only. */
+  registry?: ConnectorTypeLookup;
+  /** Prior connectors — used to preserve password fields left as the sentinel. */
+  previous?: Connector[];
+}
+
+/** Validate + preserve the flat built-in Discord connector at index `i`. */
+function parseDiscordConnector(
+  c: ConnectorBody,
+  i: number,
+  previous?: Connector[],
+): { ok: true; value: Connector } | { ok: false; error: string } {
+  let webhookUrl: string | undefined;
+  if (c.webhookUrl != null && c.webhookUrl !== '') {
+    if (!isNonEmptyString(c.webhookUrl)) {
+      return { ok: false, error: `connectors[${i}].webhookUrl must be a non-empty string` };
+    }
+    if (!/^https?:\/\//i.test(c.webhookUrl)) {
+      return { ok: false, error: `connectors[${i}].webhookUrl must be a http(s) URL` };
+    }
+    webhookUrl = c.webhookUrl;
+  }
+  let channelId: string | undefined;
+  if (c.channelId != null && c.channelId !== '') {
+    if (typeof c.channelId !== 'string') {
+      return { ok: false, error: `connectors[${i}].channelId must be a string` };
+    }
+    if (!DISCORD_SNOWFLAKE_RE.test(c.channelId)) {
+      return {
+        ok: false,
+        error: `connectors[${i}].channelId must be a Discord snowflake (17–20 digits)`,
+      };
+    }
+    channelId = c.channelId;
+  }
+  // Password preservation: a botToken echoed back as the masking sentinel means
+  // the operator didn't retype it — keep the previously stored token (red-team I-4).
+  let botToken: string | undefined;
+  const prevDiscord = previous?.find(isDiscordConnector);
+  if (c.botToken === PASSWORD_SENTINEL) {
+    botToken = prevDiscord?.botToken;
+  } else if (c.botToken != null && c.botToken !== '') {
+    if (typeof c.botToken !== 'string') {
+      return { ok: false, error: `connectors[${i}].botToken must be a string` };
+    }
+    if (c.botToken.length > DISCORD_BOT_TOKEN_MAX) {
+      return { ok: false, error: `connectors[${i}].botToken is too long` };
+    }
+    botToken = c.botToken;
+  }
+  // The bot needs a channel to listen on — without one the token is useless.
+  if (botToken && !channelId) {
+    return {
+      ok: false,
+      error: `connectors[${i}].botToken requires connectors[${i}].channelId to be set`,
+    };
+  }
+  // Empty connector — neither outbound webhook nor inbound bot — has no effect
+  // and is almost certainly a UI mistake. Reject loudly.
+  if (!webhookUrl && !(botToken && channelId)) {
+    return {
+      ok: false,
+      error: `connectors[${i}] must set webhookUrl, or both botToken and channelId`,
+    };
+  }
+  return {
+    ok: true,
+    value: {
+      type: 'discord',
+      ...(webhookUrl ? { webhookUrl } : {}),
+      ...(channelId ? { channelId } : {}),
+      ...(botToken ? { botToken } : {}),
+    },
+  };
+}
+
+function parseConnectors(x: unknown, opts: ParseConnectorsOpts = {}): ParseConnectorsResult {
   if (x == null) return { ok: true, value: [] };
   if (!Array.isArray(x)) return { ok: false, error: 'connectors must be an array' };
   const out: Connector[] = [];
@@ -102,68 +209,66 @@ function parseConnectors(
     if (!c || typeof c !== 'object') {
       return { ok: false, error: `connectors[${i}] must be an object` };
     }
-    if (c.type !== 'discord') {
-      return { ok: false, error: `connectors[${i}].type must be 'discord'` };
+    if (typeof c.type !== 'string' || c.type.length === 0) {
+      return { ok: false, error: `connectors[${i}].type must be a non-empty string` };
     }
-    let webhookUrl: string | undefined;
-    if (c.webhookUrl != null && c.webhookUrl !== '') {
-      if (!isNonEmptyString(c.webhookUrl)) {
-        return { ok: false, error: `connectors[${i}].webhookUrl must be a non-empty string` };
-      }
-      if (!/^https?:\/\//i.test(c.webhookUrl)) {
-        return { ok: false, error: `connectors[${i}].webhookUrl must be a http(s) URL` };
-      }
-      webhookUrl = c.webhookUrl;
+    if (c.type === 'discord') {
+      const r = parseDiscordConnector(c, i, opts.previous);
+      if (!r.ok) return r;
+      out.push(r.value);
+      continue;
     }
-    let channelId: string | undefined;
-    if (c.channelId != null && c.channelId !== '') {
-      if (typeof c.channelId !== 'string') {
-        return { ok: false, error: `connectors[${i}].channelId must be a string` };
-      }
-      if (!DISCORD_SNOWFLAKE_RE.test(c.channelId)) {
-        return {
-          ok: false,
-          error: `connectors[${i}].channelId must be a Discord snowflake (17–20 digits)`,
-        };
-      }
-      channelId = c.channelId;
-    }
-    let botToken: string | undefined;
-    if (c.botToken != null && c.botToken !== '') {
-      if (typeof c.botToken !== 'string') {
-        return { ok: false, error: `connectors[${i}].botToken must be a string` };
-      }
-      if (c.botToken.length > DISCORD_BOT_TOKEN_MAX) {
-        return { ok: false, error: `connectors[${i}].botToken is too long` };
-      }
-      // The bot needs a channel to listen on — without one the token is
-      // useless. We catch the misconfig here rather than letting the spawner
-      // silently start a connection that never serves a message.
-      if (!channelId) {
-        return {
-          ok: false,
-          error: `connectors[${i}].botToken requires connectors[${i}].channelId to be set`,
-        };
-      }
-      botToken = c.botToken;
-    }
-    // Empty connector — neither outbound webhook nor inbound bot — has no
-    // effect and is almost certainly a UI mistake. Reject loudly instead
-    // of silently dropping configuration.
-    if (!webhookUrl && !(botToken && channelId)) {
+    // Generic (plugin-provided) connector type — needs a registered provider.
+    if (!opts.registry || !opts.registry.has(c.type)) {
       return {
         ok: false,
-        error: `connectors[${i}] must set webhookUrl, or both botToken and channelId`,
+        status: 422,
+        code: 'UNKNOWN_CONNECTOR_TYPE',
+        error: `connectors[${i}].type '${c.type}' has no registered provider`,
       };
     }
-    out.push({
-      type: 'discord',
-      ...(webhookUrl ? { webhookUrl } : {}),
-      ...(channelId ? { channelId } : {}),
-      ...(botToken ? { botToken } : {}),
-    });
+    const rawConfig = (c as { config?: unknown }).config;
+    if (rawConfig != null && (typeof rawConfig !== 'object' || Array.isArray(rawConfig))) {
+      return { ok: false, error: `connectors[${i}].config must be an object` };
+    }
+    const incoming = (rawConfig ?? {}) as Record<string, unknown>;
+    const schema = opts.registry.schemaFor(c.type);
+    if (!schema) {
+      // No schema declared — store the config verbatim (no fields to validate).
+      out.push({ type: c.type, config: incoming });
+      continue;
+    }
+    const prevGeneric = opts.previous?.find(
+      (p): p is Extract<Connector, { config: Record<string, unknown> }> =>
+        !isDiscordConnector(p) && p.type === c.type,
+    );
+    const merged = mergeConfigForWrite(schema, incoming, prevGeneric?.config ?? {});
+    const validated = validateConfig(schema, merged);
+    if (!validated.ok) {
+      return { ok: false, error: `connectors[${i}].config: ${validated.error}` };
+    }
+    out.push({ type: c.type, config: validated.value });
   }
   return { ok: true, value: out };
+}
+
+// ---------------------------------------------------------------------------
+// Password masking on read (red-team I-4)
+// ---------------------------------------------------------------------------
+
+/** Replace connector password fields with the masking sentinel for a read. */
+function maskConnector(c: Connector, registry?: ConnectorTypeLookup): Connector {
+  if (isDiscordConnector(c)) {
+    // botToken is the only password field on the built-in discord connector.
+    return c.botToken ? { ...c, botToken: PASSWORD_SENTINEL } : { ...c };
+  }
+  const schema = registry?.schemaFor(c.type) ?? null;
+  return { type: c.type, config: redactConfigForRead(schema, c.config) };
+}
+
+/** Serialise a role for a response, masking every connector's password fields. */
+function maskRole(role: Role, registry?: ConnectorTypeLookup): Role {
+  return { ...role, connectors: role.connectors.map((c) => maskConnector(c, registry)) };
 }
 
 export function createRolesRouter(
@@ -175,11 +280,23 @@ export function createRolesRouter(
    * the mutating route is the re-arm trigger). Optional — tests omit it.
    */
   onRolesChanged?: () => void,
+  /**
+   * J4 — connector-type registry: gates unknown connector types (422) and drives
+   * password masking + form generation. Optional (discord stays built-in either
+   * way; without it, non-discord types are rejected as unknown).
+   */
+  connectorRegistry?: ConnectorTypeLookup,
 ): Router {
   const router = Router();
 
   router.get('/roles', (_req: Request, res: Response) => {
-    res.json({ roles: store.list() });
+    res.json({ roles: store.list().map((r) => maskRole(r, connectorRegistry)) });
+  });
+
+  // J4 — connector types available for role connectors (built-in `discord` +
+  // any plugin-provided types). Drives the generic connector form in the UI.
+  router.get('/connector-types', (_req: Request, res: Response) => {
+    res.json({ connectorTypes: connectorRegistry?.types() ?? [] });
   });
 
   router.post('/roles', (req: Request, res: Response) => {
@@ -220,8 +337,12 @@ export function createRolesRouter(
 
     const wc = parseWorkerCount(body.workerCount, config.maxWorkersPerOrch);
     if (!wc.ok) return res.status(400).json({ error: wc.error });
-    const cn = parseConnectors(body.connectors);
-    if (!cn.ok) return res.status(400).json({ error: cn.error });
+    const cn = parseConnectors(body.connectors, { registry: connectorRegistry });
+    if (!cn.ok) {
+      return res
+        .status(cn.status ?? 400)
+        .json({ error: cn.error, ...(cn.code ? { code: cn.code } : {}) });
+    }
     const sch = parseCron(body.schedule);
     if (!sch.ok) return res.status(400).json({ error: sch.error });
     const smsg = parseNullableString(body.scheduleMessage, 'scheduleMessage');
@@ -247,7 +368,7 @@ export function createRolesRouter(
     };
     const role = store.create(init);
     onRolesChanged?.();
-    res.status(201).json({ role });
+    res.status(201).json({ role: maskRole(role, connectorRegistry) });
   });
 
   router.get('/roles/:id', (req: Request<{ id: string }>, res: Response) => {
@@ -256,7 +377,7 @@ export function createRolesRouter(
       res.status(404).json({ error: 'not found' });
       return;
     }
-    res.json({ role });
+    res.json({ role: maskRole(role, connectorRegistry) });
   });
 
   router.patch('/roles/:id', (req: Request<{ id: string }>, res: Response) => {
@@ -326,8 +447,15 @@ export function createRolesRouter(
       patch.workerCount = r.value;
     }
     if (body.connectors !== undefined) {
-      const r = parseConnectors(body.connectors);
-      if (!r.ok) return res.status(400).json({ error: r.error });
+      const r = parseConnectors(body.connectors, {
+        registry: connectorRegistry,
+        previous: existing.connectors,
+      });
+      if (!r.ok) {
+        return res
+          .status(r.status ?? 400)
+          .json({ error: r.error, ...(r.code ? { code: r.code } : {}) });
+      }
       patch.connectors = r.value;
     }
     if (body.schedule !== undefined) {
@@ -358,7 +486,7 @@ export function createRolesRouter(
       return;
     }
     onRolesChanged?.();
-    res.json({ role: updated });
+    res.json({ role: maskRole(updated, connectorRegistry) });
   });
 
   router.delete('/roles/:id', (req: Request<{ id: string }>, res: Response) => {

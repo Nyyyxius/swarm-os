@@ -8,7 +8,12 @@
 //
 // See `docs/redesign-desktop/07_rightpanel-data-binding.md` §3.
 
-import { type OrchestratorView, type RoleView, type SessionView } from '../../api/client';
+import {
+  isDiscordConnectorView,
+  type OrchestratorView,
+  type RoleView,
+  type SessionView,
+} from '../../api/client';
 import { type RightPanelAgent, type RightPanelTeam } from './RightPanel';
 
 /**
@@ -31,7 +36,7 @@ export function buildRightPanelTeam(
   // webhooks per role aren't surfaced individually by the UI v1; we
   // pick the first one.
   const discordWebhook =
-    role?.connectors.find((c) => c.type === 'discord')?.webhookUrl ?? null;
+    role?.connectors.find(isDiscordConnectorView)?.webhookUrl ?? null;
 
   return {
     id: orch.id,

@@ -15,6 +15,7 @@ import {
   type MessagingDefaults,
 } from '../orchestrator/messaging.js';
 import { validateCwdUnderWorkspace } from '../../http/validation.js';
+import { isDiscordConnector } from '../roles/index.js';
 import type { Config, EffortLevel, PermissionMode } from '../../config.js';
 import { withModule } from '../../logger.js';
 
@@ -188,7 +189,7 @@ function resolveDiscordContext(
 } {
   const roleId = ctx.orchestrator.roleId;
   const role = roleId && ctx.spawner.roleStore ? ctx.spawner.roleStore.get(roleId) : null;
-  const discord = role?.connectors.find((c) => c.type === 'discord');
+  const discord = role?.connectors.find(isDiscordConnector);
   const channelId = discord?.channelId;
   if (!channelId) {
     logCall(toolName, ctx, false, 'NO_DISCORD_CHANNEL');

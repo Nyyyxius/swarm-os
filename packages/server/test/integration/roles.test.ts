@@ -7,6 +7,8 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { bootTestStack, authHeaders, type TestStack } from './helpers.js';
+import { RoleStore } from '../../src/modules/roles/index.js';
+import { PASSWORD_SENTINEL } from '../../src/modules/plugins/config-schema.js';
 
 let stack: TestStack;
 
@@ -186,6 +188,63 @@ describe('REST: /roles CRUD', () => {
     expect(cleared.status).toBe(200);
     const clearedBody = (await cleared.json()) as { role: { schedule: string | null } };
     expect(clearedBody.role.schedule).toBeNull();
+  });
+});
+
+describe('REST: /roles connectors (J4 — generic types + secret masking)', () => {
+  const BOT_TOKEN = 'MTA1234567890abcdef.ABCDEF.fakebottokenforintegrationtest';
+  const CHANNEL = '123456789012345678';
+
+  it('rejects an unknown connector type with 422 UNKNOWN_CONNECTOR_TYPE', async () => {
+    const r = await postRole({
+      label: 'unknown-type',
+      connectors: [{ type: 'slack', config: { channel: 'C1' } }],
+    });
+    expect(r.status).toBe(422);
+    expect(r.body.code).toBe('UNKNOWN_CONNECTOR_TYPE');
+  });
+
+  it('masks the discord botToken on read and preserves it when the sentinel is echoed back', async () => {
+    const created = await postRole({
+      label: 'masked',
+      connectors: [{ type: 'discord', channelId: CHANNEL, botToken: BOT_TOKEN }],
+    });
+    expect(created.status).toBe(201);
+    const id = created.body.role.id as string;
+    // The create response is already masked.
+    expect(created.body.role.connectors[0].botToken).toBe(PASSWORD_SENTINEL);
+
+    // GET masks the token too.
+    const got = await fetch(`http://127.0.0.1:${stack.mainPort}/roles/${id}`, {
+      headers: authHeaders(stack.config.token),
+    });
+    const gotBody = (await got.json()) as {
+      role: { connectors: Array<{ botToken?: string; channelId?: string }> };
+    };
+    expect(gotBody.role.connectors[0].botToken).toBe(PASSWORD_SENTINEL);
+
+    // The stored token is intact behind the mask.
+    const store = new RoleStore(stack.db);
+    const stored = store.get(id);
+    const discord = stored?.connectors.find((c) => c.type === 'discord') as
+      | { botToken?: string }
+      | undefined;
+    expect(discord?.botToken).toBe(BOT_TOKEN);
+
+    // PATCH echoing the sentinel back keeps the previously stored token.
+    const patched = await fetch(`http://127.0.0.1:${stack.mainPort}/roles/${id}`, {
+      method: 'PATCH',
+      headers: authHeaders(stack.config.token),
+      body: JSON.stringify({
+        connectors: [{ type: 'discord', channelId: CHANNEL, botToken: PASSWORD_SENTINEL }],
+      }),
+    });
+    expect(patched.status).toBe(200);
+    const afterPatch = new RoleStore(stack.db).get(id);
+    const discord2 = afterPatch?.connectors.find((c) => c.type === 'discord') as
+      | { botToken?: string }
+      | undefined;
+    expect(discord2?.botToken).toBe(BOT_TOKEN);
   });
 });
 

@@ -24,6 +24,7 @@ import { createPluginsRouter } from './routes/plugins.js';
 import type { PluginHost } from '../modules/plugins/host.js';
 import type { PluginHttpRegistry } from '../modules/plugins/http-registry.js';
 import type { PluginInstaller } from '../modules/plugins/installer.js';
+import type { ConnectorRegistry } from '../modules/plugins/connector-registry.js';
 import type { RoleStore } from '../modules/roles/index.js';
 import type { SettingsStore } from '../modules/settings/index.js';
 import type { MessagesAggregator } from '../modules/metrics/aggregator.js';
@@ -94,6 +95,7 @@ export function createApp(
   pluginHost?: PluginHost,
   pluginHttpRegistry?: PluginHttpRegistry,
   pluginInstaller?: PluginInstaller,
+  connectorRegistry?: ConnectorRegistry,
 ): { app: express.Express; ideProxy: ProxyHandler | null } {
   const app = express();
   app.disable('x-powered-by');
@@ -239,7 +241,7 @@ export function createApp(
   app.use(createOrchestratorsRouter(spawner, config));
   app.use(createSessionsRouter(spawner, config));
   app.use(createWsTicketRouter(spawner));
-  app.use(createRolesRouter(roleStore, config, onRolesChanged));
+  app.use(createRolesRouter(roleStore, config, onRolesChanged, connectorRegistry));
   app.use(createSettingsRouter(settingsStore));
   // `GET /ide-info` — VS Code web connection details for the authenticated
   // client. Mounted after the auth gate so it 401s without X-Auth-Token
@@ -313,6 +315,7 @@ export function startServer(
   pluginHost?: PluginHost,
   pluginHttpRegistry?: PluginHttpRegistry,
   pluginInstaller?: PluginInstaller,
+  connectorRegistry?: ConnectorRegistry,
 ): ServerHandle {
   const { app, ideProxy } = createApp(
     config,
@@ -327,6 +330,7 @@ export function startServer(
     pluginHost,
     pluginHttpRegistry,
     pluginInstaller,
+    connectorRegistry,
   );
   const http = createServer(app);
 

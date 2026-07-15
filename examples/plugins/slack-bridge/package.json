@@ -1,0 +1,15 @@
+{
+  "name": "swarm-os-plugin-slack-bridge",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "swarm-os Slack channel connector (Socket Mode).",
+  "main": "index.js",
+  "dependencies": {
+    "@slack/socket-mode": "^2.0.2",
+    "@slack/web-api": "^7.8.0"
+  },
+  "devDependencies": {
+    "@swarm-os/plugin-sdk": "^0.1.0"
+  }
+}

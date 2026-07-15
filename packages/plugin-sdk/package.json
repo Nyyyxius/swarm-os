@@ -1,0 +1,33 @@
+{
+  "name": "@swarm-os/plugin-sdk",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Types-only SDK for authoring swarm-os plugins — the public SwarmPluginApi contract, with no runtime dependency on the server.",
+  "type": "module",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc"
+  },
+  "peerDependencies": {
+    "zod": "^4.4.3"
+  },
+  "peerDependenciesMeta": {
+    "zod": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "typescript": "^5.7.3",
+    "zod": "^4.4.3"
+  }
+}

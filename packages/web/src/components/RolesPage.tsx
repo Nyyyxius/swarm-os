@@ -29,7 +29,15 @@
 
 import { useEffect, useMemo, useState } from 'react';
 import { useRoles } from '../hooks/useRoles';
-import { api, type ConnectorView, type RoleView, type RoleInput } from '../api/client';
+import {
+  api,
+  isDiscordConnectorView,
+  type ConnectorView,
+  type ConnectorTypeInfo,
+  type ConnectorSchema,
+  type RoleView,
+  type RoleInput,
+} from '../api/client';
 import { DiscordOnboarding } from './DiscordOnboarding';
 import { useShellMode } from '../hooks/useShellMode';
 
@@ -872,6 +880,88 @@ function CadenceSection({
 }
 
 // ───────────────────────────── CONNECTORS ───────────────────────────────────
+/** Is a value present (non-empty)? Shared by the generic connector form. */
+function connNonEmpty(v: unknown): boolean {
+  return v !== undefined && v !== null && String(v).trim() !== '';
+}
+
+/**
+ * Generic connector form — renders inputs from a connector type's declared
+ * schema (J4). Password fields pre-fill with the server's sentinel (`•••`) when
+ * a value is stored; leaving them untouched preserves the secret server-side.
+ */
+function GenericConnectorFields({
+  schema,
+  value,
+  onChange,
+}: {
+  schema: ConnectorSchema;
+  value: Record<string, unknown>;
+  onChange: (key: string, v: unknown) => void;
+}) {
+  return (
+    <div style={{ display: 'grid', gap: 8 }}>
+      {Object.entries(schema.properties).map(([key, prop]) => {
+        const label = prop.title ?? key;
+        const required = schema.required?.includes(key) ?? false;
+        const cur = value[key];
+        if (prop.type === 'boolean') {
+          return (
+            <label key={key} style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+              <input
+                type="checkbox"
+                checked={Boolean(cur)}
+                onChange={(e) => onChange(key, e.target.checked)}
+              />
+              <span className="k">{label}</span>
+            </label>
+          );
+        }
+        if (prop.enum && prop.enum.length > 0) {
+          return (
+            <label key={key} style={{ display: 'grid', gap: 4 }}>
+              <span className="k">
+                {label}
+                {required ? ' *' : ''}
+              </span>
+              <select
+                value={String(cur ?? '')}
+                onChange={(e) => onChange(key, e.target.value)}
+              >
+                <option value="">(unset)</option>
+                {prop.enum.map((o) => (
+                  <option key={String(o)} value={String(o)}>
+                    {String(o)}
+                  </option>
+                ))}
+              </select>
+            </label>
+          );
+        }
+        const inputType =
+          prop.format === 'password' ? 'password' : prop.type === 'number' ? 'number' : 'text';
+        return (
+          <label key={key} style={{ display: 'grid', gap: 4 }}>
+            <span className="k">
+              {label}
+              {required ? ' *' : ''}
+            </span>
+            <input
+              type={inputType}
+              value={String(cur ?? '')}
+              placeholder={prop.description ?? ''}
+              onChange={(e) =>
+                onChange(key, prop.type === 'number' ? e.target.value : e.target.value)
+              }
+            />
+            {prop.description && <span className="field-help">{prop.description}</span>}
+          </label>
+        );
+      })}
+    </div>
+  );
+}
+
 function ConnectorsSection({
   role,
   editing,
@@ -885,18 +975,75 @@ function ConnectorsSection({
   onCancel: () => void;
   onSave: (body: Partial<RoleInput>) => Promise<void>;
 }) {
-  const discord = role.connectors.find((c) => c.type === 'discord');
+  const discord = role.connectors.find(isDiscordConnectorView);
+  const genericConnectors = role.connectors.filter(
+    (c): c is Extract<ConnectorView, { config: Record<string, unknown> }> =>
+      !isDiscordConnectorView(c),
+  );
   const [url, setUrl] = useState(discord?.webhookUrl ?? '');
   const [channelId, setChannelId] = useState(discord?.channelId ?? '');
   const [botToken, setBotToken] = useState(discord?.botToken ?? '');
   const [error, setError] = useState<string | null>(null);
+  // J4 — available connector types (built-in discord + plugin-provided).
+  const [types, setTypes] = useState<ConnectorTypeInfo[]>([]);
+  // Working config per non-discord connector type (keyed by type).
+  const [drafts, setDrafts] = useState<Record<string, Record<string, unknown>>>({});
+
+  useEffect(() => {
+    let live = true;
+    api
+      .listConnectorTypes()
+      .then((r) => {
+        if (live) setTypes(r.connectorTypes);
+      })
+      .catch(() => {
+        /* connector types unavailable — only built-in discord editable */
+      });
+    return () => {
+      live = false;
+    };
+  }, []);
 
   useEffect(() => {
     setUrl(discord?.webhookUrl ?? '');
     setChannelId(discord?.channelId ?? '');
     setBotToken(discord?.botToken ?? '');
+    const d: Record<string, Record<string, unknown>> = {};
+    for (const c of genericConnectors) d[c.type] = { ...c.config };
+    setDrafts(d);
     setError(null);
-  }, [role.id, discord?.webhookUrl, discord?.channelId, discord?.botToken, editing]);
+    // role.connectors is intentionally excluded from deps — we reset the draft
+    // on role change / entering edit, not on every poll refresh.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [role.id, editing]);
+
+  const pluginTypes = types.filter((t) => t.type !== 'discord' && t.schema);
+
+  function buildGenericConnectors(): ConnectorView[] {
+    const out: ConnectorView[] = [];
+    for (const t of pluginTypes) {
+      const schema = t.schema;
+      if (!schema) continue;
+      const draft = drafts[t.type] ?? {};
+      const required = schema.required ?? [];
+      const configured =
+        required.length > 0
+          ? required.every((k) => connNonEmpty(draft[k]))
+          : Object.keys(schema.properties).some((k) => connNonEmpty(draft[k]));
+      if (!configured) continue;
+      const config: Record<string, unknown> = {};
+      for (const [k, prop] of Object.entries(schema.properties)) {
+        const v = draft[k];
+        if (prop.type === 'boolean') {
+          if (v !== undefined) config[k] = Boolean(v);
+          continue;
+        }
+        if (connNonEmpty(v)) config[k] = prop.type === 'number' ? Number(v) : v;
+      }
+      out.push({ type: t.type, config });
+    }
+    return out;
+  }
 
   async function save() {
     setError(null);
@@ -915,23 +1062,24 @@ function ConnectorsSection({
       setError('Set a channel ID alongside the bot token (the bot needs a channel to listen on)');
       return;
     }
-    if (!u && !(tok && cid)) {
-      if (u === '' && cid === '' && tok === '') {
-        // operator cleared everything — treat as "remove the connector"
-      } else {
-        setError('Set a webhook URL, or a bot token + channel ID (or both)');
-        return;
-      }
+    if (u === '' || (tok && cid) || (!tok && !cid)) {
+      // valid discord shapes: webhook-only, bot+channel, both, or none
+    } else {
+      setError('Set a webhook URL, or a bot token + channel ID (or both)');
+      return;
     }
-    const hasAny = !!u || !!(tok && cid);
-    const connectors: ConnectorView[] = hasAny
-      ? [{
-          type: 'discord',
-          ...(u ? { webhookUrl: u } : {}),
-          ...(cid ? { channelId: cid } : {}),
-          ...(tok ? { botToken: tok } : {}),
-        }]
+    const hasDiscord = !!u || !!(tok && cid);
+    const discordConnector: ConnectorView[] = hasDiscord
+      ? [
+          {
+            type: 'discord',
+            ...(u ? { webhookUrl: u } : {}),
+            ...(cid ? { channelId: cid } : {}),
+            ...(tok ? { botToken: tok } : {}),
+          },
+        ]
       : [];
+    const connectors: ConnectorView[] = [...discordConnector, ...buildGenericConnectors()];
     try {
       await onSave({ connectors });
     } catch (e) {
@@ -939,15 +1087,19 @@ function ConnectorsSection({
     }
   }
 
-  async function remove() {
+  async function removeDiscord() {
     if (!confirm('Remove Discord connector from this role?')) return;
     setError(null);
     try {
-      await onSave({ connectors: [] });
+      // Keep any plugin connectors; only drop discord.
+      await onSave({ connectors: genericConnectors });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
   }
+
+  const labelFor = (type: string): string =>
+    types.find((t) => t.type === type)?.label ?? type;
 
   return (
     <div className="role-section">
@@ -974,9 +1126,9 @@ function ConnectorsSection({
       </h3>
 
       {!editing ? (
-        discord ? (
+        discord || genericConnectors.length > 0 ? (
           <>
-            {discord.webhookUrl && (
+            {discord?.webhookUrl && (
               <div className="cfg-kv">
                 <span className="k">DISCORD</span>
                 <span
@@ -991,54 +1143,77 @@ function ConnectorsSection({
                 </span>
               </div>
             )}
-            {discord.channelId && (
+            {discord?.channelId && (
               <div className="cfg-kv">
                 <span className="k">CHANNEL ID</span>
-                <span
-                  className="v"
-                  style={{ fontSize: 10.5, color: 'var(--text-dim)' }}
-                >
+                <span className="v" style={{ fontSize: 10.5, color: 'var(--text-dim)' }}>
                   {discord.channelId}
                 </span>
               </div>
             )}
-            {discord.botToken && (
+            {discord?.botToken && (
               <div className="cfg-kv">
                 <span className="k">BOT TOKEN</span>
-                <span
-                  className="v"
-                  style={{ fontSize: 10.5, color: 'var(--text-dim)' }}
-                >
+                <span className="v" style={{ fontSize: 10.5, color: 'var(--text-dim)' }}>
                   configured
                 </span>
               </div>
             )}
+            {genericConnectors.map((c) => (
+              <div className="cfg-kv" key={c.type}>
+                <span className="k">{labelFor(c.type).toUpperCase()}</span>
+                <span className="v" style={{ fontSize: 10.5, color: 'var(--text-dim)' }}>
+                  {Object.keys(c.config).length > 0 ? 'configured' : 'no config'}
+                </span>
+              </div>
+            ))}
           </>
         ) : (
           <div className="field-help">
-            No Discord connector. Configure system notifications (webhook) or a
-            bidirectional bot (token + channel) — or both.
+            No connectors. Configure Discord (webhook and/or bot), or a
+            plugin-provided channel connector below.
           </div>
         )
       ) : (
-        <div style={{ display: 'grid', gap: 12 }}>
-          <DiscordOnboarding
-            webhookUrl={url}
-            setWebhookUrl={setUrl}
-            channelId={channelId}
-            setChannelId={setChannelId}
-            botToken={botToken}
-            setBotToken={setBotToken}
-          />
-          {discord && (
-            <button
-              className="btn danger"
-              style={{ alignSelf: 'flex-start' }}
-              onClick={() => void remove()}
-            >
-              REMOVE DISCORD
-            </button>
-          )}
+        <div style={{ display: 'grid', gap: 16 }}>
+          <div style={{ display: 'grid', gap: 12 }}>
+            <DiscordOnboarding
+              webhookUrl={url}
+              setWebhookUrl={setUrl}
+              channelId={channelId}
+              setChannelId={setChannelId}
+              botToken={botToken}
+              setBotToken={setBotToken}
+            />
+            {discord && (
+              <button
+                className="btn danger"
+                style={{ alignSelf: 'flex-start' }}
+                onClick={() => void removeDiscord()}
+              >
+                REMOVE DISCORD
+              </button>
+            )}
+          </div>
+
+          {pluginTypes.map((t) => (
+            <div key={t.type} style={{ display: 'grid', gap: 8 }}>
+              <h4 style={{ margin: 0, fontSize: 12, letterSpacing: 0.5 }}>
+                {t.label.toUpperCase()}
+              </h4>
+              <GenericConnectorFields
+                schema={t.schema as ConnectorSchema}
+                value={drafts[t.type] ?? {}}
+                onChange={(key, v) =>
+                  setDrafts((prev) => ({
+                    ...prev,
+                    [t.type]: { ...(prev[t.type] ?? {}), [key]: v },
+                  }))
+                }
+              />
+            </div>
+          ))}
+
           {error && (
             <div
               className="field-warn"

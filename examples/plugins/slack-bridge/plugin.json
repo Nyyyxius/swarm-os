@@ -1,0 +1,49 @@
+{
+  "name": "slack-bridge",
+  "version": "0.1.0",
+  "displayName": "Slack Bridge",
+  "description": "Bidirectional Slack channel connector (Socket Mode — no public URL required). Inbound channel messages land in the lead's inbox; the lead replies via the slack.send MCP tool.",
+  "main": "index.js",
+  "apiVersion": 1,
+  "capabilities": ["connectors", "messaging", "mcp-tools"],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "includeBotMessages": {
+        "type": "boolean",
+        "default": false,
+        "title": "Include bot messages",
+        "description": "Forward messages posted by other bots/apps (default: drop them to avoid loops)."
+      }
+    }
+  },
+  "connectors": [
+    {
+      "type": "slack",
+      "label": "Slack (Socket Mode)",
+      "schema": {
+        "type": "object",
+        "properties": {
+          "appToken": {
+            "type": "string",
+            "format": "password",
+            "title": "App-Level Token",
+            "description": "xapp-… token with connections:write (Socket Mode)."
+          },
+          "botToken": {
+            "type": "string",
+            "format": "password",
+            "title": "Bot Token",
+            "description": "xoxb-… token with chat:write + the channel read scopes."
+          },
+          "channel": {
+            "type": "string",
+            "title": "Channel ID",
+            "description": "Slack channel id (e.g. C0123ABCD) the lead converses in."
+          }
+        },
+        "required": ["appToken", "botToken", "channel"]
+      }
+    }
+  ]
+}
