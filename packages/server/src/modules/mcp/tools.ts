@@ -120,7 +120,7 @@ export function buildList(ctx: ToolContext): ListPayload {
  * ships in v1.29: when an outputSchema is declared, structuredContent is
  * the source of truth and content is informational.
  */
-function ok<T extends object>(payload: T): {
+export function ok<T extends object>(payload: T): {
   structuredContent: { [k: string]: unknown };
   content: Array<{ type: 'text'; text: string }>;
 } {
@@ -136,7 +136,7 @@ function ok<T extends object>(payload: T): {
  * permission code in 1.29) and prefix the message with `PERMISSION_DENIED:`
  * so the client can pattern-match without inspecting the numeric code.
  */
-function requireLead(ctx: ToolContext, toolName: string): void {
+export function requireLead(ctx: ToolContext, toolName: string): void {
   const isLead = ctx.session.id === ctx.orchestrator.leadSessionId;
   if (!isLead) {
     throw new McpError(

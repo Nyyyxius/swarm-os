@@ -321,8 +321,14 @@ export interface SwarmPluginApi {
   readonly mcp: { registerTool(def: PluginToolDef): Disposable };
 
   readonly http: {
-    registerRouter(router: Router): Disposable;
-    registerPublicRouter(router: Router): Disposable;
+    /**
+     * Build a fresh router from the SERVER's express instance. Plugins should
+     * use this rather than importing their own express — a router from a
+     * different express version may not mount cleanly.
+     */
+    createRouter(): Router;
+    registerRouter(router: Router): Disposable; // /plugin-api/<name>/* — after auth
+    registerPublicRouter(router: Router): Disposable; // /public/plugins/<name>/* — before auth
   };
 
   readonly notify: { send(input: NotificationInput): Promise<void> };
@@ -337,6 +343,14 @@ export interface SwarmPluginApi {
   };
 
   readonly settings: { instance(): InstanceSettings };
+
+  /**
+   * Scripts/CLI the plugin ships for the AGENTS to run (capability
+   * `agent-assets`). `basePath` is the transport-aware absolute directory the
+   * plugin's declared `agentAssets.dir` was copied to — the plugin uses it when
+   * announcing its scripts to leads (e.g. `bash <basePath>/hello.sh`).
+   */
+  readonly agentAssets: { readonly basePath: string };
 }
 
 // ---------------------------------------------------------------------------

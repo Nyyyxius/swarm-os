@@ -19,11 +19,14 @@ import { RoleScheduler } from './modules/schedule/index.js';
 import { IdeSupervisor } from './modules/ide/index.js';
 import { PluginStore } from './modules/plugins/store.js';
 import { PluginHost } from './modules/plugins/host.js';
+import { PluginToolRegistry } from './modules/plugins/mcp-registry.js';
+import { PluginHttpRegistry } from './modules/plugins/http-registry.js';
 import { eventBus } from './events.js';
 import {
   rehydrateMailbox,
   mailboxJanitor,
 } from './modules/orchestrator/mailbox-persistence.js';
+import { broadcastToLeadsFromExternal } from './modules/orchestrator/messaging.js';
 
 const config = loadConfig();
 const rootLog = initRootLogger(config);
@@ -218,12 +221,40 @@ if (config.ideEnabled) {
 // (so future bridges are up before auto-resume) but its activateEnabled()
 // never rejects — see the boot chain below.
 const pluginStore = new PluginStore(db);
+// J2 — registries consulted per-request (MCP tools) / per-request (HTTP zones).
+// Never torn down; enable/disable is a Map mutation.
+const pluginToolRegistry = new PluginToolRegistry();
+const pluginHttpRegistry = new PluginHttpRegistry();
+const pluginMessagingDefaults = {
+  maxMessageSizeBytes: config.maxMessageSizeBytes,
+  idleThresholdMs: config.idleThresholdMs,
+};
 const pluginHost = new PluginHost({
   store: pluginStore,
   eventBus,
   pluginsDir: path.join(config.dataDir, 'plugins'),
   zod: z,
   onRolesChanged: () => scheduler.reload(),
+  // J2 façades.
+  spawner,
+  roleStore,
+  settingsStore,
+  config,
+  toolRegistry: pluginToolRegistry,
+  httpRegistry: pluginHttpRegistry,
+  // Signal leads of a plugin tool-set change via the external-origin broadcast
+  // path (mailbox.push + emit + idle wake). Best-effort — never throws into
+  // the enable/disable path.
+  broadcastToLeads: (from, content) => {
+    try {
+      broadcastToLeadsFromExternal(spawner, from, content, pluginMessagingDefaults);
+    } catch (err) {
+      log.warn({
+        event: 'plugins.broadcast_to_leads_failed',
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  },
 });
 
 // Phase 8 — bootGate: HTTP listens immediately so /health stays green for
@@ -240,6 +271,7 @@ const handle = startServer(
   bootGate,
   () => scheduler.reload(),
   pluginHost,
+  pluginHttpRegistry,
 );
 
 // Start MCP HTTP listener on its own port (loopback only, plan §14).
@@ -248,7 +280,7 @@ const handle = startServer(
 // agent wastes its first turn on a transport error. If MCP fails to bind
 // we shut down the main listener too — the system is non-functional
 // without MCP.
-const mcp = new McpServer(spawner, config.mcpPort, config, busMetrics);
+const mcp = new McpServer(spawner, config.mcpPort, config, busMetrics, pluginToolRegistry);
 
 async function runAutoResume(): Promise<void> {
   if (!config.autoResume || resumableState.resumable.length === 0) {

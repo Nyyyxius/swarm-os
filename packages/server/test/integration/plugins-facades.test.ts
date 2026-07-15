@@ -1,0 +1,186 @@
+/**
+ * J2 — plugin API façades (messaging / roles / teams / schedule.cron).
+ *
+ * Builds the real `SwarmPluginApi` via `buildPluginApi` wired to a booted stack
+ * (spawner + roleStore + settings + config) and drives the façades directly.
+ */
+
+import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import { z } from 'zod';
+import { bootTestStack, type TestStack } from './helpers.js';
+import { buildPluginApi, type PluginGuard } from '../../src/modules/plugins/api.js';
+import {
+  DisposableStore,
+  type SwarmPluginApi,
+  type PluginCapability,
+} from '../../src/modules/plugins/api-types.js';
+import { PluginStore } from '../../src/modules/plugins/store.js';
+import { RoleStore } from '../../src/modules/roles/index.js';
+import { eventBus, type SwarmEvent } from '../../src/events.js';
+import { withModule } from '../../src/logger.js';
+
+let stack: TestStack;
+let roleStore: RoleStore;
+
+const PLUGIN = 'facadep';
+
+beforeEach(async () => {
+  stack = await bootTestStack({ skipMcp: true, skipMainHttp: true });
+  roleStore = new RoleStore(stack.db);
+});
+
+afterEach(async () => {
+  await stack.teardown();
+});
+
+/** Identity guard — runs the fn straight through (crash isolation not under test here). */
+const identityGuard: PluginGuard = <A extends unknown[]>(
+  _hook: string,
+  fn: (...a: A) => unknown,
+) => (...a: A): unknown => fn(...a);
+
+function buildApi(caps: PluginCapability[]): {
+  api: SwarmPluginApi;
+  disposables: DisposableStore;
+  rolesChanged: { count: number };
+} {
+  const store = new PluginStore(stack.db);
+  const disposables = new DisposableStore();
+  const rolesChanged = { count: 0 };
+  const api = buildPluginApi(
+    {
+      store,
+      eventBus,
+      log: withModule('test.facade'),
+      zod: z,
+      granted: new Set(caps),
+      guard: identityGuard,
+      currentEpoch: () => 0,
+      onConfigChange: [],
+      spawner: stack.spawner,
+      roleStore,
+      settingsStore: stack.settingsStore,
+      notifier: stack.spawner.notifier,
+      config: stack.config,
+      onRolesChanged: () => {
+        rolesChanged.count += 1;
+      },
+      toolRegistry: stack.pluginToolRegistry,
+      httpRegistry: stack.pluginHttpRegistry,
+      scheduleTimezone: 'UTC',
+      agentAssetsBasePath: null,
+    },
+    PLUGIN,
+    disposables,
+    0,
+  );
+  return { api, disposables, rolesChanged };
+}
+
+function createOrch(name: string) {
+  const { orchestrator, lead } = stack.spawner.create(
+    {
+      name,
+      role: 'coordinator',
+      defaultModel: stack.config.defaultModel,
+      defaultEffort: stack.config.defaultEffort,
+      defaultPermissionMode: stack.config.defaultPermissionMode,
+      leadPreamble: null,
+      workerPreamble: null,
+      lead: { cwd: stack.workspaceRoot, prompt: 'noop', preamble: null },
+    },
+    { skipSpawn: true },
+  );
+  return { orchId: orchestrator.id, leadId: lead.id };
+}
+
+const waitFor = async (cond: () => boolean, timeoutMs = 3000): Promise<void> => {
+  const start = Date.now();
+  while (!cond()) {
+    if (Date.now() - start > timeoutMs) throw new Error('waitFor timed out');
+    await new Promise((r) => setTimeout(r, 10));
+  }
+};
+
+describe('messaging façade', () => {
+  it('sendToLead pushes into the lead inbox and emits mailbox.message', () => {
+    const { orchId, leadId } = createOrch('team-a');
+    const { api } = buildApi(['messaging']);
+
+    const events: SwarmEvent[] = [];
+    const off = eventBus.onEvent((e) => events.push(e));
+    try {
+      const out = api.messaging.sendToLead(orchId, 'hi from plugin');
+      expect(out.delivered).toBe(true);
+      expect(out.to_session_id).toBe(leadId);
+
+      const orch = stack.spawner.get(orchId);
+      const inbox = orch?.mailbox.peek(leadId) ?? [];
+      expect(inbox).toHaveLength(1);
+      expect(inbox[0]?.from).toBe(`plugin:${PLUGIN}`);
+      expect(inbox[0]?.content).toBe('hi from plugin');
+
+      const mailEvt = events.find(
+        (e) => e.kind === 'mailbox.message' && (e.payload as { from?: string }).from === `plugin:${PLUGIN}`,
+      );
+      expect(mailEvt).toBeTruthy();
+    } finally {
+      off();
+    }
+  });
+
+  it('requires the messaging capability', () => {
+    const { orchId } = createOrch('team-b');
+    const { api } = buildApi([]); // no caps granted
+    expect(() => api.messaging.sendToLead(orchId, 'x')).toThrow(/messaging/);
+  });
+});
+
+describe('roles façade', () => {
+  it('create fires onRolesChanged and persists the role', () => {
+    const { api, rolesChanged } = buildApi(['roles']);
+    const role = api.roles.create({ label: 'from-plugin' });
+    expect(role.label).toBe('from-plugin');
+    expect(rolesChanged.count).toBe(1);
+    expect(roleStore.get(role.id)?.label).toBe('from-plugin');
+  });
+});
+
+describe('teams façade', () => {
+  it('list returns a snapshot without session_secret', () => {
+    const { orchId, leadId } = createOrch('team-c');
+    const { api } = buildApi(['teams']);
+    const teams = api.teams.list();
+    const t = teams.find((x) => x.id === orchId);
+    expect(t).toBeTruthy();
+    expect(t?.leadSessionId).toBe(leadId);
+    expect(JSON.stringify(t)).not.toContain('sessionSecret');
+    expect(t?.sessions.some((s) => s.id === leadId && s.type === 'lead')).toBe(true);
+  });
+});
+
+describe('schedule.cron', () => {
+  it('fires while armed and stops after dispose', async () => {
+    const { api } = buildApi(['schedule']);
+    let ticks = 0;
+    const d = api.schedule.cron('* * * * * *', () => {
+      ticks += 1;
+    });
+
+    await waitFor(() => ticks >= 1, 4000);
+    const atDispose = ticks;
+    d.dispose();
+
+    await new Promise((r) => setTimeout(r, 1300));
+    // No more ticks after dispose (allow the in-flight second to settle).
+    expect(ticks).toBeLessThanOrEqual(atDispose + 1);
+    const settled = ticks;
+    await new Promise((r) => setTimeout(r, 1300));
+    expect(ticks).toBe(settled);
+  });
+
+  it('rejects an invalid cron expression', () => {
+    const { api } = buildApi(['schedule']);
+    expect(() => api.schedule.cron('not a cron', () => undefined)).toThrow();
+  });
+});

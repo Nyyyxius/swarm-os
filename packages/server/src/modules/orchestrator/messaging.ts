@@ -481,6 +481,125 @@ export function broadcastToLeads(
 }
 
 /**
+ * External-origin push to ONE orchestrator's current lead (bridges + plugins).
+ *
+ * Unlike `sendMessageToLead`, this helper has NO source orchestrator/session
+ * context — `from` is a free-form label such as `'plugin:<name>'` or
+ * `'discord:<user>'`. It borrows the exact Discord-bridge path: `mailbox.push`
+ * + `emitMailboxMessage` + idle wake. Used by the plugin `messaging.sendToLead`
+ * façade (plan §J2) and by the host's tool-set-change notification.
+ *
+ * Throws `MessageError` on oversize content or when the lead is not active.
+ */
+export function pushToLeadInbox(
+  orch: Orchestrator,
+  from: string,
+  content: string,
+  defaults: MessagingDefaults,
+  meta?: {
+    sourceKind?: 'discord';
+    sourceMessageId?: string;
+    threadId?: string;
+    threadName?: string;
+  },
+): CrossSendOutcome {
+  const sizeCheck = validateMessageSize(content, defaults.maxMessageSizeBytes);
+  if (!sizeCheck.ok) {
+    throw new MessageError(
+      'MESSAGE_TOO_LARGE',
+      `message too large: ${sizeCheck.bytes} bytes > ${sizeCheck.max}`,
+      413,
+    );
+  }
+  const lead = orch.lead;
+  if (!lead || !isActive(lead)) {
+    throw new MessageError(
+      'RECIPIENT_NOT_ACTIVE',
+      `lead of orchestrator ${orch.id} is not active`,
+      404,
+    );
+  }
+  const result = orch.mailbox.push(lead.id, { from, content, ...(meta ?? {}) });
+  emitMailboxMessage(orch.id, from, lead.id);
+
+  log.info({
+    event: 'mail.external_send',
+    orch: orch.id,
+    from,
+    toSid: lead.id,
+    len: sizeCheck.bytes,
+    queueSize: result.queueSize,
+    dropped: result.dropped,
+  });
+
+  let signalled = false;
+  if (isIdle(lead, Date.now(), defaults.idleThresholdMs)) {
+    signalled = injectSignal(lead);
+  }
+
+  return {
+    delivered: true,
+    dropped: result.dropped,
+    queueSize: result.queueSize,
+    signalled,
+    to_session_id: lead.id,
+    to_orchestrator_id: orch.id,
+  };
+}
+
+/**
+ * External-origin broadcast to EVERY active orchestrator's lead (plugins).
+ *
+ * Best-effort, mirroring `broadcastToLeads` but with a free-form `from` label
+ * and no source-orch exclusion (a plugin belongs to no team). Per-recipient
+ * failures are swallowed. Used by the plugin `messaging.broadcastToLeads`
+ * façade and the host's tool-set-change notification.
+ */
+export function broadcastToLeadsFromExternal(
+  spawner: Spawner,
+  from: string,
+  content: string,
+  defaults: MessagingDefaults,
+): CrossBroadcastOutcome {
+  const sizeCheck = validateMessageSize(content, defaults.maxMessageSizeBytes);
+  if (!sizeCheck.ok) {
+    throw new MessageError(
+      'MESSAGE_TOO_LARGE',
+      `message too large: ${sizeCheck.bytes} bytes > ${sizeCheck.max}`,
+      413,
+    );
+  }
+
+  const delivered: Array<{ orchestrator_id: string; session_id: string }> = [];
+  const now = Date.now();
+  for (const orch of spawner.listActive()) {
+    const lead = orch.lead;
+    if (!lead || !isActive(lead)) continue;
+    try {
+      orch.mailbox.push(lead.id, { from, content });
+      emitMailboxMessage(orch.id, from, lead.id);
+      if (isIdle(lead, now, defaults.idleThresholdMs)) injectSignal(lead);
+      delivered.push({ orchestrator_id: orch.id, session_id: lead.id });
+    } catch (err) {
+      log.warn({
+        event: 'mail.external_broadcast_skip',
+        orch: orch.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  log.info({
+    event: 'mail.external_broadcast',
+    from,
+    deliveredCount: delivered.length,
+    len: sizeCheck.bytes,
+  });
+
+  return { delivered_to: delivered };
+}
+
+/**
  * Convenience wrapper that callers (REST handler, orchestrator) use to read
  * a session's inbox and emit the canonical log. Mirrors `team.read_inbox`.
  */

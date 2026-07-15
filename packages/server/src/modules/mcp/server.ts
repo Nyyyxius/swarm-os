@@ -9,6 +9,7 @@ import { registerTeamCommsTools, type ToolContext } from './tools.js';
 import type { Config } from '../../config.js';
 import type { MessagingDefaults } from '../orchestrator/messaging.js';
 import type { BusMetricsCollector } from '../metrics/busMetrics.js';
+import type { PluginToolRegistry } from '../plugins/mcp-registry.js';
 import { withModule } from '../../logger.js';
 
 const log = withModule('mcp');
@@ -80,6 +81,12 @@ export class McpServer {
      * (pre-S8) keep working unchanged.
      */
     private readonly busMetrics?: BusMetricsCollector,
+    /**
+     * J2 — dynamic plugin tools. When passed, `handle()` registers every
+     * currently-enabled plugin tool onto the per-request SdkMcpServer right
+     * after the built-in team-comms tools. Optional so pre-J2 test paths boot.
+     */
+    private readonly pluginTools?: PluginToolRegistry,
   ) {
     this.messagingDefaults = {
       maxMessageSizeBytes: this.config?.maxMessageSizeBytes ?? 16 * 1024,
@@ -220,6 +227,7 @@ export class McpServer {
       { capabilities: {} },
     );
     registerTeamCommsTools(sdkServer, () => ctx);
+    this.pluginTools?.registerAll(sdkServer, () => ctx);
 
     const transport = new StreamableHTTPServerTransport({
       sessionIdGenerator: undefined, // stateless

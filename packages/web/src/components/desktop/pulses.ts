@@ -31,6 +31,10 @@ export function deriveKind(ev: MailboxMessageEvent): MapPulse['kind'] {
   //    `team.broadcast`). The server fan-outs into N frames, each with
   //    `to === 'broadcast'` — we still emit N pulses, one per recipient.
   if (ev.to === 'broadcast') return 'broadcast';
+  // 1.5) Plugin-origin message (`from='plugin:<name>'`, J2). Classify as a
+  //    non-'intra' kind so SwarmController maps its source to '__center__'
+  //    (an intra kind would look for a session position that doesn't exist).
+  if (typeof ev.from === 'string' && ev.from.startsWith('plugin:')) return 'human';
   // 2) Cross-team: comes from another orchestrator's lead via
   //    `swarm.send_to_lead`. We detect it by comparing the source orch
   //    id to the destination orch id.

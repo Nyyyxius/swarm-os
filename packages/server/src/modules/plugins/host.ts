@@ -28,6 +28,17 @@ import { loadManifest, HOST_API_VERSION, type PluginManifest } from './manifest.
 import { loadPluginModule } from './loader.js';
 import { buildPluginApi, type PluginGuard } from './api.js';
 import { withTimeout, isThenable } from './util.js';
+import type { PluginToolRegistry } from './mcp-registry.js';
+import type { PluginHttpRegistry } from './http-registry.js';
+import {
+  agentAssetsBasePath,
+  copyAgentAssets,
+  removeAgentAssets,
+} from './agent-assets.js';
+import type { Spawner } from '../spawner/index.js';
+import type { RoleStore } from '../roles/index.js';
+import type { SettingsStore } from '../settings/index.js';
+import type { Config } from '../../config.js';
 import {
   DisposableStore,
   PluginDisabledError,
@@ -122,6 +133,28 @@ export interface PluginHostDeps {
    * () => scheduler.reload()). Accepted now so the wiring is stable.
    */
   onRolesChanged?: () => void;
+
+  // ---- J2 deps (optional so J1 host tests still construct the host) --------
+  /** Spawner — backs the teams + messaging façades. */
+  spawner?: Spawner;
+  /** RoleStore — backs the roles façade. */
+  roleStore?: RoleStore;
+  /** SettingsStore — backs the settings façade. */
+  settingsStore?: SettingsStore;
+  /** Server config — cwd validation, workspaceRoot, TZ, messaging defaults. */
+  config?: Config;
+  /** MCP tool registry consulted per-request by McpServer.handle(). */
+  toolRegistry?: PluginToolRegistry;
+  /** HTTP router registry consulted per-request by the main.ts dispatchers. */
+  httpRegistry?: PluginHttpRegistry;
+  /**
+   * Broadcast an informative line to every active team's lead — used to signal
+   * a plugin's MCP tool set changed (already-running sessions only see new
+   * tools at restart; transport is stateless). Wired in index.ts to the
+   * external-origin broadcast helper.
+   */
+  broadcastToLeads?: (from: string, content: string) => void;
+
   /** Shared lock registry (defaults to a private one). */
   locks?: PluginLockRegistry;
   /** Injectable clock for tests. */
@@ -137,6 +170,14 @@ export class PluginHost {
   private readonly eventBus: SwarmEventBus;
   private readonly pluginsDir: string;
   private readonly zod: typeof z;
+  private readonly onRolesChanged?: () => void;
+  private readonly spawner?: Spawner;
+  private readonly roleStore?: RoleStore;
+  private readonly settingsStore?: SettingsStore;
+  private readonly config?: Config;
+  private readonly toolRegistry?: PluginToolRegistry;
+  private readonly httpRegistry?: PluginHttpRegistry;
+  private readonly broadcastToLeads?: (from: string, content: string) => void;
   private readonly locks: PluginLockRegistry;
   private readonly clock: () => number;
   private readonly activateTimeoutMs: number;
@@ -158,6 +199,14 @@ export class PluginHost {
     this.eventBus = deps.eventBus;
     this.pluginsDir = deps.pluginsDir;
     this.zod = deps.zod;
+    this.onRolesChanged = deps.onRolesChanged;
+    this.spawner = deps.spawner;
+    this.roleStore = deps.roleStore;
+    this.settingsStore = deps.settingsStore;
+    this.config = deps.config;
+    this.toolRegistry = deps.toolRegistry;
+    this.httpRegistry = deps.httpRegistry;
+    this.broadcastToLeads = deps.broadcastToLeads;
     this.locks = deps.locks ?? new PluginLockRegistry();
     this.clock = deps.now ?? Date.now;
     this.activateTimeoutMs = deps.timeouts?.activateMs ?? ACTIVATE_TIMEOUT_MS;
@@ -308,6 +357,11 @@ export class PluginHost {
       fn: (...args: A) => unknown,
     ) => this.guard<A>(name, hook, fn);
 
+    const assetsBasePath =
+      this.config && manifest.agentAssets
+        ? agentAssetsBasePath(this.config, name)
+        : null;
+
     const api = buildPluginApi(
       {
         store: this.store,
@@ -318,6 +372,17 @@ export class PluginHost {
         guard: boundGuard,
         currentEpoch: () => this.epochs.get(name) ?? 0,
         onConfigChange,
+        // J2 façades.
+        spawner: this.spawner,
+        roleStore: this.roleStore,
+        settingsStore: this.settingsStore,
+        notifier: this.spawner?.notifier,
+        config: this.config,
+        onRolesChanged: this.onRolesChanged,
+        toolRegistry: this.toolRegistry,
+        httpRegistry: this.httpRegistry,
+        scheduleTimezone: this.config?.scheduleTimezone,
+        agentAssetsBasePath: assetsBasePath,
       },
       name,
       disposables,
@@ -401,6 +466,9 @@ export class PluginHost {
       return this.recordActivationFailure(name, this.store.get(name) ?? row, err);
     }
 
+    // Copy agentAssets into the workspace (best-effort — never fails enable).
+    this.syncAgentAssets(name, manifest, grantedCaps);
+
     this.store.patch(name, {
       enabled: 1,
       fail_count: 0,
@@ -413,7 +481,59 @@ export class PluginHost {
     // could be auto-disabled after a single new crash).
     this.crashWindows.delete(name);
     this.emitChanged(name);
+    // Signal leads if this plugin exposes MCP tools (already-running sessions
+    // only pick them up at restart — transport is stateless).
+    this.notifyToolSetChanged(name, true);
     return this.viewOf(name);
+  }
+
+  /**
+   * Copy (or remove) a plugin's `agentAssets` dir into the workspace. Requires
+   * the `agent-assets` capability to be granted AND a config to resolve the
+   * workspace root. Best-effort: logged, never fatal to enable.
+   */
+  private syncAgentAssets(
+    name: string,
+    manifest: PluginManifest,
+    grantedCaps: PluginCapability[],
+  ): void {
+    if (!this.config) return;
+    if (!manifest.agentAssets || !grantedCaps.includes('agent-assets')) {
+      // No (longer any) assets — clean up a prior copy.
+      removeAgentAssets(this.config, name);
+      return;
+    }
+    copyAgentAssets(
+      this.config,
+      path.join(this.pluginsDir, name),
+      name,
+      manifest.agentAssets.dir,
+    );
+  }
+
+  /**
+   * Notify every active team's lead that a plugin's MCP tool set changed. Only
+   * fires when the plugin actually has registered tools (enable) or had them
+   * (disable). No-op without a `broadcastToLeads` wiring.
+   */
+  private notifyToolSetChanged(name: string, enabled: boolean): void {
+    if (!this.broadcastToLeads) return;
+    if (!this.toolRegistry?.has(name)) return;
+    const verb = enabled
+      ? 'are now available'
+      : 'have been removed';
+    const msg =
+      `[swarm-os] Plugin '${name}' MCP tools ${verb}. ` +
+      `Restart or resume your session to refresh the available tools.`;
+    try {
+      this.broadcastToLeads(`plugin:${name}`, msg);
+    } catch (err) {
+      log.warn({
+        event: 'plugins.tool_notify_failed',
+        name,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   private recordActivationFailure(name: string, row: PluginRow, err: unknown): never {
@@ -450,12 +570,31 @@ export class PluginHost {
     return this.locks.run(name, async () => {
       const row = this.store.get(name);
       if (!row) throw new PluginNotFoundError(name);
+      // Capture BEFORE teardown — disposables remove the tools from the registry.
+      const hadTools = this.toolRegistry?.has(name) ?? false;
       const inst = this.active.get(name);
       if (inst) await this.deactivateInstance(name, inst);
+      // Remove copied agentAssets from the workspace.
+      if (this.config) removeAgentAssets(this.config, name);
       this.store.patch(name, { enabled: 0, quarantined_until: null, last_error: null });
       this.crashedNames.delete(name);
       this.crashWindows.delete(name);
       this.emitChanged(name);
+      if (hadTools && this.broadcastToLeads) {
+        try {
+          this.broadcastToLeads(
+            `plugin:${name}`,
+            `[swarm-os] Plugin '${name}' MCP tools have been removed. ` +
+              `Restart or resume your session to refresh the available tools.`,
+          );
+        } catch (err) {
+          log.warn({
+            event: 'plugins.tool_notify_failed',
+            name,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       return this.viewOf(name);
     });
   }
@@ -519,6 +658,7 @@ export class PluginHost {
     return this.locks.run(name, async () => {
       const inst = this.active.get(name);
       if (inst) await this.deactivateInstance(name, inst);
+      if (this.config) removeAgentAssets(this.config, name);
       const dir = path.join(this.pluginsDir, name);
       try {
         fs.rmSync(dir, { recursive: true, force: true });
@@ -706,6 +846,11 @@ export class PluginHost {
   /** True when a plugin is currently activated (for tests / diagnostics). */
   isActive(name: string): boolean {
     return this.active.has(name);
+  }
+
+  /** Raw stored config for a plugin (unredacted) — used by the config route. */
+  getRawConfig(name: string): Record<string, unknown> {
+    return this.store.getConfig(name);
   }
 
   private viewOfRow(row: PluginRow): PluginView {

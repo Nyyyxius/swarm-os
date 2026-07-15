@@ -4,6 +4,7 @@ import { useShellMode } from '../hooks/useShellMode';
 import { useSwarmController } from '../controller/SwarmController';
 import { HttpError, type PluginView, type PluginStatus } from '../api/client';
 import { PermissionsDialog } from './plugins/PermissionsDialog';
+import { PluginConfigForm } from './plugins/PluginConfigForm';
 
 /**
  * Plugins management overlay — modeled on RolesPage. Lists installed plugins
@@ -310,6 +311,9 @@ export function PluginsPage({ open, onClose }: Props) {
                   : `${plugin.grantedCapabilities.length}/${plugin.capabilities.length} granted`}
               </div>
             </div>
+
+            {/* Config form (rendered only when the manifest declares a configSchema). */}
+            <PluginConfigForm pluginName={plugin.name} rev={c.pluginsRev} />
 
             <div style={{ display: 'flex', gap: 10, marginTop: 30 }}>
               {plugin.enabled ? (

@@ -351,7 +351,12 @@ export const api = {
   // ---- Plugins (J1 socle) --------------------------------------------------
   listPlugins: () => request<{ plugins: PluginView[] }>('GET', '/plugins'),
   getPlugin: (name: string) =>
-    request<{ plugin: PluginView; manifest: unknown }>('GET', `/plugins/${name}`),
+    request<{
+      plugin: PluginView;
+      manifest: { configSchema?: unknown; [k: string]: unknown } | null;
+      /** Redacted stored config (password fields masked as the sentinel). */
+      config?: Record<string, unknown>;
+    }>('GET', `/plugins/${name}`),
   scanPlugins: () => request<{ plugins: PluginView[] }>('POST', '/plugins/scan'),
   enablePlugin: (name: string, grantedCapabilities?: string[]) =>
     request<{ plugin: PluginView }>(

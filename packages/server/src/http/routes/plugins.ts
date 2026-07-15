@@ -10,6 +10,12 @@ import * as path from 'node:path';
 import type { PluginHost } from '../../modules/plugins/host.js';
 import { PluginActivationError, PluginNotFoundError } from '../../modules/plugins/host.js';
 import { loadManifest } from '../../modules/plugins/manifest.js';
+import {
+  parseConfigSchema,
+  validateConfig,
+  redactConfigForRead,
+  mergeConfigForWrite,
+} from '../../modules/plugins/config-schema.js';
 
 interface EnableBody {
   grantedCapabilities?: unknown;
@@ -37,12 +43,17 @@ export function createPluginsRouter(host: PluginHost, pluginsDir: string): Route
     try {
       const plugin = host.viewOf(req.params.name);
       let manifest: unknown = null;
+      let config: Record<string, unknown> = {};
       try {
-        manifest = loadManifest(path.join(pluginsDir, req.params.name));
+        const m = loadManifest(path.join(pluginsDir, req.params.name));
+        manifest = m;
+        // Redact password fields before the config ever leaves the server.
+        const schema = parseConfigSchema(m.configSchema);
+        config = redactConfigForRead(schema, host.getRawConfig(req.params.name));
       } catch {
         /* folder gone / invalid — return the row view without a manifest */
       }
-      res.json({ plugin, manifest });
+      res.json({ plugin, manifest, config });
     } catch (err) {
       if (err instanceof PluginNotFoundError) {
         res.status(404).json({ error: 'not found' });
@@ -130,11 +141,28 @@ export function createPluginsRouter(host: PluginHost, pluginsDir: string): Route
   });
 
   router.put('/plugins/:name/config', (req: Request<{ name: string }>, res: Response) => {
-    // J1 stores config verbatim; schema validation lands in J2.
-    const config = (req.body ?? {}) as unknown;
-    if (config == null || typeof config !== 'object' || Array.isArray(config)) {
+    const body = (req.body ?? {}) as unknown;
+    if (body == null || typeof body !== 'object' || Array.isArray(body)) {
       res.status(400).json({ error: 'config body must be a JSON object' });
       return;
+    }
+    // J2 — validate against the manifest's configSchema (when declared) and
+    // preserve password fields the operator left as the masking sentinel.
+    let config: Record<string, unknown> = body as Record<string, unknown>;
+    let schema = null;
+    try {
+      schema = parseConfigSchema(loadManifest(path.join(pluginsDir, req.params.name)).configSchema);
+    } catch {
+      /* folder gone / invalid manifest — store verbatim (no schema to check) */
+    }
+    if (schema) {
+      const merged = mergeConfigForWrite(schema, body as Record<string, unknown>, host.getRawConfig(req.params.name));
+      const result = validateConfig(schema, merged);
+      if (!result.ok) {
+        res.status(400).json({ error: result.error });
+        return;
+      }
+      config = result.value;
     }
     void host
       .setConfig(req.params.name, config)

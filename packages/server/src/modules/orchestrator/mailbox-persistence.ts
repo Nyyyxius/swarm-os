@@ -231,7 +231,18 @@ function isSenderTerminal(
   liveSessionStatuses: Map<string, string>,
   db: SwarmDb,
 ): boolean {
-  if (row.from_id === 'system' || row.from_id === 'human') return false;
+  // 'system'/'human' senders, and any plugin-origin message (`plugin:<name>`),
+  // are never sender-terminal: a plugin has no session row, so without this
+  // exemption every pending `from='plugin:x'` message would be classified
+  // terminal (unknown session → terminal) and silently destroyed at each boot
+  // (plan §J2 fix B-1).
+  if (
+    row.from_id === 'system' ||
+    row.from_id === 'human' ||
+    row.from_id.startsWith('plugin:')
+  ) {
+    return false;
+  }
   // Live in this orch's session map?
   const liveStatus = liveSessionStatuses.get(row.from_id);
   if (liveStatus) {

@@ -27,9 +27,12 @@ import { BusMetricsCollector } from '../../src/modules/metrics/busMetrics.js';
 import { BackupScheduler } from '../../src/modules/backup/index.js';
 import { PluginStore } from '../../src/modules/plugins/store.js';
 import { PluginHost } from '../../src/modules/plugins/host.js';
+import { PluginToolRegistry } from '../../src/modules/plugins/mcp-registry.js';
+import { PluginHttpRegistry } from '../../src/modules/plugins/http-registry.js';
+import { broadcastToLeadsFromExternal } from '../../src/modules/orchestrator/messaging.js';
 import { eventBus } from '../../src/events.js';
 import { z } from 'zod';
-import { createApp, startServer } from '../../src/http/main.js';
+import { createApp, startServer, type BootGate } from '../../src/http/main.js';
 import { loadConfig, _resetConfigCacheForTesting } from '../../src/config.js';
 import type { Config } from '../../src/config.js';
 import type { Notifier, NotificationInput } from '../../src/modules/notify/index.js';
@@ -44,6 +47,11 @@ export interface TestStackOptions {
   skipMainHttp?: boolean;
   /** Override the idle threshold (default 50 ms — keeps tests fast). */
   idleThresholdMs?: number;
+  /**
+   * Inject a bootGate so a test can hold business + plugin routes at 503 while
+   * `value` is false (J2 — verifies plugin routes are gated during boot).
+   */
+  bootGate?: BootGate;
 }
 
 export interface TestStack {
@@ -58,9 +66,12 @@ export interface TestStack {
   persistence: DbPersistence;
   /** Exposed so settings tests can read the singleton row without re-instantiating. */
   settingsStore: SettingsStore;
-  /** J1 plugins — host + plugins dir exposed so integration tests can drive scan/enable. */
+  /** Plugins — host + plugins dir exposed so integration tests can drive scan/enable. */
   pluginHost: PluginHost;
   pluginsDir: string;
+  /** J2 — registries exposed so tests can assert registered tools/routers. */
+  pluginToolRegistry: PluginToolRegistry;
+  pluginHttpRegistry: PluginHttpRegistry;
   /** S9 — exposed so integration tests can call `tick()` synchronously. */
   aggregator: MessagesAggregator;
   /** S8 — exposed so integration tests can call `tick()` / `snapshot()`. */
@@ -128,20 +139,41 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
   const persistence = new DbPersistence(db);
   const roleStore = new RoleStore(db);
   const settingsStore = new SettingsStore(db);
-  // J1 plugins — own tables on the raw Db handle + host over `<dataDir>/plugins`.
+  // Default to no-op so a notifier wasn't passed
+  const notifier = opts.notifier ?? new NoOpNotifier();
+  const spawner = new Spawner(config, { notifier, persistence, roleStore });
+  // Plugins — own tables on the raw Db handle + host over `<dataDir>/plugins`.
+  // J2 wires the full façade deps (spawner/roles/settings/config) + the MCP and
+  // HTTP registries so the integration tests exercise the real dynamic surface.
   const pluginsDir = path.join(dataDir, 'plugins');
   fs.mkdirSync(pluginsDir, { recursive: true });
   const pluginStore = new PluginStore(db);
+  const pluginToolRegistry = new PluginToolRegistry();
+  const pluginHttpRegistry = new PluginHttpRegistry();
   const pluginHost = new PluginHost({
     store: pluginStore,
     eventBus,
     pluginsDir,
     zod: z,
     timeouts: { activateMs: 2000, deactivateMs: 1000 },
+    spawner,
+    roleStore,
+    settingsStore,
+    config,
+    toolRegistry: pluginToolRegistry,
+    httpRegistry: pluginHttpRegistry,
+    onRolesChanged: () => undefined,
+    broadcastToLeads: (from, content) => {
+      try {
+        broadcastToLeadsFromExternal(spawner, from, content, {
+          maxMessageSizeBytes: config.maxMessageSizeBytes,
+          idleThresholdMs: config.idleThresholdMs,
+        });
+      } catch {
+        /* best-effort */
+      }
+    },
   });
-  // Default to no-op so a notifier wasn't passed
-  const notifier = opts.notifier ?? new NoOpNotifier();
-  const spawner = new Spawner(config, { notifier, persistence, roleStore });
   // S9 — aggregator. We DON'T call `start()` in tests: the integration tests
   // drive `tick()` synchronously to avoid 60 s waits, and starting the
   // interval would risk spurious ticks during the test.
@@ -161,7 +193,7 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
 
   let mcp: McpServer | null = null;
   if (!opts.skipMcp) {
-    mcp = new McpServer(spawner, config.mcpPort, config, busMetrics);
+    mcp = new McpServer(spawner, config.mcpPort, config, busMetrics, pluginToolRegistry);
     await mcp.start();
   }
 
@@ -175,9 +207,10 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
       aggregator,
       backup,
       busMetrics,
-      undefined,
+      opts.bootGate,
       undefined,
       pluginHost,
+      pluginHttpRegistry,
     );
     http = handle.http;
     // Wait until the listener is actually accepting connections.
@@ -199,6 +232,8 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
       settingsStore,
       pluginHost,
       pluginsDir,
+      pluginToolRegistry,
+      pluginHttpRegistry,
       aggregator,
       busMetrics,
       workspaceRoot,

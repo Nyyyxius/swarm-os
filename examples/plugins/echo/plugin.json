@@ -1,9 +1,33 @@
 {
   "name": "echo",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "displayName": "Echo",
-  "description": "Minimal J1 example plugin: re-emits every mailbox.message as plugin.echo.seen and writes a heartbeat to its kv store.",
+  "description": "Example plugin: re-emits every mailbox.message as plugin.echo.seen, exposes an `echo.ping` MCP tool to agents, and an authenticated /plugin-api/echo/hello route.",
   "main": "index.js",
   "apiVersion": 1,
-  "capabilities": ["events", "events-emit", "db-kv", "schedule"]
+  "capabilities": [
+    "events",
+    "events-emit",
+    "db-kv",
+    "schedule",
+    "mcp-tools",
+    "http-routes"
+  ],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "greeting": {
+        "type": "string",
+        "title": "Greeting prefix",
+        "description": "Prefix returned by echo.ping (default \"pong\").",
+        "default": "pong"
+      },
+      "apiToken": {
+        "type": "string",
+        "format": "password",
+        "title": "Demo API token",
+        "description": "Demonstration secret — masked as ••• on read, preserved on save when left untouched."
+      }
+    }
+  }
 }

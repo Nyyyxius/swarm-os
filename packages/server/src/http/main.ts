@@ -3,7 +3,7 @@ import type { Socket } from 'node:net';
 import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
-import express, { type Request, type Response, type NextFunction } from 'express';
+import express, { Router, type Request, type Response, type NextFunction } from 'express';
 import { createProxyMiddleware, type RequestHandler as ProxyHandler } from 'http-proxy-middleware';
 import { Spawner } from '../modules/spawner/index.js';
 import type { Config } from '../config.js';
@@ -22,6 +22,7 @@ import { createSettingsRouter } from './routes/settings.js';
 import { createIdeRouter } from './routes/ide.js';
 import { createPluginsRouter } from './routes/plugins.js';
 import type { PluginHost } from '../modules/plugins/host.js';
+import type { PluginHttpRegistry } from '../modules/plugins/http-registry.js';
 import type { RoleStore } from '../modules/roles/index.js';
 import type { SettingsStore } from '../modules/settings/index.js';
 import type { MessagesAggregator } from '../modules/metrics/aggregator.js';
@@ -90,6 +91,7 @@ export function createApp(
   bootGate?: BootGate,
   onRolesChanged?: () => void,
   pluginHost?: PluginHost,
+  pluginHttpRegistry?: PluginHttpRegistry,
 ): { app: express.Express; ideProxy: ProxyHandler | null } {
   const app = express();
   app.disable('x-powered-by');
@@ -99,7 +101,19 @@ export function createApp(
   // returns a clean 413 with details; the body-parser cap exists only to stop
   // pathological abuse of the socket.
   const bodyLimitKb = Math.max(64, Math.ceil(config.maxPromptSizeBytes / 1024) + 64);
-  app.use(express.json({ limit: `${bodyLimitKb}kb` }));
+  app.use(
+    express.json({
+      limit: `${bodyLimitKb}kb`,
+      // J2 — expose the exact raw bytes to plugin PUBLIC handlers so they can
+      // verify HMAC signatures (Slack/Stripe/GitHub webhooks) computed over the
+      // wire body, which `JSON.parse` would otherwise discard. Only set for
+      // parsed JSON requests; other content-types aren't parsed and leave the
+      // stream intact with `req.body` undefined (documented in docs/plugins.md).
+      verify: (req: Request, _res, buf: Buffer) => {
+        req.rawBody = buf;
+      },
+    }),
+  );
 
   // Public: health & info.
   app.get('/health', (_req: Request, res: Response) => {
@@ -206,6 +220,17 @@ export function createApp(
     });
   }
 
+  // J2 — plugin PUBLIC routes (`/public/plugins/:name/*`). Mounted AFTER
+  // bootGate (so a 503 during auto-resume applies) but BEFORE the auth gate:
+  // these are inbound webhooks that carry no X-Auth-Token — the plugin verifies
+  // its own signatures over `req.rawBody`. Never torn down: the dispatcher
+  // consults a mutable Map, so a disabled plugin 404s immediately.
+  if (pluginHttpRegistry) {
+    const pub = Router();
+    pub.use('/public/plugins/:name', pluginHttpRegistry.publicDispatcher());
+    app.use(pub);
+  }
+
   // Authenticated routes.
   const auth = makeAuthMiddleware(config.token);
   app.use(auth);
@@ -235,6 +260,15 @@ export function createApp(
   // dispatchers for plugin-owned routes land in J2 — this is the control plane.
   if (pluginHost) {
     app.use(createPluginsRouter(pluginHost, path.join(config.dataDir, 'plugins')));
+  }
+
+  // J2 — plugin AUTHENTICATED routes (`/plugin-api/:name/*`). Mounted AFTER the
+  // auth gate so a token is required, and after the `/plugins` control plane so
+  // the distinct prefix keeps the two apart. Never torn down (mutable Map).
+  if (pluginHttpRegistry) {
+    const authRouter = Router();
+    authRouter.use('/plugin-api/:name', pluginHttpRegistry.authDispatcher());
+    app.use(authRouter);
   }
 
   // JSON error handler — must be the LAST middleware. Without this, body-parser
@@ -272,6 +306,7 @@ export function startServer(
   bootGate?: BootGate,
   onRolesChanged?: () => void,
   pluginHost?: PluginHost,
+  pluginHttpRegistry?: PluginHttpRegistry,
 ): ServerHandle {
   const { app, ideProxy } = createApp(
     config,
@@ -284,6 +319,7 @@ export function startServer(
     bootGate,
     onRolesChanged,
     pluginHost,
+    pluginHttpRegistry,
   );
   const http = createServer(app);
 

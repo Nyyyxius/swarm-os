@@ -67,6 +67,10 @@ const REDACT_PATHS = [
   // so the wildcard catches it wherever the connector is logged.
   'botToken',
   '*.botToken',
+  // Plugin config blob — may hold plugin secrets (API tokens etc.) declared
+  // via a `format:'password'` field. Redacted wherever a plugin row is logged.
+  'config_json',
+  '*.config_json',
 ];
 
 export function buildLogger(config?: Pick<Config, 'logLevel' | 'logPretty' | 'projectName'>): Logger {
