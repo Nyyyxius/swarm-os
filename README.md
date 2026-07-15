@@ -87,14 +87,96 @@ no-ops. See `docs/phase-1-spawner-lead.md` for the full local-dev wiring.
 
 - `packages/server/` — Express + WS + MCP HTTP + SQLite + Notifier
 - `packages/web/` — React + Vite + xterm.js UI + PWA shell
+- `packages/plugin-sdk/` — types-only SDK for plugin authors (`@swarm-os/plugin-sdk`)
 - `scripts/` — `verify-claude-code.ts` (spike harness), `gen-icons.ts` (PWA icons), `push-image.sh` (manual GHCR publish)
-- `examples/` — `docker-compose.{single,multi,dist}.yml` reference deployments (`dist` = third-party, `.env`-driven)
+- `examples/` — `docker-compose.{single,multi,dist}.yml` reference deployments (`dist` = third-party, `.env`-driven); `plugins/` — example plugins (`echo`, `slack-bridge`)
 - `install.sh` + `.env.example` — one-shot installer + config template for a third-party deployment
 - `docs/deploy/` — bilingual install + usage guides for shipping to a third party
 - `docs/` — phase-by-phase implementation reports (mandatory pre-reading)
 - `archives/` — superseded plan revisions (historical, do not edit)
 - `plan.md` — canonical specification (sections 1–17)
 - `Dockerfile` — multi-stage builder + runtime (claude CLI pinned at 2.1.142)
+
+---
+
+## Plugins
+
+swarm-os is extensible through **installable plugins**: JavaScript ESM modules
+loaded in-process and hot enabled/disabled from the UI (`#/plugins`) with no
+server restart and no interruption of running teams. A plugin receives an
+injected `SwarmPluginApi` façade — event bus, team/role management, agent
+messaging, per-plugin storage, cron scheduling, MCP tools exposed to the
+agents, HTTP routes, and channel connectors (Discord-style bridges). Full
+authoring guide: `docs/plugins.md`.
+
+### Creating a plugin
+
+A plugin is a directory with a `plugin.json` manifest and an ESM entry point
+(JS only — pre-compile TypeScript before packaging; no native modules):
+
+```json
+{
+  "name": "my-plugin",
+  "version": "1.0.0",
+  "main": "index.js",
+  "apiVersion": 1,
+  "capabilities": ["events", "db-kv", "mcp-tools"]
+}
+```
+
+```js
+export default {
+  activate(api) {
+    api.events.on('mailbox.message', (ev) => api.log.info({ ev }, 'seen'));
+    api.mcp.registerTool({
+      name: 'hello', title: 'Hello', description: 'Say hello',
+      inputSchema: { name: api.zod.string() },
+      handler: ({ name }, ctx) => ({ reply: `hello ${name} from ${ctx.sessionName}` }),
+    });
+  },
+};
+```
+
+Drop the directory in `/data/plugins/<name>/`, hit **Scan** on `#/plugins`,
+then **Enable**. Everything registered through `api.*` returns a disposable
+and is torn down automatically on disable. Agents see MCP tools as
+`<name>.<tool>` (here `my-plugin.hello`). Working examples:
+`examples/plugins/echo` (events, MCP tool, HTTP route, config schema) and
+`examples/plugins/slack-bridge` (channel connector, npm dependencies).
+Use `packages/plugin-sdk` for typed autocompletion while authoring.
+
+### Capabilities
+
+The manifest **declares** what the plugin wants; the operator **grants** it in
+the management page at first enable (editable at any time — the API only
+materialises `manifest ∩ granted`). This is a declarative guardrail, **not a
+sandbox**: plugins run in-process as trusted code.
+
+| Capability | Grants |
+|---|---|
+| `events` / `events-emit` | subscribe to the event bus / emit `plugin.<name>.*` events |
+| `messaging` | send to sessions/leads, broadcast, read inboxes (`from = plugin:<name>`) |
+| `teams` / `roles` | create/destroy teams, spawn/kill workers / role CRUD |
+| `mcp-tools` | register MCP tools exposed to agents as `<name>.<tool>` |
+| `http-routes` / `http-public` | authed routes under `/plugin-api/<name>/*` / tokenless webhooks under `/public/plugins/<name>/*` (HMAC over `req.rawBody`) |
+| `agent-assets` | ship scripts copied to `<workspace>/.swarm-plugins/<name>/` for agents to run |
+| `db-kv` / `db-tables` | per-plugin key-value store / own SQLite tables (`plugin_<name>_*`) |
+| `notify` / `schedule` | push operator notifications / cron expressions + intervals |
+| `connectors` | provide channel connector types (Slack/Telegram-style bridges) roles can use |
+| `settings-read` | read instance settings |
+
+### Installing & managing
+
+Four sources, all hot-installable from the **Install** dialog on `#/plugins`
+(or `POST /plugins/install`): drop a directory in `/data/plugins` + Scan,
+upload a `.tgz` (`npm pack` format, ≤50 MB), install from npm (any spec), or
+clone from a git URL (the repo must commit compiled JS). The page also covers
+enable/disable, the schema-driven config form (`format: "password"` fields are
+masked on read and preserved on save), permission grants, upgrade and
+uninstall (`?purge=true` also drops the plugin's KV data and tables). Crash
+isolation counts sync throws *and* async rejections: a plugin crashing ≥5
+times in 60 s is auto-disabled and quarantined (exponential backoff) instead
+of taking the server down.
 
 ---
 
@@ -147,6 +229,7 @@ Exit codes: `0` PASS, `1` FAIL, `2` prerequisites missing.
 ## Cross-references
 
 - Specification: `plan.md`
+- Plugin authoring guide: `docs/plugins.md`
 - Phase implementation reports: `docs/phase-*.md` (mandatory pre-reading
   before touching the corresponding code)
 - Spike report: `scripts/verify-claude-code.report.md`
