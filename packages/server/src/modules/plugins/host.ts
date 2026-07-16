@@ -24,7 +24,7 @@ import type { z } from 'zod';
 import { withModule } from '../../logger.js';
 import type { SwarmEventBus } from '../../events.js';
 import { PluginStore, type PluginRow } from './store.js';
-import { loadManifest, HOST_API_VERSION, type PluginManifest } from './manifest.js';
+import { loadManifest, HOST_API_VERSION, type PluginManifest, type UiPanel } from './manifest.js';
 import { loadPluginModule } from './loader.js';
 import { buildPluginApi, type PluginGuard } from './api.js';
 import { withTimeout, isThenable, swapPluginDir } from './util.js';
@@ -962,10 +962,15 @@ export class PluginHost {
   private viewOfRow(row: PluginRow): PluginView {
     let capabilities: PluginCapability[] = [];
     let displayName: string | undefined;
+    let uiPanels: UiPanel[] = [];
     try {
       const m = loadManifest(path.join(this.pluginsDir, row.name));
       capabilities = m.capabilities;
       displayName = m.displayName;
+      // Panels are surfaced ONLY for an enabled plugin: a disabled plugin's
+      // `/plugin-api/<name>/*` routes are torn down (404), so a nav entry would
+      // dead-link. `m.uiPanels` is always an array (schema default []).
+      if (row.enabled === 1) uiPanels = m.uiPanels;
     } catch {
       /* folder gone / invalid manifest — fall back to empty capabilities */
     }
@@ -984,6 +989,7 @@ export class PluginHost {
       lastError: row.last_error,
       installedAt: row.installed_at,
       updatedAt: row.updated_at,
+      uiPanels,
     };
   }
 

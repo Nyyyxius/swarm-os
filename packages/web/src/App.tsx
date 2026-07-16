@@ -4,6 +4,7 @@ import MobileShell from './components/mobile/MobileShell';
 import { RolesPage } from './components/RolesPage';
 import { PluginsPage } from './components/PluginsPage';
 import IdeOverlay from './components/desktop/IdeOverlay';
+import PluginPanelHost from './components/desktop/PluginPanelHost';
 import { SwarmControllerProvider } from './controller/SwarmController';
 import { useShellMode } from './hooks/useShellMode';
 
@@ -12,7 +13,8 @@ type Route =
   | { kind: 'detail'; id: string }
   | { kind: 'roles' }
   | { kind: 'plugins' }
-  | { kind: 'ide' };
+  | { kind: 'ide' }
+  | { kind: 'panel'; plugin: string; panel: string };
 
 /**
  * Parse the current URL hash into a Route. We use the URL fragment so deep
@@ -26,6 +28,9 @@ function parseHash(): Route {
   const h = window.location.hash;
   const m = /^#\/orchestrators\/([a-zA-Z0-9-]+)$/.exec(h);
   if (m && m[1]) return { kind: 'detail', id: m[1] };
+  // Feature B.3 — plugin UI panel: `#/panel/<plugin>/<panelId>`.
+  const p = /^#\/panel\/([a-z][a-z0-9-]{1,40})\/([a-z][a-z0-9-]*)$/.exec(h);
+  if (p && p[1] && p[2]) return { kind: 'panel', plugin: p[1], panel: p[2] };
   if (h === '#/roles') return { kind: 'roles' };
   if (h === '#/plugins') return { kind: 'plugins' };
   if (h === '#/ide') return { kind: 'ide' };
@@ -38,6 +43,7 @@ function setHashRoute(route: Route): void {
   else if (route.kind === 'roles') target = '#/roles';
   else if (route.kind === 'plugins') target = '#/plugins';
   else if (route.kind === 'ide') target = '#/ide';
+  else if (route.kind === 'panel') target = `#/panel/${route.plugin}/${route.panel}`;
   else target = `#/orchestrators/${route.id}`;
   if (window.location.hash !== target) {
     window.location.hash = target;
@@ -90,6 +96,7 @@ export default function App() {
           onOpenRoles={() => setRoute({ kind: 'roles' })}
           onOpenPlugins={() => setRoute({ kind: 'plugins' })}
           onOpenIde={() => setRoute({ kind: 'ide' })}
+          onOpenPanel={(plugin, panel) => setRoute({ kind: 'panel', plugin, panel })}
           onCloseRightPanel={() => {
             if (route.kind === 'detail') setRoute({ kind: 'list' });
           }}
@@ -114,6 +121,16 @@ export default function App() {
           {/* IDE overlay is desktop-only (the #/ide redirect keeps mobile off it). */}
           {!isMobile && route.kind === 'ide' && (
             <IdeOverlay onClose={() => setRoute({ kind: 'list' })} />
+          )}
+
+          {/* Plugin UI panel overlay (feature B.3) — responsive, mounted only
+              while the panel route is active. */}
+          {route.kind === 'panel' && (
+            <PluginPanelHost
+              pluginName={route.plugin}
+              panelId={route.panel}
+              onClose={() => setRoute({ kind: 'plugins' })}
+            />
           )}
         </SwarmControllerProvider>
       </main>

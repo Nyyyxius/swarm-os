@@ -75,6 +75,8 @@ export interface SwarmControllerProps {
   onOpenPlugins?: () => void;
   /** TopBar/Dock IDE → route `#/ide`. */
   onOpenIde?: () => void;
+  /** Plugin panel nav → route `#/panel/<plugin>/<panelId>` (feature B.3). */
+  onOpenPanel?: (plugin: string, panelId: string) => void;
   /** Current shell-mode override (auto|desktop|mobile), from useShellMode. */
   shellMode: ShellMode;
   /** Persist a shell-mode override (escape hatch from the auto breakpoint). */
@@ -127,6 +129,8 @@ export interface SwarmControllerValue {
   onOpenRoles: () => void;
   onOpenPlugins: () => void;
   onOpenIde: () => void;
+  /** Open a plugin UI panel overlay (feature B.3). */
+  onOpenPanel: (plugin: string, panelId: string) => void;
   /** Revision counter bumped on each plugin.host.changed WS event (live refresh). */
   pluginsRev: number;
   // shell-mode override (escape hatch from auto breakpoint)
@@ -170,6 +174,7 @@ export function SwarmControllerProvider({
   onOpenRoles,
   onOpenPlugins,
   onOpenIde,
+  onOpenPanel,
   shellMode,
   setShellMode,
   children,
@@ -743,6 +748,10 @@ export function SwarmControllerProvider({
   const onOpenRolesResolved = useCallback(() => { onOpenRoles?.(); }, [onOpenRoles]);
   const onOpenPluginsResolved = useCallback(() => { onOpenPlugins?.(); }, [onOpenPlugins]);
   const onOpenIdeResolved = useCallback(() => { onOpenIde?.(); }, [onOpenIde]);
+  const onOpenPanelResolved = useCallback(
+    (plugin: string, panelId: string) => { onOpenPanel?.(plugin, panelId); },
+    [onOpenPanel],
+  );
 
   const value: SwarmControllerValue = {
     orchestrators,
@@ -781,6 +790,7 @@ export function SwarmControllerProvider({
     onOpenRoles: onOpenRolesResolved,
     onOpenPlugins: onOpenPluginsResolved,
     onOpenIde: onOpenIdeResolved,
+    onOpenPanel: onOpenPanelResolved,
     pluginsRev,
     shellMode,
     setShellMode,

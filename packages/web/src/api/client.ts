@@ -10,6 +10,28 @@ export function getToken(): string {
 export function setToken(t: string): void {
   if (t) localStorage.setItem(TOKEN_KEY, t);
   else localStorage.removeItem(TOKEN_KEY);
+  syncPanelCookie();
+}
+
+/**
+ * Feature B.3 — plugin UI panels load in an iframe, which cannot send the
+ * `X-Auth-Token` header. The server's auth gate accepts a cookie as an
+ * alternative, but only for the `/plugin-api/` zone. We mirror the localStorage
+ * token into that cookie: `Path=/plugin-api/` (so the browser never attaches it
+ * to other routes) + `SameSite=Strict` (no cross-site attachment → CSRF-safe).
+ * No `Secure` flag: swarm-os is commonly served over plain http (loopback /
+ * Tailscale) and a Secure cookie would silently fail to store there.
+ */
+const PANEL_COOKIE = 'swarm_os_token';
+
+/** Set or clear the panel-auth cookie to match the current token. */
+export function syncPanelCookie(): void {
+  const t = getToken();
+  if (t) {
+    document.cookie = `${PANEL_COOKIE}=${encodeURIComponent(t)}; Path=/plugin-api/; SameSite=Strict`;
+  } else {
+    document.cookie = `${PANEL_COOKIE}=; Path=/plugin-api/; SameSite=Strict; Max-Age=0`;
+  }
 }
 
 export interface OrchestratorView {
@@ -141,6 +163,16 @@ export type RoleInput = Omit<RoleView, 'id' | 'createdAt' | 'updatedAt'>;
 
 export type PluginStatus = 'disabled' | 'enabled' | 'error' | 'crashed' | 'quarantined';
 
+/**
+ * A UI panel a plugin exposes (feature B.3). Mirror of the server-side
+ * `UiPanel` (modules/plugins/manifest.ts). Rendered by the SPA as an iframe.
+ */
+export interface UiPanel {
+  id: string;
+  title: string;
+  path: string;
+}
+
 /** Mirror of the server-side `PluginView` (modules/plugins/api-types.ts). */
 export interface PluginView {
   name: string;
@@ -159,6 +191,8 @@ export interface PluginView {
   lastError: string | null;
   installedAt: string;
   updatedAt: string;
+  /** UI panels (feature B.3). Present ONLY for an enabled plugin; else `[]`. */
+  uiPanels: UiPanel[];
 }
 
 /** Body of `POST /plugins/install`. Upload is a separate raw-body endpoint. */

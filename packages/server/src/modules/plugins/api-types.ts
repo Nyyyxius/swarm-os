@@ -30,8 +30,10 @@ import type { Message } from '../orchestrator/mailbox.js';
 import type { HostExecInput, HostExecResult } from '../orchestrator/ssh-exec.js';
 import type { NotificationInput, NotificationLevel } from '../notify/index.js';
 import type { InstanceSettings } from '../settings/index.js';
+import type { UiPanel } from './manifest.js';
 
 export type { HostExecInput, HostExecResult } from '../orchestrator/ssh-exec.js';
+export type { UiPanel } from './manifest.js';
 
 /**
  * Capabilities a manifest may DECLARE. The operator then GRANTS a subset in
@@ -167,6 +169,12 @@ export interface PluginView {
   lastError: string | null;
   installedAt: string;
   updatedAt: string;
+  /**
+   * UI panels the plugin declares (feature B.3). Surfaced ONLY when the plugin
+   * is enabled — a disabled plugin's HTTP routes are torn down, so exposing a
+   * panel would dead-link. Empty `[]` otherwise.
+   */
+  uiPanels: UiPanel[];
 }
 
 // ---------------------------------------------------------------------------

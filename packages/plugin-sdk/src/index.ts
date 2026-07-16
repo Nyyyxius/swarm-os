@@ -88,6 +88,21 @@ export const PLUGIN_CAPABILITIES = [
 
 export type PluginCapability = (typeof PLUGIN_CAPABILITIES)[number];
 
+/**
+ * A UI panel a plugin exposes (feature B.3, uiPanels v1). The swarm-os SPA
+ * renders one navigation entry per panel of an ENABLED plugin and hosts `path`
+ * inside an iframe under the plugin's authenticated HTTP zone
+ * (`/plugin-api/<name>/`).
+ */
+export interface UiPanel {
+  /** `^[a-z][a-z0-9-]*$`, unique within `uiPanels` — also the SPA route segment. */
+  id: string;
+  /** Navigation label (non-empty, ≤ 80 chars). */
+  title: string;
+  /** RELATIVE path under `/plugin-api/<name>/` — no absolute path, no `..`. */
+  path: string;
+}
+
 /** A flat subset of JSON Schema driving the auto-generated config/connector form. */
 export interface PluginConfigProp {
   type: 'string' | 'number' | 'boolean';
@@ -125,8 +140,8 @@ export interface PluginManifest {
   agentAssets?: { dir: string };
   /** Channel connector types this plugin provides (capability `connectors`). */
   connectors?: Array<{ type: string; label: string; schema?: PluginConfigSchema }>;
-  /** Reserved for v2. */
-  uiPanels?: unknown[];
+  /** UI panels rendered by the SPA as iframes (feature B.3). Optional, default `[]`. */
+  uiPanels?: UiPanel[];
 }
 
 // ---------------------------------------------------------------------------

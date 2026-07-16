@@ -352,6 +352,31 @@ export function PluginsPage({ open, onClose }: Props) {
               </div>
             </div>
 
+            {/* Panels (feature B.3) — the server only populates `uiPanels` for
+                an ENABLED plugin, so this section appears only when there is at
+                least one live panel to open. */}
+            {plugin.uiPanels.length > 0 && (
+              <div className="role-section">
+                <h3>
+                  <span>PANELS</span>
+                </h3>
+                <div className="r-tags" style={{ marginBottom: 8, gap: 8 }}>
+                  {plugin.uiPanels.map((panel) => (
+                    <button
+                      key={panel.id}
+                      className="btn"
+                      onClick={() => c.onOpenPanel(plugin.name, panel.id)}
+                    >
+                      {panel.title}
+                    </button>
+                  ))}
+                </div>
+                <div className="field-help">
+                  Opens the plugin page in a sandboxed iframe (v1).
+                </div>
+              </div>
+            )}
+
             {/* Config form (rendered only when the manifest declares a configSchema). */}
             <PluginConfigForm pluginName={plugin.name} rev={c.pluginsRev} />
 

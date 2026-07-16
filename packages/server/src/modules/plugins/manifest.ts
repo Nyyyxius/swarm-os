@@ -62,6 +62,31 @@ const capabilitySchema = z.enum(
   PLUGIN_CAPABILITIES as unknown as [PluginCapability, ...PluginCapability[]],
 );
 
+/** A `uiPanels[].id` slug — also the SPA route segment, so URL/nav-safe. */
+export const PANEL_ID_RE = /^[a-z][a-z0-9-]*$/;
+
+/** Upper bound on a panel's navigation label (feature B.3, uiPanels v1). */
+const PANEL_TITLE_MAX = 80;
+
+/**
+ * One UI panel a plugin exposes (feature B.3). The SPA renders a navigation
+ * entry per panel of an ENABLED plugin, and hosts `path` inside an iframe under
+ * the plugin's authenticated HTTP zone (`/plugin-api/<name>/`).
+ *
+ * `path` carries the SAME anti-traversal rigour as `main` (`isSafeMain`): a
+ * RELATIVE path inside the plugin zone — no absolute path, no `..` escape.
+ */
+const uiPanelSchema = z.object({
+  id: z.string().regex(PANEL_ID_RE, 'uiPanels[].id must match ^[a-z][a-z0-9-]*$'),
+  title: z.string().trim().min(1, 'uiPanels[].title must be non-empty').max(PANEL_TITLE_MAX),
+  path: z.string().refine(isSafeMain, {
+    message: 'uiPanels[].path must be a relative path inside the plugin zone (no absolute / no "..")',
+  }),
+});
+
+/** A validated UI panel — the shape surfaced on `PluginView.uiPanels`. */
+export type UiPanel = z.infer<typeof uiPanelSchema>;
+
 /**
  * A permissive sub-JSON-Schema slot. J1 stores it verbatim; J2 adds the
  * form generator + validator. Kept `unknown` here so an author can ship a
@@ -96,7 +121,12 @@ export const manifestSchema = z
         }),
       )
       .optional(),
-    uiPanels: z.array(z.unknown()).optional(),
+    uiPanels: z
+      .array(uiPanelSchema)
+      .refine((panels) => new Set(panels.map((p) => p.id)).size === panels.length, {
+        message: 'uiPanels: panel ids must be unique within the manifest',
+      })
+      .default([]),
   })
   // Tolerate forward-compatible fields authored against a newer host.
   .passthrough();

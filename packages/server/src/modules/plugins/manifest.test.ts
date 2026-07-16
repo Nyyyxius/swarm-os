@@ -87,6 +87,59 @@ describe('plugin manifest schema', () => {
   });
 });
 
+describe('manifest uiPanels (feature B.3)', () => {
+  const panel = (over: Record<string, unknown> = {}) => ({
+    id: 'dash',
+    title: 'Dashboard',
+    path: 'panel',
+    ...over,
+  });
+
+  it('defaults uiPanels to [] when omitted', () => {
+    const r = manifestSchema.safeParse(base());
+    expect(r.success).toBe(true);
+    if (r.success) expect(r.data.uiPanels).toEqual([]);
+  });
+
+  it('accepts well-formed panels (incl. a nested relative path)', () => {
+    const r = manifestSchema.safeParse({
+      ...base(),
+      uiPanels: [panel(), panel({ id: 'ui', title: 'UI', path: 'ui/index.html' })],
+    });
+    expect(r.success).toBe(true);
+    if (r.success) {
+      expect(r.data.uiPanels.map((p) => p.id)).toEqual(['dash', 'ui']);
+      expect(r.data.uiPanels[1]?.path).toBe('ui/index.html');
+    }
+  });
+
+  it('rejects a duplicate panel id', () => {
+    const r = manifestSchema.safeParse({
+      ...base(),
+      uiPanels: [panel({ id: 'dup' }), panel({ id: 'dup', title: 'Other', path: 'other' })],
+    });
+    expect(r.success).toBe(false);
+  });
+
+  it('rejects an invalid panel id (uppercase / leading digit / empty)', () => {
+    expect(manifestSchema.safeParse({ ...base(), uiPanels: [panel({ id: 'Dash' })] }).success).toBe(false);
+    expect(manifestSchema.safeParse({ ...base(), uiPanels: [panel({ id: '1dash' })] }).success).toBe(false);
+    expect(manifestSchema.safeParse({ ...base(), uiPanels: [panel({ id: '' })] }).success).toBe(false);
+  });
+
+  it('rejects an empty title', () => {
+    expect(manifestSchema.safeParse({ ...base(), uiPanels: [panel({ title: '' })] }).success).toBe(false);
+    expect(manifestSchema.safeParse({ ...base(), uiPanels: [panel({ title: '   ' })] }).success).toBe(false);
+  });
+
+  it('rejects a path-traversing or absolute panel path (same rigour as main)', () => {
+    expect(manifestSchema.safeParse({ ...base(), uiPanels: [panel({ path: '../../evil.html' })] }).success).toBe(false);
+    expect(manifestSchema.safeParse({ ...base(), uiPanels: [panel({ path: '/etc/passwd' })] }).success).toBe(false);
+    expect(manifestSchema.safeParse({ ...base(), uiPanels: [panel({ path: 'a/../../b.html' })] }).success).toBe(false);
+    expect(manifestSchema.safeParse({ ...base(), uiPanels: [panel({ path: '' })] }).success).toBe(false);
+  });
+});
+
 describe('loadManifest', () => {
   let dir: string;
   beforeEach(() => {

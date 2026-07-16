@@ -16,6 +16,12 @@ export default defineConfig({
       '/orchestrators': { target: SERVER_TARGET, changeOrigin: true },
       '/sessions': { target: SERVER_TARGET, changeOrigin: true },
       '/health': { target: SERVER_TARGET, changeOrigin: true },
+      // Plugin management REST + plugin-owned HTTP zones (feature B.3 iframes
+      // load `/plugin-api/<name>/*` on the app origin, so the dev proxy must
+      // forward them too).
+      '/plugins': { target: SERVER_TARGET, changeOrigin: true },
+      '/plugin-api': { target: SERVER_TARGET, changeOrigin: true },
+      '/public': { target: SERVER_TARGET, changeOrigin: true },
       // VS Code web: `/ide-info` (connection details) + `/ide` (the editor
       // itself, reverse-proxied by the server under that base path, incl. its
       // WebSocket). Both ride on the server's single port.

@@ -64,6 +64,7 @@ A plugin is a directory dropped under `/data/plugins/<name>/`:
 | `configSchema` | Optional flat JSON-Schema subset → auto-generated config form + validation. |
 | `agentAssets`  | Optional `{ dir }` copied into the workspace for agents to run (see §7). |
 | `connectors`   | Optional channel connector declarations (see §6). |
+| `uiPanels`     | Optional UI panels rendered by the SPA as iframes (see §5, *UI panels*). |
 
 ### Entry point
 
@@ -255,6 +256,78 @@ undefined (read `req.rawBody`).
 A route error never crashes the server: it's caught, charged to your crash
 counter (epoch-aware), and answered as `500 { error: 'PLUGIN_ERROR', plugin }`.
 
+### UI panels (`uiPanels`, feature B.3)
+
+A plugin can surface **pages** in the swarm-os SPA. Each declared panel becomes a
+navigation entry (in the **Plugins** page, under the plugin's detail) that opens
+the plugin's page in a full-screen **iframe**. This is a v1: the panel is a plain
+HTML page **you serve** from your authenticated HTTP zone — swarm-os does **not**
+load a third-party JS bundle and does **not** inject React components.
+
+**Manifest schema** — `uiPanels` is optional (default `[]`):
+
+```json
+"uiPanels": [
+  { "id": "demo", "title": "Echo Demo", "path": "panel" }
+]
+```
+
+| field   | rule |
+| ------- | ---- |
+| `id`    | slug `^[a-z][a-z0-9-]*$`, **unique** within `uiPanels`; also the SPA route segment |
+| `title` | navigation label — non-empty, ≤ 80 chars |
+| `path`  | **relative** path under your authenticated zone — no absolute path, no `..` (same anti-traversal rigour as `main`) |
+
+`path` resolves to `/plugin-api/<name>/<path>`, so you serve the page from a
+normal authenticated route:
+
+```ts
+const router = api.http.createRouter();
+router.get('/panel', (_req, res) => res.type('html').send('<!doctype html>…'));
+api.http.registerRouter(router);        // → GET /plugin-api/<name>/panel
+```
+
+**Lifecycle — enabled only.** Panels are surfaced in `PluginView.uiPanels` **only
+while the plugin is enabled**. A disabled plugin's `/plugin-api/*` routes are torn
+down (they 404), so no navigation entry is shown for it.
+
+**Iframe authentication.** An `<iframe src="/plugin-api/<name>/…">` cannot send
+the `X-Auth-Token` header the REST client uses. The SPA therefore mirrors the
+token into a cookie:
+
+```
+swarm_os_token=<token>; Path=/plugin-api/; SameSite=Strict
+```
+
+and the server's auth gate accepts that cookie **as an alternative to the header,
+but only for requests under `/plugin-api/`** (belt-and-suspenders with the
+cookie's own path scope). Rationale:
+
+- The swarm-os token grants full API access, so we keep it **out of URLs** (a
+  `?token=` query would leak via referrer / browser history / access logs). A
+  path-scoped cookie avoids that.
+- `SameSite=Strict` blocks cross-site attachment ⇒ CSRF-safe; `Path=/plugin-api/`
+  means the browser never sends it to `/orchestrators`, `/plugins`, etc.
+- No `Secure` flag: swarm-os is commonly served over plain http (loopback /
+  Tailscale), where a `Secure` cookie would silently fail to store.
+
+A **same-origin** `fetch('./data')` from inside your panel automatically carries
+this cookie, so your panel's own authenticated calls just work.
+
+**Sandbox.** The iframe is rendered with
+`sandbox="allow-scripts allow-same-origin allow-forms"` and
+`referrerpolicy="no-referrer"`. `allow-same-origin` is required for the panel's
+own `/plugin-api` fetches to carry the cookie; combined with `allow-scripts` it
+means the panel runs with **same-origin privileges** (it can reach the app's
+`localStorage`, where the token lives). That is acceptable because **plugins are
+already fully-trusted in-process code** (they run in the server process, can hold
+`host-exec`, etc.) — a UI panel does not widen that trust boundary. Do not install
+plugins you would not already trust with the host. `allow-popups` and
+`allow-top-navigation` are intentionally omitted.
+
+**Limits (v1).** No third-party JS bundle, no injected React components — a panel
+is an iframe to a page you serve. Richer host↔panel integration is future work.
+
 ---
 
 ## 6. Channel connectors
@@ -370,8 +443,9 @@ every private `plugin_<name'>_*` table so a later reinstall starts clean.
 
 - **`examples/plugins/echo/`** — dependency-free: re-emits `mailbox.message` as
   `plugin.echo.seen`, a private KV counter, an interval heartbeat, an
-  `echo.ping` MCP tool, an authenticated `/plugin-api/echo/hello` route, and a
-  `configSchema` with a masked password field.
+  `echo.ping` MCP tool, an authenticated `/plugin-api/echo/hello` route, a
+  `uiPanels` demo page served at `/plugin-api/echo/panel` (§5, *UI panels*), and
+  a `configSchema` with a masked password field.
 - **`examples/plugins/slack-bridge/`** — a real Slack channel connector over
   Socket Mode (npm deps `@slack/socket-mode` + `@slack/web-api`), with inbound
   channel → lead inbox and an outbound `slack.send` MCP tool.

@@ -215,6 +215,28 @@ describe('PluginHost lifecycle', () => {
     expect(v.lastError).toMatch(/timed out/);
     expect(v.failCount).toBe(1);
   });
+
+  it('exposes uiPanels in the view ONLY while enabled (feature B.3)', async () => {
+    mkPlugin('paneled', {
+      uiPanels: [{ id: 'demo', title: 'Demo', path: 'panel' }],
+    });
+    fakes.set('paneled', { activate() {} });
+    await host.scan();
+
+    // Disabled → no panels surfaced (routes are torn down, would dead-link).
+    expect(host.viewOf('paneled').enabled).toBe(false);
+    expect(host.viewOf('paneled').uiPanels).toEqual([]);
+
+    // Enabled → panels surfaced from the manifest.
+    await host.enable('paneled');
+    const enabled = host.viewOf('paneled');
+    expect(enabled.enabled).toBe(true);
+    expect(enabled.uiPanels).toEqual([{ id: 'demo', title: 'Demo', path: 'panel' }]);
+
+    // Back to disabled → panels drop out again.
+    await host.disable('paneled');
+    expect(host.viewOf('paneled').uiPanels).toEqual([]);
+  });
 });
 
 describe('PluginHost crash isolation & quarantine', () => {
