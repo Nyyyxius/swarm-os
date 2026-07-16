@@ -106,8 +106,9 @@ loaded in-process and hot enabled/disabled from the UI (`#/plugins`) with no
 server restart and no interruption of running teams. A plugin receives an
 injected `SwarmPluginApi` façade — event bus, team/role management, agent
 messaging, per-plugin storage, cron scheduling, MCP tools exposed to the
-agents, HTTP routes, and channel connectors (Discord-style bridges). Full
-authoring guide: `docs/plugins.md`.
+agents, HTTP routes, host command execution over SSH, and channel connectors
+(Discord-style bridges) — and can surface its own pages as iframe UI panels in
+the SPA. Full authoring guide: `docs/plugins.md`.
 
 ### Creating a plugin
 
@@ -141,9 +142,11 @@ Drop the directory in `/data/plugins/<name>/`, hit **Scan** on `#/plugins`,
 then **Enable**. Everything registered through `api.*` returns a disposable
 and is torn down automatically on disable. Agents see MCP tools as
 `<name>.<tool>` (here `my-plugin.hello`). Working examples:
-`examples/plugins/echo` (events, MCP tool, HTTP route, config schema) and
-`examples/plugins/slack-bridge` (channel connector, npm dependencies).
-Use `packages/plugin-sdk` for typed autocompletion while authoring.
+`examples/plugins/echo` (events, MCP tool, HTTP route, config schema, UI panel)
+and `examples/plugins/slack-bridge` (channel connector, npm dependencies).
+Use `packages/plugin-sdk` for typed autocompletion while authoring. A manifest
+may also declare `uiPanels` to surface its own pages as full-pane iframes in the
+SPA nav (enabled plugins only) — see `docs/plugins.md` §5.
 
 ### Capabilities
 
@@ -161,9 +164,10 @@ sandbox**: plugins run in-process as trusted code.
 | `http-routes` / `http-public` | authed routes under `/plugin-api/<name>/*` / tokenless webhooks under `/public/plugins/<name>/*` (HMAC over `req.rawBody`) |
 | `agent-assets` | ship scripts copied to `<workspace>/.swarm-plugins/<name>/` for agents to run |
 | `db-kv` / `db-tables` | per-plugin key-value store / own prefixed SQLite tables (`plugin_<name'>_*`, `name'` = name with `-`→`_`) via `defineTable`/`prepare`, confined to that prefix |
-| `notify` / `schedule` | push operator notifications / cron expressions + intervals |
+| `notify` / `schedule` | push operator notifications (incl. free-form `notify.custom` alerts) / cron expressions + intervals |
 | `connectors` | provide channel connector types (Slack/Telegram-style bridges) roles can use |
 | `settings-read` | read instance settings |
+| `host-exec` | run arbitrary commands on the **host** over SSH (`api.host.exec`) — the most powerful capability: full trust, `ssh` agent transport only |
 
 ### Installing & managing
 
