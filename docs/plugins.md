@@ -201,6 +201,62 @@ Semantics:
 > transport (`SWARM_OS_AGENT_TRANSPORT=ssh`): under the `local` transport there
 > is no separate host to reach and the call rejects with a clear error.
 
+### 4.2 `storage.defineTable` / `storage.prepare` — private SQLite tables
+
+`db-kv` covers a string key-value store; `db-tables` (a **separate** capability)
+gives you real relational tables on the server's own SQLite database, confined to
+a private namespace. Every object you create is prefixed `plugin_<name'>_` where
+`name'` is your plugin name with `-` → `_` (a bare hyphen is an invalid SQL
+identifier, so `slack-bridge` → `plugin_slack_bridge_`). That is exactly the
+prefix the uninstall purge drops, so your tables never outlive a
+`DELETE …?purge=true`.
+
+```ts
+// DDL — one CREATE, idempotent, entirely inside your prefix.
+api.storage.defineTable(
+  'CREATE TABLE IF NOT EXISTS plugin_myplugin_events (id INTEGER PRIMARY KEY, at TEXT, kind TEXT)',
+);
+api.storage.defineTable(
+  'CREATE INDEX IF NOT EXISTS plugin_myplugin_events_at ON plugin_myplugin_events(at)',
+);
+
+// DML — prepared once, then run/get/all with named (@x) or positional (?) params.
+const insert = api.storage.prepare('INSERT INTO plugin_myplugin_events (at, kind) VALUES (@at, @kind)');
+insert.run({ at: new Date().toISOString(), kind: 'login' });
+
+const recent = api.storage
+  .prepare<{ since: string }, { kind: string }>('SELECT kind FROM plugin_myplugin_events WHERE at > @since')
+  .all({ since: '2026-01-01' });
+```
+
+**`defineTable(ddl)`** accepts exactly one `CREATE TABLE` / `CREATE [UNIQUE]
+INDEX` / `CREATE TRIGGER` statement — the object types the purge knows how to
+drop. It is compiled with `.prepare()` (not `.exec()`), so a **single statement**
+is enforced: a trailing `; DROP TABLE roles` is rejected. The statement may not
+reference any table outside your prefix (so `CREATE TABLE … AS SELECT … FROM
+roles` and triggers wired onto core tables are refused), and the object it
+actually creates is verified — inside a transaction that rolls back on any
+violation — to sit under your prefix (both its own name and the table it attaches
+to). `CREATE VIEW`/`VIRTUAL`/`TEMP`, `PRAGMA`, `ATTACH`, `DROP` and `ALTER` are
+all rejected.
+
+**`prepare(sql)`** compiles one DML statement (`SELECT` / `INSERT` / `UPDATE` /
+`DELETE` / `REPLACE` / `WITH`) and returns a safe `{ run, get, all }` projection —
+never the raw better-sqlite3 handle. `PRAGMA`, `ATTACH`/`DETACH`, `VACUUM`, DDL
+and explicit transactions (`BEGIN`/`COMMIT`) are refused, and the statement may
+reference **only** tables under your prefix — reads and writes to any core table
+(`roles`, `plugins`, …) or another plugin's tables throw. A statement you hold
+across `disable()` becomes inert: the next `run/get/all` raises a benign
+`PluginDisabledError` rather than touching the DB.
+
+> Limits (documented, not a sandbox — plugins are trusted in-process code). The
+> table guard is a conservative identifier scan: an identifier that merely
+> *collides* with a forbidden table name (e.g. a column literally named `roles`)
+> is rejected too, and the `ATTACH` ban is an anti-accident guard. The prefix is
+> textual — `plugin_a_` is a prefix of `plugin_a_b_` (plugin `a-b`), the same
+> ambiguity the purge carries; avoid plugin names where one is a `<other>-…`
+> extension of another.
+
 ---
 
 ## 5. MCP tools & HTTP routes

@@ -160,7 +160,7 @@ sandbox**: plugins run in-process as trusted code.
 | `mcp-tools` | register MCP tools exposed to agents as `<name>.<tool>` |
 | `http-routes` / `http-public` | authed routes under `/plugin-api/<name>/*` / tokenless webhooks under `/public/plugins/<name>/*` (HMAC over `req.rawBody`) |
 | `agent-assets` | ship scripts copied to `<workspace>/.swarm-plugins/<name>/` for agents to run |
-| `db-kv` / `db-tables` | per-plugin key-value store / own SQLite tables (`plugin_<name>_*`) |
+| `db-kv` / `db-tables` | per-plugin key-value store / own prefixed SQLite tables (`plugin_<name'>_*`, `name'` = name with `-`→`_`) via `defineTable`/`prepare`, confined to that prefix |
 | `notify` / `schedule` | push operator notifications / cron expressions + intervals |
 | `connectors` | provide channel connector types (Slack/Telegram-style bridges) roles can use |
 | `settings-read` | read instance settings |

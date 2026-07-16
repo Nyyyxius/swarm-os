@@ -140,6 +140,22 @@ export class PluginCapabilityError extends Error {
   }
 }
 
+/**
+ * Raised by `storage.defineTable` / `storage.prepare` when a plugin's SQL
+ * violates the private-table contract: a statement that is not mono-statement,
+ * a DDL/DML referencing a table OUTSIDE the plugin's `plugin_<name'>_` prefix,
+ * a `defineTable` that would create a non-prefixed object, or a forbidden verb
+ * (PRAGMA/ATTACH/DETACH/VACUUM/transaction control). This is a real error
+ * surfaced to the plugin — the guardrail keeps a plugin's SQL strictly inside
+ * its own tables and off the core schema (`roles`, `plugins`, …).
+ */
+export class PluginStorageError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = 'PluginStorageError';
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Runtime status / view
 // ---------------------------------------------------------------------------

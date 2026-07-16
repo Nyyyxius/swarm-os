@@ -221,15 +221,32 @@ export function buildPluginApi(
           return store.kvList(name, prefix);
         },
       },
-      defineTable(): void {
-        throw new PluginCapabilityError(
-          `api.storage.defineTable is not materialised in this build (db-tables)`,
-        );
+      defineTable(ddl: string): void {
+        requireCap('db-tables');
+        ensureLive();
+        store.defineTable(name, ddl);
       },
-      prepare() {
-        throw new PluginCapabilityError(
-          `api.storage.prepare is not materialised in this build (db-tables)`,
-        );
+      prepare<P extends object = object, R = unknown>(sql: string) {
+        requireCap('db-tables');
+        ensureLive();
+        const stmt = store.prepareForPlugin<P, R>(name, sql);
+        // Re-check the epoch on EVERY call: a statement a plugin holds across
+        // disable() must become a benign PluginDisabledError, not a live handle
+        // onto the shared DB after the plugin is torn down.
+        return {
+          run: (p?: P): void => {
+            ensureLive();
+            stmt.run(p);
+          },
+          get: (p?: P): R | undefined => {
+            ensureLive();
+            return stmt.get(p);
+          },
+          all: (p?: P): R[] => {
+            ensureLive();
+            return stmt.all(p);
+          },
+        };
       },
     },
 

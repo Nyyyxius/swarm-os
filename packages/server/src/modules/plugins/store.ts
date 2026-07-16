@@ -17,8 +17,97 @@
 import type { Database as Db } from 'better-sqlite3';
 import { withModule } from '../../logger.js';
 import type { SwarmDb } from '../db/index.js';
+import { PluginStorageError } from './api-types.js';
 
 const log = withModule('plugins.store');
+
+/** Safe projection of a prepared statement handed to a plugin — never the raw
+ *  better-sqlite3 `Statement` (which would expose the shared `Database`). */
+export interface PluginPreparedStatement<P extends object = object, R = unknown> {
+  run(p?: P): void;
+  get(p?: P): R | undefined;
+  all(p?: P): R[];
+}
+
+/** Verbs a plugin may `prepare()` — DML + CTEs only. Everything else (DDL,
+ *  PRAGMA, ATTACH/DETACH, VACUUM, BEGIN/COMMIT/…) is refused: DDL goes through
+ *  `defineTable`, the rest have no legitimate plugin use and could escape the
+ *  prefix boundary. `.prepare()` already enforces a single statement, so these
+ *  verbs can only ever appear as the STATEMENT HEAD. */
+const PREPARE_ALLOWED_VERBS = new Set(['SELECT', 'INSERT', 'UPDATE', 'DELETE', 'REPLACE', 'WITH']);
+
+/** SQLite internal schema objects — always off-limits to a plugin (they don't
+ *  carry a `plugin_<name'>_` prefix and some aren't listed in `sqlite_master`). */
+const SQLITE_INTERNAL_TABLES = [
+  'sqlite_master',
+  'sqlite_schema',
+  'sqlite_temp_master',
+  'sqlite_temp_schema',
+  'sqlite_sequence',
+  'sqlite_stat1',
+  'sqlite_stat4',
+];
+
+/**
+ * Strip comments and single-quoted string literals from SQL so a subsequent
+ * identifier scan can't be fooled by a table name that only appears inside a
+ * literal/comment. String literals collapse to a space (keeps tokens apart);
+ * quoted IDENTIFIERS (`"…"`, `` `…` ``, `[…]`) are preserved for scanning.
+ */
+function stripSqlNoise(sql: string): string {
+  let out = '';
+  let i = 0;
+  const n = sql.length;
+  while (i < n) {
+    const c = sql[i];
+    const c2 = sql[i + 1];
+    if (c === '-' && c2 === '-') {
+      i += 2;
+      while (i < n && sql[i] !== '\n') i++;
+      continue;
+    }
+    if (c === '/' && c2 === '*') {
+      i += 2;
+      while (i < n && !(sql[i] === '*' && sql[i + 1] === '/')) i++;
+      i += 2;
+      continue;
+    }
+    if (c === "'") {
+      i++;
+      while (i < n) {
+        if (sql[i] === "'") {
+          if (sql[i + 1] === "'") {
+            i += 2;
+            continue;
+          }
+          i++;
+          break;
+        }
+        i++;
+      }
+      out += ' ';
+      continue;
+    }
+    out += c;
+    i++;
+  }
+  return out;
+}
+
+/** Lowercased set of every identifier a (noise-stripped) SQL string mentions —
+ *  bare words AND quoted identifiers. Used to test membership against the set of
+ *  forbidden table names (a real table reference always names the table). */
+function referencedIdentifiers(strippedSql: string): Set<string> {
+  const ids = new Set<string>();
+  for (const m of strippedSql.matchAll(/"((?:[^"]|"")*)"|`((?:[^`]|``)*)`|\[([^\]]*)\]/g)) {
+    const inner = (m[1] ?? m[2] ?? m[3] ?? '').replace(/""/g, '"').replace(/``/g, '`');
+    ids.add(inner.toLowerCase());
+  }
+  for (const m of strippedSql.matchAll(/[A-Za-z_][A-Za-z0-9_$]*/g)) {
+    ids.add(m[0].toLowerCase());
+  }
+  return ids;
+}
 
 /** Row shape of the `plugins` table (SQLite stores booleans as 0/1 integers). */
 export interface PluginRow {
@@ -266,16 +355,186 @@ export class PluginStore {
     }
   }
 
+  // ---- db-tables (private plugin_<name'>_* tables) -----------------------
+
+  /**
+   * Set of existing table/view names a plugin MAY NOT reference — everything
+   * outside its `plugin_<name'>_` prefix, plus SQLite's internal schema tables.
+   * Computed live from `sqlite_master` so a table added later (core migration,
+   * another plugin) is covered without a restart.
+   */
+  private forbiddenTableNames(prefix: string): Set<string> {
+    const set = new Set<string>(SQLITE_INTERNAL_TABLES);
+    const rows = this.db
+      .prepare<[], { name: string }>(
+        "SELECT name FROM sqlite_master WHERE type IN ('table','view')",
+      )
+      .all();
+    for (const r of rows) {
+      const n = r.name.toLowerCase();
+      if (!n.startsWith(prefix)) set.add(n);
+    }
+    return set;
+  }
+
+  /**
+   * Reject a statement that references ANY table outside `prefix`. Since a real
+   * table reference always names the table literally (SQLite has no way to reach
+   * a base table without spelling its name), scanning the noise-stripped SQL for
+   * a forbidden name is a robust upper bound: it catches `… FROM roles`,
+   * `INSERT INTO roles …`, `CREATE TABLE plugin_x_y AS SELECT … FROM roles`, and
+   * a trigger body touching a core table. Limits (documented): it is
+   * conservative — an identifier that merely COLLIDES with a forbidden table
+   * name (e.g. a column literally named `roles`) is rejected too; and the
+   * `plugin_a_` prefix is a textual prefix of `plugin_a_b_` (plugin `a-b`), the
+   * same ambiguity the uninstall purge carries.
+   */
+  private assertOnlyPrefixedTables(sql: string, prefix: string): void {
+    const forbidden = this.forbiddenTableNames(prefix);
+    if (forbidden.size === 0) return;
+    const ids = referencedIdentifiers(stripSqlNoise(sql));
+    for (const name of forbidden) {
+      if (ids.has(name)) {
+        throw new PluginStorageError(
+          `statement references table '${name}', which is outside the plugin's '${prefix}' prefix`,
+        );
+      }
+    }
+  }
+
+  /**
+   * `api.storage.defineTable(ddl)` — create a private `plugin_<name'>_*` object.
+   *
+   * Accepts exactly one `CREATE TABLE` / `CREATE [UNIQUE] INDEX` / `CREATE
+   * TRIGGER` statement (the object types the uninstall purge knows how to drop),
+   * and enforces:
+   *  - mono-statement — via `.prepare()` (not `.exec()`): a trailing
+   *    `; DROP TABLE roles` throws "more than one statement";
+   *  - no reference to a table outside the prefix (blocks `AS SELECT … FROM
+   *    roles` read-copies and triggers wired onto core tables);
+   *  - every object the statement actually creates lives under the prefix — both
+   *    its NAME and the table it attaches to (`tbl_name`), verified against a
+   *    `sqlite_master` diff inside a transaction that ROLLS BACK on violation.
+   *
+   * Idempotent: a `CREATE … IF NOT EXISTS` that creates nothing commits as a
+   * no-op. `ATTACH` is refused (not a `CREATE`) — an anti-accident guard, not a
+   * security boundary (plugins are trusted in-process code; documented).
+   */
+  defineTable(plugin: string, ddl: string): void {
+    if (typeof ddl !== 'string' || ddl.trim().length === 0) {
+      throw new PluginStorageError('defineTable requires a non-empty CREATE statement');
+    }
+    const sql = ddl.trim();
+    if (!/^CREATE\s+(TABLE|(UNIQUE\s+)?INDEX|TRIGGER)\b/i.test(sql)) {
+      throw new PluginStorageError(
+        "defineTable only accepts a 'CREATE TABLE' / 'CREATE [UNIQUE] INDEX' / 'CREATE TRIGGER' " +
+          'statement (no VIEW / VIRTUAL / TEMP / PRAGMA / ATTACH / DROP / ALTER)',
+      );
+    }
+    const prefix = PluginStore.tablePrefix(plugin);
+    this.assertOnlyPrefixedTables(sql, prefix);
+
+    const before = new Set(
+      this.db.prepare<[], { name: string }>('SELECT name FROM sqlite_master').all().map((r) => r.name),
+    );
+    const tx = this.db.transaction(() => {
+      this.db.prepare(sql).run();
+      const created = this.db
+        .prepare<[], { type: string; name: string; tbl_name: string }>(
+          'SELECT type, name, tbl_name FROM sqlite_master',
+        )
+        .all()
+        .filter((o) => !before.has(o.name));
+      for (const o of created) {
+        if (o.type !== 'table' && o.type !== 'index' && o.type !== 'trigger') {
+          throw new PluginStorageError(
+            `defineTable created an unsupported object type '${o.type}' ('${o.name}')`,
+          );
+        }
+        const nm = o.name.toLowerCase();
+        const tbl = o.tbl_name.toLowerCase();
+        // Every created object must attach to a table under the plugin's prefix.
+        // Its own name must be prefixed too — except a `sqlite_autoindex_*`,
+        // which SQLite creates IMPLICITLY for a UNIQUE/PRIMARY KEY on the (now
+        // verified-prefixed) table. `sqlite_` is a reserved name a plugin cannot
+        // forge (`CREATE TABLE sqlite_x` is rejected outright), so allowing it
+        // when `tbl_name` is prefixed is safe.
+        if (!tbl.startsWith(prefix) || (!nm.startsWith(prefix) && !nm.startsWith('sqlite_'))) {
+          throw new PluginStorageError(
+            `defineTable object '${o.name}' (on '${o.tbl_name}') must start with '${prefix}'`,
+          );
+        }
+      }
+    });
+    tx();
+  }
+
+  /**
+   * `api.storage.prepare(sql)` — compile a single DML statement over the
+   * plugin's private tables and return a safe `{ run, get, all }` projection
+   * (never the raw better-sqlite3 `Statement`).
+   *
+   * Guards: the leading verb must be SELECT/INSERT/UPDATE/DELETE/REPLACE/WITH
+   * (rejects PRAGMA/ATTACH/DETACH/VACUUM/DDL/transaction control — and
+   * `.prepare()` guarantees a single statement so those verbs can't be chained
+   * on); PRAGMA/ATTACH/DETACH/VACUUM are also refused anywhere (a
+   * `pragma_table_info(...)` table-valued function would otherwise slip past the
+   * head check); and no table outside the plugin's prefix may be referenced.
+   * `.prepare()` additionally fails fast if a referenced table doesn't exist.
+   */
+  prepareForPlugin<P extends object = object, R = unknown>(
+    plugin: string,
+    sql: string,
+  ): PluginPreparedStatement<P, R> {
+    if (typeof sql !== 'string' || sql.trim().length === 0) {
+      throw new PluginStorageError('prepare requires a non-empty SQL statement');
+    }
+    const trimmed = sql.trim();
+    const verb = /^([A-Za-z]+)/.exec(trimmed)?.[1]?.toUpperCase() ?? '';
+    if (!PREPARE_ALLOWED_VERBS.has(verb)) {
+      throw new PluginStorageError(
+        `prepare only accepts SELECT/INSERT/UPDATE/DELETE/REPLACE/WITH statements (got '${verb || '?'}') ` +
+          '— DDL, PRAGMA, ATTACH/DETACH, VACUUM and explicit transactions are refused',
+      );
+    }
+    const stripped = stripSqlNoise(trimmed).toLowerCase();
+    if (/\bpragma/.test(stripped) || /\battach\b/.test(stripped) || /\bdetach\b/.test(stripped) || /\bvacuum\b/.test(stripped)) {
+      throw new PluginStorageError('prepare: PRAGMA / ATTACH / DETACH / VACUUM are not allowed');
+    }
+    const prefix = PluginStore.tablePrefix(plugin);
+    this.assertOnlyPrefixedTables(trimmed, prefix);
+
+    const stmt = this.db.prepare(trimmed);
+    return {
+      run: (p?: P): void => {
+        if (p === undefined) stmt.run();
+        else stmt.run(p);
+      },
+      get: (p?: P): R | undefined =>
+        (p === undefined ? stmt.get() : stmt.get(p)) as R | undefined,
+      all: (p?: P): R[] => (p === undefined ? stmt.all() : stmt.all(p)) as R[],
+    };
+  }
+
+  /**
+   * The private-object prefix a plugin owns: `plugin_<name'>_` where `name'` =
+   * name with `-`→`_` (a bare tiret is an invalid SQL identifier, so a table
+   * `plugin_slack-bridge_x` would be a syntax error). This is the SINGLE source
+   * of truth for the prefix — `pluginObjectNames` (uninstall purge),
+   * `defineTable` and `prepare` all derive from it, so a table created by
+   * `defineTable` is exactly the one the purge later drops.
+   */
+  static tablePrefix(plugin: string): string {
+    return `plugin_${plugin.replace(/-/g, '_')}_`;
+  }
+
   /**
    * Enumerate the private tables/indexes/triggers a plugin owns —
-   * `plugin_<name'>_%` where `name'` = name with `-`→`_` (a bare tiret is an
-   * invalid SQL identifier, so `defineTable` mandates the underscore form).
-   * The `_` in the prefix is a LIKE wildcard, so it is escaped to match
-   * literally (else `plugin_x_` would also match `plugin_xY`).
+   * `plugin_<name'>_%`. The `_` in the prefix is a LIKE wildcard, so it is
+   * escaped to match literally (else `plugin_x_` would also match `plugin_xY`).
    */
   private pluginObjectNames(plugin: string): Array<{ type: string; name: string }> {
-    const namePrime = plugin.replace(/-/g, '_');
-    const prefix = `plugin_${namePrime}_`;
+    const prefix = PluginStore.tablePrefix(plugin);
     const like = `${prefix.replace(/([\\%_])/g, '\\$1')}%`;
     return this.db
       .prepare<[string], { type: string; name: string }>(
