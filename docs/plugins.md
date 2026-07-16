@@ -182,8 +182,13 @@ Semantics:
 - **Exit handling** — a non-zero exit is a *normal* result (`code` is set, the
   promise resolves). The promise rejects only for an infrastructure failure
   (wrong transport, or the local `ssh` binary failing to spawn).
-- **Timeout** — after `timeoutMs` the ssh process is killed and the call resolves
-  with `timedOut: true` and `code: null`.
+- **Timeout** — the remote command is wrapped in the host's `timeout(1)`
+  (coreutils), so after ~`timeoutMs` the process is terminated **on the host**
+  (SIGTERM, then SIGKILL after a short grace). This is required: killing the
+  local `ssh` client alone does **not** stop the remote process — with no PTY and
+  the ControlMaster mux keeping the master connection alive, it would otherwise
+  run to completion. The local `ssh` is also killed as a backstop, and the call
+  resolves with `timedOut: true` and `code: null`.
 - **Output cap** — stdout and stderr are each captured up to `maxOutputBytes`;
   past that the stream is truncated with a `\n[output truncated at N bytes]`
   marker. Over-limit `timeoutMs`/`maxOutputBytes` inputs are **rejected**, not

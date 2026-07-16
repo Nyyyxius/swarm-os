@@ -16,6 +16,15 @@
  * string. Every `argv` element (and the `cwd`) is `shellQuote`d before it is
  * spliced in, so an argument containing spaces, single quotes or shell
  * metacharacters can never break out of its token. See `agent-process.shellQuote`.
+ *
+ * ⚠️ Timeout termination: without a PTY, and with the ControlMaster mux keeping
+ * the master connection alive, killing the LOCAL `ssh` client does NOT stop the
+ * remote process — it is reparented under the surviving master and runs to
+ * completion (e.g. a `sleep 600` would outlive a 5 s timeout by ~595 s). So the
+ * `host.exec` path wraps the remote command in the host's `timeout(1)`
+ * (coreutils): the HOST terminates the process itself (SIGTERM, then SIGKILL
+ * after a short grace). The local SIGKILL is retained as a backstop and remains
+ * the authority that flips `timedOut` (its window is <= the remote one).
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
@@ -32,6 +41,12 @@ export const HOST_EXEC_MAX_TIMEOUT_MS = 120_000;
 export const HOST_EXEC_DEFAULT_MAX_OUTPUT_BYTES = 1024 * 1024; // 1 MiB
 /** Hard ceiling on `maxOutputBytes` — bounds the server's memory per call. */
 export const HOST_EXEC_MAX_OUTPUT_BYTES = 8 * 1024 * 1024; // 8 MiB
+/**
+ * Grace between the host `timeout`'s SIGTERM and its SIGKILL (`--kill-after`).
+ * A well-behaved program dies on SIGTERM immediately; this only bounds how long
+ * a signal-ignoring program can cling on before the host force-kills it.
+ */
+export const HOST_EXEC_KILL_GRACE_S = 5;
 
 export interface HostExecInput {
   /** Program + args. Non-empty; element 0 is the binary (resolved on the host PATH). */
@@ -121,20 +136,45 @@ export function translateCwdForHost(config: Config, cwd: string): string {
   return cwd;
 }
 
+export interface RemoteCommandOptions {
+  /** Working directory on the host (translated from container paths by the caller path). */
+  cwd?: string;
+  /**
+   * When set, the remote command is wrapped in the host's `timeout(1)` so the
+   * HOST terminates it after ~`ceil(timeoutMs/1000)`s (SIGTERM, then SIGKILL
+   * after `HOST_EXEC_KILL_GRACE_S`). Guarantees the remote process dies even
+   * though killing the local ssh client does not (no PTY + ControlMaster mux).
+   */
+  timeoutMs?: number;
+}
+
 /**
- * Build the single remote-command string ssh runs on the host. Wrapped in
- * `bash -lc '<…>'` (login shell) so the host user's PATH is set up and binaries
- * from `~/.local/bin` resolve — consistent with the agent transport. `exec`
- * replaces the login shell with the target program so there is no lingering
- * intermediate shell. Every token is `shellQuote`d.
+ * Build the single remote-command string ssh runs on the host. The program is
+ * wrapped in `bash -lc '<…>'` (login shell) so the host user's PATH is set up
+ * and binaries from `~/.local/bin` resolve — consistent with the agent
+ * transport. `exec` replaces the login shell with the target program so there
+ * is no lingering intermediate shell (and the host `timeout` signals the real
+ * program directly). Every token is `shellQuote`d.
+ *
+ * With `timeoutMs`, the whole thing is prefixed with `timeout --kill-after=<g>s
+ * <n>s …` (coreutils) so the process is terminated ON THE HOST — the local ssh
+ * kill alone cannot stop a remote process reparented under the ControlMaster
+ * mux. `timeout` (`/usr/bin/timeout`) resolves on the sshd default PATH.
  */
-export function buildRemoteCommand(config: Config, argv: readonly string[], cwd?: string): string {
+export function buildRemoteCommand(
+  config: Config,
+  argv: readonly string[],
+  opts: RemoteCommandOptions = {},
+): string {
   const remoteArgv = argv.map((a) => shellQuote(a)).join(' ');
   const inner =
-    cwd !== undefined
-      ? `cd ${shellQuote(translateCwdForHost(config, cwd))} && exec ${remoteArgv}`
+    opts.cwd !== undefined
+      ? `cd ${shellQuote(translateCwdForHost(config, opts.cwd))} && exec ${remoteArgv}`
       : `exec ${remoteArgv}`;
-  return `bash -lc ${shellQuote(inner)}`;
+  const bashCmd = `bash -lc ${shellQuote(inner)}`;
+  if (opts.timeoutMs === undefined) return bashCmd;
+  const durationS = Math.max(1, Math.ceil(opts.timeoutMs / 1000));
+  return `timeout --kill-after=${HOST_EXEC_KILL_GRACE_S}s ${durationS}s ${bashCmd}`;
 }
 
 function clampTimeout(ms: number | undefined): number {
@@ -203,7 +243,10 @@ export async function hostExec(
   const maxOutputBytes = clampMaxOutput(input.maxOutputBytes);
   const spawnImpl = deps.spawnImpl ?? spawn;
 
-  const sshArgs = [...buildSshBaseArgs(config), buildRemoteCommand(config, input.argv, input.cwd)];
+  const sshArgs = [
+    ...buildSshBaseArgs(config),
+    buildRemoteCommand(config, input.argv, { cwd: input.cwd, timeoutMs }),
+  ];
 
   return await new Promise<HostExecResult>((resolve, reject) => {
     let proc: ChildProcess;
@@ -220,6 +263,10 @@ export async function hostExec(
     let timedOut = false;
     let settled = false;
 
+    // Local backstop: kill the ssh client and flip `timedOut`. The remote
+    // `timeout(1)` wrapper (see buildRemoteCommand) is what actually terminates
+    // the process ON THE HOST; this local kill just stops us waiting and is the
+    // authority for `timedOut` (its window <= the remote one).
     const timer = setTimeout(() => {
       timedOut = true;
       try {

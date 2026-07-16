@@ -1,6 +1,6 @@
 import { describe, it, expect, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { execFileSync, type spawn as nodeSpawn } from 'node:child_process';
+import { execFileSync, spawnSync, type spawn as nodeSpawn } from 'node:child_process';
 import type { Config } from '../../config.js';
 import { shellQuote } from './agent-process.js';
 import {
@@ -150,10 +150,22 @@ describe('buildRemoteCommand', () => {
   });
 
   it('prepends a cd to the translated host cwd', () => {
-    const cmd = buildRemoteCommand(sshConfig(), ['git', 'status'], '/workspace/repo');
+    const cmd = buildRemoteCommand(sshConfig(), ['git', 'status'], { cwd: '/workspace/repo' });
     expect(cmd).toBe(
       `bash -lc ${shellQuote("cd '/home/ubuntu/projects/repo' && exec 'git' 'status'")}`,
     );
+  });
+
+  it('wraps in host timeout(1) when timeoutMs is given (ceil to seconds + kill grace)', () => {
+    const cmd = buildRemoteCommand(sshConfig(), ['sleep', '99'], { timeoutMs: 4500 });
+    // 4500ms → ceil = 5s; --kill-after uses the module grace constant.
+    expect(cmd).toBe(`timeout --kill-after=5s 5s bash -lc ${shellQuote("exec 'sleep' '99'")}`);
+  });
+
+  it('does not wrap in timeout when timeoutMs is omitted (improve-via-ssh path)', () => {
+    const cmd = buildRemoteCommand(sshConfig(), ['echo', 'hi']);
+    expect(cmd.startsWith('timeout ')).toBe(false);
+    expect(cmd).toBe(`bash -lc ${shellQuote("exec 'echo' 'hi'")}`);
   });
 
   it('double-quotes so an argument with spaces/quotes cannot break out of its token', () => {
@@ -179,6 +191,19 @@ describe('buildRemoteCommand', () => {
     // still proving `$(…)`/backticks came through LITERALLY (no substitution).
     const out = execFileSync('bash', ['-c', cmd], { encoding: 'utf8' });
     expect(out.endsWith(nasty)).toBe(true);
+  });
+
+  it('the host timeout wrapper actually terminates a long-running child (end-to-end)', () => {
+    // A 30s sleep wrapped in a 1s host timeout: a real shell (standing in for
+    // the host login shell sshd invokes) must reap it in ~1s, proving the remote
+    // process does NOT outlive the timeout — the regression the local ssh kill
+    // could not prevent through the ControlMaster mux.
+    const cmd = buildRemoteCommand(sshConfig(), ['sleep', '30'], { timeoutMs: 1000 });
+    const start = Date.now();
+    const r = spawnSync('bash', ['-c', cmd]);
+    const elapsedMs = Date.now() - start;
+    expect(elapsedMs).toBeLessThan(15_000); // nowhere near the 30s sleep
+    expect(r.status).toBe(124); // GNU timeout's "timed out" exit code
   });
 });
 
@@ -210,11 +235,14 @@ describe('hostExec', () => {
 
     expect(calls).toHaveLength(1);
     expect(calls[0]!.file).toBe('ssh');
+    // The default timeout (30s) is applied and threaded into the remote timeout(1) wrapper.
     const expectedArgs = [
       ...buildSshBaseArgs(sshConfig()),
-      buildRemoteCommand(sshConfig(), ['echo', 'hi']),
+      buildRemoteCommand(sshConfig(), ['echo', 'hi'], { timeoutMs: 30_000 }),
     ];
     expect(calls[0]!.args).toEqual(expectedArgs);
+    // The remote command carries the host timeout(1) guard (regression fix).
+    expect(calls[0]!.args[calls[0]!.args.length - 1]).toMatch(/^timeout --kill-after=5s 30s bash -lc /);
     expect(calls[0]!.opts).toMatchObject({ stdio: ['ignore', 'pipe', 'pipe'] });
     expect(res).toEqual({ code: 0, stdout: 'hi\n', stderr: '', timedOut: false });
   });
