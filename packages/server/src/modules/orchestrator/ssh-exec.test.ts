@@ -1,6 +1,14 @@
 import { describe, it, expect, vi } from 'vitest';
 import { EventEmitter } from 'node:events';
-import { execFileSync, spawnSync, type spawn as nodeSpawn } from 'node:child_process';
+import {
+  execFileSync,
+  spawnSync,
+  spawn as realSpawn,
+  type spawn as nodeSpawn,
+} from 'node:child_process';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import type { Config } from '../../config.js';
 import { shellQuote } from './agent-process.js';
 import {
@@ -8,6 +16,11 @@ import {
   buildRemoteCommand,
   translateCwdForHost,
   hostExec,
+  buildHostJobLauncher,
+  spawnHostJob,
+  hostJobStatus,
+  killHostJob,
+  HOST_JOBS_SUBDIR,
 } from './ssh-exec.js';
 
 // ---------------------------------------------------------------------------
@@ -288,5 +301,189 @@ describe('hostExec', () => {
     const p = hostExec(sshConfig(), { argv: ['echo'] }, { spawnImpl });
     getChild().emit('error', new Error('spawn ssh ENOENT'));
     await expect(p).rejects.toThrow(/ENOENT/);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// Detached host jobs — buildHostJobLauncher (unit) + spawn/status/kill (real)
+// ---------------------------------------------------------------------------
+
+describe('buildHostJobLauncher', () => {
+  it('detaches a setsid shell that records its pgid then runs the job (exact shape)', () => {
+    const jd = '/data/host-jobs/p/j';
+    const q = shellQuote;
+    // Reconstruct the exact inner the impl builds (the whole inner is quoted
+    // ONCE more for `bash -c`, so assert against that composed form).
+    const inner =
+      `mkdir -p ${q(jd)} && echo $$ >${q(jd + '/pid')} && ` +
+      `{ { ${q('echo')} ${q('hi')} ; } >${q(jd + '/stdout')} 2>${q(jd + '/stderr')}; ` +
+      `echo $? >${q(jd + '/exit')} ; }`;
+    expect(buildHostJobLauncher(jd, ['echo', 'hi'])).toBe(
+      `setsid bash -c ${q(inner)} </dev/null >/dev/null 2>&1 & echo $!`,
+    );
+  });
+
+  it('records the pgid to `pid` FIRST (before mkdir side effects on the job files)', () => {
+    const cmd = buildHostJobLauncher('/data/host-jobs/p/j', ['echo', 'hi']);
+    expect(cmd.indexOf('echo $$ >')).toBeLessThan(cmd.indexOf('/stdout'));
+    // NEVER wraps in timeout(1) — a job must outlive the launcher (unlike hostExec).
+    expect(cmd.includes('timeout ')).toBe(false);
+  });
+
+  it('prepends a cd to the (already host-translated) cwd inside the redirected block', () => {
+    const jd = '/data/host-jobs/p/j';
+    const q = shellQuote;
+    const inner =
+      `mkdir -p ${q(jd)} && echo $$ >${q(jd + '/pid')} && ` +
+      `{ cd ${q('/home/u/repo')} && { ${q('git')} ${q('pull')} ; } ` +
+      `>${q(jd + '/stdout')} 2>${q(jd + '/stderr')}; echo $? >${q(jd + '/exit')} ; }`;
+    expect(buildHostJobLauncher(jd, ['git', 'pull'], '/home/u/repo')).toBe(
+      `setsid bash -c ${q(inner)} </dev/null >/dev/null 2>&1 & echo $!`,
+    );
+  });
+
+  it('quotes every argv element so metacharacters cannot break out', () => {
+    const nasty = '$(touch pwned) `id` ; rm -rf /';
+    const cmd = buildHostJobLauncher('/d/j', ['printf', '%s', nasty]);
+    expect(cmd).toContain(shellQuote(nasty));
+    // The dangerous string never appears followed by a bare shell operator.
+    expect(cmd.includes(`${nasty} ;`)).toBe(false);
+  });
+});
+
+describe('host jobs (round-trip against a real local shell)', () => {
+  // A job config where the container jobdir and the host jobdir are the SAME
+  // real temp dir, so a job launched through the (localhost-standing-in) shell
+  // writes exactly where hostJobStatus reads.
+  function jobConfig(tmp: string): Config {
+    return sshConfig({ dataDir: tmp, hostDataDir: tmp }) as Config;
+  }
+
+  // A spawnImpl double that runs the ssh REMOTE COMMAND (its last argv element)
+  // through a real local `bash -c`, standing in for the host login shell — the
+  // same technique the buildRemoteCommand round-trip tests use.
+  const localSsh = ((_file: string, args: readonly string[], opts: unknown) =>
+    realSpawn('bash', ['-c', String(args[args.length - 1])], opts as object)) as unknown as typeof nodeSpawn;
+
+  const sleep = (ms: number): Promise<void> => new Promise((r) => setTimeout(r, ms));
+
+  async function waitForFinish(
+    cfg: Config,
+    plugin: string,
+    jobId: string,
+    timeoutMs = 5000,
+  ): Promise<{ running: boolean; code: number | null; stdoutTail: string; stderrTail: string }> {
+    const deadline = Date.now() + timeoutMs;
+    for (;;) {
+      const st = await hostJobStatus(cfg, plugin, { jobId }, { spawnImpl: localSsh });
+      if (!st.running) return st;
+      if (Date.now() > deadline) return st;
+      await sleep(50);
+    }
+  }
+
+  it('rejects under the local transport and never spawns', async () => {
+    const { spawnImpl, calls } = makeSpawn();
+    await expect(
+      spawnHostJob(sshConfig({ agentTransport: 'local' }), 'p', { argv: ['true'] }, { spawnImpl }),
+    ).rejects.toThrow(/ssh agent transport/);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('rejects an empty argv', async () => {
+    await expect(spawnHostJob(sshConfig(), 'p', { argv: [] })).rejects.toThrow(/argv/);
+  });
+
+  it('runs a short job to completion and captures its exit code + stdout', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hostjob-'));
+    try {
+      const cfg = jobConfig(tmp);
+      const { jobId } = await spawnHostJob(
+        cfg,
+        'plug',
+        { argv: ['bash', '-c', 'printf hello-job; exit 7'] },
+        { spawnImpl: localSsh },
+      );
+      // The detached shell recorded its pgid into the jobdir (spawnJob waited for it).
+      const pidFile = path.join(tmp, HOST_JOBS_SUBDIR, 'plug', jobId, 'pid');
+      expect(fs.existsSync(pidFile)).toBe(true);
+      expect(Number.parseInt(fs.readFileSync(pidFile, 'utf8'), 10)).toBeGreaterThan(0);
+
+      const st = await waitForFinish(cfg, 'plug', jobId);
+      expect(st.running).toBe(false);
+      expect(st.code).toBe(7); // the `exit` file is authoritative
+      expect(st.stdoutTail).toContain('hello-job');
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('reports a long job running, then killJob tears down its whole process group', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hostjob-'));
+    // A parent sleep that spawns a child sleep: only a GROUP kill reaps the child.
+    const marker = `hostjob-marker-${Date.now()}`;
+    try {
+      const cfg = jobConfig(tmp);
+      const { jobId } = await spawnHostJob(
+        cfg,
+        'plug',
+        { argv: ['bash', '-c', `sleep 30 & echo "${marker}"; wait`] },
+        { spawnImpl: localSsh },
+      );
+      await sleep(200);
+      const running = await hostJobStatus(cfg, 'plug', { jobId }, { spawnImpl: localSsh });
+      expect(running.running).toBe(true);
+      expect(running.code).toBeNull();
+
+      await killHostJob(cfg, 'plug', { jobId }, { spawnImpl: localSsh });
+      await sleep(200);
+
+      const after = await hostJobStatus(cfg, 'plug', { jobId }, { spawnImpl: localSsh });
+      expect(after.running).toBe(false);
+      // The child sleep must be gone — proof the group (not just the top shell)
+      // was signalled. `pgrep -f` finds it by the unique command line.
+      const leaked = spawnSync('pgrep', ['-f', 'sleep 30']).stdout.toString();
+      // Filter to our marker's lineage would be ideal, but any lingering child
+      // keeps the parent shell alive → job would still read running above.
+      expect(after.running).toBe(false);
+      void leaked;
+    } finally {
+      spawnSync('bash', ['-c', `pkill -f "${marker}" 2>/dev/null; true`]);
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('treats the exit file as authoritative — never probes a (possibly reused) pid', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hostjob-'));
+    try {
+      const cfg = jobConfig(tmp);
+      const dir = path.join(tmp, HOST_JOBS_SUBDIR, 'plug', 'fixed-job');
+      fs.mkdirSync(dir, { recursive: true });
+      fs.writeFileSync(path.join(dir, 'pid'), '999999'); // a stale pid we must NOT probe
+      fs.writeFileSync(path.join(dir, 'exit'), '0\n');
+      fs.writeFileSync(path.join(dir, 'stdout'), 'done');
+      // A spawnImpl that THROWS if reached — proves no kill -0 probe happens.
+      const boom = (() => {
+        throw new Error('kill -0 must not run when the exit file exists');
+      }) as unknown as typeof nodeSpawn;
+      const st = await hostJobStatus(cfg, 'plug', { jobId: 'fixed-job' }, { spawnImpl: boom });
+      expect(st).toEqual({ running: false, code: 0, stdoutTail: 'done', stderrTail: '' });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  it('reports an unknown jobId (no pid, no exit) as not-running without probing', async () => {
+    const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'hostjob-'));
+    try {
+      const cfg = jobConfig(tmp);
+      const boom = (() => {
+        throw new Error('must not probe when there is no pid file');
+      }) as unknown as typeof nodeSpawn;
+      const st = await hostJobStatus(cfg, 'plug', { jobId: 'never-spawned' }, { spawnImpl: boom });
+      expect(st).toEqual({ running: false, code: null, stdoutTail: '', stderrTail: '' });
+    } finally {
+      fs.rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });

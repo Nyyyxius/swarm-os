@@ -158,7 +158,7 @@ for `manifest ∩ granted`.
 | `connectors.register(type, provider)` | `connectors` | Provide a channel connector type (see §6). |
 | `settings.instance()` | `settings-read` | Read-only instance settings. |
 | `agentAssets.basePath` | `agent-assets` | Transport-aware base path of your copied `agentAssets.dir` (see §7). |
-| `host.exec(input)` | `host-exec` | Run a command on the **host** over SSH (see §4.1). ⚠️ Arbitrary host code execution — full trust; `ssh` transport only. |
+| `host.exec(input)` / `host.spawnJob` / `jobStatus` / `killJob` | `host-exec` | Run a command on the **host** over SSH — short (`exec`) or a detached long-running job (`spawnJob`, see §4.1). ⚠️ Arbitrary host code execution — full trust; `ssh` transport only. |
 
 ### 4.1 `host.exec` — run a command on the host
 
@@ -205,6 +205,58 @@ Semantics:
 > absolutely. It is refused outright unless swarm-os runs with the `ssh` agent
 > transport (`SWARM_OS_AGENT_TRANSPORT=ssh`): under the `local` transport there
 > is no separate host to reach and the call rejects with a clear error.
+
+#### Detached host jobs (`spawnJob` / `jobStatus` / `killJob`)
+
+`host.exec` is for **short** commands: it runs in the foreground and is killed
+when it exceeds `timeoutMs`. For work that runs for **minutes** and must OUTLIVE
+the call — even a swarm-os restart — use the detached job trio (same `host-exec`
+capability):
+
+```ts
+const { jobId } = await api.host.spawnJob({
+  argv: ['bash', 'deploy/install.sh'],   // program + args (element 0 is the binary)
+  cwd: '/workspace',                     // optional; /workspace + /data → host paths
+});
+
+// …later (poll on your own schedule — nothing polls for you):
+const { running, code, stdoutTail, stderrTail } = await api.host.jobStatus({
+  jobId,
+  tailBytes: 16_384,                     // optional per-stream tail (default 16 KiB, cap 1 MiB)
+});
+if (!running && code !== 0) { /* failed — inspect stderrTail */ }
+
+await api.host.killJob({ jobId });       // SIGTERM the whole process group, then SIGKILL
+```
+
+Signatures:
+
+- `spawnJob(input): Promise<{ jobId: string }>` — `jobId` is a server-minted UUID.
+- `jobStatus(input): Promise<{ running: boolean; code: number | null; stdoutTail: string; stderrTail: string }>`.
+- `killJob(input): Promise<void>`.
+
+Semantics:
+
+- **Detachment.** The job runs under `setsid` in its own session, so closing the
+  SSH ControlMaster mux never SIGHUPs it. Its bookkeeping (`pid`, `exit`, `stdout`,
+  `stderr`) lives in `<hostDataDir>/host-jobs/<plugin>/<jobId>/` — on the `/data`
+  bind mount, so it is readable from BOTH the container and the host and **survives
+  a swarm-os restart** (re-`jobStatus` the same `jobId` after a restart).
+- **Status.** The `exit` file is authoritative: once it exists the job is finished
+  (`running:false`, `code` set) and the host is never touched again. While it is
+  absent, liveness is a `kill -0` on the recorded pgid. A pgid that is gone with no
+  `exit` file (a host reboot mid-job, or an unknown `jobId`) reports
+  `{running:false, code:null}` — never a false "running" off a reused pid.
+- **Kill.** `killJob` signals the whole **process group** (`kill -TERM -<pgid>`,
+  grace, then `-KILL`), so grandchildren (a `pip`/`docker` a script spawned) die
+  too — not just the top shell. It is idempotent: an already-finished or
+  never-spawned job is a no-op.
+- **No auto-GC.** Jobdirs are not garbage-collected (this is a handful of
+  provisioning runs, not a queue); purge `<hostDataDir>/host-jobs/` yourself if
+  needed. `deactivate()` does **not** kill running jobs — they are detached by
+  design (keep the `jobId` in your KV to reattach).
+- **Transport.** Like `host.exec`, requires the `ssh` transport; rejects under
+  `local`.
 
 ### 4.2 `storage.defineTable` / `storage.prepare` — private SQLite tables
 

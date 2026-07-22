@@ -351,6 +351,31 @@ export interface HostExecResult {
   timedOut: boolean;
 }
 
+/** Input to `api.host.spawnJob` — a command launched as a DETACHED host job. */
+export interface HostJobSpawnInput {
+  /** Program + args. Non-empty; element 0 is the binary (resolved on the host PATH). */
+  argv: string[];
+  /** Working directory on the host. Container `/workspace` + `/data` paths are translated. */
+  cwd?: string;
+}
+
+/** Opaque handle returned by `api.host.spawnJob` — `jobId` is a server-minted UUID. */
+export interface HostJobRef {
+  jobId: string;
+}
+
+/** Snapshot returned by `api.host.jobStatus`. */
+export interface HostJobStatus {
+  /** True while the job's process group is still alive (no exit recorded yet). */
+  running: boolean;
+  /** Exit code once finished; `null` while running or if the job vanished untracked. */
+  code: number | null;
+  /** Last `tailBytes` of stdout (utf8), with a truncation marker when clipped. */
+  stdoutTail: string;
+  /** Last `tailBytes` of stderr (utf8), with a truncation marker when clipped. */
+  stderrTail: string;
+}
+
 export interface InstanceSettings {
   instanceLabel: string | null;
   accent: string;
@@ -544,9 +569,18 @@ export interface SwarmPluginApi {
    * clear error under `local`. `argv` runs directly (no shell word-splitting),
    * no interactive PTY; a non-zero exit is a normal result, a timeout returns
    * `timedOut: true`.
+   *
+   * `exec` is for SHORT foreground commands. For long work that must OUTLIVE the
+   * call (and a swarm-os restart), use the detached job trio `spawnJob` /
+   * `jobStatus` / `killJob` (same `host-exec` capability): the job runs under
+   * `setsid` in its own session and its bookkeeping lives on the `/data` bind
+   * mount, so `killJob` can take down its whole process group across a restart.
    */
   readonly host: {
     exec(input: HostExecInput): Promise<HostExecResult>;
+    spawnJob(input: HostJobSpawnInput): Promise<HostJobRef>;
+    jobStatus(input: { jobId: string; tailBytes?: number }): Promise<HostJobStatus>;
+    killJob(input: { jobId: string }): Promise<void>;
   };
 }
 

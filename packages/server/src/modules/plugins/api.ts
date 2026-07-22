@@ -46,8 +46,12 @@ import {
 } from '../../http/validation.js';
 import {
   hostExec,
+  spawnHostJob,
+  hostJobStatus,
+  killHostJob,
   HOST_EXEC_MAX_TIMEOUT_MS,
   HOST_EXEC_MAX_OUTPUT_BYTES,
+  HOST_JOB_MAX_TAIL_BYTES,
 } from '../orchestrator/ssh-exec.js';
 import {
   type SwarmPluginApi,
@@ -174,6 +178,19 @@ export function buildPluginApi(
     cwd: zod.string().min(1).optional(),
     timeoutMs: zod.number().int().positive().max(HOST_EXEC_MAX_TIMEOUT_MS).optional(),
     maxOutputBytes: zod.number().int().positive().max(HOST_EXEC_MAX_OUTPUT_BYTES).optional(),
+  });
+
+  // api.host.spawnJob input — argv non-empty; cwd optional. No timeout/output
+  // caps here: a detached job is unbounded by design (poll it via jobStatus).
+  const hostJobSpawnSchema = zod.object({
+    argv: zod.array(zod.string()).min(1),
+    cwd: zod.string().min(1).optional(),
+  });
+  // A jobId is a server-minted UUID; `tailBytes` is bounded (over-limit rejected).
+  const hostJobIdSchema = zod.object({ jobId: zod.string().min(1) });
+  const hostJobStatusSchema = zod.object({
+    jobId: zod.string().min(1),
+    tailBytes: zod.number().int().positive().max(HOST_JOB_MAX_TAIL_BYTES).optional(),
   });
 
   const api: SwarmPluginApi = {
@@ -563,6 +580,26 @@ export function buildPluginApi(
         // silent no-op. `hostExec` gates the transport (rejects under `local`).
         const parsed = hostExecSchema.parse(input);
         return await hostExec(need(deps.config, 'host'), parsed);
+      },
+      async spawnJob(input) {
+        requireCap('host-exec');
+        ensureLive();
+        const parsed = hostJobSpawnSchema.parse(input);
+        // `name` is the manifest-constrained plugin name — a safe path segment,
+        // never plugin-supplied input, so the jobdir path cannot be injected.
+        return await spawnHostJob(need(deps.config, 'host'), name, parsed);
+      },
+      async jobStatus(input) {
+        requireCap('host-exec');
+        ensureLive();
+        const parsed = hostJobStatusSchema.parse(input);
+        return await hostJobStatus(need(deps.config, 'host'), name, parsed);
+      },
+      async killJob(input) {
+        requireCap('host-exec');
+        ensureLive();
+        const parsed = hostJobIdSchema.parse(input);
+        await killHostJob(need(deps.config, 'host'), name, parsed);
       },
     },
 

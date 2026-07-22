@@ -28,7 +28,9 @@
  */
 
 import { spawn, type ChildProcess } from 'node:child_process';
+import * as fs from 'node:fs';
 import * as path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import type { Config } from '../../config.js';
 import { shellQuote } from './agent-process.js';
 import { toHostPath } from './path-translate.js';
@@ -299,4 +301,286 @@ export async function hostExec(
       });
     });
   });
+}
+
+// ===========================================================================
+// Detached host jobs (`api.host.spawnJob` / `jobStatus` / `killJob`)
+// ===========================================================================
+//
+// A host job is a long-running command launched on the HOST and DETACHED from
+// the SSH channel: `spawnJob` returns immediately with a `jobId`, the command
+// keeps running under `setsid` (its own session), and the caller polls
+// `jobStatus` (or `killJob`) later. This is the shape a plugin needs for a
+// multi-minute install/provision step that must SURVIVE the caller — and even
+// survive a swarm-os restart (the job's bookkeeping lives on the `/data` bind
+// mount, readable from BOTH the container and the host).
+//
+// Why not `hostExec`: `hostExec` runs the command in the FOREGROUND and wraps
+// it in the host's `timeout(1)` (§buildRemoteCommand) — it is built to bound a
+// short call and KILL the remote process when the SSH client goes away. A job
+// is the opposite: it must outlive the client. So we launch it with a clean
+// `setsid` template (below) via a SHORT foreground `hostExec` whose only job is
+// to fork+detach the real work. `setsid` puts the job in a new session with no
+// controlling terminal, so closing the ControlPersist mux never SIGHUPs it.
+//
+// The pgid — the identity `killJob` signals to reap grandchildren (pip, docker,
+// …), not just the top shell — is captured ROBUSTLY: the detached shell is (via
+// setsid) its own session leader, so its `$$` == pgid whether or not setsid had
+// to fork (it forks when its caller is already a group leader, e.g. under the
+// `timeout(1)` wrapper hostExec adds, which puts the launcher in a fresh group).
+// So the shell records its OWN `$$` to the `pid` file as its FIRST action, and
+// `spawnJob` waits for that file — we never trust the launcher's `$!`, which
+// would be the ephemeral setsid parent in the fork case.
+
+/** Subdir under `<dataDir>`/`<hostDataDir>` that holds every job's bookkeeping. */
+export const HOST_JOBS_SUBDIR = 'host-jobs';
+/** Wall-clock cap for the SHORT foreground exec that launches / probes / kills a job. */
+const HOST_JOB_CONTROL_TIMEOUT_MS = 15_000;
+/** How long `spawnJob` waits for the detached shell to record its pgid to `pid`. */
+const HOST_JOB_PID_WAIT_MS = 5_000;
+/** Grace between the process-group SIGTERM and the follow-up SIGKILL in `killJob`. */
+const HOST_JOB_KILL_GRACE_S = 2;
+/** Default per-stream tail returned by `jobStatus` when the caller omits `tailBytes`. */
+export const HOST_JOB_DEFAULT_TAIL_BYTES = 16 * 1024;
+/** Hard ceiling on `jobStatus` `tailBytes` — bounds the read + the server's memory. */
+export const HOST_JOB_MAX_TAIL_BYTES = 1024 * 1024;
+
+/** Opaque handle returned by `spawnHostJob`. `jobId` is a server-minted UUID. */
+export interface HostJobRef {
+  jobId: string;
+}
+
+/** Snapshot of a host job's liveness + captured output tails. */
+export interface HostJobStatus {
+  /** True while the job's process group is still alive (no `exit` file yet). */
+  running: boolean;
+  /** Exit code once the job finished; `null` while running or if it vanished untracked. */
+  code: number | null;
+  /** Last `tailBytes` of the job's stdout (utf8), with a truncation marker when clipped. */
+  stdoutTail: string;
+  /** Last `tailBytes` of the job's stderr (utf8), with a truncation marker when clipped. */
+  stderrTail: string;
+}
+
+/** Input to `spawnHostJob`. */
+export interface HostJobSpawnInput {
+  /** Program + args. Non-empty; element 0 is the binary (resolved on the host PATH). */
+  argv: string[];
+  /** Working directory ON THE HOST. Container `/workspace` + `/data` paths are translated. */
+  cwd?: string;
+}
+
+/** Every host-job path requires the ssh transport (there is no host under `local`). */
+function requireHostJobTransport(config: Config): void {
+  if (config.agentTransport !== 'ssh' || !config.sshTarget) {
+    throw new Error(
+      'host jobs require the ssh agent transport (SWARM_OS_AGENT_TRANSPORT=ssh)',
+    );
+  }
+}
+
+/**
+ * Build the `setsid` launcher run (once, in the foreground) to detach a job.
+ * Pure: `hostJobDir` and `cwd` are ALREADY host-native paths (translated by the
+ * caller) so the template can be unit-tested without a `Config`. Every path and
+ * argv element is `shellQuote`d.
+ *
+ * Shape: the detached shell records its OWN pgid (`$$`, valid because setsid
+ * made it a session leader) to `pid` FIRST, then runs the real command with
+ * stdout/stderr redirected to files, and records the exit code to `exit` — the
+ * file `jobStatus` treats as authoritative. The outer `</dev/null >/dev/null
+ * 2>&1` detaches the setsid process from the (closing) SSH channel; the trailing
+ * `& echo $!` just returns the launcher promptly (its value is unused — see the
+ * section header on why `$!` is NOT the job's pgid under the timeout wrapper).
+ */
+export function buildHostJobLauncher(
+  hostJobDir: string,
+  argv: readonly string[],
+  cwd?: string,
+): string {
+  const quotedArgv = argv.map((a) => shellQuote(a)).join(' ');
+  const jd = shellQuote(hostJobDir);
+  const pidF = shellQuote(path.posix.join(hostJobDir, 'pid'));
+  const stdoutF = shellQuote(path.posix.join(hostJobDir, 'stdout'));
+  const stderrF = shellQuote(path.posix.join(hostJobDir, 'stderr'));
+  const exitF = shellQuote(path.posix.join(hostJobDir, 'exit'));
+  const cd = cwd !== undefined ? `cd ${shellQuote(cwd)} && ` : '';
+  const inner =
+    `mkdir -p ${jd} && echo $$ >${pidF} && ` +
+    `{ ${cd}{ ${quotedArgv} ; } >${stdoutF} 2>${stderrF}; echo $? >${exitF} ; }`;
+  return `setsid bash -c ${shellQuote(inner)} </dev/null >/dev/null 2>&1 & echo $!`;
+}
+
+/** Container-side jobdir (on the `/data` bind mount) for a plugin's job. */
+function containerJobDir(config: Config, pluginName: string, jobId: string): string {
+  return path.join(config.dataDir, HOST_JOBS_SUBDIR, pluginName, jobId);
+}
+
+/** Read a whole small bookkeeping file (`pid` / `exit`) or `null` if absent. */
+function readJobFile(file: string): string | null {
+  try {
+    return fs.readFileSync(file, 'utf8');
+  } catch {
+    return null;
+  }
+}
+
+/** Read the last `maxBytes` of a (possibly large) output file, with a marker when clipped. */
+function readTail(file: string, maxBytes: number): string {
+  let fd: number | undefined;
+  try {
+    const size = fs.statSync(file).size;
+    const start = size > maxBytes ? size - maxBytes : 0;
+    const len = size - start;
+    if (len <= 0) return '';
+    fd = fs.openSync(file, 'r');
+    const buf = Buffer.alloc(len);
+    fs.readSync(fd, buf, 0, len, start);
+    const text = buf.toString('utf8');
+    return start > 0 ? `[…truncated ${start} bytes]\n${text}` : text;
+  } catch {
+    return '';
+  } finally {
+    if (fd !== undefined) {
+      try {
+        fs.closeSync(fd);
+      } catch {
+        /* already closed */
+      }
+    }
+  }
+}
+
+function clampTailBytes(n: number | undefined): number {
+  if (n === undefined) return HOST_JOB_DEFAULT_TAIL_BYTES;
+  return Math.min(Math.max(1, Math.floor(n)), HOST_JOB_MAX_TAIL_BYTES);
+}
+
+/** Parse the pgid from a `pid` file, or `NaN` if absent/blank/malformed. */
+function readPid(dir: string): number {
+  const raw = readJobFile(path.join(dir, 'pid'));
+  return raw ? Number.parseInt(raw.trim(), 10) : Number.NaN;
+}
+
+/** Poll the container-side `pid` file until the detached shell records its pgid. */
+async function waitForPid(dir: string, timeoutMs: number): Promise<number> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const pid = readPid(dir);
+    if (Number.isInteger(pid) && pid > 0) return pid;
+    if (Date.now() >= deadline) return Number.NaN;
+    await new Promise((r) => setTimeout(r, 50));
+  }
+}
+
+/**
+ * Launch `argv` as a DETACHED host job and resolve with its `jobId`. The job
+ * outlives this call (and swarm-os itself). Rejects only if the launch itself
+ * fails (transport wrong, empty argv, or the job never recorded its pgid within
+ * the wait window). The `pid` file (pgid) is written by the detached shell, so
+ * once this resolves a later `jobStatus`/`killJob` always finds it.
+ */
+export async function spawnHostJob(
+  config: Config,
+  pluginName: string,
+  input: HostJobSpawnInput,
+  deps: HostExecDeps = {},
+): Promise<HostJobRef> {
+  requireHostJobTransport(config);
+  if (!Array.isArray(input.argv) || input.argv.length === 0) {
+    throw new Error('spawnJob: argv must be a non-empty array');
+  }
+  const jobId = randomUUID();
+  const dir = containerJobDir(config, pluginName, jobId);
+  // Pre-create the jobdir container-side (on the /data bind mount) so the pid
+  // file is visible to us the instant the host shell writes it; the launcher's
+  // own `mkdir -p` is belt-and-suspenders.
+  fs.mkdirSync(dir, { recursive: true });
+  const hostDir = translateCwdForHost(config, dir);
+  const hostCwd = input.cwd !== undefined ? translateCwdForHost(config, input.cwd) : undefined;
+  const launcher = buildHostJobLauncher(hostDir, input.argv, hostCwd);
+
+  const res = await hostExec(
+    config,
+    { argv: ['bash', '-c', launcher], timeoutMs: HOST_JOB_CONTROL_TIMEOUT_MS },
+    deps,
+  );
+  if (res.timedOut) {
+    throw new Error(`spawnJob: launcher timed out (stderr=${res.stderr.trim().slice(0, 200)})`);
+  }
+  const pid = await waitForPid(dir, HOST_JOB_PID_WAIT_MS);
+  if (!Number.isInteger(pid) || pid <= 0) {
+    throw new Error(
+      `spawnJob: job never recorded a pid (code=${res.code}, ` +
+        `stderr=${res.stderr.trim().slice(0, 200)})`,
+    );
+  }
+  return { jobId };
+}
+
+/**
+ * Report a job's liveness + output tails. The `exit` file is AUTHORITATIVE — a
+ * finished job never touches the host again. Only when it is absent do we probe
+ * the pid's liveness on the host (`kill -0`); an absent pid with no exit (a host
+ * reboot mid-job, or an unknown jobId) is reported as `{running:false, code:null}`
+ * rather than trusting a `kill -0` that could hit a reused pid.
+ */
+export async function hostJobStatus(
+  config: Config,
+  pluginName: string,
+  input: { jobId: string; tailBytes?: number },
+  deps: HostExecDeps = {},
+): Promise<HostJobStatus> {
+  requireHostJobTransport(config);
+  const dir = containerJobDir(config, pluginName, input.jobId);
+  const tail = clampTailBytes(input.tailBytes);
+  const stdoutTail = readTail(path.join(dir, 'stdout'), tail);
+  const stderrTail = readTail(path.join(dir, 'stderr'), tail);
+
+  const exitRaw = readJobFile(path.join(dir, 'exit'));
+  if (exitRaw !== null && exitRaw.trim().length > 0) {
+    const code = Number.parseInt(exitRaw.trim(), 10);
+    return { running: false, code: Number.isInteger(code) ? code : null, stdoutTail, stderrTail };
+  }
+
+  const pid = readPid(dir);
+  if (!Number.isInteger(pid) || pid <= 0) {
+    // No pid AND no exit: reboot during the job, or a jobId we never spawned.
+    return { running: false, code: null, stdoutTail, stderrTail };
+  }
+  // `kill -0` as a bash builtin (no dependency on a standalone /bin/kill).
+  const probe = await hostExec(
+    config,
+    { argv: ['bash', '-c', `kill -0 ${pid}`], timeoutMs: HOST_JOB_CONTROL_TIMEOUT_MS },
+    deps,
+  );
+  const running = !probe.timedOut && probe.code === 0;
+  return { running, code: null, stdoutTail, stderrTail };
+}
+
+/**
+ * Terminate a job's whole PROCESS GROUP (SIGTERM, grace, then SIGKILL). Relies
+ * on the `setsid` pid==pgid identity so `kill -… -<pid>` reaches grandchildren.
+ * Best-effort + idempotent: a missing pid file (never spawned / already reaped)
+ * is a no-op, and each signal is `2>/dev/null`'d so an already-dead group never
+ * turns into an error.
+ */
+export async function killHostJob(
+  config: Config,
+  pluginName: string,
+  input: { jobId: string },
+  deps: HostExecDeps = {},
+): Promise<void> {
+  requireHostJobTransport(config);
+  const dir = containerJobDir(config, pluginName, input.jobId);
+  const pid = readPid(dir);
+  if (!Number.isInteger(pid) || pid <= 0) return;
+  const cmd =
+    `kill -TERM -${pid} 2>/dev/null; sleep ${HOST_JOB_KILL_GRACE_S}; ` +
+    `kill -KILL -${pid} 2>/dev/null; true`;
+  await hostExec(
+    config,
+    { argv: ['bash', '-c', cmd], timeoutMs: HOST_JOB_CONTROL_TIMEOUT_MS },
+    deps,
+  );
 }

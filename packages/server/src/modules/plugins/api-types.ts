@@ -27,12 +27,24 @@ import type {
   CrossBroadcastOutcome,
 } from '../orchestrator/messaging.js';
 import type { Message } from '../orchestrator/mailbox.js';
-import type { HostExecInput, HostExecResult } from '../orchestrator/ssh-exec.js';
+import type {
+  HostExecInput,
+  HostExecResult,
+  HostJobRef,
+  HostJobStatus,
+  HostJobSpawnInput,
+} from '../orchestrator/ssh-exec.js';
 import type { NotificationInput, NotificationLevel } from '../notify/index.js';
 import type { InstanceSettings } from '../settings/index.js';
 import type { UiPanel } from './manifest.js';
 
-export type { HostExecInput, HostExecResult } from '../orchestrator/ssh-exec.js';
+export type {
+  HostExecInput,
+  HostExecResult,
+  HostJobRef,
+  HostJobStatus,
+  HostJobSpawnInput,
+} from '../orchestrator/ssh-exec.js';
 export type { UiPanel } from './manifest.js';
 
 /**
@@ -420,9 +432,24 @@ export interface SwarmPluginApi {
    * (`code` set); a timeout kills the ssh process and returns `timedOut: true`.
    * `cwd` container paths (`/workspace`, `/data`) are translated to their host
    * equivalents; anything else is treated as a host-native path.
+   *
+   * `exec` is for SHORT commands (bounded, foreground). For long-running work
+   * that must OUTLIVE the call (and even a swarm-os restart) use the detached
+   * job trio `spawnJob` / `jobStatus` / `killJob` (same `host-exec` capability).
    */
   readonly host: {
     exec(input: HostExecInput): Promise<HostExecResult>;
+    /**
+     * Launch `argv` as a DETACHED host job and return its `jobId`. The job runs
+     * under `setsid` (its own session), so it survives the SSH channel closing
+     * AND a swarm-os restart; its bookkeeping lives on the `/data` bind mount.
+     * Poll it with `jobStatus`; stop it with `killJob`.
+     */
+    spawnJob(input: HostJobSpawnInput): Promise<HostJobRef>;
+    /** Snapshot a job's liveness + captured output tails (`tailBytes` per stream). */
+    jobStatus(input: { jobId: string; tailBytes?: number }): Promise<HostJobStatus>;
+    /** Terminate a job's whole process group (SIGTERM, grace, SIGKILL). Idempotent. */
+    killJob(input: { jobId: string }): Promise<void>;
   };
 }
 
