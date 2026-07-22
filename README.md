@@ -167,14 +167,15 @@ sandbox**: plugins run in-process as trusted code.
 | `notify` / `schedule` | push operator notifications (incl. free-form `notify.custom` alerts) / cron expressions + intervals |
 | `connectors` | provide channel connector types (Slack/Telegram-style bridges) roles can use |
 | `settings-read` | read instance settings |
-| `host-exec` | run arbitrary commands on the **host** over SSH (`api.host.exec`) — the most powerful capability: full trust, `ssh` agent transport only |
+| `host-exec` | run arbitrary commands on the **host** over SSH — short (`api.host.exec`) or a detached long-running job (`api.host.spawnJob`/`jobStatus`/`killJob`) — the most powerful capability: full trust, `ssh` agent transport only |
 
 ### Installing & managing
 
 Four sources, all hot-installable from the **Install** dialog on `#/plugins`
 (or `POST /plugins/install`): drop a directory in `/data/plugins` + Scan,
 upload a `.tgz` (`npm pack` format, ≤50 MB), install from npm (any spec), or
-clone from a git URL (the repo must commit compiled JS). The page also covers
+clone from a git URL — branch/tag `ref`, optional `subdir` for a plugin nested
+in a monorepo (the repo must commit compiled JS). The page also covers
 enable/disable, the schema-driven config form (`format: "password"` fields are
 masked on read and preserved on save), permission grants, upgrade and
 uninstall (`?purge=true` also drops the plugin's KV data and tables). Crash

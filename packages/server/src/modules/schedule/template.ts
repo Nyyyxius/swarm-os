@@ -4,8 +4,8 @@
  * Tokens (case-insensitive):
  *  - {{fire}}      → fire time truncated to the minute, e.g. `2026-06-18T20:00Z`.
  *                    Recommended idempotency key (`cycle_window_id`): unique per
- *                    tick, identical for the whole minute, matches the compact
- *                    ISO form the trader bundle already uses.
+ *                    tick, identical for the whole minute, in a compact ISO form
+ *                    convenient as a per-window deduplication key.
  *  - {{now}}       → full ISO-8601 of the fire time (with ms).
  *  - {{window:Nh}} → fire time floored to an N-hour grid (anchored at the unix
  *  - {{window:Nm}}   epoch / UTC midnight), rendered to-the-minute. Use for
