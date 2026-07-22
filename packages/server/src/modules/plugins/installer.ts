@@ -53,9 +53,43 @@ const STDERR_MAX = 600;
 
 export type InstallSource =
   | { kind: 'npm'; spec: string }
-  | { kind: 'git'; url: string; ref?: string }
+  | { kind: 'git'; url: string; ref?: string; subdir?: string }
   | { kind: 'dir'; dir: string }
   | { kind: 'upload'; tgz: Buffer; name?: string };
+
+/**
+ * A `subdir` must be a plain relative path INSIDE the clone — reject absolute
+ * paths and any `..` traversal (same rigour as `manifest.isSafeMain`). The
+ * empty string is invalid (use `undefined` for "whole repo").
+ */
+export function isSafeSubdir(subdir: string): boolean {
+  if (subdir.length === 0) return false;
+  if (path.isAbsolute(subdir)) return false;
+  const normalized = path.normalize(subdir);
+  if (normalized.startsWith('..')) return false;
+  if (normalized.split(/[\\/]/).includes('..')) return false;
+  return true;
+}
+
+/**
+ * Encode a git source into the `source_ref` column so `upgrade` can re-fetch the
+ * SAME url/ref/subdir. Backward-compatible with the pre-subdir `url#ref` form:
+ * a subdir adds a third `#`-delimited field (`url#<ref>#<subdir>`, ref possibly
+ * empty). git URLs don't carry a `#` fragment, so the split is unambiguous.
+ */
+export function encodeGitRef(url: string, ref?: string, subdir?: string): string {
+  if (subdir) return `${url}#${ref ?? ''}#${subdir}`;
+  return ref ? `${url}#${ref}` : url;
+}
+
+/** Inverse of `encodeGitRef` (tolerant of the legacy `url` / `url#ref` forms). */
+export function decodeGitRef(stored: string): { url: string; ref?: string; subdir?: string } {
+  const parts = stored.split('#');
+  const url = parts[0] ?? stored;
+  const ref = parts[1] && parts[1].length > 0 ? parts[1] : undefined;
+  const subdir = parts[2] && parts[2].length > 0 ? parts[2] : undefined;
+  return { url, ref, subdir };
+}
 
 /** Bad manifest / name / apiVersion / path-traversal / reserved name → HTTP 422. */
 export class InstallValidationError extends Error {
@@ -171,12 +205,8 @@ export class PluginInstaller {
         source = { kind: 'npm', spec: row.source_ref ?? name };
         break;
       case 'git': {
-        const ref = row.source_ref ?? '';
-        const hash = ref.lastIndexOf('#');
-        source =
-          hash > 0
-            ? { kind: 'git', url: ref.slice(0, hash), ref: ref.slice(hash + 1) }
-            : { kind: 'git', url: ref };
+        const { url, ref, subdir } = decodeGitRef(row.source_ref ?? '');
+        source = { kind: 'git', url, ref, subdir };
         break;
       }
       case 'dir':
@@ -263,10 +293,46 @@ export class PluginInstaller {
         break;
       }
       case 'git': {
-        await this.gitClone(source.url, source.ref, dir);
-        this.rmQuiet(path.join(dir, '.git'));
+        if (source.subdir === undefined) {
+          // Whole-repo clone straight into the staging dir (the plugin root).
+          await this.gitClone(source.url, source.ref, dir);
+          this.rmQuiet(path.join(dir, '.git'));
+        } else {
+          if (!isSafeSubdir(source.subdir)) {
+            throw new InstallValidationError(
+              `git subdir '${source.subdir}' must be a relative path inside the repo ` +
+                `(no absolute path, no "..")`,
+            );
+          }
+          // Clone into a private temp, then copy ONLY <clone>/<subdir> into the
+          // staging dir — which BECOMES the plugin root (commitInstall renames the
+          // staging entire), so loadManifest / npmInstallIfDeps / the `main` check
+          // all operate on the relocated subdir, not the repo root.
+          const cloneDir = path.join(this.stagingRoot, `${uuid}-clone`);
+          try {
+            // Pre-create so `run`'s cwd exists; `git clone` fills the empty dir.
+            fs.mkdirSync(cloneDir, { recursive: true });
+            await this.gitClone(source.url, source.ref, cloneDir);
+            const srcPath = path.resolve(cloneDir, source.subdir);
+            const cloneRoot = path.resolve(cloneDir) + path.sep;
+            if (
+              !srcPath.startsWith(cloneRoot) ||
+              !fs.existsSync(srcPath) ||
+              !fs.statSync(srcPath).isDirectory()
+            ) {
+              throw new InstallValidationError(
+                `git subdir '${source.subdir}' not found in ${source.url}`,
+              );
+            }
+            fs.cpSync(srcPath, dir, { recursive: true });
+            // A subdir may itself carry a nested .git (submodule/worktree leftover).
+            this.rmQuiet(path.join(dir, '.git'));
+          } finally {
+            this.rmQuiet(cloneDir);
+          }
+        }
         sourceKind = 'git';
-        sourceRef = source.ref ? `${source.url}#${source.ref}` : source.url;
+        sourceRef = encodeGitRef(source.url, source.ref, source.subdir);
         break;
       }
     }

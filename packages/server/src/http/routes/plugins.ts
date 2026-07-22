@@ -85,7 +85,12 @@ function parseInstallSource(
       return { ok: false, error: 'git source requires a non-empty "url"' };
     }
     const ref = typeof b.ref === 'string' && b.ref.trim() !== '' ? b.ref.trim() : undefined;
-    return { ok: true, value: { kind: 'git', url: b.url.trim(), ref } };
+    // Optional: install a plugin that lives in a SUBDIRECTORY of the repo. The
+    // installer copies only <clone>/<subdir> into the plugin root (anti-traversal
+    // enforced there). `ref` is a branch or tag (shallow clone), never a SHA.
+    const subdir =
+      typeof b.subdir === 'string' && b.subdir.trim() !== '' ? b.subdir.trim() : undefined;
+    return { ok: true, value: { kind: 'git', url: b.url.trim(), ref, subdir } };
   }
   if (src === 'dir') {
     if (typeof b.dir !== 'string' || b.dir.trim() === '') {

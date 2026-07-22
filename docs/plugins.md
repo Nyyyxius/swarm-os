@@ -541,7 +541,7 @@ The same mechanic protects connector password fields. Config is redacted in logs
 | **dir / drop** | Copy the folder into `/data/plugins/<name>/`, then `POST /plugins/scan` (or the UI "Scan" button). |
 | **upload** | `POST /plugins/upload?name=x` with a `.tgz` (npm-pack format), `Content-Type: application/gzip` (≤ 50 MB). |
 | **npm** | `POST /plugins/install { source:'npm', spec }` — the host `npm pack`s the spec, then extracts + installs deps (avoids the sibling-hoist trap). |
-| **git** | `POST /plugins/install { source:'git', url, ref? }` — shallow clone; the repo must commit compiled JS (no build at install). |
+| **git** | `POST /plugins/install { source:'git', url, ref?, subdir? }` — shallow clone; the repo must commit compiled JS (no build at install). `ref` is a **branch or tag**, never a SHA (`--depth 1 --branch`). With `subdir` the plugin lives in a **subdirectory** of the repo: only `<clone>/<subdir>` is copied and becomes the plugin root (its `plugin.json` at the top); a `..`/absolute subdir is rejected, and a missing `plugin.json` in the subdir errors clearly. Upgrade re-clones and re-copies the SAME `url`/`ref`/`subdir`. |
 | **marketplace** | Reserved (`source_kind='registry'`, `GET /plugins/catalog`) — not yet implemented. |
 
 **Upgrade** re-fetches the source (`npm`/`git` re-pull `source_ref`; `dir`
