@@ -1,0 +1,104 @@
+{
+  "name": "discord-agent",
+  "version": "0.1.0",
+  "displayName": "Discord Agent",
+  "description": "Connecte un channel Discord (texte + messages vocaux) à un agent principal permanent du swarm. L'humain autorisé écrit ou envoie un clip vocal ; l'agent exécute la tâche et répond dans la même modalité (texte->texte, vocal->clip TTS). STT/TTS via OpenAI (Whisper + gpt-4o-mini-tts, format opus, sans ffmpeg).",
+  "main": "index.js",
+  "apiVersion": 1,
+  "capabilities": [
+    "connectors",
+    "teams",
+    "roles",
+    "mcp-tools",
+    "db-kv",
+    "http-routes",
+    "notify"
+  ],
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "botToken": {
+        "type": "string",
+        "format": "password",
+        "title": "Discord Bot Token",
+        "description": "Token du bot Discord. Intents privilegiees requises: MessageContent. Permissions: Read Message History, Send Messages, Send Voice Messages."
+      },
+      "channelId": {
+        "type": "string",
+        "title": "Channel ID",
+        "description": "Snowflake du channel Discord que l'agent ecoute (un channel = un agent)."
+      },
+      "openaiApiKey": {
+        "type": "string",
+        "format": "password",
+        "title": "OpenAI API Key",
+        "description": "Cle OpenAI utilisee pour la transcription (Whisper) et la synthese vocale (TTS)."
+      },
+      "allowedUserIds": {
+        "type": "string",
+        "title": "Utilisateurs autorises (IDs)",
+        "description": "Snowflakes Discord separes par des virgules autorises a commander l'agent. FAIL-CLOSED: vide = tout message est ignore (l'agent a un acces bypassPermissions au swarm)."
+      },
+      "leadModel": {
+        "type": "string",
+        "default": "claude-opus-4-8[1m]",
+        "title": "Modele du lead",
+        "description": "Modele Claude du lead permanent. Defaut 'claude-opus-4-8[1m]' (contexte 1M, valide sur le CLI hote). Repli manuel sur 'claude-opus-4-8' si un CLI refuse le suffixe [1m]."
+      },
+      "ttsVoice": {
+        "type": "string",
+        "enum": [
+          "alloy",
+          "ash",
+          "ballad",
+          "coral",
+          "echo",
+          "fable",
+          "onyx",
+          "nova",
+          "sage",
+          "shimmer",
+          "verse"
+        ],
+        "default": "alloy",
+        "title": "Voix TTS",
+        "description": "Voix OpenAI pour les reponses vocales."
+      },
+      "ttsModel": {
+        "type": "string",
+        "default": "gpt-4o-mini-tts",
+        "title": "Modele TTS",
+        "description": "Modele OpenAI de synthese vocale (format de sortie: opus / OGG-Opus, sans ffmpeg)."
+      },
+      "sttModel": {
+        "type": "string",
+        "default": "whisper-1",
+        "title": "Modele STT",
+        "description": "Modele OpenAI de transcription des clips vocaux (OGG/Opus accepte tel quel)."
+      },
+      "language": {
+        "type": "string",
+        "default": "fr",
+        "title": "Langue",
+        "description": "Indice de langue pour la transcription (STT uniquement). Le preambule reste en francais en v1."
+      },
+      "workDir": {
+        "type": "string",
+        "default": "discord-agent",
+        "title": "Repertoire de travail",
+        "description": "Repertoire du lead, relatif a la racine du workspace (/workspace). Contient NOTES.md, la memoire persistante de l'agent."
+      }
+    },
+    "required": [
+      "botToken",
+      "channelId",
+      "openaiApiKey"
+    ]
+  },
+  "connectors": [
+    {
+      "type": "discord-agent",
+      "label": "Discord Agent"
+    }
+  ]
+}

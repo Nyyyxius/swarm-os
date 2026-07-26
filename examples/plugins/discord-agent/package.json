@@ -1,0 +1,11 @@
+{
+  "name": "swarm-os-plugin-discord-agent",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "swarm-os Discord channel agent (texte + vocal, OpenAI STT/TTS).",
+  "main": "index.js",
+  "dependencies": {
+    "discord.js": "^14.16.0"
+  }
+}
