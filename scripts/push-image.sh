@@ -20,8 +20,17 @@ IMAGE="${IMAGE:-ghcr.io/luminis1986/swarm-os}"
 VERSION="${1:?usage: scripts/push-image.sh <version>   e.g. v0.1.0}"
 TAG="${VERSION#v}"   # strip a leading "v" → 0.1.0
 
-echo "==> Building ${IMAGE}:${TAG} (+ :latest)"
-docker build -t "${IMAGE}:${TAG}" -t "${IMAGE}:latest" .
+# Same build args the CI workflow passes. Without them the server reports
+# version "dev" on /info and the OCI version/revision labels are empty — i.e.
+# an image indistinguishable from a local scratch build. We already cd'd to
+# REPO_ROOT above, so rev-parse resolves against this repo.
+GIT_SHA="$(git rev-parse HEAD 2>/dev/null || echo '')"
+
+echo "==> Building ${IMAGE}:${TAG} (+ :latest)  [commit ${GIT_SHA:-unknown}]"
+docker build \
+  --build-arg "APP_VERSION=${TAG}" \
+  --build-arg "GIT_SHA=${GIT_SHA}" \
+  -t "${IMAGE}:${TAG}" -t "${IMAGE}:latest" .
 
 echo "==> Pushing ${IMAGE}:${TAG}"
 docker push "${IMAGE}:${TAG}"

@@ -2,6 +2,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
+import { fileURLToPath } from 'node:url';
 
 export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export type PermissionMode =
@@ -269,7 +270,25 @@ export interface Config {
    *  version" interstitial. */
   ideCliDataDir: string;
   startedAt: string;
+  /**
+   * Version this instance reports on `/info`. Resolved by `resolveVersion()` —
+   * env first (baked into the image), monorepo root `package.json` second.
+   * NEVER hardcoded: a literal here drifts from the release tag silently,
+   * which is exactly what happened between Phase 6 and v0.5.0.
+   */
   version: string;
+  /**
+   * Git SHA the image was built from (`SWARM_OS_COMMIT`, set by the
+   * Dockerfile from `--build-arg GIT_SHA`). `null` outside a built image.
+   */
+  commit: string | null;
+  /**
+   * Image reference this deployment was started from (`SWARM_OS_IMAGE`, the
+   * same var the dist compose interpolates into `image:`). `null` when the
+   * compose hardcodes a tag — which is the honest answer, and matches the
+   * `image_not_interpolated` self-update eligibility case.
+   */
+  image: string | null;
 }
 
 const VALID_EFFORTS: ReadonlySet<string> = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
@@ -381,6 +400,57 @@ function loadOrCreateIdeToken(dataDir: string): string {
     /* best-effort */
   }
   return fresh;
+}
+
+/**
+ * The one place that answers "what version is this?".
+ *
+ * Production (container): `SWARM_OS_VERSION`, baked by the Dockerfile from
+ * `--build-arg APP_VERSION` (CI passes the git tag). For a published image
+ * this is the ONLY source of truth. `ENV SWARM_OS_VERSION=${APP_VERSION}` with
+ * no build-arg yields the empty string, so empty MUST read as "unset" rather
+ * than as a version.
+ *
+ * Dev (`pnpm dev`, vitest, `node dist/index.js` from a checkout): the
+ * **monorepo root** `package.json`. Emphatically NOT the `package.json` next
+ * to `dist/`: `pnpm --filter=server deploy --prod` ships `server@0.0.0` into
+ * the image, so reading the nearest manifest would report `0.0.0` in
+ * production and silently reintroduce the very drift this function exists to
+ * kill. The root manifest is also what the `Release:` commits bump, so the
+ * anti-drift test has something real to compare against.
+ *
+ * One relative path serves every layout because `src/config.ts` and
+ * `dist/config.js` sit at the same depth (`rootDir: src` / `outDir: dist` in
+ * packages/server/tsconfig.json). Inside the image it resolves to
+ * `/home/package.json`, which does not exist — and there `SWARM_OS_VERSION` is
+ * always set, so the fallback never fires.
+ */
+function resolveVersion(): string {
+  const fromEnv = process.env.SWARM_OS_VERSION?.trim();
+  if (fromEnv) return fromEnv;
+
+  const rootPkg = path.resolve(
+    path.dirname(fileURLToPath(import.meta.url)),
+    '..',
+    '..',
+    '..',
+    'package.json',
+  );
+  try {
+    const parsed = JSON.parse(fs.readFileSync(rootPkg, 'utf8')) as {
+      name?: unknown;
+      version?: unknown;
+    };
+    // Name guard: if the tree layout ever moves, report 'dev' rather than a
+    // stranger's version number picked up from whatever package.json landed
+    // three levels up.
+    if (parsed.name === 'swarm-os' && typeof parsed.version === 'string' && parsed.version) {
+      return parsed.version;
+    }
+  } catch {
+    /* not a source checkout — fall through to 'dev' */
+  }
+  return 'dev';
 }
 
 let cached: Config | null = null;
@@ -652,7 +722,15 @@ export function loadConfig(): Config {
     ideServerDataDir,
     ideCliDataDir,
     startedAt: new Date().toISOString(),
-    version: '0.6.0-phase6',
+    version: resolveVersion(),
+    commit:
+      process.env.SWARM_OS_COMMIT && process.env.SWARM_OS_COMMIT.length > 0
+        ? process.env.SWARM_OS_COMMIT
+        : null,
+    image:
+      process.env.SWARM_OS_IMAGE && process.env.SWARM_OS_IMAGE.length > 0
+        ? process.env.SWARM_OS_IMAGE
+        : null,
   };
   return cached;
 }

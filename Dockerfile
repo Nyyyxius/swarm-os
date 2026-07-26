@@ -179,6 +179,25 @@ ENV NODE_ENV=production \
     SWARM_OS_IDE_PORT=8790 \
     SWARM_OS_VSCODE_CLI=/opt/vscode-cli/code
 
+# Build provenance — the single source of truth for "which version is this".
+# `SWARM_OS_VERSION` is what config.ts reads at runtime and serves on /info;
+# the OCI labels carry the same two values in the registry-visible metadata so
+# `docker inspect` / `docker manifest inspect` agree with the running process.
+#
+# Declared AFTER the COPY layers on purpose: bumping the version then only
+# invalidates metadata layers, never the pnpm install / `pnpm -r build` cache.
+#
+# Left unset (a plain `docker build .`), `ENV SWARM_OS_VERSION=` yields the
+# EMPTY STRING, not an absent variable — config.ts treats empty as unset and
+# falls back to the monorepo root package.json, then to 'dev'. CI passes both
+# via --build-arg (see .github/workflows/release-image.yml).
+ARG APP_VERSION=""
+ARG GIT_SHA=""
+ENV SWARM_OS_VERSION=${APP_VERSION} \
+    SWARM_OS_COMMIT=${GIT_SHA}
+LABEL org.opencontainers.image.version="${APP_VERSION}" \
+      org.opencontainers.image.revision="${GIT_SHA}"
+
 EXPOSE 8787
 # Note: neither 8788 (MCP) nor 8790 (VS Code web `code serve-web`) is exposed.
 # Plan §14 — single ingress. The MCP server is intra-container only; the editor
