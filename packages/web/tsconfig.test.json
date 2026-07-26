@@ -1,0 +1,23 @@
+// Typecheck that INCLUDES the test files.
+//
+// `tsconfig.app.json` excludes them on purpose (they must not reach the vite
+// build), which also means `tsc -b` never looked at them: a test could pass a
+// `UpdateRunView` where the API declares `UpdateRunDetail` and nothing would
+// say so — the mock is only ever consumed by the code under test at runtime.
+// One command closes that hole:
+//
+//     pnpm --filter web typecheck
+//
+// Not part of the build graph (no `composite`, not referenced by
+// `tsconfig.json`): it is a check, not an output.
+{
+  "extends": "./tsconfig.app.json",
+  "compilerOptions": {
+    "composite": false,
+    "noEmit": true,
+    "tsBuildInfoFile": "./node_modules/.tmp/tsconfig.test.tsbuildinfo",
+    "types": ["vite/client", "vitest/globals"]
+  },
+  "include": ["src", "test", "vitest.config.ts"],
+  "exclude": []
+}

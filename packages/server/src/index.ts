@@ -1,7 +1,7 @@
 import * as path from 'node:path';
 import { z } from 'zod';
 import { loadConfig } from './config.js';
-import { Spawner } from './modules/spawner/index.js';
+import { Spawner, type TeamSnapshotEntry } from './modules/spawner/index.js';
 import { startServer, type BootGate } from './http/main.js';
 import { McpServer } from './modules/mcp/server.js';
 import { initRootLogger, withModule } from './logger.js';
@@ -22,6 +22,12 @@ import { PluginHost } from './modules/plugins/host.js';
 import { PluginToolRegistry } from './modules/plugins/mcp-registry.js';
 import { PluginHttpRegistry } from './modules/plugins/http-registry.js';
 import { PluginInstaller } from './modules/plugins/installer.js';
+import { UpdateService, UpdateStore, UpdateRunner, githubTokenFromEnv } from './modules/updates/index.js';
+import {
+  SpawnerTeamsPort,
+  reconcileUpdateTeams,
+  startUpdateRunnerAtBoot,
+} from './modules/updates/teams-port.js';
 import {
   ConnectorRegistry,
   DiscordConnectorProvider,
@@ -239,7 +245,27 @@ if (config.ideEnabled) {
 // server-killing throw, and quarantines crash loops. Activated AFTER mcp.start
 // (so future bridges are up before auto-resume) but its activateEnabled()
 // never rejects — see the boot chain below.
-const pluginStore = new PluginStore(db);
+//
+// Nothing in this block may stop the boot either, and that is a fix, not a
+// preference: `PluginStore`'s constructor runs DDL and then PREPARES against
+// it, so a schema it cannot work with (SQLITE_READONLY, a hand-modified
+// `plugins` table, an ALTER that failed for any reason other than "duplicate
+// column") throws at module top level — before the HTTP listener exists, on
+// every boot, i.e. a crash loop with no /health and no way in. `UpdateStore`
+// below already gets exactly this treatment. Same discipline as
+// `pluginHost.activateEnabled()`: plugins go away for this boot, loudly, and
+// the orchestrator stack — the reason the process exists — still comes up.
+let pluginStore: PluginStore | null = null;
+try {
+  pluginStore = new PluginStore(db);
+  log.info({ event: 'boot.plugin_store' });
+} catch (err) {
+  log.error({
+    event: 'boot.plugin_store_unavailable',
+    error: err instanceof Error ? err.message : String(err),
+    note: 'the plugin registry could not be opened — plugins are DISABLED for this boot and /plugins answers 404; every other subsystem is unaffected. Fix the plugins/plugin_kv schema and restart.',
+  });
+}
 // J2 — registries consulted per-request (MCP tools) / per-request (HTTP zones).
 // Never torn down; enable/disable is a Map mutation.
 const pluginToolRegistry = new PluginToolRegistry();
@@ -248,7 +274,7 @@ const pluginMessagingDefaults = {
   maxMessageSizeBytes: config.maxMessageSizeBytes,
   idleThresholdMs: config.idleThresholdMs,
 };
-const pluginHost = new PluginHost({
+const pluginHost = pluginStore === null ? null : new PluginHost({
   store: pluginStore,
   eventBus,
   pluginsDir: path.join(config.dataDir, 'plugins'),
@@ -278,13 +304,135 @@ const pluginHost = new PluginHost({
 });
 // J3 — install/upgrade from npm/git/upload/dir. Shares the host's per-name lock
 // (via host.commitInstall) so a swap is never concurrent with an enable (I-8).
-const pluginInstaller = new PluginInstaller({
-  pluginsDir: path.join(config.dataDir, 'plugins'),
-  store: pluginStore,
-  host: pluginHost,
-});
+const pluginInstaller =
+  pluginStore === null || pluginHost === null
+    ? null
+    : new PluginInstaller({
+        pluginsDir: path.join(config.dataDir, 'plugins'),
+        store: pluginStore,
+        host: pluginHost,
+      });
 // Purge stale `.staging/*` (interrupted installs, `.bak-*` leftovers) at boot.
-pluginInstaller.purgeStaging();
+// Best-effort: a staging directory we cannot clean is not worth a crash loop.
+try {
+  pluginInstaller?.purgeStaging();
+} catch (err) {
+  log.warn({
+    event: 'boot.plugin_staging_purge_failed',
+    error: err instanceof Error ? err.message : String(err),
+  });
+}
+
+// ---- Update detection (system releases + plugin origins) -------------------
+// NO TIMER, and that is the design: the SPA already polls `/info` every 60 s
+// without auth, so SERVING that route is what refreshes the verdict (TTL-gated,
+// fire-and-forget). Hence nothing to start here and nothing to stop in
+// shutdown() — see the header of modules/updates/index.ts.
+//
+// Nothing in this block may stop the boot. An expired PAT, a dead network, a
+// GitHub 404 on a private repo are ordinary states of a perfectly healthy
+// deployment, and "there is a newer version" is a nicety: a swarm-os that
+// refuses to start because it can't reach GitHub would be strictly worse than
+// one that never mentions updates. Same no-reject discipline as
+// pluginHost.activateEnabled() below.
+let updateStore: UpdateStore | undefined;
+try {
+  // The DDL runs in this constructor, NOT in db/schema.sql: that file is not
+  // shipped in the image (tsc doesn't copy `.sql`), SwarmDb silently falls back
+  // to its inlined copy, and its writers swallow failures into a warn — so a
+  // table declared only there would never exist in production and every write
+  // to it would vanish without a trace. PluginStore already sidesteps it this
+  // way. `assertReady` is the boot assertion that the sidestep actually worked:
+  // loud (log.error), never fatal.
+  const store = new UpdateStore(db);
+  store.assertReady();
+  updateStore = store;
+  log.info({ event: 'boot.update_store' });
+} catch (err) {
+  log.error({
+    event: 'boot.update_store_unavailable',
+    error: err instanceof Error ? err.message : String(err),
+    note: 'update_runs is missing — update RUNS cannot be recorded; detection is unaffected',
+  });
+}
+const updates = new UpdateService({
+  // The narrow slice the service reads; `image` is SWARM_OS_IMAGE, whose very
+  // absence is the observable form of "this compose hardcodes its tag".
+  config: { version: config.version, image: config.image, agentTransport: config.agentTransport },
+  settings: settingsStore,
+  store: updateStore,
+  // The projection lives in PluginHost: modules/updates defines its own narrow
+  // `PluginOrigin` so detection never imports the plugin registry, and this is
+  // the wiring step that closes the loop. Called lazily, per refresh, so it
+  // always reads the CURRENT rows (an upgrade changes the recorded commit).
+  listPluginOrigins: () => pluginHost?.listOrigins() ?? [],
+});
+log.info({
+  event: 'boot.updates',
+  // Value never logged — only whether a PAT exists, which is the one thing an
+  // operator debugging "why is there no update badge" needs to know. Asked via
+  // the module's own reader so the env var is named in exactly one place.
+  githubToken: githubTokenFromEnv() ? 'configured' : 'unset',
+  runsPersisted: updateStore !== undefined,
+});
+
+// ---- Update application (Lot D/E) ------------------------------------------
+// Detection above answers "is there a newer version"; this is what installs it.
+// Unlike the service, the runner DOES own a lifecycle (a watch interval, a
+// one-shot schedule timer, a grace-window timer), so it is started below and
+// stopped in shutdown().
+//
+// Late-bound into the service (`setRunner`) because its teams port needs the
+// spawner, and because an instance without a store must still detect: no store
+// ⇒ no runner ⇒ every write route answers 503 and says why, rather than
+// answering 202 and doing nothing. Nothing here may stop the boot.
+let updateRunner: UpdateRunner | null = null;
+if (updateStore) {
+  try {
+    updateRunner = new UpdateRunner({
+      config,
+      store: updateStore,
+      // The whole of what the apply machine knows about live teams (§D.5/§D.6).
+      teams: new SpawnerTeamsPort(spawner),
+    });
+    updates.setRunner(updateRunner);
+    // The script descriptor is only known after `start()` installs it, so it
+    // is logged there (`updates.script_installed`), not here.
+    log.info({ event: 'boot.update_runner', transport: config.agentTransport });
+  } catch (err) {
+    updateRunner = null;
+    log.error({
+      event: 'boot.update_runner_unavailable',
+      error: err instanceof Error ? err.message : String(err),
+      note: 'detection still works; POST /updates/* answers 503',
+    });
+  }
+}
+
+/** §D.5 — banner for the resumed LEADS; null ⇒ resume notices unchanged. */
+let updateResumeBanner: string | null = null;
+/** §D.6 — teams that were up before the update; the DB rows no longer know. */
+let updateTeams: readonly TeamSnapshotEntry[] = [];
+let updateRunId: string | null = null;
+
+// Kicked off HERE, not in the boot chain below, so the run directory is read
+// and a half-written `.env` line is restored while mcp/plugins come up — and
+// AWAITED before auto-resume, because the banner it produces is what tells the
+// resumed leads why they were interrupted. It touches only files and the
+// update store, never the spawner, so it is safe to overlap with them.
+const updatesReady: Promise<void> = startUpdateRunnerAtBoot(updateRunner, updateStore ?? null)
+  .then((state) => {
+    updateRunId = state.runId;
+    updateResumeBanner = state.banner;
+    updateTeams = state.teams;
+  })
+  .catch((err: unknown) => {
+    // Defensive: `startUpdateRunnerAtBoot` swallows its own failures.
+    log.error({
+      event: 'boot.update_runner_start_failed',
+      error: err instanceof Error ? err.message : String(err),
+    });
+  });
 
 // Phase 8 — bootGate: HTTP listens immediately so /health stays green for
 // Docker, but business routes return 503 until auto-resume finishes.
@@ -299,10 +447,11 @@ const handle = startServer(
   busMetrics,
   bootGate,
   () => scheduler.reload(),
-  pluginHost,
+  pluginHost ?? undefined,
   pluginHttpRegistry,
-  pluginInstaller,
+  pluginInstaller ?? undefined,
   connectorRegistry,
+  updates,
 );
 
 // Start MCP HTTP listener on its own port (loopback only, plan §14).
@@ -315,6 +464,10 @@ const mcp = new McpServer(spawner, config.mcpPort, config, busMetrics, pluginToo
 
 async function runAutoResume(): Promise<void> {
   if (!config.autoResume || resumableState.resumable.length === 0) {
+    // Still reconcile: with auto-resume off (or nothing to resume), every team
+    // the update interrupted is a casualty, and that is worth saying out loud.
+    // The store is passed explicitly — see the call in the `finally` below.
+    reconcileUpdateTeams(spawner, updateTeams, updateRunId, updateStore ?? null);
     bootGate.value = true;
     log.info({ event: 'boot.complete', resumed: 0, mailboxRehydrated: 0 });
     return;
@@ -322,7 +475,13 @@ async function runAutoResume(): Promise<void> {
   try {
     const { resumed, failed } = await spawner.resumeFromDb(
       resumableState.resumable,
-      { staggerMs: config.resumeStaggerMs },
+      {
+        staggerMs: config.resumeStaggerMs,
+        // §D.5 — LEADS only (the spawner threads it to `Orchestrator.resume`,
+        // never to the workers). `null` when no update was in flight, which
+        // leaves the resume notice byte-identical to any other restart.
+        resumeBanner: updateResumeBanner,
+      },
     );
     const mailbox = rehydrateMailbox(spawner, db);
     const janitor = mailboxJanitor(db);
@@ -350,6 +509,16 @@ async function runAutoResume(): Promise<void> {
       error: err instanceof Error ? err.message : String(err),
     });
   } finally {
+    // §D.6 — which of the pre-update teams actually came back. Read from the
+    // live map against the persisted snapshot, never from the DB rows: they
+    // were all flipped to `interrupted` before the resume even started.
+    //
+    // The store is handed over HERE, as an argument. It used to be smuggled
+    // through module state in `teams-port.ts` because this file was out of its
+    // author's reach; the verdict is written by whoever holds both halves, and
+    // this call site holds them. `updateRunId` is non-null only when a run was
+    // in flight, so an ordinary boot still writes nowhere.
+    reconcileUpdateTeams(spawner, updateTeams, updateRunId, updateStore ?? null);
     bootGate.value = true;
     log.info({ event: 'boot.complete', listening: true });
   }
@@ -360,7 +529,12 @@ mcp
   // Plugins come up BEFORE auto-resume so any future bridge is live when the
   // teams return. activateEnabled() catches per-plugin internally and NEVER
   // rejects, so it can't trip the fatal .catch below.
-  .then(() => pluginHost.activateEnabled())
+  .then(() => pluginHost?.activateEnabled())
+  // The update runner must have concluded (or abandoned + restored the `.env`
+  // of) an interrupted run BEFORE any team comes back: its banner is what the
+  // resumed leads are told, and its `.env` restore is what keeps the next
+  // reboot off an image nobody verified. It never rejects.
+  .then(() => updatesReady)
   .then(() => runAutoResume())
   .catch(async (err) => {
     log.error({ event: 'mcp.start_failed', error: err instanceof Error ? err.message : String(err) });
@@ -393,9 +567,21 @@ async function shutdown(signal: string): Promise<void> {
     backup.stop();
     // Disarm per-role crons so no tick fires into a half-torn-down spawner.
     scheduler.stop();
+    // The update RUNNER does own timers, and this is early on purpose: a
+    // shutdown during a warning window must not let the grace timer fire into
+    // a `docker compose up` on the way out. `stop()` clears the timers without
+    // settling the window, so `drive()` simply never reaches its spawn — and a
+    // run whose host job is already detached is unaffected, since the next
+    // process concludes it from the run directory (§D.4).
+    updateRunner?.stop();
+    // No `updates.stop()` on purpose: the update SERVICE (detection) owns no
+    // timer, no socket and no child process — its only long-lived state is an
+    // in-flight fetch that resolves into a field nobody reads after this
+    // point. The absence of a lifecycle there IS the design
+    // (modules/updates/index.ts).
     // Tear down active plugins (disposables + deactivate) before the spawner
     // goes away, so a plugin's teardown can still observe live teams.
-    await pluginHost.deactivateAll();
+    await pluginHost?.deactivateAll();
     // Stop the VS Code web child (suppresses its restart loop, SIGTERM→SIGKILL).
     await ide.stop();
     spawner.shutdownAll(`signal:${signal}`);

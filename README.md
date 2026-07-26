@@ -35,6 +35,45 @@ Image distribution is handled by `.github/workflows/release-image.yml` (push a
 
 ---
 
+## Update
+
+Full guide: `docs/deploy/install.en.md` §7 (FR: `install.fr.md` §7). The short
+version:
+
+**Detection needs a token.** `SWARM_OS_GITHUB_TOKEN` is a read-only GitHub PAT
+with `contents:read` on the (private) swarm-os repository — classic PAT: scope
+`repo`; fine-grained: `Contents: Read`. It is *not* the `read:packages` token
+used by `docker login`. Put it in the deployment `.env` **and** make sure the
+compose service names it in `environment:` (that block is an explicit
+allow-list; all shipped compose files carry
+`SWARM_OS_GITHUB_TOKEN: ${SWARM_OS_GITHUB_TOKEN:-}`). Without it the check
+status stays `no_token` and no release is ever announced — a healthy state, not
+an error.
+
+**One-click update** (SETTINGS ▸ SYSTEM UPDATE) needs the SSH transport and a
+registry `SWARM_OS_IMAGE`; otherwise the drawer names the one reason it cannot
+(`TRANSPORT IS NOT SSH`, `IMAGE TAG IS HARDCODED`, `IMAGE IS LOCALLY BUILT`, or
+a host fact answered by the updater's preflight, which refuses without touching
+anything). When it runs, **swarm-os rewrites the `SWARM_OS_IMAGE=` line of the
+operator's env file** — that line only, temp-file + rename, with a `<file>.bak`
+written first — then recreates the container and verifies it on `/health` up to
+`boot_complete`, rolling the line back if that fails. `/data` persists.
+
+**Teams are warned first, for at least 120 s.** The window is 300 s by default
+and the server floors it at 120: below that a lead mid-turn cannot reach an idle
+boundary, read the notice and wrap up. The countdown names the leads that have
+not read it and says *"Applying anyway"*; afterwards the drawer lists the teams
+that did not come back, and says of a lead that never read the notice that its
+work "was interrupted at an arbitrary point".
+
+**Publishing a release** (maintainer): bump `package.json`, commit, tag, then
+`git push origin master --follow-tags`. A tag that stays local publishes
+nothing — the `release-image` workflow fires on the pushed tag and cuts the
+GitHub Release the checker reads. A manual `workflow_dispatch` publishes
+`:<short-sha>` only and never moves `:latest`.
+
+---
+
 ## Build from source (dev — single project)
 
 Edit the host paths to your situation, then run from the repo root:
@@ -234,6 +273,8 @@ Exit codes: `0` PASS, `1` FAIL, `2` prerequisites missing.
 ## Cross-references
 
 - Specification: `plan.md`
+- Deployment & update guide: `docs/deploy/` (EN + FR; the update surface is
+  §7 of `install.*.md`)
 - Plugin authoring guide: `docs/plugins.md`
 - Phase implementation reports: `docs/phase-*.md` (mandatory pre-reading
   before touching the corresponding code)

@@ -17,6 +17,7 @@ function row(over: Partial<PluginRow> = {}): PluginRow {
     version: '0.1.0',
     source_kind: 'dir',
     source_ref: '/data/plugins/echo',
+    source_commit: null,
     enabled: 0,
     config_json: null,
     granted_capabilities_json: null,
@@ -123,6 +124,103 @@ describe('PluginStore', () => {
     store.kvSet('echo', '5000', 'b');
     // A LIKE-injection-style prefix must not match '5000'.
     expect(store.kvList('echo', '50%').map((e) => e.key)).toEqual(['50%']);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// source_commit — origin tracking + the ALTER that back-fills an existing DB
+// ---------------------------------------------------------------------------
+
+/** The `plugins` DDL as it stood BEFORE `source_commit` existed. */
+const LEGACY_PLUGINS_DDL = `
+  CREATE TABLE plugins (
+    name          TEXT PRIMARY KEY,
+    version       TEXT NOT NULL,
+    source_kind   TEXT NOT NULL,
+    source_ref    TEXT,
+    enabled       INTEGER NOT NULL DEFAULT 0,
+    config_json   TEXT,
+    granted_capabilities_json TEXT,
+    api_version   INTEGER NOT NULL DEFAULT 1,
+    fail_count    INTEGER NOT NULL DEFAULT 0,
+    quarantined_until TEXT,
+    installed_at  TEXT NOT NULL,
+    updated_at    TEXT NOT NULL,
+    last_error    TEXT
+  )
+`;
+
+/** Replace the migrated table with the legacy one, carrying a pre-existing row. */
+function rewindToLegacySchema(): void {
+  db.db.exec('DROP TABLE plugins');
+  db.db.exec(LEGACY_PLUGINS_DDL);
+  db.db
+    .prepare(
+      `INSERT INTO plugins (name, version, source_kind, source_ref, enabled, api_version,
+        fail_count, installed_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)`,
+    )
+    .run('legacy', '1.0.0', 'git', 'file:///r#main', 1, 1, 0, '2020-01-01T00:00:00.000Z', '2020-01-01T00:00:00.000Z');
+}
+
+/** Column names currently on the `plugins` table. */
+function pluginColumns(): string[] {
+  return db.db
+    .prepare<[], { name: string }>("SELECT name FROM pragma_table_info('plugins')")
+    .all()
+    .map((c) => c.name);
+}
+
+describe('PluginStore source_commit', () => {
+  it('round-trips a commit and defaults to null', () => {
+    store.upsert(row({ source_commit: 'a'.repeat(40) }));
+    expect(store.get('echo')?.source_commit).toBe('a'.repeat(40));
+    store.upsert(row({ name: 'other' }));
+    expect(store.get('other')?.source_commit).toBeNull();
+  });
+
+  it('upsert overwrites the commit on conflict (an upgrade re-records HEAD)', () => {
+    store.upsert(row({ source_commit: 'a'.repeat(40) }));
+    store.upsert(row({ source_commit: 'b'.repeat(40), version: '0.2.0' }));
+    expect(store.get('echo')?.source_commit).toBe('b'.repeat(40));
+  });
+
+  it('patch can set the commit without disturbing installed_at', () => {
+    store.upsert(row({ installed_at: '2020-01-01T00:00:00.000Z' }));
+    const after = store.patch('echo', { source_commit: 'c'.repeat(40) });
+    expect(after?.source_commit).toBe('c'.repeat(40));
+    expect(store.get('echo')?.installed_at).toBe('2020-01-01T00:00:00.000Z');
+  });
+
+  it('ALTERs a DB created before the column existed, leaving old rows null', () => {
+    rewindToLegacySchema();
+    expect(pluginColumns()).not.toContain('source_commit');
+
+    // A second store over the SAME db is the boot path of an upgraded install.
+    const migrated = new PluginStore(db);
+    expect(pluginColumns()).toContain('source_commit');
+
+    const legacy = migrated.get('legacy');
+    expect(legacy?.source_commit).toBeNull();
+    // The rest of the pre-existing row is untouched by the migration.
+    expect(legacy?.version).toBe('1.0.0');
+    expect(legacy?.source_ref).toBe('file:///r#main');
+    expect(legacy?.enabled).toBe(1);
+    expect(legacy?.installed_at).toBe('2020-01-01T00:00:00.000Z');
+  });
+
+  it('is idempotent: re-constructing over a migrated DB neither throws nor breaks writes', () => {
+    rewindToLegacySchema();
+    new PluginStore(db); // runs the ALTER
+    expect(() => new PluginStore(db)).not.toThrow(); // duplicate column swallowed
+    const third = new PluginStore(db);
+
+    // `upsert` swallows write errors into a log.warn, so "no throw" proves
+    // nothing — assert the write actually landed.
+    third.upsert(row({ name: 'fresh', source_commit: 'd'.repeat(40) }));
+    expect(third.get('fresh')?.source_commit).toBe('d'.repeat(40));
+    // …and that the migrated legacy row is still writable through the new column.
+    third.patch('legacy', { source_commit: 'e'.repeat(40) });
+    expect(third.get('legacy')?.source_commit).toBe('e'.repeat(40));
   });
 });
 

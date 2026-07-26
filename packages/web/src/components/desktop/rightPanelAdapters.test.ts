@@ -57,6 +57,8 @@ const baseOrch: OrchestratorView = {
   msgCount: 0,
   stopReason: null,
   health: 'ok',
+  resumeCount: 0,
+  lastResumedAt: null,
 };
 
 const baseRole: RoleView = {
@@ -69,6 +71,8 @@ const baseRole: RoleView = {
   defaultModel: null,
   defaultEffort: null,
   defaultPermissionMode: null,
+  schedule: null,
+  scheduleMessage: null,
   connectors: [],
   createdAt: '2026-05-22T10:00:00Z',
   updatedAt: '2026-05-22T10:00:00Z',

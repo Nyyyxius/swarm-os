@@ -40,6 +40,10 @@ import type { Spawner } from '../spawner/index.js';
 import type { RoleStore } from '../roles/index.js';
 import type { SettingsStore } from '../settings/index.js';
 import type { Config } from '../../config.js';
+// Type-only, and it stays that way: `listOrigins()` below is the projection the
+// update detector asks the wiring for. Nothing from `modules/updates` is
+// imported at runtime, so the two modules still link in one direction only.
+import type { PluginOrigin } from '../updates/plugins-check.js';
 import {
   DisposableStore,
   PluginDisabledError,
@@ -91,6 +95,8 @@ export interface CommitInstallInput {
   stagingDir: string;
   sourceKind: string;
   sourceRef: string | null;
+  /** git HEAD of the fetched source; null when the source has no commit. */
+  sourceCommit: string | null;
   version: string;
   apiVersion: number;
   /** The new manifest's declared capabilities (for the new-capability gap). */
@@ -749,6 +755,7 @@ export class PluginHost {
           version: input.version,
           source_kind: input.sourceKind,
           source_ref: input.sourceRef,
+          source_commit: input.sourceCommit,
           api_version: input.apiVersion,
         });
       } else {
@@ -757,6 +764,7 @@ export class PluginHost {
           version: input.version,
           source_kind: input.sourceKind,
           source_ref: input.sourceRef,
+          source_commit: input.sourceCommit,
           enabled: 0,
           config_json: null,
           granted_capabilities_json: null,
@@ -840,6 +848,8 @@ export class PluginHost {
             version: manifest.version,
             source_kind: 'dir',
             source_ref: dir,
+            // A folder that just appeared on disk has no traceable origin.
+            source_commit: null,
             enabled: 0,
             config_json: null,
             granted_capabilities_json: null,
@@ -949,6 +959,34 @@ export class PluginHost {
     return this.viewOfRow(row);
   }
 
+  /**
+   * Installed plugins projected into the update detector's own narrow origin
+   * type — `modules/updates/plugins-check.ts` declares `PluginOrigin` itself
+   * precisely so detection never depends on the `plugins` table's storage
+   * shape. Someone still has to translate, and this class is already the single
+   * place in the codebase that turns a snake_case row into a public shape
+   * (`viewOfRow`). Doing it in `index.ts` instead would teach the boot file the
+   * column names of a table it doesn't own.
+   *
+   * NOT `list()`: `PluginView` deliberately has no `sourceRef`, and the re-fetch
+   * address is exactly what a `git ls-remote` / npm probe needs.
+   *
+   * Disabled plugins are included. A disabled row is still listed in the UI with
+   * its version, and "enable it before we'll tell you it's outdated" is the kind
+   * of surprise this feature exists to remove.
+   */
+  listOrigins(): PluginOrigin[] {
+    return this.store.list().map((row) => ({
+      name: row.name,
+      version: row.version,
+      sourceKind: row.source_kind,
+      sourceRef: row.source_ref,
+      // `?? null` guards a row from a DB where the ALTER didn't land — and the
+      // detector reads a null commit as `unknown`, never as `available`.
+      sourceCommit: row.source_commit ?? null,
+    }));
+  }
+
   /** True when a plugin is currently activated (for tests / diagnostics). */
   isActive(name: string): boolean {
     return this.active.has(name);
@@ -981,6 +1019,9 @@ export class PluginHost {
       status: this.statusOf(row),
       enabled: row.enabled === 1,
       sourceKind: row.source_kind,
+      // `?? null` guards a row read back from a DB where the ALTER didn't land:
+      // emit an explicit null rather than dropping the key from the JSON.
+      sourceCommit: row.source_commit ?? null,
       apiVersion: row.api_version,
       capabilities,
       grantedCapabilities: this.parseGranted(row),

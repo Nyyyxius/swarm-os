@@ -420,13 +420,23 @@ export class Orchestrator {
     leadRow: SessionRow;
     workerRows: SessionRow[];
     staggerMs: number;
+    /**
+     * update_system D.5 — extra text prepended to the LEAD's resume notice
+     * only (e.g. "the server was updated to v0.5.1 — your work was
+     * interrupted"). Workers deliberately do not get it: the lead owns the
+     * team's narrative and is the one an operator addresses; N workers each
+     * announcing the same update would just burn N contexts.
+     *
+     * Omitted ⇒ the resume notice is byte-for-byte what it has always been.
+     */
+    banner?: string | null;
   }): Promise<void> {
     if (this._leadSessionId) {
       throw new Error(`orchestrator ${this.id} already has a lead — resume called twice?`);
     }
 
     const leadRow = opts.leadRow;
-    const leadNotice = buildResumeNotice(leadRow.log_path);
+    const leadNotice = buildResumeNotice(leadRow.log_path, opts.banner);
 
     // Build the preamble with the resume notice appended. We use the
     // persisted `init.lead.preamble` (already in `this.init.lead.preamble`)

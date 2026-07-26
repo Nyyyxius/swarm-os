@@ -124,6 +124,8 @@ interface Staged {
   manifest: PluginManifest;
   sourceKind: string;
   sourceRef: string | null;
+  /** git HEAD of the fetched clone; null for every non-git source (see `gitHeadCommit`). */
+  sourceCommit: string | null;
 }
 
 export interface PluginInstallerDeps {
@@ -181,6 +183,7 @@ export class PluginInstaller {
         stagingDir: staged.dir,
         sourceKind: staged.sourceKind,
         sourceRef: staged.sourceRef,
+        sourceCommit: staged.sourceCommit,
         version: staged.manifest.version,
         apiVersion: staged.manifest.apiVersion,
         manifestCaps: staged.manifest.capabilities,
@@ -243,6 +246,7 @@ export class PluginInstaller {
         stagingDir: staged.dir,
         sourceKind: staged.sourceKind,
         sourceRef: staged.sourceRef,
+        sourceCommit: staged.sourceCommit,
         version: staged.manifest.version,
         apiVersion: staged.manifest.apiVersion,
         manifestCaps: staged.manifest.capabilities,
@@ -258,6 +262,8 @@ export class PluginInstaller {
     fs.mkdirSync(dir, { recursive: true });
     let sourceKind: string;
     let sourceRef: string | null;
+    // Only a git source has a commit; every other branch leaves this null.
+    let sourceCommit: string | null = null;
 
     switch (source.kind) {
       case 'dir': {
@@ -296,6 +302,8 @@ export class PluginInstaller {
         if (source.subdir === undefined) {
           // Whole-repo clone straight into the staging dir (the plugin root).
           await this.gitClone(source.url, source.ref, dir);
+          // Read HEAD while `.git` is still there — it is about to be deleted.
+          sourceCommit = await this.gitHeadCommit(dir);
           this.rmQuiet(path.join(dir, '.git'));
         } else {
           if (!isSafeSubdir(source.subdir)) {
@@ -313,6 +321,9 @@ export class PluginInstaller {
             // Pre-create so `run`'s cwd exists; `git clone` fills the empty dir.
             fs.mkdirSync(cloneDir, { recursive: true });
             await this.gitClone(source.url, source.ref, cloneDir);
+            // HEAD lives in the CLONE, not in `dir` (which only ever receives the
+            // copied subdir) — and the clone is wiped by the `finally` below.
+            sourceCommit = await this.gitHeadCommit(cloneDir);
             const srcPath = path.resolve(cloneDir, source.subdir);
             const cloneRoot = path.resolve(cloneDir) + path.sep;
             if (
@@ -362,7 +373,7 @@ export class PluginInstaller {
         `uploaded package is '${manifest.name}', expected '${source.name}'`,
       );
     }
-    return { dir, manifest, sourceKind, sourceRef };
+    return { dir, manifest, sourceKind, sourceRef, sourceCommit };
   }
 
   // ---- fetch primitives --------------------------------------------------
@@ -402,6 +413,32 @@ export class PluginInstaller {
     if (ref) args.push('--branch', ref);
     args.push('--', url, dir);
     await this.run('git', args, dir);
+  }
+
+  /**
+   * `git rev-parse HEAD` in a fresh clone — the plugin's ORIGIN, recorded so a
+   * later pass can tell whether the remote has moved (the `--depth 1` clone's
+   * `.git` is deleted moments later, so this is the only window).
+   *
+   * BEST-EFFORT on purpose: the clone already succeeded and the package is about
+   * to be validated, so failing an otherwise-good install over a metadata read
+   * would be a regression. `null` is exactly the "origin unknown" state every
+   * consumer must already handle for rows installed before this existed.
+   */
+  private async gitHeadCommit(cloneDir: string): Promise<string | null> {
+    try {
+      const out = (await this.run('git', ['rev-parse', 'HEAD'], cloneDir)).trim();
+      // 40 hex = sha1, 64 = the sha256 object format. Anything else (a detached
+      // "HEAD" echo, a warning line) is not a commit id — don't persist it.
+      if (!/^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(out)) {
+        log.warn({ event: 'plugins.git_head_unexpected', cloneDir, out: out.slice(0, 80) });
+        return null;
+      }
+      return out;
+    } catch (err) {
+      log.warn({ event: 'plugins.git_head_failed', cloneDir, error: String(err) });
+      return null;
+    }
   }
 
   /** `npm install --omit=dev …` in `dir` when its package.json declares deps. */

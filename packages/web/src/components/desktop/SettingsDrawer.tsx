@@ -31,6 +31,7 @@ import { useNow } from '../../lib/useNow';
 import { formatUptime, formatClockShort } from '../../lib/format';
 import { AppearanceSection } from './AppearanceSection';
 import { MaintenanceSection } from './MaintenanceSection';
+import { UpdateSection } from './UpdateSection';
 import { type ShellMode } from '../../hooks/useShellMode';
 
 export type AuthState = 'unknown' | 'ok' | 'missing' | 'invalid';
@@ -55,6 +56,9 @@ export interface SettingsDrawerProps {
    *  hatch from the responsive aiguillage. */
   shellMode?: ShellMode;
   setShellMode?: (m: ShellMode) => void;
+  /** True when the drawer was opened from the TopBar/dock update badge —
+   *  scrolls SYSTEM UPDATE into view instead of leaving it below ABOUT. */
+  focusUpdates?: boolean;
 }
 
 export default function SettingsDrawer({
@@ -67,6 +71,7 @@ export default function SettingsDrawer({
   onTokenCleared,
   shellMode,
   setShellMode,
+  focusUpdates,
 }: SettingsDrawerProps) {
   const [token, setTokenLocal] = useState<string>(() => getToken());
   const [show, setShow] = useState(false);
@@ -172,7 +177,7 @@ export default function SettingsDrawer({
             )}
             {authState === 'invalid' && !!token && (
               <div className="field-warn">
-                ⚠ Token rejected (HTTP 401). Verify it matches the server's
+                ⚠ Token rejected (HTTP 401). Verify it matches the server&apos;s
                 <code> SWARM_OS_TOKEN</code> (or <code>/data/token</code> at first boot).
               </div>
             )}
@@ -224,6 +229,12 @@ export default function SettingsDrawer({
               </div>
             </div>
           </div>
+
+          {/* ── SYSTEM UPDATE ───────────────────────────── */}
+          {/* Right after ABOUT, which renders the running version: the update
+              verdict belongs next to the number it is about. Fetches
+              `GET /updates` on mount — i.e. when the drawer opens. */}
+          <UpdateSection focus={focusUpdates} />
 
           {/* ── MAINTENANCE ─────────────────────────────── */}
           <MaintenanceSection />

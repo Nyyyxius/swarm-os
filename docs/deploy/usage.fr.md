@@ -83,6 +83,32 @@ exécutions moins chères, puis `./install.sh` pour appliquer.
 
 ---
 
+## Mettre à jour
+
+**RÉGLAGES ▸ SYSTEM UPDATE** affiche la version en cours et, si un
+`SWARM_OS_GITHUB_TOKEN` est configuré, la dernière release publiée. Sans ce
+token, rien n'est jamais annoncé — voir install.fr.md §7.4.
+
+Si le déploiement est éligible (transport SSH + un `SWARM_OS_IMAGE` de
+registry), le même panneau applique la mise à jour lui-même : il réécrit la
+ligne `SWARM_OS_IMAGE=` de ton `.env` (en laissant un `.bak`), recrée le
+conteneur et vérifie le nouveau sur `/health` jusqu'à `boot_complete` — avec
+retour à la ligne d'origine si la vérification échoue. `/data` persiste.
+
+**Tes équipes sont interrompues par tout ça, et l'UI le dit franchement.**
+Chaque lead vivant est prévenu dans sa propre session et la mise à jour attend
+une fenêtre d'au moins **120 secondes** (300 par défaut ; le serveur refuse plus
+court). Le compte à rebours nomme les leads qui n'ont pas lu l'avis et annonce
+*"Applying anyway"* : l'échéance ne se négocie pas. Ensuite, le panneau liste
+les équipes qui ne sont pas revenues et ce que la coupure a fait à leur travail ;
+RESTART TEAMS est un redémarrage à froid sur place — rien n'est repris là où
+ça s'était arrêté.
+
+Détail complet, raisons d'inéligibilité et dépannage :
+[install.fr.md §7](install.fr.md).
+
+---
+
 ## Commandes de cycle de vie
 
 ```sh

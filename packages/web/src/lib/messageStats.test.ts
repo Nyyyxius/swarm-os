@@ -41,6 +41,8 @@ function makeOrch(id: string, msgCount: number): OrchestratorView {
     sessions: [],
     msgCount,
     health: 'ok',
+    resumeCount: 0,
+    lastResumedAt: null,
   };
 }
 

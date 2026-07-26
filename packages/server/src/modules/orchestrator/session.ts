@@ -48,6 +48,28 @@ const log = withModule('session');
 const LOG_CAP_BYTES = 50 * 1024 * 1024; // 50 MB per plan §15
 const RING_BUFFER_LINES = 200;
 
+/**
+ * update_system D.5 — backoff used when one PTY injector finds the other one
+ * holding the line.
+ *
+ * Both injectors (`_fireNotice` and `_fireContextReset`) write in TWO steps:
+ * the payload first, then a solo `\r` 150 / 250 ms later (see `notifySignal`'s
+ * JSDoc for why the CR cannot ride the same chunk). Between those two writes
+ * the Ink TUI has a half-typed prompt buffer; a second injector writing into
+ * that gap produces one garbled line that submits as neither command. So the
+ * loser of the race sleeps this long — deliberately longer than the 250 ms CR
+ * delay of the slower injector — and re-checks. It is a backoff, never a
+ * poll: exactly one timer is armed at a time per injector.
+ */
+const PTY_INJECT_CONTENTION_RETRY_MS = 300;
+
+/**
+ * How long `_fireNotice` considers the line "held" after handing the text to
+ * `notifySignal` (which submits its CR at +150 ms). Slightly over that so
+ * timer jitter can't let a context reset slip in between the two writes.
+ */
+const NOTICE_WRITE_WINDOW_MS = 200;
+
 export type SessionType = 'lead' | 'worker';
 
 /**
@@ -56,6 +78,34 @@ export type SessionType = 'lead' | 'worker';
  * prompt — see `buildClaudeArgs`); `/compact` summarizes and continues.
  */
 export type ContextResetCommand = '/clear' | '/compact';
+
+/**
+ * update_system D.5 — terminal outcome of an armed operator notice. A notice
+ * resolves exactly once; the caller learns which way it went through the
+ * `onOutcome` callback and/or the `noticeState` getter.
+ *
+ *  - `fired`       — the text was written into the PTY on a real idle
+ *                    boundary. This is the ONLY outcome that means the agent
+ *                    was actually interrupted with the warning.
+ *  - `never_idle`  — the deadline expired before the PTY ever went quiet for
+ *                    `idleMs` (or while a context reset held the line). The
+ *                    mailbox row is still there, but nothing woke the agent.
+ *  - `aborted`     — the session died / was stopped / the notice was
+ *                    superseded before it could fire. Not a delivery.
+ */
+export type NoticeOutcome = 'fired' | 'never_idle' | 'aborted';
+
+/**
+ * Snapshot of the most recent `armNotice` request. `outcome: null` means the
+ * notice is still armed and re-arming; `id` echoes the caller-supplied
+ * correlation token (the pre-minted mailbox message id, in practice) so a
+ * caller can prove the outcome it reads belongs to ITS notice and not to a
+ * previous one.
+ */
+export interface NoticeState {
+  id: string | null;
+  outcome: NoticeOutcome | null;
+}
 
 export type SessionStatus =
   | 'starting'
@@ -326,6 +376,41 @@ export class Session extends EventEmitter {
    */
   private _pendingContextReset: { cmd: ContextResetCommand; instructions?: string; idleMs: number } | null = null;
   private _pendingContextTimer: NodeJS.Timeout | null = null;
+  /**
+   * update_system D.5 — armed operator notice, fired once the PTY goes idle.
+   *
+   * DELIBERATELY a separate slot from `_pendingContextReset`: that one is
+   * single-occupancy (`requestContextReset` returns false when it is taken)
+   * and is already contended by the byte-based auto-compact backstop
+   * (`_maybeAutoCompact`) and by `compactOnWaiting` (`http/routes/hooks.ts`).
+   * Arming a warning there would either be silently refused or would cancel a
+   * pending `/compact` — both unacceptable for the one message the operator
+   * absolutely must land before the container is recreated.
+   *
+   * `deadlineAt` is what `_pendingContextReset` has no equivalent of: past it
+   * we stop re-arming and report `never_idle` instead of waiting forever for
+   * an idle boundary a busy lead may never offer.
+   */
+  private _pendingNotice: {
+    text: string;
+    idleMs: number;
+    deadlineAt: number;
+    id: string | null;
+    onOutcome: ((outcome: NoticeOutcome) => void) | null;
+  } | null = null;
+  private _pendingNoticeTimer: NodeJS.Timeout | null = null;
+  /** Last resolved notice + its correlation id. See `noticeState`. */
+  private _noticeState: NoticeState | null = null;
+  /** True while the notice's two-step write (text, then CR) is in flight. */
+  private _noticeFiring = false;
+  /**
+   * True while a context reset's two-step write is in flight. `_pendingContextReset`
+   * is nulled at the TOP of `_fireContextReset`, i.e. 250 ms before the command
+   * is actually submitted, so `hasPendingContextReset` alone leaves a window in
+   * which the notice would write into a half-typed `/compact`. This flag closes
+   * exactly that window.
+   */
+  private _contextResetFiring = false;
   /** Bytes of PTY output emitted since the last context reset (auto-compact backstop). */
   private _bytesSinceReset = 0;
   private readonly _idleThresholdMs: number;
@@ -1008,19 +1093,32 @@ export class Session extends EventEmitter {
    * every byte, so we sleep for whatever idle time remains and re-check on
    * wake — if the agent spoke in the meantime we sleep again. No tight poll:
    * one timer at a time, sized to the remaining idle gap.
+   *
+   * `minWaitMs` (update_system D.5) is a floor used solely by the contention
+   * backoff below; it defaults to 0, so the timing of every pre-existing
+   * caller is byte-for-byte what it was.
    */
-  private _scheduleContextReset(): void {
+  private _scheduleContextReset(minWaitMs = 0): void {
     const pending = this._pendingContextReset;
     if (!pending) return;
     if (this._pendingContextTimer) clearTimeout(this._pendingContextTimer);
     const elapsed = Date.now() - this._idleSince;
-    const wait = Math.max(1, pending.idleMs - elapsed);
+    const wait = Math.max(1, minWaitMs, pending.idleMs - elapsed);
     this._pendingContextTimer = setTimeout(() => {
       this._pendingContextTimer = null;
       if (!this._pendingContextReset) return;
       // Still busy (the agent produced output within the idle window)? Wait again.
       if (Date.now() - this._idleSince < this._pendingContextReset.idleMs) {
         this._scheduleContextReset();
+        return;
+      }
+      // D.5 ordering guard, reset side. An operator notice fires on the SAME
+      // idle boundary and writes to the SAME prompt buffer; if its two-step
+      // write is in flight, back off rather than garble both. This branch is
+      // unreachable unless someone called `armNotice` — sessions that never
+      // use the new API keep the exact previous behaviour.
+      if (this._noticeFiring) {
+        this._scheduleContextReset(PTY_INJECT_CONTENTION_RETRY_MS);
         return;
       }
       this._fireContextReset();
@@ -1047,11 +1145,16 @@ export class Session extends EventEmitter {
       });
       return;
     }
+    // D.5: from here until the CR below lands, the prompt buffer holds a
+    // half-typed slash command. `_pendingContextReset` is already null, so
+    // this flag is what keeps the notice injector off the line.
+    this._contextResetFiring = true;
     // Submit the command on its own tick so the slash-command menu in the Ink
     // TUI runs the highlighted entry (same trick as notifySignal). A slightly
     // longer delay than the mailbox signal gives the autocomplete menu time to
     // populate before the Enter keypress lands.
     setTimeout(() => {
+      this._contextResetFiring = false;
       if (!this.agent) return;
       try {
         this.agent.write('\r');
@@ -1082,6 +1185,226 @@ export class Session extends EventEmitter {
   /** True when a `/clear` or `/compact` is armed but not yet fired. */
   get hasPendingContextReset(): boolean {
     return this._pendingContextReset !== null;
+  }
+
+  // --- update_system D.5 — operator notice -------------------------------
+  //
+  // The requirement: before the container is recreated, every live team's
+  // lead must be TOLD, in its PTY, and given time to react. The pre-existing
+  // path (`broadcastToLeadsFromExternal`) is a no-op exactly when it matters:
+  // it injects the wake-up signal only if the lead happens to be idle at that
+  // very instant, and never retries. A lead mid-turn gets a mailbox row and
+  // nothing else, forever — which is the common case, since a team worth
+  // warning is a team that is working.
+  //
+  // `armNotice` is the retrying version: it holds the text and injects it at
+  // the first real idle boundary, re-arming as long as the agent keeps
+  // talking, and gives up loudly (`never_idle`) at a caller-supplied deadline
+  // instead of silently waiting forever. The deadline exists because the
+  // operator's action must never be vetoed by a busy agent: we proceed at the
+  // deadline, we just have to be able to SAY that the lead was never reached.
+
+  /**
+   * Arm a one-shot operator notice, fired into the PTY at the next idle
+   * boundary. Returns true if the notice was armed (or `false` if this
+   * session cannot receive one at all).
+   *
+   * Injection goes through `notifySignal`, unchanged: its `text`-then-`\r`
+   * cadence is structural for the Ink TUI, and it deliberately does not bump
+   * `_idleSince` (a server-injected write is not agent output and must not
+   * extend anyone's busy window).
+   *
+   * Refused (returns false) when there is no live PTY, when the session is
+   * not `running`/`waiting`, or when it is `paused`: a SIGSTOP'd process
+   * cannot read its tty, so the write would sit in a kernel buffer and land
+   * garbled on resume — the caller should treat a refusal exactly like
+   * `never_idle` (nobody was warned).
+   *
+   * NOT single-occupancy, unlike `requestContextReset`: a second arm
+   * SUPERSEDES the first (which resolves `aborted`). This is deliberate —
+   * an operator escalating from "applying in 5 minutes" to "applying now"
+   * must not have the newer, more urgent text refused because the stale one
+   * is still waiting for an idle boundary.
+   *
+   * @param text  Single line, ideally — it is typed into a prompt buffer.
+   * @param opts.idleMs      PTY quiet time required before injecting.
+   * @param opts.deadlineMs  Give up (report `never_idle`) after this long.
+   * @param opts.id          Opaque correlation token echoed by `noticeState`.
+   * @param opts.onOutcome   Fired exactly once, on resolution.
+   */
+  armNotice(
+    text: string,
+    opts: {
+      idleMs: number;
+      deadlineMs: number;
+      id?: string;
+      onOutcome?: (outcome: NoticeOutcome) => void;
+    },
+  ): boolean {
+    if (!this.agent) return false;
+    if (this._status !== 'running' && this._status !== 'waiting') return false;
+    // Supersede any notice still waiting for its idle boundary.
+    if (this._pendingNotice) this._resolveNotice('aborted', 'superseded');
+    const idleMs = Math.max(0, opts.idleMs);
+    this._pendingNotice = {
+      text,
+      idleMs,
+      deadlineAt: Date.now() + Math.max(0, opts.deadlineMs),
+      id: opts.id ?? null,
+      onOutcome: opts.onOutcome ?? null,
+    };
+    this._noticeState = { id: opts.id ?? null, outcome: null };
+    this._appendLog(
+      `[swarm-os] operator notice armed — fires once idle for ${idleMs}ms, deadline ${Math.max(0, opts.deadlineMs)}ms\n`,
+    );
+    log.info({
+      event: 'session.notice_armed',
+      sessionId: this.id,
+      idleMs,
+      deadlineMs: Math.max(0, opts.deadlineMs),
+      noticeId: opts.id ?? null,
+    });
+    this._scheduleNotice();
+    return true;
+  }
+
+  /**
+   * (Re)arm the deferred injection — same shape as `_scheduleContextReset`
+   * (one timer at a time, sized to the remaining idle gap, re-checked on
+   * wake), plus the deadline.
+   *
+   * The sleep is capped at the remaining time to the deadline so we report
+   * `never_idle` ON the deadline instead of one idle-window late: an operator
+   * screen counting down to zero must not be contradicted by a status that
+   * only settles afterwards.
+   */
+  private _scheduleNotice(minWaitMs = 0): void {
+    const pending = this._pendingNotice;
+    if (!pending) return;
+    if (this._pendingNoticeTimer) clearTimeout(this._pendingNoticeTimer);
+    const now = Date.now();
+    const idleGap = pending.idleMs - (now - this._idleSince);
+    const untilDeadline = pending.deadlineAt - now;
+    const wait = Math.max(1, Math.min(Math.max(minWaitMs, idleGap), untilDeadline));
+    const timer = setTimeout(() => {
+      this._pendingNoticeTimer = null;
+      const p = this._pendingNotice;
+      if (!p) return;
+      const t = Date.now();
+      // `paused` is never idle for our purposes — same rule as `isIdle` in
+      // messaging.ts: the SIGSTOP'd process can't drain its tty.
+      const idle = this._status !== 'paused' && t - this._idleSince >= p.idleMs;
+      // Ordering guard, notice side: a `/clear` / `/compact` targets the same
+      // idle boundary and the same prompt buffer. Armed-but-unfired counts as
+      // busy (it will take this very boundary), and so does its in-flight
+      // two-step write.
+      const lineHeld = this._pendingContextReset !== null || this._contextResetFiring;
+      if (idle && !lineHeld) {
+        this._fireNotice();
+        return;
+      }
+      if (t >= p.deadlineAt) {
+        this._resolveNotice(
+          'never_idle',
+          lineHeld ? 'deadline-while-context-reset-held-the-line' : 'deadline-busy',
+        );
+        return;
+      }
+      this._scheduleNotice(lineHeld ? PTY_INJECT_CONTENTION_RETRY_MS : 0);
+    }, wait);
+    // Never hold the process open just to warn someone: shutdown paths
+    // resolve the notice explicitly (stop / _handleExit).
+    timer.unref?.();
+    this._pendingNoticeTimer = timer;
+  }
+
+  /** Inject the armed notice via the (unmodified) `notifySignal` cadence. */
+  private _fireNotice(): void {
+    const pending = this._pendingNotice;
+    if (!pending) return;
+    if (!this.agent) {
+      this._resolveNotice('aborted', 'no-agent');
+      return;
+    }
+    // Hold the line for the whole two-step write (text now, CR at +150 ms).
+    this._noticeFiring = true;
+    const release = setTimeout(() => {
+      this._noticeFiring = false;
+    }, NOTICE_WRITE_WINDOW_MS);
+    release.unref?.();
+    this.notifySignal(pending.text);
+    log.info({
+      event: 'session.notice_fired',
+      sessionId: this.id,
+      noticeId: pending.id,
+      idleForMs: Date.now() - this._idleSince,
+    });
+    this._resolveNotice('fired');
+  }
+
+  /**
+   * Resolve the armed notice exactly once: clear the slot + timer, record the
+   * outcome for `noticeState`, and hand it to the caller's callback. A
+   * throwing callback must never take the session down with it.
+   */
+  private _resolveNotice(outcome: NoticeOutcome, reason?: string): void {
+    const pending = this._pendingNotice;
+    this._pendingNotice = null;
+    if (this._pendingNoticeTimer) {
+      clearTimeout(this._pendingNoticeTimer);
+      this._pendingNoticeTimer = null;
+    }
+    // No pending notice ⇒ nothing to resolve. Crucially this also means a
+    // later `stop()` cannot overwrite an already-recorded `fired`.
+    if (!pending) return;
+    this._noticeState = { id: pending.id, outcome };
+    if (outcome !== 'fired') {
+      this._appendLog(
+        `[swarm-os] operator notice NOT delivered (${outcome}${reason ? `: ${reason}` : ''})\n`,
+      );
+      log.warn({
+        event: 'session.notice_undelivered',
+        sessionId: this.id,
+        noticeId: pending.id,
+        outcome,
+        reason: reason ?? null,
+        busyForMs: Date.now() - this._idleSince,
+      });
+    }
+    try {
+      pending.onOutcome?.(outcome);
+    } catch (err) {
+      log.warn({
+        event: 'session.notice_callback_failed',
+        sessionId: this.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Drop an armed notice (operator cancelled the update). Returns true if
+   * something was actually armed. Resolves it as `aborted`.
+   */
+  cancelNotice(): boolean {
+    if (!this._pendingNotice) return false;
+    this._resolveNotice('aborted', 'cancelled');
+    return true;
+  }
+
+  /** True when an operator notice is armed but has not fired yet. */
+  get hasPendingNotice(): boolean {
+    return this._pendingNotice !== null;
+  }
+
+  /**
+   * Most recent notice + its outcome (`null` outcome while still armed),
+   * or `null` if this session never had one. Compare `id` against your own
+   * correlation token before trusting `outcome` — a later notice replaces
+   * this state wholesale.
+   */
+  get noticeState(): NoticeState | null {
+    return this._noticeState;
   }
 
   /**
@@ -1129,6 +1452,11 @@ export class Session extends EventEmitter {
     ) {
       return;
     }
+    // D.5 — the PTY this notice was waiting for is about to die. Resolve it
+    // now (as a non-delivery) so the caller's callback fires while the
+    // process is still around to report it, and so the timer is cleared even
+    // if the exit event never arrives.
+    this._resolveNotice('aborted', `session-stopped:${reason}`);
     this._stopReason ??= reason;
     // Mark the intent so _handleExit knows this was a user-requested stop,
     // not a crash/natural exit.
@@ -1469,6 +1797,11 @@ export class Session extends EventEmitter {
       this._pendingContextTimer = null;
     }
     this._pendingContextReset = null;
+    this._contextResetFiring = false;
+    // Same for an armed operator notice (D.5). No-op when it already fired —
+    // `_resolveNotice` returns early on an empty slot, so a `fired` outcome
+    // recorded moments ago survives the exit and stays reportable.
+    this._resolveNotice('aborted', 'session-exited');
     // Drop our PTY-side listener disposables (the underlying impl already
     // clears its callback sets on exit, but be explicit for the case where a
     // session is recycled or replaced in tests).

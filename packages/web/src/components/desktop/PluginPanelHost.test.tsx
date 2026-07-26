@@ -20,6 +20,7 @@ function mkPlugin(over: Partial<PluginView> = {}): PluginView {
     status: 'enabled',
     enabled: true,
     sourceKind: 'dir',
+    sourceCommit: null,
     apiVersion: 1,
     capabilities: [],
     grantedCapabilities: [],

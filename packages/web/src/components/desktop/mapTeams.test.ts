@@ -50,6 +50,8 @@ function orch(over: Partial<OrchestratorView> = {}): OrchestratorView {
     sessions: [lead],
     msgCount: 0,
     health: 'ok',
+    resumeCount: 0,
+    lastResumedAt: null,
     ...over,
   };
 }

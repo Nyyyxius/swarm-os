@@ -80,6 +80,31 @@ runs, then `./install.sh` to apply.
 
 ---
 
+## Updating
+
+**SETTINGS ▸ SYSTEM UPDATE** shows the running version and, when a
+`SWARM_OS_GITHUB_TOKEN` is configured, the newest published release. Without
+that token nothing is ever announced — see install.en.md §7.4.
+
+If the deployment qualifies (SSH transport + a registry `SWARM_OS_IMAGE`), the
+same panel applies the update itself: it rewrites the `SWARM_OS_IMAGE=` line of
+your `.env` (leaving a `.bak`), recreates the container, and verifies the new
+one on `/health` up to `boot_complete` — rolling back to the previous line if
+that fails. `/data` persists.
+
+**Your teams are interrupted by this, and the UI is explicit about it.** Every
+live lead is warned in its own session and the update waits out a window of at
+least **120 seconds** (300 by default; the server refuses anything shorter).
+The countdown names the leads that have not read the notice and says *"Applying
+anyway"*, because the deadline is not a negotiation. Afterwards the panel lists
+the teams that did not come back and what the cut did to their work; RESTART
+TEAMS is a fresh start in place — nothing is resumed where it stopped.
+
+Full walkthrough, eligibility reasons and troubleshooting:
+[install.en.md §7](install.en.md).
+
+---
+
 ## Lifecycle commands
 
 ```sh

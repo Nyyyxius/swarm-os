@@ -36,6 +36,8 @@ const baseOrch: OrchestratorView = {
   msgCount: 42,
   stopReason: null,
   health: 'ok',
+  resumeCount: 0,
+  lastResumedAt: null,
 };
 
 describe('deriveTag', () => {

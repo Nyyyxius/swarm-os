@@ -36,6 +36,7 @@ export default function DesktopShell() {
         onOpenPlugins={c.onOpenPlugins}
         onOpenIde={c.onOpenIde}
         onOpenSettings={() => c.setSettingsOpen(true)}
+        onOpenUpdates={c.openUpdates}
       />
       <div className="main">
         <LeftPanel
@@ -84,6 +85,7 @@ export default function DesktopShell() {
           onTokenCleared={c.setAuthMissing}
           shellMode={c.shellMode}
           setShellMode={c.setShellMode}
+          focusUpdates={c.updatesFocus}
         />
       )}
       <BroadcastModal

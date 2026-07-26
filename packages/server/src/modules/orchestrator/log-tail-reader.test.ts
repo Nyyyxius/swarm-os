@@ -88,3 +88,42 @@ describe('buildResumeNotice', () => {
     expect(notice).toContain('(empty');
   });
 });
+
+/**
+ * update_system D.5 — the optional banner. This is the only channel that
+ * reaches a lead AFTER the container has been recreated (the pre-update
+ * mailbox message is wiped by `shutdownForRestart` → `clearAll()`), so it
+ * must be additive: every existing caller keeps the exact same string.
+ */
+describe('buildResumeNotice — post-restart banner (D.5)', () => {
+  it('is byte-identical to the no-banner form when the banner is absent/empty', () => {
+    const p = path.join(tmp, 'session.log');
+    fs.writeFileSync(p, 'previous turn\n');
+    const plain = buildResumeNotice(p);
+    expect(buildResumeNotice(p, undefined)).toBe(plain);
+    expect(buildResumeNotice(p, null)).toBe(plain);
+    expect(buildResumeNotice(p, '')).toBe(plain);
+    expect(buildResumeNotice(p, '   \n  ')).toBe(plain);
+    // Same for the null-path variant.
+    expect(buildResumeNotice(null, undefined)).toBe(buildResumeNotice(null));
+  });
+
+  it('prepends the banner above the restart-notice block, leaving the block untouched', () => {
+    const p = path.join(tmp, 'session.log');
+    fs.writeFileSync(p, 'previous turn\n');
+    const plain = buildResumeNotice(p);
+    const banner = '## Server updated\nswarm-os was updated to v9.9.9 — this is why you were cut off.';
+    const withBanner = buildResumeNotice(p, banner);
+    expect(withBanner).toBe(`${banner}\n\n${plain}`);
+    // The banner comes FIRST: it is the cause of the interruption the block
+    // below then explains.
+    expect(withBanner.indexOf('Server updated')).toBeLessThan(
+      withBanner.indexOf('Server restart notice'),
+    );
+  });
+
+  it('trims surrounding whitespace so the joint stays a single blank line', () => {
+    const plain = buildResumeNotice(null);
+    expect(buildResumeNotice(null, '\n\n  BANNER  \n\n')).toBe(`BANNER\n\n${plain}`);
+  });
+});

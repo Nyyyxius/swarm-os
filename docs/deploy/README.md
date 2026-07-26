@@ -19,13 +19,26 @@ cp .env.example .env     # edit WORKSPACE_PATH, DATA_PATH, SWARM_OS_IMAGE, proje
 ./install.sh             # pulls the image, starts it, prints token + URL
 ```
 
+Two variables decide what the update surface can do — both documented in
+[install.en.md §7](install.en.md): `SWARM_OS_IMAGE` (set it explicitly; it is
+the line an update rewrites, `.bak` beside it) and `SWARM_OS_GITHUB_TOKEN` (a
+read-only PAT with `contents:read` on the private repo; without it no release
+is ever detected).
+
 ---
 
 ## Handoff checklist (for the maintainer shipping this)
 
 **Publish the image** — push a `vX.Y.Z` git tag (the `release-image` workflow
-builds + pushes to GHCR), or run `scripts/push-image.sh vX.Y.Z`. Then grant the
-recipient's GitHub account/team read access to the GHCR package.
+builds + pushes to GHCR **and cuts the GitHub Release the update checker
+reads**), or run `scripts/push-image.sh vX.Y.Z`. Then grant the recipient's
+GitHub account/team read access to the GHCR package.
+
+> A release is only effective once the tag reaches GitHub:
+> `git push origin master --follow-tags`. A tag that stays local publishes
+> nothing — the workflow never fires and no instance sees the version. A manual
+> `workflow_dispatch` run publishes `:<short-sha>` only: it does not move
+> `:latest` and cuts no release.
 
 **Hand over** (the kit only): the repo/source or just `install.sh`, `.env.example`,
 `examples/docker-compose.dist.yml`, `docs/deploy/`, `LICENSE` — plus the image

@@ -38,9 +38,13 @@ function renderDrawer(over: Partial<SettingsDrawerProps> = {}) {
 const FIXED_INFO: InfoView = {
   project_name: 'swarm-os',
   version: '0.1.0',
-  // Use a fixed date in the past — `formatClockShort` reads local hours, so
-  // we don't assert on the exact value, only that the cell renders.
-  started_at: new Date('2026-05-22T08:05:00Z').toISOString(),
+  // Relative to NOW, not a hardcoded date: `formatUptime` renders
+  // `H+:MM:SS` counted from `started_at`, so a fixed calendar date makes the
+  // uptime grow with wall-clock time and the assertion below rot (a date
+  // fixed in 2026-05 renders `1552:27:46` two months later — still valid
+  // output, just no longer two digits of hours). `formatClockShort` reads
+  // local hours, so we assert the cell renders, never its exact value.
+  started_at: new Date(Date.now() - 3_600_000).toISOString(),
 };
 
 const HEALTH_2: HealthView = {

@@ -54,6 +54,7 @@ function rowFor(name: string, over: Partial<PluginRow> = {}): PluginRow {
     version: '0.1.0',
     source_kind: 'dir',
     source_ref: path.join(pluginsDir, name),
+    source_commit: null,
     enabled: 0,
     config_json: null,
     granted_capabilities_json: null,
@@ -405,5 +406,50 @@ describe('PluginHost boot (activateEnabled)', () => {
     await host.activateEnabled();
     expect(host.isActive('expired')).toBe(true);
     expect(host.viewOf('expired').status).toBe('enabled');
+  });
+});
+
+/**
+ * `listOrigins()` — the projection the update detector is wired to.
+ *
+ * It is a translation, so the tests are about what MUST NOT be lost on the way:
+ * the re-fetch address (absent from `PluginView`), the recorded commit (whose
+ * absence means "unknown", never "available"), and disabled rows (still listed
+ * in the UI, so still worth a verdict).
+ */
+describe('PluginHost.listOrigins', () => {
+  it('projects a git row with its ref and commit intact', () => {
+    store.upsert(
+      rowFor('trader', {
+        version: '1.2.3',
+        source_kind: 'git',
+        source_ref: 'https://example.com/x.git#main#packages/trader',
+        source_commit: 'a'.repeat(40),
+      }),
+    );
+    expect(host.listOrigins()).toEqual([
+      {
+        name: 'trader',
+        version: '1.2.3',
+        sourceKind: 'git',
+        sourceRef: 'https://example.com/x.git#main#packages/trader',
+        sourceCommit: 'a'.repeat(40),
+      },
+    ]);
+  });
+
+  it('carries a null commit through as null — the detector reads it as unknown', () => {
+    store.upsert(rowFor('legacy', { source_kind: 'git', source_ref: 'https://e/x.git' }));
+    expect(host.listOrigins()[0].sourceCommit).toBeNull();
+  });
+
+  it('includes disabled plugins', () => {
+    store.upsert(rowFor('off', { enabled: 0 }));
+    store.upsert(rowFor('on', { enabled: 1 }));
+    expect(host.listOrigins().map((o) => o.name).sort()).toEqual(['off', 'on']);
+  });
+
+  it('is empty when nothing is installed', () => {
+    expect(host.listOrigins()).toEqual([]);
   });
 });

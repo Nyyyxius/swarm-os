@@ -119,6 +119,14 @@ export interface SwarmControllerValue {
   setShowNew: (v: boolean) => void;
   settingsOpen: boolean;
   setSettingsOpen: (v: boolean) => void;
+  /**
+   * True when SETTINGS was opened from the update badge — the drawer scrolls
+   * its SYSTEM UPDATE section into view. Cleared on close, so the cog never
+   * inherits the badge's intent.
+   */
+  updatesFocus: boolean;
+  /** Open SETTINGS on the SYSTEM UPDATE section (TopBar badge / mobile dock). */
+  openUpdates: () => void;
   broadcastOpen: boolean;
   setBroadcastOpen: (v: boolean) => void;
   spawnFor: OrchestratorView | null;
@@ -251,6 +259,17 @@ export function SwarmControllerProvider({
   // ── dialog-open intents ────────────────────────────────────────────────
   const [showNew, setShowNew] = useState(false);
   const [settingsOpen, setSettingsOpen] = useState(false);
+  // Set only by the update badge; cleared whenever the drawer closes so the
+  // next cog click opens a plain SETTINGS.
+  const [updatesFocus, setUpdatesFocus] = useState(false);
+  const setSettingsOpenResolved = useCallback((v: boolean) => {
+    if (!v) setUpdatesFocus(false);
+    setSettingsOpen(v);
+  }, []);
+  const openUpdates = useCallback(() => {
+    setUpdatesFocus(true);
+    setSettingsOpen(true);
+  }, []);
   const [spawnFor, setSpawnFor] = useState<OrchestratorView | null>(null);
   const [editConfigFor, setEditConfigFor] = useState<OrchestratorView | null>(null);
   const [broadcastOpen, setBroadcastOpen] = useState(false);
@@ -474,11 +493,16 @@ export function SwarmControllerProvider({
     [orchestrators],
   );
 
+  // `updateAvailable` is derived from the SAME `info` object as `version`, in
+  // the same memo: the badge and the version string are one render, always.
+  // A server without the detector omits `update` entirely → no badge, no throw.
   const topBarInfo: TopBarInfo = useMemo(
     () => ({
       projectName: info?.project_name ?? '—',
       version: info?.version ?? '—',
       startedAt: info?.started_at ?? null,
+      updateAvailable: info?.update?.available ?? false,
+      updateLatest: info?.update?.latest ?? null,
     }),
     [info],
   );
@@ -780,7 +804,9 @@ export function SwarmControllerProvider({
     showNew,
     setShowNew,
     settingsOpen,
-    setSettingsOpen,
+    setSettingsOpen: setSettingsOpenResolved,
+    updatesFocus,
+    openUpdates,
     broadcastOpen,
     setBroadcastOpen,
     spawnFor,

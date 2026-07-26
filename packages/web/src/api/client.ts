@@ -181,6 +181,20 @@ export interface PluginView {
   status: PluginStatus;
   enabled: boolean;
   sourceKind: string;
+  /**
+   * git HEAD the plugin was installed from. `null` for npm/dir/upload sources
+   * AND for anything installed before origin tracking existed — those can only
+   * ever report an "unknown" update status.
+   */
+  sourceCommit: string | null;
+  /**
+   * Update detection for this plugin. Both are OPTIONAL on the wire: the
+   * server declares them but a given build may not populate them. An absent
+   * value means "not checked" — never "up to date", so the UI must stay silent
+   * rather than claim anything.
+   */
+  latestVersion?: string | null;
+  updateStatus?: 'up_to_date' | 'available' | 'unknown' | 'error';
   apiVersion: number;
   /** Capabilities the manifest requests. */
   capabilities: string[];
@@ -281,12 +295,299 @@ export interface HealthView {
   sessions_active: number;
   sessions_waiting: number;
   uptime_seconds: number;
+  /**
+   * False while auto-resume is still replaying teams. `/health` is mounted
+   * BEFORE the boot gate and answers 200 unconditionally (the Dockerfile
+   * HEALTHCHECK would restart-loop a slow-but-correct resume otherwise), so
+   * a 200 alone only proves the process is listening. Anything waiting for a
+   * container to actually be *back* — the update overlay — gates on this bit.
+   *
+   * Optional on the wire: a server older than the boot gate omits it, and
+   * "absent" must read as "nothing to wait for", never as "still booting".
+   */
+  boot_complete?: boolean;
+  /** S5 — sessions an operator paused. Absent on older servers. */
+  sessions_paused?: number;
 }
 
 export interface InfoView {
   project_name: string;
   version: string;
   started_at: string;
+  /**
+   * Build provenance baked into the image (`ARG GIT_SHA`). Null on a run from
+   * source, absent on a server older than the provenance work.
+   */
+  commit?: string | null;
+  /** `SWARM_OS_IMAGE` this deployment started from; null when the compose
+   *  hardcodes its tag. */
+  image?: string | null;
+  /**
+   * The ONLY update data `/info` carries — it is unauthenticated, so release
+   * notes, plugin origins and the self-update eligibility reason stay behind
+   * the auth gate in `GET /updates`.
+   *
+   * Optional on purpose: a server without the detector simply omits the field,
+   * which must read as "no badge", never as a crash. This is what backs the
+   * TopBar badge — the SPA already polls `/info` every 60 s, so the badge
+   * paints in the very same `setInfo` as the version string beside it and
+   * needs no poll, hook or WS event of its own.
+   */
+  update?: { available: boolean; latest: string | null };
+}
+
+/**
+ * ── Update surface ───────────────────────────────────────────────────────
+ * Hand-maintained mirror of `packages/server/src/modules/updates/index.ts`
+ * (+ `plugins-check.ts`). `web` does not depend on `server` (design doc
+ * §2.1), so a field added there must be added here too.
+ */
+
+/** Outcome of the last COMPLETED system check — each maps to its own sentence. */
+export type SystemCheckStatus =
+  | 'never_checked'
+  | 'ok'
+  | 'no_releases'
+  | 'no_token'
+  | 'unauthorized'
+  | 'not_found'
+  | 'error';
+
+export interface SystemUpdateState {
+  /** Version this instance is running. */
+  current: string;
+  /** `latest > current` AND not dismissed. Recomputed server-side on each read. */
+  available: boolean;
+  /** Comparable version of the newest published release (`0.6.0`). */
+  latest: string | null;
+  /** Its tag as published (`v0.6.0`). */
+  tag: string | null;
+  notesUrl: string | null;
+  notesBody: string | null;
+  publishedAt: string | null;
+  /** Version the operator chose to hide, if any. */
+  dismissedVersion: string | null;
+  checkStatus: SystemCheckStatus;
+  /** ISO of the last completed check, success or failure. */
+  checkedAt: string | null;
+  /** Message for `checkStatus === 'error'`. */
+  error: string | null;
+}
+
+/**
+ * Why this deployment can (or cannot) update itself. A boolean would tell an
+ * operator "no" without telling them the one thing to change — hence a reason
+ * per case, each with its own copy in the UI.
+ */
+export type SelfUpdateStatus =
+  | 'ok'
+  | 'transport_not_ssh'
+  | 'image_not_registry'
+  | 'image_not_interpolated'
+  | 'env_file_not_found'
+  | 'env_file_not_writable'
+  | 'registry_auth_missing'
+  /** Checks that need the host and don't exist yet. */
+  | 'unknown';
+
+export interface SelfUpdateEligibility {
+  status: SelfUpdateStatus;
+  /** One operator-facing sentence, computed server-side from this deployment. */
+  detail: string;
+}
+
+export type PluginUpdateStatus = 'available' | 'up_to_date' | 'local' | 'unknown';
+
+export interface PluginUpdateCheck {
+  name: string;
+  status: PluginUpdateStatus;
+  /** npm only — `dist-tags.latest`. Null for git (a sha is not a version). */
+  latestVersion: string | null;
+  /** git only — the remote sha at the installed ref. */
+  latestCommit: string | null;
+  /** Stable machine-readable cause for `local`/`unknown`; null otherwise. */
+  reason: string | null;
+  checkedAt: string;
+}
+
+/**
+ * ── Apply / schedule ──────────────────────────────────────────────────────
+ * Mirror of `packages/server/src/modules/updates/runner.ts`.
+ *
+ *   scheduled → warning_teams → preflight → applying → verifying → success
+ *        │            │             │                      ├→ rolled_back
+ *    cancelled    cancelled      refused                   ├→ failed
+ *                             (nothing touched)            └→ abandoned
+ */
+export type UpdateRunState =
+  | 'scheduled'
+  | 'warning_teams'
+  | 'preflight'
+  | 'applying'
+  | 'verifying'
+  | 'success'
+  | 'rolled_back'
+  | 'failed'
+  | 'abandoned'
+  | 'cancelled'
+  | 'refused';
+
+/** Terminal = nothing more will happen on its own. Mirrors `TERMINAL_UPDATE_STATES`. */
+export const TERMINAL_UPDATE_STATES: ReadonlySet<UpdateRunState> = new Set<UpdateRunState>([
+  'success',
+  'rolled_back',
+  'failed',
+  'abandoned',
+  'cancelled',
+  'refused',
+]);
+
+/**
+ * How a lead actually received the warning — NOT a counter. `read` is observed
+ * server-side by pre-minting the mailbox id and checking it left the queue;
+ * `queued_unread` means the notice was injected into the PTY and is still
+ * sitting in the inbox; `never_idle` means the lead never offered an idle
+ * boundary before the deadline; `no_lead` means there was nobody to warn.
+ *
+ * Those four are observations. `pending` is not: it is the placeholder row the
+ * server writes for every snapshot team the instant the warning window opens,
+ * and it means **nothing has been observed about this lead yet**. It used to be
+ * `never_idle`, which put "this lead never reached an idle boundary" on screen —
+ * "(busy for 4m31)" — about leads whose notice had already fired, for the whole
+ * window. Anything this build does not recognise is treated as `pending` too:
+ * an unknown value must never be able to read as a verdict.
+ *
+ * ⚠️ In a `pending` record `signalled` and `read` are FLOORS, not observations:
+ * false because nothing was seen, not because nothing happened. Read `state`
+ * first and the booleans only when it is one of the other four.
+ */
+export type LeadNoticeState =
+  | 'read'
+  | 'queued_unread'
+  | 'never_idle'
+  | 'no_lead'
+  | 'pending';
+
+/** One team alive at the instant the update was requested (`teamsSnapshot`). */
+export interface UpdateTeamSnapshot {
+  orchestratorId: string;
+  name: string;
+  leadSessionId: string | null;
+}
+
+/**
+ * One row of `teams_warned_json`. Snake_case on the wire — this is persisted
+ * JSON, not a view model, and the server writes it verbatim.
+ */
+export interface WarnedTeamRecord {
+  orch_id: string;
+  orch_name: string;
+  lead_id: string | null;
+  /** The notice was injected into the lead's session (not merely queued). */
+  signalled: boolean;
+  /** The lead consumed it before the deadline. */
+  read: boolean;
+  state: LeadNoticeState;
+}
+
+/** Why a team of the pre-update snapshot is (or is not) back. */
+export type TeamReconcileReason = 'ok' | 'absent' | 'not_running' | 'no_lead' | 'lead_dead';
+
+/**
+ * One row of `teams_reconciled_json`, written ONCE by the boot that followed
+ * the update. Snake_case on the wire for the same reason as
+ * `WarnedTeamRecord`: persisted JSON, served verbatim.
+ *
+ * This is what makes the post-update screen still true tomorrow — it records
+ * the state of the world at the instant the teams were reconciled, which no
+ * amount of looking at `GET /orchestrators` later can reconstruct.
+ */
+export interface ReconciledTeamRecord {
+  orch_id: string;
+  orch_name: string;
+  /** Lead session id BEFORE the update. */
+  lead_id: string | null;
+  /** Live, non-terminal, with a live lead. */
+  back: boolean;
+  /** Lead id now — differs from `lead_id` after a fresh restart-in-place. */
+  lead_id_now: string | null;
+  /** Orchestrator status then; `null` when it was not in the live map at all. */
+  status: string | null;
+  reason: TeamReconcileReason;
+}
+
+export interface UpdateRunView {
+  id: string;
+  kind: string;
+  state: UpdateRunState;
+  targetVersion: string | null;
+  scheduledFor: string | null;
+  warnedAt: string | null;
+  startedAt: string | null;
+  finishedAt: string | null;
+  /** Verdict message, refusal reason, or the review note on a `success`. */
+  error: string | null;
+  /** Live phase from the host script's `events.ndjson`; null when terminal. */
+  phase: string | null;
+  envFile: string | null;
+  teamsSnapshot: UpdateTeamSnapshot[];
+  teamsWarned: WarnedTeamRecord[];
+  /**
+   * §D.6 — which of `teamsSnapshot` came back, as recorded by the boot that
+   * followed the update. OPTIONAL on the wire: a server older than the
+   * `teams_reconciled_json` column omits it, and a run that has not been
+   * through that boot sends `[]`. Both mean "no record" — the UI falls back to
+   * diffing the snapshot against the live team list.
+   */
+  teamsReconciled?: ReconciledTeamRecord[] | null;
+  /** Seconds left in the grace window; null outside `warning_teams`. */
+  graceRemainingSeconds: number | null;
+  terminal: boolean;
+}
+
+/** `result.json` as the host script wrote it. Every field is optional on read. */
+export interface HostUpdateResult {
+  script_version?: string;
+  state?: string;
+  exit_code?: number;
+  reason?: string;
+  message?: string;
+  /** `boot_complete` | `healthy_no_boot_complete` | `unreachable` | `skipped`. */
+  verify?: string;
+  env_file?: string;
+  target_image?: string;
+  previous_image?: string;
+  env_written?: boolean;
+  deployed?: boolean;
+  finished_at?: string;
+}
+
+/** `GET /updates/:id` — the view plus what only the run directory knows. */
+export interface UpdateRunDetail extends UpdateRunView {
+  runDir: string;
+  envLineBefore: string | null;
+  logTail: string;
+  result: HostUpdateResult | null;
+}
+
+/** Full authenticated state — `GET /updates`. */
+export interface UpdatesView {
+  system: SystemUpdateState;
+  plugins: PluginUpdateCheck[];
+  /** ISO of the last completed plugin sweep; null until the first one. */
+  pluginsCheckedAt: string | null;
+  canSelfUpdate: SelfUpdateEligibility;
+  /**
+   * The run in flight or scheduled; null when idle. The three fields below are
+   * OPTIONAL on the wire on purpose: a server that shipped detection without
+   * the apply engine omits them entirely, and that must read as "this build
+   * cannot apply", never as a crash.
+   */
+  run?: UpdateRunView | null;
+  /** Newest-first history (10), for the "last update" verdict. */
+  recentRuns?: UpdateRunView[];
+  /** Version + sha256 of the updater script this build would run. */
+  updater?: { version: string; sha256: string } | null;
 }
 
 /**
@@ -623,6 +924,71 @@ export const api = {
       'GET',
       '/backups',
     ),
+  /**
+   * Update surface. `getUpdates` is the full authed state (system + plugins +
+   * self-update eligibility) and is fetched ON DEMAND when the SETTINGS
+   * drawer's SYSTEM UPDATE section opens — never polled. The badge rides the
+   * public `/info` poll instead (`InfoView.update`).
+   *
+   * `dismissUpdate(version)` hides one version; `dismissUpdate(null)`
+   * un-hides. Both return the recomputed system state.
+   */
+  getUpdates: () => request<UpdatesView>('GET', '/updates'),
+  dismissUpdate: (version: string | null) =>
+    request<{ system: SystemUpdateState }>('POST', '/updates/dismiss', { version }),
+  /**
+   * Apply / schedule. Every one of these answers **503** when the instance was
+   * wired without an apply machine — that is a fact about the build, not a
+   * failure, and the UI says so instead of showing a generic error.
+   *
+   * `apply` answers 202: the run outlives the request and, by design, outlives
+   * the server process (the whole point is `docker compose up -d` on the
+   * container we are talking to). It is followed through `getUpdateRun`.
+   * 409 means a run is already in flight.
+   *
+   * `graceSeconds` is floored server-side at 120 (`MIN_GRACE_SECONDS`) whenever
+   * a team is alive — below that an operator is announcing, not warning.
+   */
+  applyUpdate: (body: { targetVersion: string; graceSeconds?: number }) =>
+    request<{ runId: string; run: UpdateRunDetail | null }>('POST', '/updates/apply', {
+      kind: 'system',
+      ...body,
+    }),
+  /**
+   * Cut the warning window short. 200 `{applied:true}` once the hard
+   * {@link MIN_GRACE_SECONDS} floor has elapsed; **409 while it has not**, with
+   * `remainingSeconds` and a message naming the wait — the server refuses
+   * rather than queueing the apply, because an operator who asked for "now"
+   * has not asked for "in 90 s". 404 names a run the server does not know
+   * (and is also what a server predating this route answers).
+   */
+  applyUpdateNow: (runId?: string) =>
+    request<{ applied: boolean; run: UpdateRunDetail | null }>(
+      'POST',
+      '/updates/apply-now',
+      runId === undefined ? {} : { runId },
+    ),
+  /** One-shot at an ISO datetime (Lot E) — not a cron. */
+  scheduleUpdate: (body: { at: string; targetVersion: string; graceSeconds?: number }) =>
+    request<{ runId: string; at: string; run: UpdateRunDetail | null }>(
+      'POST',
+      '/updates/schedule',
+      { kind: 'system', ...body },
+    ),
+  /** 404 when nothing was scheduled. */
+  cancelUpdateSchedule: () => request<{ cancelled: boolean }>('DELETE', '/updates/schedule'),
+  /**
+   * Cancel during the warning window. 409 once the host updater owns the
+   * outcome: past that point there is nothing safe to interrupt.
+   */
+  cancelUpdateRun: (runId?: string) =>
+    request<{ cancelled: boolean; run: UpdateRunView | null }>(
+      'POST',
+      '/updates/cancel',
+      runId === undefined ? {} : { runId },
+    ),
+  getUpdateRun: (id: string) =>
+    request<{ run: UpdateRunDetail }>('GET', `/updates/${encodeURIComponent(id)}`),
   /**
    * VS Code web (`code serve-web`) connection details. The editor is
    * reverse-proxied under `basePath` (e.g. `/ide`) on the same origin, so the

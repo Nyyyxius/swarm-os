@@ -22,6 +22,9 @@ services:
     container_name: swarm-os-stiix
     init: true
     restart: unless-stopped
+    # PTY comfort, not corruption insurance — `shutdownAll()` is synchronous.
+    # See docker-compose.test.yml for the full note.
+    stop_grace_period: 30s
     ports:
       # Single ingress: the VS Code web editor is reverse-proxied under /ide on
       # this same port (mapped to container 8787), so no extra port is needed.
@@ -46,6 +49,10 @@ services:
       SWARM_OS_HOST_DATA_DIR: ${HOME}/.swarm-os/stiix
       SWARM_OS_HOST_CLAUDE_DIR: ${HOME}/.claude
       SWARM_OS_HOST_WORKSPACE_ROOT: ${HOME}/projets/fyrel
+      # Update detection. `environment:` is an explicit allow-list: a variable
+      # not named here never reaches the process, and the check stays stuck on
+      # `no_token`. Read-only PAT, scope `contents:read` (the repo is private).
+      SWARM_OS_GITHUB_TOKEN: ${SWARM_OS_GITHUB_TOKEN:-}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/health"]
       interval: 30s

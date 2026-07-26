@@ -136,5 +136,11 @@ CREATE TABLE IF NOT EXISTS instance_settings (
   font_size INTEGER NOT NULL,           -- px, 11..16
   density TEXT NOT NULL,                -- 'compact'|'regular'|'comfy'
   dark_mode INTEGER NOT NULL DEFAULT 1, -- 1=dark (v1 only supports dark; toggle is UI stub)
+  -- Version tag the operator chose to stop being nagged about (update
+  -- detection). Not visual, but this singleton row is already "the operator's
+  -- preferences for this instance" and a second one-row table would be worse.
+  -- NOTE: also added by SwarmDb.applyMigrations() — an existing DB only gets
+  -- the column through the ALTER, since CREATE TABLE IF NOT EXISTS skips.
+  dismissed_update_version TEXT,
   updated_at TEXT NOT NULL              -- ISO 8601
 );

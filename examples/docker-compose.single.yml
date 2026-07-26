@@ -20,6 +20,10 @@ services:
     # the contract explicit at the orchestration layer (plan §13).
     init: true
     restart: unless-stopped
+    # PTY comfort, NOT corruption insurance: `spawner.shutdownAll()` is
+    # synchronous, so the 10s default SIGKILL truncates no intended DB write.
+    # The extra time only lets the agent PTYs close cleanly on SIGTERM.
+    stop_grace_period: 30s
     ports:
       # Bind on the host loopback ONLY. Tailscale exposes 127.0.0.1 of the
       # host on the tailnet; never write 0.0.0.0 here. Plan §14 critical.
@@ -47,6 +51,11 @@ services:
     environment:
       SWARM_OS_PROJECT_NAME: fyrel-cc-app
       SWARM_OS_DISCORD_WEBHOOK_URL: ${FYREL_DISCORD_WEBHOOK:-}
+      # Update detection: read-only GitHub PAT (scope `contents:read`) used to
+      # read the releases of the private swarm-os repo. `environment:` is an
+      # allow-list — a variable not named here never reaches the process, and
+      # the check stays on `no_token` forever. Empty = detection off.
+      SWARM_OS_GITHUB_TOKEN: ${SWARM_OS_GITHUB_TOKEN:-}
       # Public URL is used for Discord embed deep-links (no token included).
       # Set to your Tailscale name or whatever URL the user reaches the UI at.
       SWARM_OS_PUBLIC_URL: ${SWARM_OS_PUBLIC_URL:-https://swarm.tail-xyz.ts.net:8787}

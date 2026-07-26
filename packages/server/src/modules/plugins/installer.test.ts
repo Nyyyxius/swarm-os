@@ -122,6 +122,11 @@ describe('git subdir install (real clone via file://)', () => {
 
   const fileUrl = (): string => `file://${repo}`;
 
+  /** HEAD of a repo, read the same way the installer does. */
+  function headOf(cwd: string): string {
+    return execFileSync('git', ['rev-parse', 'HEAD'], { cwd, encoding: 'utf8' }).trim();
+  }
+
   it('installs the plugin from a subdir (root noise excluded) and records the subdir ref', async () => {
     const res = await installer.install({ kind: 'git', url: fileUrl(), ref: 'main', subdir: 'plugin/trader' });
     expect(res.view.name).toBe('trader');
@@ -145,8 +150,18 @@ describe('git subdir install (real clone via file://)', () => {
     });
   });
 
+  it('records the cloned HEAD as source_commit for a subdir install', async () => {
+    // The clone's `.git` is deleted during staging — the SHA must be captured
+    // before that, and it is the ORIGIN of the whole repo, not of the subdir.
+    const res = await installer.install({ kind: 'git', url: fileUrl(), ref: 'main', subdir: 'plugin/trader' });
+    expect(res.view.sourceCommit).toBe(headOf(repo));
+    expect(store.get('trader')?.source_commit).toBe(headOf(repo));
+    expect(headOf(repo)).toMatch(/^[0-9a-f]{40}$/);
+  });
+
   it('upgrade re-clones and re-copies the SAME subdir', async () => {
     await installer.install({ kind: 'git', url: fileUrl(), ref: 'main', subdir: 'plugin/trader' });
+    const first = store.get('trader')?.source_commit;
     // Bump the plugin version in the repo and commit.
     writePlugin('plugin/trader', 'trader', '2.0.0');
     git(repo, 'add', '-A');
@@ -156,6 +171,24 @@ describe('git subdir install (real clone via file://)', () => {
     expect(res.isUpgrade).toBe(true);
     expect(res.view.version).toBe('2.0.0');
     expect(fs.existsSync(path.join(pluginsDir, 'trader', 'README.md'))).toBe(false);
+    // The commit is RE-recorded, not sticky — this is what makes a later
+    // "remote has moved" comparison meaningful.
+    expect(res.view.sourceCommit).toBe(headOf(repo));
+    expect(res.view.sourceCommit).not.toBe(first);
+  });
+
+  it('records no commit for a non-git source', async () => {
+    const src = path.join(tmp, 'localplugin');
+    fs.mkdirSync(src, { recursive: true });
+    fs.writeFileSync(
+      path.join(src, 'plugin.json'),
+      JSON.stringify({ name: 'local', version: '0.1.0', main: 'index.js', apiVersion: 1, capabilities: [] }),
+    );
+    fs.writeFileSync(path.join(src, 'index.js'), 'export default { activate() {} };\n');
+
+    const res = await installer.install({ kind: 'dir', dir: src });
+    expect(res.view.sourceCommit).toBeNull();
+    expect(store.get('local')?.source_commit).toBeNull();
   });
 
   it('rejects a traversal subdir before any clone', async () => {
@@ -192,5 +225,10 @@ describe('git subdir install (real clone via file://)', () => {
       ref: 'main',
       subdir: undefined,
     });
+    // Plain-clone path: HEAD is read from the staging dir itself, before its
+    // `.git` is removed (which the existing assertions confirm it is).
+    expect(res.view.sourceCommit).toBe(headOf(repo2));
+    expect(res.view.sourceCommit).toMatch(/^[0-9a-f]{40}$/);
+    expect(fs.existsSync(path.join(pluginsDir, 'rooted', '.git'))).toBe(false);
   });
 });

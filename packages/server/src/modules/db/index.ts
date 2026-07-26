@@ -125,10 +125,12 @@ export interface RoleRow {
 }
 
 /**
- * Per-instance visual settings. Singleton row (`id='current'`). The defaults
- * are seeded in code by the SettingsStore the first time `update` is called,
- * not at schema-create time — read methods return `null` when the row is
- * absent and the module layer substitutes hard-coded defaults.
+ * Per-instance operator preferences. Singleton row (`id='current'`). The
+ * defaults are seeded in code by the SettingsStore the first time `update` is
+ * called, not at schema-create time — read methods return `null` when the row
+ * is absent and the module layer substitutes hard-coded defaults.
+ *
+ * Mostly visual, with one exception: `dismissed_update_version` (see below).
  */
 export interface InstanceSettingsRow {
   id: string;
@@ -138,6 +140,13 @@ export interface InstanceSettingsRow {
   font_size: number;
   density: string;
   dark_mode: number;
+  /**
+   * Release tag the operator explicitly chose to ignore. Without it, an
+   * operator who decides to stay on the current version pins a badge on their
+   * UI forever, and the only way to make it stop is to take the update — which
+   * is not a choice.
+   */
+  dismissed_update_version: string | null;
   updated_at: string;
 }
 
@@ -440,9 +449,11 @@ export class SwarmDb {
     );
     this.upsertInstanceSettingsStmt = this.db.prepare<InstanceSettingsRow>(`
       INSERT INTO instance_settings (
-        id, instance_label, accent, bg_tint, font_size, density, dark_mode, updated_at
+        id, instance_label, accent, bg_tint, font_size, density, dark_mode,
+        dismissed_update_version, updated_at
       ) VALUES (
-        @id, @instance_label, @accent, @bg_tint, @font_size, @density, @dark_mode, @updated_at
+        @id, @instance_label, @accent, @bg_tint, @font_size, @density, @dark_mode,
+        @dismissed_update_version, @updated_at
       )
       ON CONFLICT(id) DO UPDATE SET
         instance_label = excluded.instance_label,
@@ -451,6 +462,7 @@ export class SwarmDb {
         font_size = excluded.font_size,
         density = excluded.density,
         dark_mode = excluded.dark_mode,
+        dismissed_update_version = excluded.dismissed_update_version,
         updated_at = excluded.updated_at
     `);
   }
@@ -478,6 +490,12 @@ export class SwarmDb {
       // Per-role cadence (modules/schedule) — additive nullable columns.
       { table: 'roles', column: 'schedule',         ddl: 'ALTER TABLE roles ADD COLUMN schedule TEXT' },
       { table: 'roles', column: 'schedule_message', ddl: 'ALTER TABLE roles ADD COLUMN schedule_message TEXT' },
+      // Update detection — the version the operator chose to ignore. Declared
+      // in schema.sql AND in INLINE_SCHEMA AND here: the first two only ever
+      // run on a FRESH database (CREATE TABLE IF NOT EXISTS skips an existing
+      // table wholesale), so every already-deployed instance gets the column
+      // exclusively through this ALTER.
+      { table: 'instance_settings', column: 'dismissed_update_version', ddl: 'ALTER TABLE instance_settings ADD COLUMN dismissed_update_version TEXT' },
     ];
     for (const a of additions) {
       try {
@@ -1044,6 +1062,7 @@ CREATE TABLE IF NOT EXISTS instance_settings (
   font_size INTEGER NOT NULL,
   density TEXT NOT NULL,
   dark_mode INTEGER NOT NULL DEFAULT 1,
+  dismissed_update_version TEXT,
   updated_at TEXT NOT NULL
 );
 `;

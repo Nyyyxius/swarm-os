@@ -179,6 +179,13 @@
   color: var(--text);
   font-size: 11px;
   letter-spacing: 0.12em;
+  /* inline-flex so an `.m-dot` badge (update available) actually gets its
+     7×7 box — a bare inline span ignores width/height. Single-child buttons
+     render identically. */
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
 }
 .m-dock-btn:disabled { color: var(--text-mute); opacity: 0.6; }
 .m-dock-btn:not(:disabled):active { background: var(--panel-elev); }

@@ -29,6 +29,8 @@ function mkOrch(p: Partial<OrchestratorView> = {}): OrchestratorView {
     sessions: [],
     msgCount: 0,
     health: 'ok',
+    resumeCount: 0,
+    lastResumedAt: null,
     ...p,
   };
 }

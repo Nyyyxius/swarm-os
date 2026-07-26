@@ -40,6 +40,8 @@ function mkOrch(p: Partial<OrchestratorView> = {}): OrchestratorView {
     sessions: [],
     msgCount: 0,
     health: 'ok',
+    resumeCount: 0,
+    lastResumedAt: null,
     ...p,
   };
 }
@@ -55,6 +57,8 @@ function mkRole(p: Partial<RoleView> = {}): RoleView {
     defaultModel: null,
     defaultEffort: null,
     defaultPermissionMode: null,
+    schedule: null,
+    scheduleMessage: null,
     connectors: [],
     createdAt: '2026-01-01T00:00:00Z',
     updatedAt: '2026-01-01T00:00:00Z',

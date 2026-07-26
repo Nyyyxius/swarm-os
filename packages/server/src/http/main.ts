@@ -21,6 +21,8 @@ import { createDiscordRouter } from './routes/discord.js';
 import { createSettingsRouter } from './routes/settings.js';
 import { createIdeRouter } from './routes/ide.js';
 import { createPluginsRouter } from './routes/plugins.js';
+import { createUpdatesRouter } from './routes/updates.js';
+import type { UpdateService, InfoUpdateProjection } from '../modules/updates/index.js';
 import type { PluginHost } from '../modules/plugins/host.js';
 import type { PluginHttpRegistry } from '../modules/plugins/http-registry.js';
 import type { PluginInstaller } from '../modules/plugins/installer.js';
@@ -82,6 +84,29 @@ export interface BootGate {
   value: boolean;
 }
 
+/**
+ * The update projection `/info` may carry, or `undefined` when detection isn't
+ * wired (dev, tests, or a boot where the service failed to come up).
+ *
+ * `getInfoUpdate()` is documented never to block and never to throw — it serves
+ * a cached verdict and at most schedules a background refresh. It does read the
+ * settings row for the dismissed version, though, and `/info` is the one route
+ * the SPA polls forever and an operator curls at a wedged instance. It does not
+ * get to 500 over a nicety, so the contract is belt-and-braced here.
+ */
+function infoUpdate(updates?: UpdateService): InfoUpdateProjection | undefined {
+  if (!updates) return undefined;
+  try {
+    return updates.getInfoUpdate();
+  } catch (err) {
+    log.warn({
+      event: 'http.info_update_failed',
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return undefined;
+  }
+}
+
 export function createApp(
   config: Config,
   spawner: Spawner,
@@ -96,6 +121,7 @@ export function createApp(
   pluginHttpRegistry?: PluginHttpRegistry,
   pluginInstaller?: PluginInstaller,
   connectorRegistry?: ConnectorRegistry,
+  updates?: UpdateService,
 ): { app: express.Express; ideProxy: ProxyHandler | null } {
   const app = express();
   app.disable('x-powered-by');
@@ -132,6 +158,15 @@ export function createApp(
       // from "active/idle". 0 when no session has been pause()d.
       sessions_paused: c.sessionsPaused,
       uptime_seconds: Math.round(process.uptime()),
+      // `/health` is mounted BEFORE the bootGate (below) and has always
+      // answered 200 unconditionally — so a container that starts and then
+      // wedges inside auto-resume reads as perfectly healthy. The status code
+      // deliberately STAYS 200: the Dockerfile HEALTHCHECK treats any non-2xx
+      // as a failure and would restart-loop a slow-but-correct resume, which
+      // is worse than the thing we're fixing. `boot_complete` is the extra bit
+      // consumers gate on instead.
+      // No gate injected (dev / tests) ⇒ nothing to wait for ⇒ true.
+      boot_complete: bootGate ? bootGate.value : true,
     });
   });
 
@@ -139,7 +174,28 @@ export function createApp(
     res.json({
       project_name: config.projectName,
       version: config.version,
+      // Build provenance. Both are baked into the image by the Dockerfile
+      // (ARG APP_VERSION / GIT_SHA) and are null on a run from source.
+      // `image` is the reference this deployment was started from
+      // (SWARM_OS_IMAGE in the compose `.env`); null when the compose
+      // hardcodes its tag.
+      commit: config.commit,
+      image: config.image,
       started_at: config.startedAt,
+      // Update detection. It lives HERE and nowhere else: the SPA already polls
+      // `/info` every 60 s without auth, which removes any need for a dedicated
+      // check engine, a WS kind, or a polling hook — serving this route IS the
+      // heartbeat that keeps the verdict warm (modules/updates/index.ts).
+      //
+      // `/info` is PUBLIC, so it carries ONLY the boolean and the tag. Release
+      // notes, plugin origins and the self-update eligibility reason describe
+      // the deployment itself (its transport, its image, its .env) and stay
+      // behind the auth gate in `GET /updates`.
+      //
+      // Absent — not `{available:false}` — when detection isn't wired, so a
+      // reader can tell "not checked" from "nothing new". JSON.stringify drops
+      // the key on `undefined`.
+      update: infoUpdate(updates),
     });
   });
 
@@ -259,13 +315,28 @@ export function createApp(
   // Operator backup: force a snapshot now + list existing snapshots. Same
   // X-Auth-Token gate as the rest; reuses the live BackupScheduler.
   app.use(createBackupRouter(backup));
+  // Update detection — `GET /updates` (system + plugins + eligibility reason)
+  // and `POST /updates/dismiss`. Modelled on `/backup` above and mounted here
+  // for the same reason: everything this router returns names the deployment
+  // (transport, image, release notes), so it belongs behind the token, unlike
+  // the `{available, latest}` pair `/info` publishes above. Only mounted when
+  // the service came up — a 404 is a truer answer than a router that 500s.
+  if (updates) app.use(createUpdatesRouter(updates));
   // Plugin management REST (list/scan/enable/disable/permissions/config/
   // install/upload/upgrade/uninstall). Same X-Auth-Token gate. The `/plugin-api`
   // + `/public/plugins` dispatchers for plugin-owned routes are J2 — this is the
   // control plane. `express.raw` is scoped to `/plugins/upload` inside the router.
   if (pluginHost) {
     app.use(
-      createPluginsRouter(pluginHost, path.join(config.dataDir, 'plugins'), pluginInstaller),
+      createPluginsRouter(
+        pluginHost,
+        path.join(config.dataDir, 'plugins'),
+        pluginInstaller,
+        // Feeds `latestVersion` / `updateStatus` onto each PluginView: the
+        // plugins page already lists every plugin next to an Upgrade button,
+        // so the verdict goes there rather than onto a second screen.
+        updates,
+      ),
     );
   }
 
@@ -316,6 +387,7 @@ export function startServer(
   pluginHttpRegistry?: PluginHttpRegistry,
   pluginInstaller?: PluginInstaller,
   connectorRegistry?: ConnectorRegistry,
+  updates?: UpdateService,
 ): ServerHandle {
   const { app, ideProxy } = createApp(
     config,
@@ -331,6 +403,7 @@ export function startServer(
     pluginHttpRegistry,
     pluginInstaller,
     connectorRegistry,
+    updates,
   );
   const http = createServer(app);
 

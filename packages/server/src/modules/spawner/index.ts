@@ -1,4 +1,11 @@
-import { Orchestrator, WorkerCapError, type OrchestratorInit, type StartOptions } from '../orchestrator/index.js';
+import { randomUUID } from 'node:crypto';
+import {
+  Orchestrator,
+  WorkerCapError,
+  type OrchestratorInit,
+  type OrchestratorStatus,
+  type StartOptions,
+} from '../orchestrator/index.js';
 import { eventBus } from '../../events.js';
 import { withModule } from '../../logger.js';
 import type { Config, EffortLevel, PermissionMode } from '../../config.js';
@@ -14,7 +21,12 @@ import type { SessionRow } from '../db/index.js';
 import type { DiscordBotPool } from '../discord/pool.js';
 import type { ConnectorRegistry } from '../plugins/connector-registry.js';
 import type { PluginOrchSubscription } from '../plugins/api-types.js';
-import { isIdle, SIGNAL_TEXT, pushToLeadInbox } from '../orchestrator/messaging.js';
+import {
+  isIdle,
+  SIGNAL_TEXT,
+  pushToLeadInbox,
+  emitMailboxMessage,
+} from '../orchestrator/messaging.js';
 
 const log = withModule('spawner');
 
@@ -34,6 +46,84 @@ export class SpawnerError extends Error {
 export interface SpawnerCreateResult {
   orchestrator: Orchestrator;
   lead: Session;
+}
+
+/**
+ * update_system D.5 — one team's handle on a `warnLeads()` round. Keep it
+ * (in memory, or in the update run) for the whole warning window: the
+ * `notice_id` is what makes the read receipt observable.
+ */
+export interface LeadWarning {
+  orch_id: string;
+  orch_name: string;
+  lead_id: string;
+  /** Pre-minted mailbox message id — the read receipt handle. */
+  notice_id: string;
+  /** The mailbox row was queued. */
+  queued: boolean;
+  /** The PTY notice was armed (false ⇒ paused / terminal / no PTY). */
+  armed: boolean;
+}
+
+/**
+ * Delivery state of one warned lead, per plan D.5:
+ *  - `read`          — an agent drained the inbox containing our notice.
+ *  - `queued_unread` — the PTY signal landed, the message is still queued.
+ *  - `never_idle`    — nothing reached the agent: the lead never offered an
+ *                      idle boundary before the deadline (or had no PTY).
+ */
+export type LeadNoticeState = 'read' | 'queued_unread' | 'never_idle';
+
+export interface LeadWarningStatus extends LeadWarning {
+  /** The notice text was actually written into the lead's PTY. */
+  signalled: boolean;
+  /** An agent drained the inbox that held our notice id. */
+  read: boolean;
+  state: LeadNoticeState;
+}
+
+/**
+ * The single definition of the `LeadNoticeState` trichotomy.
+ *
+ * Exported on purpose: this rule used to be a one-liner inside
+ * `leadNoticeStatus`, and every fake spawner re-typed it verbatim. A copy
+ * cannot fail — two independent changes to the real rule left the
+ * `updates/teams-port` suite fully green while it asserted the OLD rule. Any
+ * test double must call this instead of restating it, so that changing the
+ * rule here changes what the doubles produce.
+ *
+ * Precedence is deliberate: an observed consumption outranks the PTY signal
+ * (an agent that read the inbox was reached, whether or not the injector also
+ * got a word in), and "nothing reached the agent" is the fallback — the
+ * honest verdict whenever we have no positive evidence at all.
+ */
+export function deriveLeadNoticeState(o: { read: boolean; signalled: boolean }): LeadNoticeState {
+  return o.read ? 'read' : o.signalled ? 'queued_unread' : 'never_idle';
+}
+
+/** update_system D.6 — a team that was alive before a destructive action. */
+export interface TeamSnapshotEntry {
+  orch_id: string;
+  orch_name: string;
+  lead_id: string | null;
+}
+
+export type TeamReconcileReason = 'ok' | 'absent' | 'not_running' | 'no_lead' | 'lead_dead';
+
+export interface TeamReconcileEntry extends TeamSnapshotEntry {
+  /** Live, non-terminal, with a live lead. */
+  back: boolean;
+  /** Orchestrator status now (null when it isn't in the live map at all). */
+  status: OrchestratorStatus | null;
+  /** Lead id now — differs from `lead_id` after a fresh restart-in-place. */
+  lead_id_now: string | null;
+  reason: TeamReconcileReason;
+}
+
+export interface TeamReconciliation {
+  teams: TeamReconcileEntry[];
+  back: number;
+  missing: number;
 }
 
 /**
@@ -70,6 +160,23 @@ export interface SpawnerDeps {
 
 export class Spawner {
   private readonly orchestrators = new Map<string, Orchestrator>();
+  /**
+   * update_system D.5 — bookkeeping for the current `warnLeads()` round, keyed
+   * by notice id. Carries (a) the text/sender so `leadNoticeStatus` can
+   * re-push a notice that inbox pressure evicted, and (b) `readBaseline`, the
+   * lead's `mailbox.readCount()` at the instant we queued the notice — the
+   * reference point that turns "an agent drained this inbox" into an
+   * observation instead of an inference.
+   *
+   * Cleared (and thus bounded to one round) at the start of every `warnLeads`
+   * call; purely in-memory, exactly like the mailbox it mirrors — the warning
+   * window never outlives the process. A handle with no entry here therefore
+   * can never be credited with a read, which is the fail-closed direction.
+   */
+  private readonly _leadNotices = new Map<
+    string,
+    { text: string; from: string; readBaseline: number }
+  >();
   readonly notifier: Notifier;
   readonly persistence: Persistence;
   readonly roleStore: RoleStore | null;
@@ -325,9 +432,7 @@ export class Spawner {
   }
 
   listActive(): Orchestrator[] {
-    return this.list().filter(
-      (o) => o.status !== 'stopped' && o.status !== 'failed',
-    );
+    return this.list().filter((o) => o.status !== 'stopped' && o.status !== 'failed');
   }
 
   /**
@@ -441,6 +546,280 @@ export class Spawner {
     return null;
   }
 
+  // --- update_system D.5 / D.6 — warn the leads, then survive -------------
+
+  /**
+   * Warn EVERY live team's lead that something is about to interrupt it
+   * (container recreation, in practice), and give it a real chance to react.
+   *
+   * Why this exists instead of `broadcastToLeadsFromExternal`: that helper
+   * injects the PTY wake-up only when the lead happens to be idle at that
+   * exact instant, and never retries. A lead mid-turn — i.e. every team worth
+   * warning — gets a mailbox row and nothing else, forever. Here each lead
+   * gets an ARMED notice (`Session.armNotice`) that keeps waiting for a real
+   * idle boundary until the deadline.
+   *
+   * Two things are delivered per team, and they are not redundant:
+   *  1. a mailbox message with a **pre-minted id** — the read receipt. Its
+   *     disappearance from `mailbox.peek()` is the only honest proof an agent
+   *     consumed it (see `leadNoticeStatus`).
+   *  2. the armed PTY notice — what actually makes the agent look.
+   *
+   * The result array is the caller's handle: poll it through
+   * `leadNoticeStatus()` to render the countdown screen, persist the final
+   * status array as the run's `teams_warned`. Field names match that schema.
+   *
+   * Never throws: one unreachable team must not abort the warning round.
+   */
+  warnLeads(
+    text: string,
+    opts: { deadlineMs: number; idleMs?: number; from?: string },
+  ): LeadWarning[] {
+    const idleMs = opts.idleMs ?? this.config.idleThresholdMs;
+    const from = opts.from ?? 'system';
+    // A new round supersedes the previous one (the leads' own `armNotice`
+    // does the same). Also bounds this map to one round's worth of entries.
+    this._leadNotices.clear();
+    const out: LeadWarning[] = [];
+    for (const orch of this.listActive()) {
+      const lead = orch.lead;
+      if (!lead) continue;
+      const st = lead.status;
+      // Same activity predicate as `messaging.isActive`: `paused` is included
+      // on purpose — the mailbox row is still worth queueing, and the refused
+      // `armNotice` below correctly reports it as never warned.
+      if (st !== 'running' && st !== 'waiting' && st !== 'starting' && st !== 'paused') continue;
+
+      const noticeId = randomUUID();
+      // Snapshot BEFORE the push: from here on, any increase means an agent
+      // drained this lead's inbox while our notice was sitting in it.
+      const readBaseline = orch.mailbox.readCount(lead.id);
+      let queued = false;
+      try {
+        const res = orch.mailbox.push(lead.id, { id: noticeId, from, content: text });
+        emitMailboxMessage(orch.id, from, lead.id);
+        queued = true;
+        if (res.dropped) {
+          // The inbox was already at cap, so our push evicted the oldest
+          // message. Ours survives (drop-oldest), but the queue now sits AT
+          // the cap, which is exactly the state where later traffic can evict
+          // ours in turn. `leadNoticeStatus` detects that and re-pushes.
+          log.warn({
+            event: 'warn_leads.inbox_saturated',
+            orchId: orch.id,
+            leadId: lead.id,
+            queueSize: res.queueSize,
+          });
+        }
+      } catch (err) {
+        log.warn({
+          event: 'warn_leads.push_failed',
+          orchId: orch.id,
+          leadId: lead.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      let armed = false;
+      try {
+        armed = lead.armNotice(text, { idleMs, deadlineMs: opts.deadlineMs, id: noticeId });
+      } catch (err) {
+        log.warn({
+          event: 'warn_leads.arm_failed',
+          orchId: orch.id,
+          leadId: lead.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+
+      this._leadNotices.set(noticeId, { text, from, readBaseline });
+      out.push({
+        orch_id: orch.id,
+        orch_name: orch.name,
+        lead_id: lead.id,
+        notice_id: noticeId,
+        armed,
+        queued,
+      });
+    }
+    log.info({
+      event: 'warn_leads.round',
+      teams: out.length,
+      armed: out.filter((w) => w.armed).length,
+      deadlineMs: opts.deadlineMs,
+      idleMs,
+    });
+    return out;
+  }
+
+  /**
+   * Current delivery status of a `warnLeads()` round. Safe to call as often
+   * as the UI needs (it is a peek + a field read; no I/O).
+   *
+   * `read` is a genuine consumption signal, not a proxy. It needs BOTH halves
+   * of the evidence, and neither alone is enough:
+   *
+   *  1. **Our id left the inbox.** Necessary: while the row is still queued,
+   *     nothing has taken it.
+   *  2. **`Mailbox.readCount()` went up.** Sufficient to name the culprit. A
+   *     draining `Mailbox.read()` is the only thing that bumps it, and its
+   *     only production callers are the MCP `team.read_inbox` tool and the
+   *     plugin API — both mean an AGENT. The UI polls `peek()`, which is
+   *     non-destructive and invisible here.
+   *
+   * Half (2) is not redundant, it is the correction of a real lie. An empty
+   * queue is NOT evidence of a read: `Orchestrator.stop()` and
+   * `shutdownForRestart()` both call `mailbox.clearAll()`, so the single most
+   * likely event of an update window — the lead dying — used to erase the row
+   * and leave `leadNoticeStatus` reporting `state: 'read'` for an agent that
+   * never saw the message. That is precisely the falsehood the pre-minted id
+   * exists to prevent, and inferring it from an ABSENCE let it back in
+   * through another door. We now observe the `read()` call itself, so a wipe,
+   * an eviction or a session teardown can never be mistaken for a delivery.
+   *
+   * The DB `delivered_at` column remains deliberately unused for the same
+   * reason, one layer down: `clearAll()` stamps it too.
+   *
+   * The remaining way a message can vanish is the drop-oldest cap eviction,
+   * and it stays distinguishable exactly as before: an eviction only ever
+   * happens AT the cap and leaves the queue sitting at the cap, so an absent
+   * id + no observed read + a full queue means "evicted", and we re-push it
+   * with the same id so a later real read is still observable.
+   */
+  leadNoticeStatus(warnings: LeadWarning[]): LeadWarningStatus[] {
+    return warnings.map((w) => {
+      const orch = this.orchestrators.get(w.orch_id);
+      const lead = orch?.getSession(w.lead_id) ?? null;
+      // Only trust an outcome that belongs to OUR notice: a later `armNotice`
+      // replaces the session's notice state wholesale.
+      const ns = lead?.noticeState ?? null;
+      const signalled = ns !== null && ns.id === w.notice_id && ns.outcome === 'fired';
+
+      // The round's bookkeeping. Absent ⇒ this handle is not the live round
+      // (superseded, cancelled, or replayed in a later process), so we have no
+      // baseline to compare against and must not claim a read.
+      const carried = this._leadNotices.get(w.notice_id);
+      let read = false;
+      if (orch && carried) {
+        const queue = orch.mailbox.peek(w.lead_id);
+        if (!queue.some((m) => m.id === w.notice_id)) {
+          if (orch.mailbox.readCount(w.lead_id) > carried.readBaseline) {
+            // An agent drained this inbox after we queued the notice, and the
+            // notice is gone with it. This is the only path to `read: true`.
+            read = true;
+          } else if (queue.length >= this.config.maxInboxSize) {
+            // Gone with no read behind it, and the queue is at the cap:
+            // evicted by inbox pressure. Self-heal so the next poll can still
+            // observe a real read, and stay at `read: false`.
+            try {
+              orch.mailbox.push(w.lead_id, {
+                id: w.notice_id,
+                from: carried.from,
+                content: carried.text,
+              });
+              log.warn({
+                event: 'warn_leads.notice_evicted_repushed',
+                orchId: w.orch_id,
+                leadId: w.lead_id,
+                queueSize: queue.length,
+              });
+            } catch {
+              /* best-effort — the armed PTY notice is the primary channel */
+            }
+          }
+          // Otherwise: gone, below the cap, and nobody read anything — the
+          // mailbox was wiped out from under the notice (lead exit →
+          // `stop()`, or `shutdownForRestart()`). Stays `read: false`, so the
+          // lead is recorded as `queued_unread` / `never_idle` per what
+          // actually reached it.
+        }
+      }
+      // A team that vanished from the live map (destroyed mid-window) has no
+      // queue to consume from and no PTY left to signal: report it as never
+      // warned rather than inventing a read.
+      const state = deriveLeadNoticeState({ read, signalled });
+      return { ...w, signalled, read, state };
+    });
+  }
+
+  /**
+   * Drop the armed notices of a round (operator cancelled the update). The
+   * mailbox rows are left alone on purpose — the lead was genuinely told
+   * something was coming, and a message it may already have read must not be
+   * retracted from under it.
+   */
+  cancelLeadNotices(warnings: LeadWarning[]): number {
+    let cancelled = 0;
+    for (const w of warnings) {
+      const lead = this.orchestrators.get(w.orch_id)?.getSession(w.lead_id);
+      const ns = lead?.noticeState ?? null;
+      // Only cancel a notice that is still ours and still pending.
+      if (lead && ns !== null && ns.id === w.notice_id && lead.cancelNotice()) cancelled++;
+      this._leadNotices.delete(w.notice_id);
+    }
+    return cancelled;
+  }
+
+  /**
+   * update_system D.6 — snapshot the teams that are alive RIGHT NOW, in a
+   * shape the caller persists BEFORE triggering anything destructive.
+   *
+   * This must not be reconstructed from DB rows afterwards, and that is the
+   * whole point: `loadResumableState()` flips every candidate to
+   * `interrupted` BEFORE returning it, `listResumableOrchestrators()` only
+   * selects `starting|running`, and a failed resume leaves the row
+   * `interrupted`. By the time anyone asks "which teams should have come
+   * back?", the database no longer knows. This snapshot does.
+   */
+  snapshotLiveTeams(): TeamSnapshotEntry[] {
+    return this.listActive().map((orch) => ({
+      orch_id: orch.id,
+      orch_name: orch.name,
+      lead_id: orch.leadSessionId,
+    }));
+  }
+
+  /**
+   * update_system D.6 — diff a `snapshotLiveTeams()` against what is actually
+   * live now (post-restart). Drives the post-update screen and its "restart
+   * the teams" button.
+   *
+   * `back` means: the orchestrator is in the live map, not terminal, and has
+   * a lead session that is not terminal either. Anything else is a casualty,
+   * with `reason` saying which kind — an operator needs to tell "the team
+   * never came back at all" from "it came back but its lead died on spawn"
+   * (the classic resumed-lead-dies-over-SSH failure).
+   *
+   * Note `lead_id_now`: a resume reuses the persisted lead id, whereas a
+   * fresh restart-in-place mints a new one, so a differing id is normal and
+   * not an error.
+   */
+  reconcileTeams(snapshot: TeamSnapshotEntry[]): TeamReconciliation {
+    const teams = snapshot.map((entry): TeamReconcileEntry => {
+      const orch = this.orchestrators.get(entry.orch_id);
+      if (!orch) {
+        return { ...entry, back: false, status: null, lead_id_now: null, reason: 'absent' };
+      }
+      const status = orch.status;
+      const lead = orch.lead;
+      const base = { ...entry, status, lead_id_now: orch.leadSessionId };
+      if (status === 'stopped' || status === 'failed' || status === 'stopping') {
+        return { ...base, back: false, reason: 'not_running' };
+      }
+      if (!lead) return { ...base, back: false, reason: 'no_lead' };
+      const ls = lead.status;
+      if (ls !== 'running' && ls !== 'waiting' && ls !== 'starting' && ls !== 'paused') {
+        return { ...base, back: false, reason: 'lead_dead' };
+      }
+      return { ...base, back: true, reason: 'ok' };
+    });
+    return {
+      teams,
+      back: teams.filter((t) => t.back).length,
+      missing: teams.filter((t) => !t.back).length,
+    };
+  }
+
   /**
    * Phase 8 — auto-resume entrypoint. Replays the `resumable[]` list from
    * `Persistence.loadResumableState()` to rebuild each team's
@@ -460,7 +839,16 @@ export class Spawner {
    */
   async resumeFromDb(
     rows: ResumableState['resumable'],
-    opts: { staggerMs?: number } = {},
+    opts: {
+      staggerMs?: number;
+      /**
+       * update_system D.5 — banner prepended to each resumed LEAD's resume
+       * notice (see `Orchestrator.resume`). The caller reads the in-flight
+       * update run at boot and passes e.g. "the container was recreated to
+       * apply v0.5.1". Absent ⇒ resume notices are unchanged.
+       */
+      resumeBanner?: string | null;
+    } = {},
   ): Promise<{ resumed: number; failed: Array<{ id: string; error: string }> }> {
     const staggerMs = opts.staggerMs ?? this.config.resumeStaggerMs ?? 0;
     let resumed = 0;
@@ -524,7 +912,7 @@ export class Spawner {
       this.orchestrators.set(orch.id, orch);
 
       try {
-        await orch.resume({ leadRow, workerRows, staggerMs });
+        await orch.resume({ leadRow, workerRows, staggerMs, banner: opts.resumeBanner });
         resumed++;
         // Re-attach the role's connector subscriptions so a restarted server
         // keeps delivering channel messages to the rehydrated lead. The mailbox

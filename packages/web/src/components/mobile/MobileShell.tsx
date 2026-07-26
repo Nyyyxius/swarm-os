@@ -137,7 +137,26 @@ export default function MobileShell() {
         <button type="button" className="m-dock-btn" onClick={() => c.onOpenPlugins()}>
           <span>PLUGINS</span>
         </button>
-        <button type="button" className="m-dock-btn" onClick={() => c.setSettingsOpen(true)}>
+        {/* Update badge, mirrored from the desktop TopBar: same `/info`-borne
+            flag (`topBarInfo.updateAvailable`, same object as the version →
+            same render), same destination. The dock has no room for a sixth
+            slot on a phone, so the dot rides the SETTINGS button — which is
+            where the update section lives anyway. */}
+        <button
+          type="button"
+          className="m-dock-btn"
+          onClick={() =>
+            c.topBarInfo.updateAvailable ? c.openUpdates() : c.setSettingsOpen(true)
+          }
+          aria-label={
+            c.topBarInfo.updateAvailable
+              ? `Settings — update available${
+                  c.topBarInfo.updateLatest ? `: version ${c.topBarInfo.updateLatest}` : ''
+                }`
+              : undefined
+          }
+        >
+          {c.topBarInfo.updateAvailable && <span className="m-dot warn" />}
           <span>SETTINGS</span>
         </button>
       </nav>
@@ -181,6 +200,7 @@ export default function MobileShell() {
           onTokenCleared={c.setAuthMissing}
           shellMode={c.shellMode}
           setShellMode={c.setShellMode}
+          focusUpdates={c.updatesFocus}
         />
       )}
     </div>

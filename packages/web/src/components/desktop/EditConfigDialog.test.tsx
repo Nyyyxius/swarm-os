@@ -27,7 +27,9 @@ function mkOrch(p: Partial<OrchestratorView> = {}): OrchestratorView {
     roleId: 'r-orch',
     status: 'running',
     leadSessionId: 's1',
-    defaultModel: 'claude-opus-4-7',
+    // Keep in sync with `constants.ts` MODELS — an id that is no longer
+    // offered renders as the first option, not as itself.
+    defaultModel: 'claude-opus-4-8',
     defaultEffort: 'high',
     defaultPermissionMode: 'default',
     leadPreamble: null,
@@ -38,6 +40,8 @@ function mkOrch(p: Partial<OrchestratorView> = {}): OrchestratorView {
     sessions: [],
     msgCount: 0,
     health: 'ok',
+    resumeCount: 0,
+    lastResumedAt: null,
     ...p,
   };
 }
@@ -241,7 +245,13 @@ describe('EditConfigDialog — close interactions', () => {
 
 describe('EditConfigDialog — re-open resets from team defaults', () => {
   it('reverts MODEL changes when the modal is re-opened', () => {
-    const team = mkOrch({ defaultModel: 'claude-opus-4-7' });
+    // The model MUST be one `constants.ts` still offers: a `<select>` whose
+    // value matches no `<option>` falls back to the first one, so a stale id
+    // would assert against the fallback rather than against the reset. It is
+    // also deliberately neither the component's initial state
+    // ('claude-opus-4-8') nor the value we change to — otherwise the test
+    // would pass on a component that never resets at all.
+    const team = mkOrch({ defaultModel: 'claude-haiku-4-5-20251001' });
     const { rerender } = render(
       <EditConfigDialog open team={team} onClose={() => undefined} />,
     );
@@ -256,7 +266,7 @@ describe('EditConfigDialog — re-open resets from team defaults', () => {
     // Re-open
     rerender(<EditConfigDialog open team={team} onClose={() => undefined} />);
     expect((screen.getByLabelText('MODEL') as HTMLSelectElement).value)
-      .toBe('claude-opus-4-7');
+      .toBe('claude-haiku-4-5-20251001');
   });
 });
 

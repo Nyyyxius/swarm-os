@@ -22,6 +22,10 @@ services:
     container_name: swarm-os-test
     init: true
     restart: unless-stopped
+    # PTY comfort, NOT corruption insurance: `spawner.shutdownAll()` is
+    # synchronous, so the 10s default SIGKILL truncates no intended DB write.
+    # The extra time only lets the agent PTYs close cleanly on SIGTERM.
+    stop_grace_period: 30s
     ports:
       # Single ingress: the VS Code web editor is reverse-proxied under /ide on
       # this same port (8787), so no extra port mapping is needed.
@@ -46,6 +50,11 @@ services:
       SWARM_OS_HOST_DATA_DIR: ${HOME}/.swarm-os/test
       SWARM_OS_HOST_CLAUDE_DIR: ${HOME}/.claude
       SWARM_OS_HOST_WORKSPACE_ROOT: ${HOME}/projets/test
+      # Update detection. `environment:` here is an explicit allow-list, so a
+      # variable that is not named on this line NEVER reaches the process —
+      # without it `checkStatus` is stuck on `no_token` and no release is ever
+      # seen. Read-only PAT, scope `contents:read` (the repo is private).
+      SWARM_OS_GITHUB_TOKEN: ${SWARM_OS_GITHUB_TOKEN:-}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/health"]
       interval: 30s

@@ -19,6 +19,10 @@ services:
     # has its own tini ENTRYPOINT; both layered is harmless and explicit).
     init: true
     restart: unless-stopped
+    # PTY comfort, NOT corruption insurance: `spawner.shutdownAll()` is
+    # synchronous, so the 10s default SIGKILL truncates no intended DB write.
+    # The extra time only lets the agent PTYs close cleanly on SIGTERM.
+    stop_grace_period: 30s
     ports:
       # Host loopback ONLY. Never write 0.0.0.0 here — remote access goes
       # through Tailscale / a reverse proxy / an SSH tunnel. The container
@@ -44,10 +48,22 @@ services:
       - ${DATA_PATH}:/data
     environment:
       SWARM_OS_PROJECT_NAME: ${SWARM_OS_PROJECT_NAME:-swarm-os}
+      # Lets the container report its own image reference on `/info.image`.
+      # Same variable as the `image:` key above (see .env.example) — passing it
+      # through as an env var is the only way the process inside can read it;
+      # OCI labels are not visible from within the container.
+      SWARM_OS_IMAGE: ${SWARM_OS_IMAGE:-}
       # The IDE port must match the published port above (the browser connects
       # straight to it). Keep these two in sync via .env.
       SWARM_OS_IDE_PORT: ${SWARM_OS_IDE_PORT:-8790}
       SWARM_OS_IDE_ENABLED: ${SWARM_OS_IDE_ENABLED:-true}
+      # Update detection: the GitHub PAT that reads the releases of the (private)
+      # swarm-os repository — scope `contents:read`, nothing else. `environment:`
+      # is an explicit allow-list, so a variable that is not named here never
+      # reaches the process no matter what the .env says; without this line the
+      # check is permanently `no_token` and no update is ever detected. Empty is
+      # a valid, healthy state — it just means "never tell me about releases".
+      SWARM_OS_GITHUB_TOKEN: ${SWARM_OS_GITHUB_TOKEN:-}
       # Used for Discord embed deep-links (no token included).
       SWARM_OS_PUBLIC_URL: ${SWARM_OS_PUBLIC_URL:-}
       SWARM_OS_DISCORD_WEBHOOK_URL: ${SWARM_OS_DISCORD_WEBHOOK_URL:-}

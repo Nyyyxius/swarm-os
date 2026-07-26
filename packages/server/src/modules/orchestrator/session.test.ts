@@ -491,3 +491,215 @@ describe('Session — requestContextReset (deferred /clear & /compact)', () => {
     expect(fake.writes.join('')).toContain('/compact');
   });
 });
+
+/**
+ * update_system D.5 — `armNotice`: the retrying operator warning.
+ *
+ * The property under test is the one the naive path fails: a lead that is
+ * mid-turn when the operator hits "update" must STILL be interrupted, at the
+ * first real idle boundary, or be reported as never reached. Never silence.
+ */
+describe('Session — armNotice (operator warning with a deadline)', () => {
+  const NOTICE = '[swarm-os] update in 2 minutes';
+
+  function makeRunning(): { s: Session; fake: FakeAgentProcess } {
+    const fake = new FakeAgentProcess({ command: 'fake', args: [], cwd });
+    const s = new Session({
+      orchestratorId: 'orch-notice-test',
+      name: 'notice-test',
+      role: 'tester',
+      type: 'lead',
+      cwd,
+      initialPrompt: null,
+      preamble: null,
+      model: 'test-model',
+      effort: 'low',
+      permissionMode: 'bypassPermissions',
+      logsDir,
+      mcpRuntimeDir,
+      mcpHost: '127.0.0.1',
+      mcpPort: 0,
+      agentProcessOverride: fake,
+      hookToken: 'test-hook',
+      mainHttpPort: 12345,
+      claudeConfigRoot: claudeRuntimeDir,
+    });
+    openSessions.push(s);
+    return { s, fake };
+  }
+
+  it('fires into the PTY on a real idle boundary, with the notifySignal cadence', async () => {
+    const { s, fake } = makeRunning();
+    const outcomes: string[] = [];
+    expect(
+      s.armNotice(NOTICE, {
+        idleMs: 20,
+        deadlineMs: 2000,
+        id: 'n-1',
+        onOutcome: (o) => outcomes.push(o),
+      }),
+    ).toBe(true);
+    expect(s.hasPendingNotice).toBe(true);
+
+    await new Promise((r) => setTimeout(r, 300));
+    // Text first, then a SOLO carriage return ~150 ms later (structural for
+    // the Ink TUI — a one-shot `\rtext\r` lands in the prompt without firing).
+    const idx = fake.writes.findIndex((w) => w.includes(NOTICE));
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(fake.writes[idx]).toBe(`\r${NOTICE}`);
+    expect(fake.writes[idx + 1]).toBe('\r');
+    expect(s.hasPendingNotice).toBe(false);
+    expect(s.noticeState).toEqual({ id: 'n-1', outcome: 'fired' });
+    expect(outcomes).toEqual(['fired']);
+  });
+
+  it('does NOT bump idleSince — a server-injected write must not fake activity', async () => {
+    const { s } = makeRunning();
+    s.armNotice(NOTICE, { idleMs: 20, deadlineMs: 2000 });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(s.noticeState?.outcome).toBe('fired');
+    // Idle for the whole test: nothing (including our own injection) reset it.
+    expect(Date.now() - s.idleSince).toBeGreaterThanOrEqual(250);
+  });
+
+  it('re-arms while the agent keeps talking, then fires once it goes quiet', async () => {
+    const { s, fake } = makeRunning();
+    s.armNotice(NOTICE, { idleMs: 60, deadlineMs: 5000 });
+    const chatter = setInterval(() => fake._emitData('working...'), 20);
+    await new Promise((r) => setTimeout(r, 250));
+    // Still mid-turn: nothing injected, but the notice is still armed.
+    expect(fake.writes.join('')).not.toContain(NOTICE);
+    expect(s.hasPendingNotice).toBe(true);
+    clearInterval(chatter);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(fake.writes.join('')).toContain(NOTICE);
+    expect(s.noticeState?.outcome).toBe('fired');
+  });
+
+  it('reports never_idle at the deadline instead of waiting forever', async () => {
+    const { s, fake } = makeRunning();
+    const outcomes: string[] = [];
+    s.armNotice(NOTICE, {
+      idleMs: 100,
+      deadlineMs: 150,
+      id: 'n-deadline',
+      onOutcome: (o) => outcomes.push(o),
+    });
+    const chatter = setInterval(() => fake._emitData('busy'), 20);
+    await new Promise((r) => setTimeout(r, 400));
+    clearInterval(chatter);
+    expect(outcomes).toEqual(['never_idle']);
+    expect(s.noticeState).toEqual({ id: 'n-deadline', outcome: 'never_idle' });
+    expect(s.hasPendingNotice).toBe(false);
+    // And it stays given up — no late injection after the deadline.
+    await new Promise((r) => setTimeout(r, 250));
+    expect(fake.writes.join('')).not.toContain(NOTICE);
+  });
+
+  it('never interleaves with a pending context reset — it waits for the whole /clear write', async () => {
+    const { s, fake } = makeRunning();
+    // Both target the same idle boundary and the same prompt buffer.
+    expect(s.requestContextReset('/clear', { idleMs: 20 })).toBe(true);
+    expect(s.armNotice(NOTICE, { idleMs: 20, deadlineMs: 5000 })).toBe(true);
+
+    await new Promise((r) => setTimeout(r, 1200));
+    const joined = fake.writes.join('');
+    expect(joined).toContain('/clear');
+    expect(joined).toContain(NOTICE);
+
+    const resetIdx = fake.writes.findIndex((w) => w.includes('/clear'));
+    const noticeIdx = fake.writes.findIndex((w) => w.includes(NOTICE));
+    // The reset went first and its submit CR is the very next write: the
+    // notice did not land inside the half-typed slash command.
+    expect(resetIdx).toBeGreaterThanOrEqual(0);
+    expect(noticeIdx).toBeGreaterThan(resetIdx + 1);
+    expect(fake.writes[resetIdx + 1]).toBe('\r');
+  });
+
+  it('a second arm supersedes the first (operator escalation)', async () => {
+    const { s, fake } = makeRunning();
+    const outcomes: string[] = [];
+    s.armNotice('stale — update in 5 minutes', {
+      idleMs: 5000,
+      deadlineMs: 5000,
+      id: 'first',
+      onOutcome: (o) => outcomes.push(`first:${o}`),
+    });
+    expect(
+      s.armNotice(NOTICE, {
+        idleMs: 20,
+        deadlineMs: 2000,
+        id: 'second',
+        onOutcome: (o) => outcomes.push(`second:${o}`),
+      }),
+    ).toBe(true);
+    await new Promise((r) => setTimeout(r, 300));
+    expect(outcomes).toEqual(['first:aborted', 'second:fired']);
+    expect(fake.writes.join('')).not.toContain('stale');
+    expect(fake.writes.join('')).toContain(NOTICE);
+  });
+
+  it('refuses to arm without a live PTY (skipSpawn) and reports it to the caller', () => {
+    const s = new Session({
+      orchestratorId: 'orch-notice-skip',
+      name: 'notice-skip',
+      role: 'tester',
+      type: 'lead',
+      cwd,
+      initialPrompt: null,
+      preamble: null,
+      model: 'test-model',
+      effort: 'low',
+      permissionMode: 'bypassPermissions',
+      logsDir,
+      mcpRuntimeDir,
+      mcpHost: '127.0.0.1',
+      mcpPort: 0,
+      skipSpawn: true,
+    });
+    openSessions.push(s);
+    expect(s.armNotice(NOTICE, { idleMs: 10, deadlineMs: 1000 })).toBe(false);
+    expect(s.noticeState).toBeNull();
+  });
+
+  it('refuses to arm on a paused lead — a SIGSTOP’d process cannot drain its tty', () => {
+    const { s } = makeRunning();
+    expect(s.pause('test')).toBe(true);
+    expect(s.armNotice(NOTICE, { idleMs: 10, deadlineMs: 1000 })).toBe(false);
+  });
+
+  it('aborts a pending notice when the session is stopped, and cancelNotice is explicit', async () => {
+    const { s } = makeRunning();
+    const outcomes: string[] = [];
+    s.armNotice(NOTICE, {
+      idleMs: 5000,
+      deadlineMs: 9000,
+      onOutcome: (o) => outcomes.push(o),
+    });
+    expect(s.cancelNotice()).toBe(true);
+    expect(s.cancelNotice()).toBe(false);
+    expect(outcomes).toEqual(['aborted']);
+
+    const other = makeRunning();
+    const seen: string[] = [];
+    other.s.armNotice(NOTICE, {
+      idleMs: 5000,
+      deadlineMs: 9000,
+      onOutcome: (o) => seen.push(o),
+    });
+    other.s.stop('test-stop', 0);
+    expect(seen).toEqual(['aborted']);
+    await new Promise((r) => setTimeout(r, 30));
+  });
+
+  it('keeps a `fired` outcome reportable after the session exits', async () => {
+    const { s } = makeRunning();
+    s.armNotice(NOTICE, { idleMs: 20, deadlineMs: 2000, id: 'n-exit' });
+    await new Promise((r) => setTimeout(r, 300));
+    expect(s.noticeState?.outcome).toBe('fired');
+    s.stop('test-stop', 0);
+    await new Promise((r) => setTimeout(r, 60));
+    // The exit path must not overwrite the delivery we already observed.
+    expect(s.noticeState).toEqual({ id: 'n-exit', outcome: 'fired' });
+  });
+});

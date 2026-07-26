@@ -56,6 +56,8 @@ const mkOrch = (over: Partial<OrchestratorView> = {}): OrchestratorView => ({
   msgCount: 42,
   stopReason: null,
   health: 'ok',
+  resumeCount: 0,
+  lastResumedAt: null,
   ...over,
 });
 

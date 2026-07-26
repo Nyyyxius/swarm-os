@@ -187,6 +187,24 @@ export interface PluginView {
   status: PluginRuntimeStatus;
   enabled: boolean;
   sourceKind: string;
+  /**
+   * Git HEAD the plugin was installed from. Null for npm/dir/upload sources and
+   * for anything installed before origin tracking existed — those can only ever
+   * report an "unknown" update status.
+   */
+  sourceCommit: string | null;
+  /**
+   * Update detection. Declared here, but NOT populated by this module: the
+   * plugin host knows nothing about remotes. `routes/plugins.ts` (`withUpdate`)
+   * fills both in from the `UpdateService` sweep as the view goes out.
+   *
+   * Absent whenever detection is not wired, or the sweep has never seen this
+   * plugin — treat an absent value as "not checked", never as "up to date".
+   * `latestVersion` stays null for a git plugin: the newest thing at its source
+   * is a sha, and there is nowhere honest to put one here.
+   */
+  latestVersion?: string | null;
+  updateStatus?: 'up_to_date' | 'available' | 'unknown' | 'error';
   apiVersion: number;
   /** Requested by the manifest. */
   capabilities: PluginCapability[];

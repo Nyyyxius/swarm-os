@@ -30,6 +30,16 @@ export interface TopBarInfo {
   projectName: string;
   version: string;
   startedAt: string | null;
+  /**
+   * A newer release exists (and was not dismissed). Carried HERE, in the same
+   * object as `version`, on purpose: both come from the same `/info` payload
+   * and the same `setInfo`, so the badge and the version string can never
+   * paint one render apart. On a cold server the badge is simply absent, then
+   * appears at the next 60 s tick — never a flash.
+   */
+  updateAvailable?: boolean;
+  /** Version of that release (`0.6.0`), for the badge tooltip. */
+  updateLatest?: string | null;
 }
 
 interface Props {
@@ -48,6 +58,8 @@ interface Props {
   /** Open the VS Code web IDE on the deployment workspace (fullscreen overlay). */
   onOpenIde: () => void;
   onOpenSettings: () => void;
+  /** Open SETTINGS on the SYSTEM UPDATE section (update badge). */
+  onOpenUpdates: () => void;
 }
 
 const EMPTY_FLASH_SET: ReadonlySet<string> = new Set();
@@ -55,6 +67,7 @@ const EMPTY_FLASH_SET: ReadonlySet<string> = new Set();
 export default function TopBar({
   teams, selectedTeamId, flashTeamIds, totalAgents, info,
   onSelectTeam, onNewTeam, onOpenRoles, onOpenPlugins, onOpenIde, onOpenSettings,
+  onOpenUpdates,
 }: Props) {
   const flashSet = flashTeamIds ?? EMPTY_FLASH_SET;
   const [now, setNow] = useState(new Date());
@@ -159,6 +172,30 @@ export default function TopBar({
         <button className="tb-action" onClick={onOpenIde} title="open workspace IDE (VS Code)">
           {ICON.code}<span className="label">IDE</span>
         </button>
+        {/* Update badge — rendered ONLY when there is something to act on
+            (`info.updateAvailable`, same object as `info.version` above, so
+            same render). A permanently mounted button would be one more piece
+            of chrome opening a drawer the cog already opens. */}
+        {info.updateAvailable && (
+          <button
+            className="tb-action"
+            onClick={onOpenUpdates}
+            title={
+              info.updateLatest
+                ? `swarm-os v${info.updateLatest} is available — open SETTINGS`
+                : 'a new swarm-os version is available — open SETTINGS'
+            }
+            aria-label={
+              info.updateLatest
+                ? `Update available: version ${info.updateLatest}`
+                : 'Update available'
+            }
+          >
+            {ICON.reload}
+            <span className="dot warn" />
+            <span className="label">UPDATE</span>
+          </button>
+        )}
         <button className="tb-action" onClick={onOpenSettings} title="settings / token">
           {ICON.cog}
         </button>

@@ -108,6 +108,34 @@ export interface PushOptions {
 
 export class Mailbox {
   private readonly inboxes = new Map<string, Message[]>();
+  /**
+   * update_system D.5 — per-session count of *draining* `read()` calls, i.e.
+   * the number of times an agent actually took messages out of this inbox.
+   *
+   * This exists because "the message is no longer in the queue" is NOT proof
+   * that anybody read it: `clearAll()` (lead exit → `Orchestrator.stop()`,
+   * and `shutdownForRestart()`), `removeSession()` and the drop-oldest cap
+   * eviction all empty queues without a single agent being involved. Only
+   * `read()` is an agent. So the counter is bumped in exactly one place, and
+   * a caller that wants an honest read receipt compares it against a baseline
+   * taken when it queued its message (see `Spawner.leadNoticeStatus`).
+   *
+   * Invariants that make it trustworthy:
+   *  - **Monotonic, never reset.** Not by `read()` dropping the queue, not by
+   *    `removeSession()`, and above all NOT by `clearAll()` — a wipe that
+   *    could look like a read is the exact lie this counter prevents.
+   *  - **Only non-empty drains count.** Reading an already-empty inbox
+   *    provably consumed nothing, so counting it could only ever manufacture
+   *    a false "read". A read that took our message is non-empty by
+   *    definition, so this can never produce a false negative.
+   *  - **In-memory only**, like the queues themselves: it dies with the
+   *    process. A handle replayed after a restart therefore reads 0 and can
+   *    never be credited with a read — fail-closed, which is the safe side.
+   *
+   * Bounded by the number of distinct session ids of ONE orchestrator that
+   * ever drained an inbox (a handful), so it is not a growth concern.
+   */
+  private readonly reads = new Map<string, number>();
   private readonly maxSize: number;
   private readonly persist: MailboxPersistHook | undefined;
   /**
@@ -314,11 +342,16 @@ export class Mailbox {
   read(sid: string): Message[] {
     const q = this.inboxes.get(sid);
     if (!q || q.length === 0) {
-      // Don't keep empty queues hanging in the Map.
+      // Don't keep empty queues hanging in the Map. No `readCount` bump: an
+      // empty drain consumed nothing, and crediting it would let a wipe +
+      // an idle poll masquerade as a delivery (see `readCount`).
       this.inboxes.delete(sid);
       return [];
     }
     this.inboxes.delete(sid);
+    // The ONLY place this counter moves. Every other way a queue can empty
+    // (clearAll, removeSession, cap eviction) is not an agent reading.
+    this.reads.set(sid, (this.reads.get(sid) ?? 0) + 1);
     return q;
   }
 
@@ -334,6 +367,18 @@ export class Mailbox {
   /** Number of messages currently queued for `sid`. */
   size(sid: string): number {
     return this.inboxes.get(sid)?.length ?? 0;
+  }
+
+  /**
+   * Monotonic count of draining `read()` calls served for `sid` since this
+   * mailbox was constructed — see the `reads` field for the full contract.
+   *
+   * The intended use is differential, never absolute: take it when you queue
+   * a message, compare it later, and treat *an increase* as the proof that an
+   * agent drained the inbox in between.
+   */
+  readCount(sid: string): number {
+    return this.reads.get(sid) ?? 0;
   }
 
   /**

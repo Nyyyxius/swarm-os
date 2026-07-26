@@ -1,11 +1,18 @@
 /**
- * Per-instance visual settings — single-row store backing the APPEARANCE
+ * Per-instance operator preferences — single-row store backing the APPEARANCE
  * panel of the web SettingsDrawer.
  *
  * The point of this module is to let an operator differentiate multiple
  * swarm-os instances running in parallel (prod / dev / lab) at a glance:
  * each instance can pick its own label and accent. Settings are per-instance
  * (not per-user) so all tabs on the same server see the same theme.
+ *
+ * This module was purely visual until update detection landed:
+ * `dismissedUpdateVersion` is NOT a visual knob, it is an operator decision
+ * about a specific release. It lives here because it is per-instance, one row,
+ * and already the place "what this operator chose for this instance" is kept —
+ * a second singleton table would be ceremony, not clarity. The one consequence
+ * to remember is spelled out on `reset()`.
  *
  * Persistence: singleton row `instance_settings(id='current')` in SQLite.
  * The row is created lazily on first PATCH — until then, `get()` returns the
@@ -33,6 +40,13 @@ export interface InstanceSettings {
    * the toggle in the UI is grayed out. Flipping it has no visual effect yet.
    */
   darkMode: boolean;
+  /**
+   * Release version the operator dismissed — the badge stays hidden for
+   * exactly that version and reappears for the next one. `null` = nothing
+   * dismissed. NOT visual (see the module header); written by the update
+   * service, never by the appearance panel.
+   */
+  dismissedUpdateVersion: string | null;
   /** ISO 8601 timestamp of the last PATCH (or DEFAULT_UPDATED_AT before first PATCH). */
   updatedAt: string;
 }
@@ -60,6 +74,7 @@ export const DEFAULT_INSTANCE_SETTINGS: InstanceSettings = {
   fontSize: 13,
   density: 'regular',
   darkMode: true,
+  dismissedUpdateVersion: null,
   updatedAt: DEFAULT_UPDATED_AT,
 };
 
@@ -71,6 +86,10 @@ function rowToSettings(row: InstanceSettingsRow): InstanceSettings {
     fontSize: row.font_size,
     density: row.density as Density,
     darkMode: row.dark_mode === 1,
+    // `?? null` and not `row.x`: a row written before the migration reads back
+    // as `undefined` on some driver paths, and `undefined` would serialize the
+    // key away instead of saying "nothing dismissed".
+    dismissedUpdateVersion: row.dismissed_update_version ?? null,
     updatedAt: row.updated_at,
   };
 }
@@ -84,6 +103,7 @@ function settingsToRow(s: InstanceSettings): InstanceSettingsRow {
     font_size: s.fontSize,
     density: s.density,
     dark_mode: s.darkMode ? 1 : 0,
+    dismissed_update_version: s.dismissedUpdateVersion,
     updated_at: s.updatedAt,
   };
 }
@@ -112,16 +132,29 @@ export class SettingsStore {
       fontSize: patch.fontSize ?? current.fontSize,
       density: patch.density ?? current.density,
       darkMode: patch.darkMode ?? current.darkMode,
+      dismissedUpdateVersion:
+        patch.dismissedUpdateVersion !== undefined
+          ? patch.dismissedUpdateVersion
+          : current.dismissedUpdateVersion,
       updatedAt: new Date().toISOString(),
     };
     this.db.upsertInstanceSettings(settingsToRow(next));
     return next;
   }
 
-  /** Reset to in-code defaults; writes the row so the change persists across restarts. */
+  /**
+   * Reset the APPEARANCE to in-code defaults; writes the row so the change
+   * persists across restarts.
+   *
+   * `dismissedUpdateVersion` is deliberately PRESERVED: this button lives in
+   * the appearance panel and means "undo my theme", so having it silently
+   * resurrect an update badge the operator had dismissed would be a surprise
+   * with no visible cause.
+   */
   reset(): InstanceSettings {
     const next: InstanceSettings = {
       ...DEFAULT_INSTANCE_SETTINGS,
+      dismissedUpdateVersion: this.get().dismissedUpdateVersion,
       updatedAt: new Date().toISOString(),
     };
     this.db.upsertInstanceSettings(settingsToRow(next));

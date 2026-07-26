@@ -4,12 +4,25 @@
  * J1/J2 surface: list / get / scan / enable / disable / permissions / config /
  * uninstall. J3 adds install-from-source (npm/git/upload/dir), upgrade, and a
  * reserved marketplace `catalog` placeholder.
+ *
+ * Update detection rides on the READ routes here rather than getting a screen of
+ * its own: `PluginsPage` already renders `v{version} · {sourceKind}` next to an
+ * Upgrade button, so a second surface listing the same plugins with the same
+ * button would be pure duplication. The verdict is a cached value the
+ * `UpdateService` refreshes in the background — reading it costs nothing and
+ * never blocks.
  */
 
 import express, { Router, type Request, type Response } from 'express';
 import * as path from 'node:path';
 import type { PluginHost } from '../../modules/plugins/host.js';
 import { PluginActivationError, PluginNotFoundError } from '../../modules/plugins/host.js';
+import type { PluginView } from '../../modules/plugins/api-types.js';
+import type {
+  PluginUpdateCheck,
+  PluginUpdateStatus,
+  UpdateService,
+} from '../../modules/updates/index.js';
 import {
   PluginInstaller,
   InstallValidationError,
@@ -101,15 +114,89 @@ function parseInstallSource(
   return { ok: false, error: "source must be one of 'npm' | 'git' | 'dir'" };
 }
 
+/**
+ * Detector status → the status published on `PluginView`.
+ *
+ * The two unions differ on purpose and this is the whole translation:
+ *  - `local` (a `dir`/`upload` plugin, no remote to compare against BY
+ *    CONSTRUCTION) has no counterpart in the view's union, so it lands on
+ *    `unknown`. Nothing is lost for the UI: `sourceKind` is right there in the
+ *    same object and is what tells "local source" apart from "couldn't check".
+ *  - `error` is never produced. The checker answers every failure — bad spec,
+ *    dead registry, unreachable remote — with `unknown` plus a machine-readable
+ *    `reason`, because "we don't know" is the honest answer and `error` would
+ *    invite the UI to render a scary state for a plugin that is probably fine.
+ *
+ * What must never happen, in either direction: a plugin we could not check
+ * reading as up to date.
+ */
+function toViewStatus(status: PluginUpdateStatus): NonNullable<PluginView['updateStatus']> {
+  switch (status) {
+    case 'available':
+      return 'available';
+    case 'up_to_date':
+      return 'up_to_date';
+    default:
+      return 'unknown';
+  }
+}
+
+/**
+ * Index the last completed sweep by plugin name. Empty when detection isn't
+ * wired or has never run — and an ABSENT entry leaves `updateStatus`
+ * `undefined`, which the type documents as "not checked", never "up to date".
+ *
+ * `getPluginChecks()` and NOT `getFullState()`: the full state also builds
+ * `currentRun()` + `listRuns(10)`, i.e. an `update_runs` read plus an
+ * `events.ndjson` read per non-terminal run — on every single plugins list, to
+ * produce nothing this page uses. Same cached sweep, same TTL-gated background
+ * refresh, none of the run bookkeeping.
+ */
+function checksByName(updates?: UpdateService): Map<string, PluginUpdateCheck> {
+  if (!updates) return new Map();
+  try {
+    return new Map(updates.getPluginChecks().map((c) => [c.name, c]));
+  } catch {
+    // Detection is a nicety; it does not get to break the plugins page.
+    return new Map();
+  }
+}
+
+/** Copy of `view` carrying the verdict, or `view` untouched when unchecked. */
+function withUpdate(view: PluginView, check: PluginUpdateCheck | undefined): PluginView {
+  if (!check) return view;
+  return {
+    ...view,
+    // npm only — for a git plugin the newest thing at the source is a sha, not
+    // a version, and `PluginView` has nowhere honest to put one.
+    latestVersion: check.latestVersion,
+    updateStatus: toViewStatus(check.status),
+  };
+}
+
 export function createPluginsRouter(
   host: PluginHost,
   pluginsDir: string,
   installer?: PluginInstaller,
+  updates?: UpdateService,
 ): Router {
   const router = Router();
 
+  /**
+   * A fresh install/upgrade invalidates the cached verdict for that plugin: the
+   * sweep still remembers the sha we just replaced, so the badge would sit on
+   * "update available" for the rest of the TTL and invite the operator to
+   * upgrade a plugin they just upgraded. Fire-and-forget — `refreshNow()` is
+   * documented never to reject, and the response must not wait on a network
+   * round-trip to npm.
+   */
+  const recheckAfterInstall = (): void => {
+    void updates?.refreshNow();
+  };
+
   router.get('/plugins', (_req: Request, res: Response) => {
-    res.json({ plugins: host.list() });
+    const checks = checksByName(updates);
+    res.json({ plugins: host.list().map((p) => withUpdate(p, checks.get(p.name))) });
   });
 
   // Marketplace placeholder (source_kind 'registry' reserved) — 501 until J4+.
@@ -135,9 +222,10 @@ export function createPluginsRouter(
     }
     void installer
       .install(parsed.value)
-      .then((r) =>
-        res.json({ plugin: r.view, isUpgrade: r.isUpgrade, newCapabilities: r.newCapabilities }),
-      )
+      .then((r) => {
+        recheckAfterInstall();
+        res.json({ plugin: r.view, isUpgrade: r.isUpgrade, newCapabilities: r.newCapabilities });
+      })
       .catch((err: unknown) => {
         if (sendInstallerError(res, err)) return;
         res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
@@ -167,9 +255,10 @@ export function createPluginsRouter(
       const name = typeof req.query.name === 'string' ? req.query.name : undefined;
       void installer
         .install({ kind: 'upload', tgz: req.body, name })
-        .then((r) =>
-          res.json({ plugin: r.view, isUpgrade: r.isUpgrade, newCapabilities: r.newCapabilities }),
-        )
+        .then((r) => {
+          recheckAfterInstall();
+          res.json({ plugin: r.view, isUpgrade: r.isUpgrade, newCapabilities: r.newCapabilities });
+        })
         .catch((err: unknown) => {
           if (sendInstallerError(res, err)) return;
           res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
@@ -184,9 +273,10 @@ export function createPluginsRouter(
     }
     void installer
       .upgrade(req.params.name)
-      .then((r) =>
-        res.json({ plugin: r.view, isUpgrade: r.isUpgrade, newCapabilities: r.newCapabilities }),
-      )
+      .then((r) => {
+        recheckAfterInstall();
+        res.json({ plugin: r.view, isUpgrade: r.isUpgrade, newCapabilities: r.newCapabilities });
+      })
       .catch((err: unknown) => {
         if (sendInstallerError(res, err)) return;
         res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
@@ -195,7 +285,12 @@ export function createPluginsRouter(
 
   router.get('/plugins/:name', (req: Request<{ name: string }>, res: Response) => {
     try {
-      const plugin = host.viewOf(req.params.name);
+      // Same verdict as the listing — the detail view is where the operator
+      // decides whether to press Upgrade, so it cannot be the one that lies.
+      const plugin = withUpdate(
+        host.viewOf(req.params.name),
+        checksByName(updates).get(req.params.name),
+      );
       let manifest: unknown = null;
       let config: Record<string, unknown> = {};
       try {

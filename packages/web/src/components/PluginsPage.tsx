@@ -265,6 +265,7 @@ export function PluginsPage({ open, onClose }: Props) {
             <h2>{(plugin.displayName ?? plugin.name).toUpperCase()}</h2>
             <div className="role-id">
               {plugin.name} · v{plugin.version} · {plugin.sourceKind}
+              {plugin.sourceCommit ? ` · ${plugin.sourceCommit.slice(0, 7)}` : ''}
             </div>
 
             {opError && (
@@ -409,6 +410,24 @@ export function PluginsPage({ open, onClose }: Props) {
               >
                 UPGRADE
               </button>
+              {/* Update indicator — next to the button that acts on it, not a
+                  second list. Only `available` lights up: `unknown` means "not
+                  checked", and claiming freshness we have not verified is how
+                  an operator stops trusting the badge. */}
+              {plugin.updateStatus === 'available' && (
+                <span
+                  className="field-help"
+                  style={{ display: 'inline-flex', alignItems: 'center', gap: 6 }}
+                  title={
+                    plugin.latestVersion
+                      ? `v${plugin.latestVersion} is available at the ${plugin.sourceKind} source`
+                      : `a newer commit is available at the ${plugin.sourceKind} source`
+                  }
+                >
+                  <span className="dot warn" />
+                  {plugin.latestVersion ? `v${plugin.latestVersion} available` : 'update available'}
+                </span>
+              )}
               <button className="btn danger" onClick={() => void doUninstall(plugin)} disabled={busy}>
                 UNINSTALL
               </button>

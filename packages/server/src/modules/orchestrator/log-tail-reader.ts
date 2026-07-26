@@ -85,14 +85,28 @@ function stripAnsi(s: string): string {
  * Format the full "## Server restart notice" block, with the log tail
  * injected. Kept as a pure function so tests can assert the exact string
  * shape without spinning a Session.
+ *
+ * `banner` (update_system D.5) is prepended ABOVE the restart-notice block.
+ * This is the only channel that reliably reaches a lead after the container
+ * has been recreated: the pre-update mailbox message does NOT survive
+ * (`Orchestrator.shutdownForRestart` calls `mailbox.clearAll()`, which stamps
+ * every row delivered, and rehydration only replays undelivered rows).
+ * This string, by contrast, rides the POSITIONAL argv at spawn
+ * (`Session._spawn` → `buildClaudeArgs({ resumeNotice })`), so it is part of
+ * the resumed lead's very first turn — no mailbox, no idle window, nothing to
+ * race. It goes above the restart notice because "we updated the server to
+ * vX.Y.Z" is the CAUSE of the interruption the block below then explains.
+ *
+ * Omitted / empty / whitespace-only banner ⇒ byte-for-byte the string this
+ * function has always returned.
  */
-export function buildResumeNotice(logPath: string | null): string {
+export function buildResumeNotice(logPath: string | null, banner?: string | null): string {
   const tail = logPath ? readLogTail(logPath) : '';
   const tailBlock = tail
     ? `<previous_session_tail>\n${tail}\n</previous_session_tail>`
     : `<previous_session_tail>(empty — no prior log available)</previous_session_tail>`;
 
-  return `---
+  const body = `---
 
 ## Server restart notice
 
@@ -116,4 +130,7 @@ If the log tail is empty or shows nothing useful, fall back to
 re-reading the user's original instructions (above) and resume from
 there. Check your inbox via \`team.read_inbox\` for any messages that
 arrived during the outage.`;
+
+  const head = banner?.trim();
+  return head ? `${head}\n\n${body}` : body;
 }

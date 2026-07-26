@@ -115,6 +115,16 @@ export interface PluginRow {
   version: string;
   source_kind: string;
   source_ref: string | null;
+  /**
+   * Git HEAD the plugin was fetched from — the ORIGIN, not the address
+   * (`source_ref` stays the re-fetch address). Null for npm/dir/upload sources,
+   * for a git clone whose `rev-parse` failed, and for every row installed before
+   * the column existed. Required-but-nullable on purpose: better-sqlite3 throws
+   * on a MISSING named parameter and `upsert` swallows that throw into a warn,
+   * so an optional field would turn a forgotten construction site into a
+   * silently dropped write. Let the compiler catch it instead.
+   */
+  source_commit: string | null;
   enabled: number;
   config_json: string | null;
   granted_capabilities_json: string | null;
@@ -154,6 +164,7 @@ export class PluginStore {
         version       TEXT NOT NULL,
         source_kind   TEXT NOT NULL,
         source_ref    TEXT,
+        source_commit TEXT,
         enabled       INTEGER NOT NULL DEFAULT 0,
         config_json   TEXT,
         granted_capabilities_json TEXT,
@@ -170,13 +181,17 @@ export class PluginStore {
       );
     `);
 
+    // MUST run between the DDL above and the prepares below: a statement naming
+    // `@source_commit` cannot compile against a pre-migration schema.
+    this.applyMigrations();
+
     this.upsertStmt = this.db.prepare<PluginRow>(`
       INSERT INTO plugins (
-        name, version, source_kind, source_ref, enabled, config_json,
+        name, version, source_kind, source_ref, source_commit, enabled, config_json,
         granted_capabilities_json, api_version, fail_count, quarantined_until,
         installed_at, updated_at, last_error
       ) VALUES (
-        @name, @version, @source_kind, @source_ref, @enabled, @config_json,
+        @name, @version, @source_kind, @source_ref, @source_commit, @enabled, @config_json,
         @granted_capabilities_json, @api_version, @fail_count, @quarantined_until,
         @installed_at, @updated_at, @last_error
       )
@@ -184,6 +199,7 @@ export class PluginStore {
         version = excluded.version,
         source_kind = excluded.source_kind,
         source_ref = excluded.source_ref,
+        source_commit = excluded.source_commit,
         enabled = excluded.enabled,
         config_json = excluded.config_json,
         granted_capabilities_json = excluded.granted_capabilities_json,
@@ -223,6 +239,36 @@ export class PluginStore {
       "SELECT key, value FROM plugin_kv WHERE plugin = ? AND key LIKE ? ESCAPE '\\' ORDER BY key ASC",
     );
     this.kvPurgeStmt = this.db.prepare<[string]>('DELETE FROM plugin_kv WHERE plugin = ?');
+  }
+
+  /**
+   * Idempotent column-additions for upgrades — same shape as
+   * `SwarmDb.applyMigrations()`. `CREATE TABLE IF NOT EXISTS` skips an EXISTING
+   * table WHOLESALE, so a column added to the DDL above never lands on a DB that
+   * already has the table: only an explicit `ALTER TABLE` does. The
+   * duplicate-column error is swallowed so this is safe to run on every boot;
+   * anything else is logged, and the prepares that follow then fail loudly on
+   * the missing column — the honest outcome for a broken schema.
+   *
+   * As with the DDL above, this deliberately does NOT go in `schema.sql`: that
+   * file isn't shipped in the image (see the module header).
+   */
+  private applyMigrations(): void {
+    const additions: Array<{ table: string; column: string; ddl: string }> = [
+      // Origin tracking — the git HEAD a plugin was fetched from, so a later
+      // pass can tell whether the remote has moved.
+      { table: 'plugins', column: 'source_commit', ddl: 'ALTER TABLE plugins ADD COLUMN source_commit TEXT' },
+    ];
+    for (const a of additions) {
+      try {
+        this.db.exec(a.ddl);
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        if (!/duplicate column name/i.test(msg)) {
+          log.warn({ event: 'plugins.migration_failed', table: a.table, column: a.column, error: msg });
+        }
+      }
+    }
   }
 
   // ---- rows --------------------------------------------------------------

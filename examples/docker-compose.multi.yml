@@ -23,6 +23,10 @@ services:
     container_name: swarm-fyrel-cc-app
     init: true
     restart: unless-stopped
+    # PTY comfort, NOT corruption insurance: `spawner.shutdownAll()` is
+    # synchronous, so the 10s default SIGKILL truncates no intended DB write.
+    # The extra time only lets the agent PTYs close cleanly on SIGTERM.
+    stop_grace_period: 30s
     ports:
       - "127.0.0.1:8787:8787"
     volumes:
@@ -36,6 +40,10 @@ services:
       SWARM_OS_PROJECT_NAME: fyrel-cc-app
       SWARM_OS_DISCORD_WEBHOOK_URL: ${FYREL_DISCORD_WEBHOOK:-}
       SWARM_OS_PUBLIC_URL: ${FYREL_PUBLIC_URL:-https://swarm.tail-xyz.ts.net:8787}
+      # Update detection: read-only GitHub PAT (scope `contents:read`). Both
+      # services read the SAME variable — one token, one repository. Not naming
+      # it here would leave the check on `no_token` whatever the .env holds.
+      SWARM_OS_GITHUB_TOKEN: ${SWARM_OS_GITHUB_TOKEN:-}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/health"]
       interval: 30s
@@ -48,6 +56,8 @@ services:
     container_name: swarm-grap-server
     init: true
     restart: unless-stopped
+    # Same rationale as the service above — PTY comfort, not corruption.
+    stop_grace_period: 30s
     ports:
       # Distinct host port; the in-container port stays at 8787. Plan §13.
       - "127.0.0.1:8797:8787"
@@ -62,6 +72,8 @@ services:
       SWARM_OS_PROJECT_NAME: grap-server
       SWARM_OS_DISCORD_WEBHOOK_URL: ${GRAP_DISCORD_WEBHOOK:-}
       SWARM_OS_PUBLIC_URL: ${GRAP_PUBLIC_URL:-https://swarm.tail-xyz.ts.net:8797}
+      # Same read-only PAT as the service above (see its comment).
+      SWARM_OS_GITHUB_TOKEN: ${SWARM_OS_GITHUB_TOKEN:-}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/health"]
       interval: 30s

@@ -328,3 +328,49 @@ describe('Mailbox.totalSize', () => {
     expect(m.totalSize()).toBe(10);
   });
 });
+
+describe('Mailbox.readCount (update_system D.5 read receipt)', () => {
+  it('counts one per draining read, per session, and never goes down', () => {
+    const m = new Mailbox();
+    expect(m.readCount('a')).toBe(0);
+    m.push('a', { from: 's', content: '1' });
+    m.push('b', { from: 's', content: '2' });
+    m.read('a');
+    expect(m.readCount('a')).toBe(1);
+    expect(m.readCount('b')).toBe(0);
+    m.push('a', { from: 's', content: '3' });
+    m.read('a');
+    expect(m.readCount('a')).toBe(2);
+  });
+
+  it('does not count a read that drained nothing', () => {
+    // An empty drain provably consumed no message; counting it would let a
+    // wipe plus an idle poll masquerade as a delivery.
+    const m = new Mailbox();
+    m.read('a');
+    expect(m.readCount('a')).toBe(0);
+  });
+
+  it('is NOT bumped by clearAll, removeSession, or a cap eviction', () => {
+    // The whole point: these are the ways a queue empties with no agent
+    // involved. `Spawner.leadNoticeStatus` relies on them being invisible.
+    const m = new Mailbox({ maxSize: 2 });
+    m.push('a', { from: 's', content: '1' });
+    m.push('a', { from: 's', content: '2' });
+    m.push('a', { from: 's', content: '3' }); // evicts the oldest
+    expect(m.readCount('a')).toBe(0);
+    m.removeSession('a');
+    expect(m.readCount('a')).toBe(0);
+    m.push('b', { from: 's', content: '1' });
+    m.clearAll();
+    expect(m.readCount('b')).toBe(0);
+  });
+
+  it('survives clearAll so a real read stays observable afterwards', () => {
+    const m = new Mailbox();
+    m.push('a', { from: 's', content: '1' });
+    m.read('a');
+    m.clearAll();
+    expect(m.readCount('a')).toBe(1);
+  });
+});
