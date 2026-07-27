@@ -424,6 +424,41 @@ describe('novelai plugin — MCP tools', () => {
     expect(out.warnings).toBeUndefined();
   });
 
+  it('3b-bis. the English rule reaches the agent, and a French context is flagged', async () => {
+    await install();
+
+    const { schema, fr, en } = await withLead('bravo-en', async (c) => ({
+      schema: (await c.listTools()).tools.find((t) => t.name === 'novelai.generate_text'),
+      // Same scene, twice, differing only in language.
+      fr: await callTool(c, 'novelai.generate_text', {
+        memory: "Elara est archiviste au palais d'Ostvale. Le roi est mourant.",
+        story: 'Elle referma le registre.\n\nLa cire etait tiede.\n\nNeuf jours.',
+        authors_note: 'Elara confronte le messager.',
+        opening: 'Elle leva les yeux et',
+      }),
+      en: await callTool(c, 'novelai.generate_text', {
+        memory: 'Elara is an archivist at the palace of Ostvale. The king is dying.',
+        story: 'She closed the register.\n\nThe wax was still warm.\n\nNine days.',
+        authors_note: 'Elara confronts the messenger about his accent.',
+        opening: 'She looked up at the messenger and',
+      }),
+    }));
+
+    // The rule has to be READABLE before the first call, not only after a bad one.
+    expect(schema?.description).toMatch(/ANGLAIS/);
+    const props = schema?.inputSchema.properties as Record<string, { description?: string }>;
+    for (const field of ['story', 'memory', 'authors_note', 'opening']) {
+      expect(props[field]?.description, field).toMatch(/ANGLAIS/i);
+    }
+
+    // Degrading, never failing: a French context still generates.
+    expect(fr.ok).toBe(true);
+    expect((fr.warnings ?? []).join(' ')).toMatch(/anglais/i);
+
+    expect(en.ok).toBe(true);
+    expect(en.warnings).toBeUndefined();
+  });
+
   it('3c. mixing `prompt` with the structured fields is refused, not arbitrated', async () => {
     await install();
 

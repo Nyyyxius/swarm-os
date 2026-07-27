@@ -36,6 +36,57 @@ const SEP = '***';
 /** Ends on sentence punctuation (optionally followed by a closing quote)? */
 const ENDS_CLOSED = /[.!?…][”"'’)\]]?\s*$/;
 
+/** Accented Latin letters — near-absent from English prose. */
+const ACCENTED = /[àâäáãçéèêëíîïñóôöõùûüúÿœæ]/gi;
+
+/**
+ * Romance-language elision: a single-letter word (or `qu`) glued to the next by
+ * an apostrophe — `d'or`, `l'homme`, `qu'il`. English apostrophes work the other
+ * way round (`don't`, `we're`), so the leading `\b` never matches there: in
+ * "don't" the `n` is not at a word boundary.
+ *
+ * This is the signal that survives someone typing French WITHOUT accents, which
+ * is exactly how the convention gets broken in this repo.
+ */
+const ELISION = /\b(?:[cdjlmnst]|qu)'/gi;
+
+/**
+ * TWO SIGNALS, TWO THRESHOLDS, because they do not lie at the same rate.
+ *
+ * An accent is weak evidence: English borrows `déjà vu`, `café`, `naïve`, and a
+ * single loanword already carries two of them. An elision is strong evidence:
+ * English never writes `\bd'`, `\bl'` or `\bqu'` at all, so two of them settle
+ * the question on their own — which is what catches French typed WITHOUT
+ * accents, the form no accent count can see.
+ *
+ * Summing them under one threshold, as a first draft did, forces a choice
+ * between flagging `déjà vu` and missing a French memory block. Splitting the
+ * thresholds costs one line and removes the dilemma.
+ */
+const MIN_ACCENTS = 3;
+const MIN_ELISIONS = 2;
+const MIN_COMBINED = 3;
+
+/**
+ * Heuristic: does this text look like it is NOT English?
+ *
+ * A HEURISTIC, deliberately, and it only ever produces a warning — never a
+ * refusal. It catches what matters (a context written in French) and tolerates
+ * the edges: an English page quoting three accented words trips it, and a short
+ * unaccented note like "Elara le confronte" slips through. Both are acceptable
+ * when the output is one advisory line.
+ *
+ * @param {string} text
+ * @returns {boolean}
+ */
+export function looksNonEnglish(text) {
+  const src = typeof text === 'string' ? text : '';
+  if (src.length === 0) return false;
+  const accents = (src.match(ACCENTED) || []).length;
+  const elisions = (src.match(ELISION) || []).length;
+  return accents >= MIN_ACCENTS || elisions >= MIN_ELISIONS || accents + elisions >= MIN_COMBINED;
+}
+
 /**
  * Keep the LAST `maxChars` of `text`, cut on a line boundary so the window never
  * opens mid-word. The HEAD is what gets dropped: the tail is the continuity the
@@ -160,6 +211,17 @@ export function buildStoryPrompt(input) {
     warnings.push(
       "Aucun memory : les personnages et les regles du monde sortiront de la fenetre et seront oublies. " +
         'Mets-y qui est qui, ou on est, et la voix narrative.',
+    );
+  }
+  // Checked on the ASSEMBLED prompt, not field by field: more text means a
+  // steadier verdict, and a French memory with an English story is just as
+  // damaging — the model sees one string either way.
+  if (looksNonEnglish(prompt)) {
+    warnings.push(
+      "Le contexte ne semble pas etre en anglais. Les modeles NovelAI sont entraines sur de la fiction " +
+        'ANGLAISE : dans une autre langue la prose reste grammaticale mais devient plate, repetitive et ' +
+        'hors registre, sans jamais lever d\'erreur. Ecris story, memory, authors_note et opening en anglais, ' +
+        'puis traduis le resultat final si tu en as besoin dans une autre langue.',
     );
   }
   const endsOn = opening || prompt;

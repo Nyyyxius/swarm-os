@@ -20,6 +20,7 @@ import { describe, it, expect } from 'vitest';
 import {
   buildStoryPrompt,
   insertAtDepth,
+  looksNonEnglish,
   tailOf,
   DEFAULT_NOTE_DEPTH,
 } from '../lib/story.js';
@@ -186,5 +187,81 @@ describe('buildStoryPrompt — warnings fire on their own trigger only', () => {
   it('does NOT warn about a closed sentence when an opening is supplied', () => {
     const { warnings } = buildStoryPrompt({ ...clean, story: 'Il partit.' });
     expect(warnings.join(' ')).not.toMatch(/phrase complete/);
+  });
+});
+
+describe('looksNonEnglish — a heuristic that must not cry wolf', () => {
+  it('leaves ordinary English prose alone', () => {
+    const samples = [
+      "She looked up at the messenger and saw how pale he was.",
+      "Don't tell me you've never seen it. We're not children, and I'm certain he isn't either.",
+      "The wizard raised his staff; the air thickened, tasting of iron and old rain.",
+      'A "quoted" line, an em-dash — and an ellipsis…',
+    ];
+    for (const s of samples) expect(looksNonEnglish(s), s).toBe(false);
+  });
+
+  it('flags accented prose', () => {
+    expect(looksNonEnglish("Elle leva les yeux vers le messager et vit à quel point il était pâle.")).toBe(true);
+    expect(looksNonEnglish('Él la miró y sonrió con cierta ironía.')).toBe(true);
+  });
+
+  it('flags UNACCENTED French through its elisions — the case accents miss', () => {
+    // No accent anywhere; only `d'` and `l'` betray it. This is exactly how the
+    // repo's own no-accent convention lets French slip past an accent check.
+    const s = "Le messager n'avait pas l'air d'un homme du Nord, quoi qu'il en dise.";
+    expect(s).not.toMatch(/[àâäéèêëîïôöùûüç]/);
+    expect(looksNonEnglish(s)).toBe(true);
+  });
+
+  it('does not mistake English contractions for elisions', () => {
+    // "don't" / "we'll" put the apostrophe INSIDE a word: no word boundary
+    // before the letter, so the elision pattern cannot match.
+    expect(looksNonEnglish("Don't. We'll go, they'd rather, it's fine, he's late, I'm sure.")).toBe(false);
+  });
+
+  it('tolerates a single loanword', () => {
+    expect(looksNonEnglish('It gave him a strange sense of déjà vu.')).toBe(false);
+  });
+
+  it('never throws on absent or malformed input', () => {
+    expect(looksNonEnglish()).toBe(false);
+    expect(looksNonEnglish('')).toBe(false);
+    expect(looksNonEnglish(null)).toBe(false);
+    expect(looksNonEnglish(42)).toBe(false);
+  });
+});
+
+describe('buildStoryPrompt — the English rule reaches the agent', () => {
+  it('warns when the assembled context is not English', () => {
+    const { warnings } = buildStoryPrompt({
+      memory: "Elara est archiviste au palais d'Ostvale.",
+      story: 'Elle referma le registre.\n\nLa cire etait tiede.\n\nNeuf jours.',
+      authorsNote: 'Elara le confronte.',
+      opening: 'Elle leva les yeux et',
+    });
+    expect(warnings.join(' ')).toMatch(/anglais/i);
+  });
+
+  it('stays silent on a well-formed English context', () => {
+    const { warnings } = buildStoryPrompt({
+      attg: 'Genre: fantasy',
+      memory: 'Elara is an archivist. Cort lies about his accent.',
+      story: 'She closed the register.\n\nThe wax was still warm.\n\nNine days, the letter claimed.',
+      authorsNote: 'Elara confronts Cort. He does not deny it.',
+      opening: 'She looked up at the messenger and',
+    });
+    expect(warnings).toEqual([]);
+  });
+
+  it('catches a French memory hiding behind an English story', () => {
+    // The model receives ONE string: half-translating helps nobody.
+    const { warnings } = buildStoryPrompt({
+      memory: "Elara est archiviste. Le roi Verrin est mourant, et l'on n'en dit rien.",
+      story: 'She closed the register.\n\nThe wax was still warm.\n\nNine days.',
+      authorsNote: 'Elara confronts Cort.',
+      opening: 'She looked up and',
+    });
+    expect(warnings.join(' ')).toMatch(/anglais/i);
   });
 });

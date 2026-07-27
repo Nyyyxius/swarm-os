@@ -206,6 +206,26 @@ La liste à jour est dans `GET /plugin-api/novelai/status`, champ `models`
 > - ✘ `"Écris-moi une histoire de sorcier"` — le modèle continuera littéralement
 >   cette phrase-là.
 
+### ⚠ Tout ce qui part vers NovelAI doit être en anglais
+
+Les modèles NovelAI sont entraînés sur un corpus de fiction **anglophone**
+(Erato est un finetune de Llama 3 sur de la prose anglaise) et les voix TTS sont
+anglophones. Dans une autre langue, **rien ne casse** : l'API répond `200`, le
+texte est grammatical. C'est exactement le problème — la prose devient plate,
+répétitive et hors registre, sans qu'aucune erreur ne le signale.
+
+La bonne marche à suivre pour une histoire en français : écrire le plan, le
+Memory et les notes d'auteur en anglais, générer en anglais, puis **traduire en
+une passe à la fin**. Un agent traduit mieux que NovelAI n'écrit en français.
+
+La règle est portée par quatre canaux : la description de `generate_text`, le
+`.describe()` de chaque champ concerné, le `writing_guide`, et un **détecteur**
+qui ajoute un `warning` quand le contexte assemblé ne semble pas anglais. Le
+détecteur repère les accents (seuil 3, pour tolérer un `déjà vu`) et les
+élisions `d'` / `l'` / `qu'` (seuil 2) — ces dernières trahissent le français
+même tapé **sans accents**, ce qu'un simple compte d'accents ne verrait pas. Il
+n'attrape pas tout et ne bloque jamais : c'est un indice, pas une barrière.
+
 ### `novelai.generate_text`
 
 Le texte est retourné **en ligne** dans la réponse de l'outil. Deux modes, **exclusifs**.

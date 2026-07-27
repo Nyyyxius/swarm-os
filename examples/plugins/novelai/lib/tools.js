@@ -192,7 +192,11 @@ const TEXT_DESCRIPTION =
   "**NovelAI CONTINUE un texte, il ne repond pas a une consigne.** Pour ecrire une histoire, " +
   'utilise `story` (ce qui est deja ecrit), `memory` (personnages, decor, voix) et ' +
   '`authors_note` (ce qui doit arriver MAINTENANT) : le plugin assemble le contexte et place ' +
-  'la direction au bon endroit. Un paragraphe par appel — genere, juge, garde ou relance. ' +
+  'la direction au bon endroit. ' +
+  "**ECRIS TOUT CE QUE TU ENVOIES EN ANGLAIS** — les modeles NovelAI sont entraines sur de la " +
+  'fiction anglaise ; dans une autre langue la sortie se degrade sans lever la moindre erreur. ' +
+  'Traduis le resultat final si l\'utilisateur veut une autre langue. ' +
+  'Un paragraphe par appel — genere, juge, garde ou relance. ' +
   'Ne consomme aucun Anlas. Une generation a la fois (5-20 s) ; si `code:"busy"`, reessaie. ' +
   'Avant ta premiere histoire, appelle `novelai.writing_guide`.';
 
@@ -213,21 +217,21 @@ export function buildTextToolDef(rt) {
         .max(200000)
         .optional()
         .describe(
-          "Le texte deja ecrit. Envoie-le en entier : le plugin garde automatiquement la fin qui tient dans la fenetre du modele et coupe le debut.",
+          "Le texte deja ecrit, EN ANGLAIS. Envoie-le en entier : le plugin garde automatiquement la fin qui tient dans la fenetre du modele et coupe le debut.",
         ),
       memory: z
         .string()
         .max(4000)
         .optional()
         .describe(
-          'Faits permanents, remis en tete a CHAQUE appel : qui sont les personnages, ou on est, les regles du monde, la voix narrative. Sans lui le modele oublie tout ce qui sort de la fenetre.',
+          'Faits permanents, EN ANGLAIS, remis en tete a CHAQUE appel : qui sont les personnages, ou on est, les regles du monde, la voix narrative. Sans lui le modele oublie tout ce qui sort de la fenetre.',
         ),
       authors_note: z
         .string()
         .max(1000)
         .optional()
         .describe(
-          "Ce qui doit arriver dans le paragraphe a venir, en une phrase. Le plugin la place a l'endroit ou elle pese le plus. C'est LE levier de direction.",
+          "Ce qui doit arriver dans le paragraphe a venir, en une phrase et EN ANGLAIS. Le plugin la place a l'endroit ou elle pese le plus. C'est LE levier de direction.",
         ),
       attg: z
         .string()
@@ -239,7 +243,7 @@ export function buildTextToolDef(rt) {
         .max(500)
         .optional()
         .describe(
-          "Fragment d'amorce ajoute en dernier, coupe en plein milieu d'une phrase — par exemple « Elle leva les yeux vers le messager et ». Un contexte qui finit sur un point invite le modele a changer de sujet.",
+          "Fragment d'amorce EN ANGLAIS, ajoute en dernier, coupe en plein milieu d'une phrase — par exemple « She looked up at the messenger and ». Un contexte qui finit sur un point invite le modele a changer de sujet.",
         ),
       // --- mode « brut » : tu assembles toi-meme ---------------------------
       prompt: z
@@ -248,7 +252,7 @@ export function buildTextToolDef(rt) {
         .max(20000)
         .optional()
         .describe(
-          "Contexte deja assemble, envoye tel quel. S'utilise SEUL, jamais avec story/memory/authors_note/attg/opening.",
+          "Contexte deja assemble, EN ANGLAIS, envoye tel quel. S'utilise SEUL, jamais avec story/memory/authors_note/attg/opening.",
         ),
       max_length: z.number().int().min(1).max(300).optional().describe('Tokens a generer. Defaut 150.'),
       min_length: z.number().int().min(1).max(300).optional().describe('Doit rester <= max_length.'),
@@ -467,7 +471,7 @@ export function buildVoiceToolDef(rt) {
         .min(1)
         .max(20000)
         .describe(
-          'Texte a synthetiser. Au-dela de 1000 caracteres il est decoupe en plusieurs fichiers (limite dure de NovelAI).',
+          'Texte a synthetiser, DE PREFERENCE EN ANGLAIS : les voix NovelAI sont anglophones et prononcent mal les autres langues. Au-dela de 1000 caracteres il est decoupe en plusieurs fichiers (limite dure de NovelAI).',
         ),
       voice: z
         .string()
