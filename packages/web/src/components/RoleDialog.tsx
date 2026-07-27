@@ -1,6 +1,25 @@
 import { useEffect, useState, type CSSProperties } from 'react';
-import { api, isDiscordConnectorView, type ConnectorView, type RoleView } from '../api/client';
+import {
+  api,
+  apiErrorMessage,
+  isDiscordConnectorView,
+  type ConnectorView,
+  type RoleView,
+} from '../api/client';
 import { DiscordOnboarding } from './DiscordOnboarding';
+import { useProviders } from '../hooks/useProviders';
+import {
+  INHERIT,
+  ModelSelect,
+  ProviderSelect,
+  effortNote,
+  effortsFor,
+  findProvider,
+  isPermissionChoice,
+  permissionNote,
+  permissionsFor,
+  unavailableNote,
+} from './ProviderFields';
 
 interface SubmitBody {
   label: string;
@@ -11,10 +30,14 @@ interface SubmitBody {
   defaultModel: string | null;
   defaultEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null;
   defaultPermissionMode: string | null;
+  /** `null` = inherit the instance default, same convention as `defaultModel`. */
+  defaultProvider: string | null;
   connectors: ConnectorView[];
   schedule: string | null;
   scheduleMessage: string | null;
 }
+
+const INHERIT_LABEL = '(inherit global default)';
 
 interface Props {
   open: boolean;
@@ -30,33 +53,26 @@ interface Props {
   containerStyle?: CSSProperties;
 }
 
-const EFFORTS = ['', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
-const PERMS = [
-  '',
-  'auto',
-  'acceptEdits',
-  'bypassPermissions',
-  'default',
-  'dontAsk',
-  'plan',
-] as const;
-const MODELS = [
-  { value: '', label: '(inherit global default)' },
-  { value: 'claude-opus-4-8', label: 'Opus 4.8 (claude-opus-4-8)' },
-  { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6 (claude-sonnet-4-6)' },
-  { value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5 (claude-haiku-4-5-20251001)' },
-] as const;
-
+// `disabled:` variants matter since Lot 3: EFFORT / PERMISSION are disabled
+// when the selected provider cannot express them, and an unstyled disabled
+// select is indistinguishable from an enabled one.
 const inputCls =
-  'w-full bg-slate-950 border border-slate-700 rounded px-2 py-1 text-sm text-slate-100 focus:outline-none focus:border-emerald-500';
+  'w-full bg-slate-950 border border-slate-700 rounded px-2 py-1 text-sm text-slate-100 focus:outline-none focus:border-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed';
 
 export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }: Props) {
   const editing = !!initial;
+  const {
+    providers,
+    defaultProvider: serverDefaultProvider,
+    transport,
+    refresh: refreshProviders,
+  } = useProviders();
   const [label, setLabel] = useState('');
   const [leadPrompt, setLeadPrompt] = useState('');
   const [leadPreamble, setLeadPreamble] = useState('');
   const [workerPreamble, setWorkerPreamble] = useState('');
   const [workerCount, setWorkerCount] = useState<string>('');
+  const [provider, setProvider] = useState<string>(INHERIT);
   const [model, setModel] = useState<string>('');
   const [effort, setEffort] = useState<string>('');
   const [perm, setPerm] = useState<string>('');
@@ -97,6 +113,7 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
       setLeadPreamble(initial.leadPreamble ?? '');
       setWorkerPreamble(initial.workerPreamble ?? '');
       setWorkerCount(initial.workerCount != null ? String(initial.workerCount) : '');
+      setProvider(initial.defaultProvider ?? INHERIT);
       setModel(initial.defaultModel ?? '');
       setEffort(initial.defaultEffort ?? '');
       setPerm(initial.defaultPermissionMode ?? '');
@@ -112,6 +129,7 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
       setLeadPreamble('');
       setWorkerPreamble('');
       setWorkerCount('');
+      setProvider(INHERIT);
       setModel('');
       setEffort('');
       setPerm('');
@@ -122,6 +140,20 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
       setScheduleMessage('');
     }
   }, [open, initial]);
+
+  // Multi-provider Lot 3 — re-probe on open so a CLI installed on the host
+  // since the page loaded is selectable without a reload (60 s server TTL).
+  useEffect(() => {
+    if (!open) return;
+    void refreshProviders();
+  }, [open, refreshProviders]);
+
+  // `defaultProvider = null` means "inherit", so the controls below are filtered
+  // by the provider that would ACTUALLY be used — the instance default.
+  const effectiveProvider = findProvider(providers, provider || serverDefaultProvider);
+  const efforts = effortsFor(effectiveProvider);
+  const perms = permissionsFor(effectiveProvider);
+  const permIsChoice = isPermissionChoice(effectiveProvider);
 
   if (!open) return null;
 
@@ -193,13 +225,17 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
         defaultModel: model || null,
         defaultEffort: (effort || null) as SubmitBody['defaultEffort'],
         defaultPermissionMode: perm || null,
+        // `null` = inherit `config.defaultProvider` (nullable server-side).
+        defaultProvider: provider || null,
         connectors,
         schedule: trimmedSchedule || null,
         scheduleMessage: scheduleMessage.trim() ? scheduleMessage : null,
       });
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      // Unwrap the server's `{error, code}` body — a bare
+      // "HTTP 400 POST /roles" hides which field it rejected.
+      setError(apiErrorMessage(err));
     } finally {
       setSubmitting(false);
     }
@@ -276,32 +312,69 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
               onChange={(e) => setWorkerCount(e.target.value)}
             />
           </Field>
+          {/* PROVIDER before MODEL: the model catalogue below is this
+              provider's. Unavailable adapters remain listed and disabled with
+              their reason rather than vanishing. */}
+          <Field label="default provider">
+            <ProviderSelect
+              className={inputCls}
+              value={provider}
+              providers={providers}
+              inheritLabel={INHERIT_LABEL}
+              onChange={(id) => {
+                setProvider(id);
+                // Never keep another provider's model id behind a new provider.
+                setModel('');
+              }}
+            />
+            {unavailableNote(effectiveProvider, transport) && (
+              <p className="mt-1 text-[11px] text-amber-400">
+                ⚠ {unavailableNote(effectiveProvider, transport)}
+              </p>
+            )}
+          </Field>
           <Field label="default model">
-            <select className={inputCls} value={model} onChange={(e) => setModel(e.target.value)}>
-              {MODELS.map((m) => (
-                <option key={m.value} value={m.value}>
-                  {m.label}
-                </option>
-              ))}
-            </select>
+            <ModelSelect
+              className={inputCls}
+              value={model}
+              provider={effectiveProvider}
+              inheritLabel={INHERIT_LABEL}
+              onChange={setModel}
+            />
           </Field>
           <Field label="default effort">
-            <select className={inputCls} value={effort} onChange={(e) => setEffort(e.target.value)}>
-              {EFFORTS.map((v) => (
+            <select
+              className={inputCls}
+              value={effort}
+              disabled={efforts.length === 0}
+              onChange={(e) => setEffort(e.target.value)}
+            >
+              {[INHERIT, ...efforts].map((v) => (
                 <option key={v} value={v}>
                   {v || '(inherit)'}
                 </option>
               ))}
             </select>
+            {effortNote(effectiveProvider) && (
+              <p className="mt-1 text-[11px] text-slate-400">{effortNote(effectiveProvider)}</p>
+            )}
           </Field>
           <Field label="default permission mode">
-            <select className={inputCls} value={perm} onChange={(e) => setPerm(e.target.value)}>
-              {PERMS.map((v) => (
+            <select
+              className={inputCls}
+              value={perm}
+              disabled={!permIsChoice}
+              onChange={(e) => setPerm(e.target.value)}
+            >
+              {[INHERIT, ...perms].map((v) => (
                 <option key={v} value={v}>
                   {v || '(inherit)'}
                 </option>
               ))}
             </select>
+            {permissionNote(effectiveProvider) && (
+              <p className="mt-1 text-[11px] text-slate-400">{permissionNote(effectiveProvider)}</p>
+            )}
           </Field>
           <Field label="cadence — cron (optional)">
             <input

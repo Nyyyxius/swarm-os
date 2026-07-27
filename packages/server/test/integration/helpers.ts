@@ -31,6 +31,7 @@ import { PluginToolRegistry } from '../../src/modules/plugins/mcp-registry.js';
 import { PluginHttpRegistry } from '../../src/modules/plugins/http-registry.js';
 import { PluginInstaller } from '../../src/modules/plugins/installer.js';
 import { ConnectorRegistry } from '../../src/modules/plugins/connector-registry.js';
+import type { ProviderRegistry } from '../../src/modules/providers/registry.js';
 import { broadcastToLeadsFromExternal } from '../../src/modules/orchestrator/messaging.js';
 import { eventBus } from '../../src/events.js';
 import { z } from 'zod';
@@ -58,6 +59,13 @@ export interface TestStackOptions {
    * `value` is false (J2 — verifies plugin routes are gated during boot).
    */
   bootGate?: BootGate;
+  /**
+   * Multi-provider — substitute the agent-provider registry. Tests that assert
+   * on `GET /providers` or on the provider gates MUST pass one: the built-in
+   * registry probes the real CLIs on PATH, so its verdicts differ between a dev
+   * box and CI.
+   */
+  providerRegistry?: ProviderRegistry;
 }
 
 export interface TestStack {
@@ -163,6 +171,7 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
     persistence,
     roleStore,
     connectorRegistry,
+    ...(opts.providerRegistry ? { providerRegistry: opts.providerRegistry } : {}),
   });
   // Plugins — own tables on the raw Db handle + host over `<dataDir>/plugins`.
   // J2 wires the full façade deps (spawner/roles/settings/config) + the MCP and

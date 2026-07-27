@@ -339,6 +339,16 @@ api.mcp.registerTool({
   up new tools only on their next restart/resume (the transport is stateless);
   the host broadcasts an informational note to leads when a plugin's tool set
   changes.
+- Because there is no MCP server *per plugin*, an agent told to "use the
+  `<name>` MCP" finds nothing — the tool is `<name>.<tool>` inside `team-comms`.
+  Every session preamble therefore ends with a **Plugin tools** section listing
+  what is registered at spawn time, with `title` as the label. It is appended
+  after the default and **before** any role-supplied preamble, so an operator's
+  custom text cannot hide the swarm's own capabilities
+  (`modules/orchestrator/preamble.ts` → `buildPluginToolsSection`). Give each
+  tool a `title` that reads on its own: it is the only description an agent sees
+  before opening the tool definition. `leadOnly` tools are omitted from worker
+  preambles.
 
 ### HTTP routes — two zones
 
@@ -562,3 +572,14 @@ every private `plugin_<name'>_*` table so a later reinstall starts clean.
 - **`examples/plugins/slack-bridge/`** — a real Slack channel connector over
   Socket Mode (npm deps `@slack/socket-mode` + `@slack/web-api`), with inbound
   channel → lead inbox and an outbound `slack.send` MCP tool.
+- **`examples/plugins/discord-agent/`** — a Discord channel bound to a permanent
+  lead: inbound text *and* voice clips (OpenAI Whisper STT), the reply sent back
+  in the same modality (TTS, OGG/Opus, no ffmpeg). Exercises `connectors`,
+  `teams`/`roles` (it provisions its own lead), a `/plugin-api/discord-agent/status`
+  diagnostic route, and a fail-closed allow-list of Discord user IDs.
+- **`examples/plugins/novelai/`** — dependency-free NovelAI bridge: a
+  `novelai.generate_text` MCP tool returning Erato prose inline and a
+  `novelai.generate_voice` tool writing TTS audio **into the workspace**. Shows
+  container → agent path translation under the `ssh` transport, a serialised
+  request queue with a shared deadline, `schedule`d token-expiry probing, and a
+  `/plugin-api/novelai/status` route with a differential `?probe=voice` self-check.

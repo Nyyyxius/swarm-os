@@ -7,7 +7,10 @@
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import { bootTestStack, authHeaders, type TestStack } from './helpers.js';
-import { DEFAULT_INSTANCE_SETTINGS } from '../../src/modules/settings/index.js';
+import {
+  DEFAULT_INSTANCE_SETTINGS,
+  PASSWORD_SENTINEL,
+} from '../../src/modules/settings/index.js';
 
 let stack: TestStack;
 
@@ -128,5 +131,111 @@ describe('REST: /settings', () => {
     expect(body.settings.accent).toBe(DEFAULT_INSTANCE_SETTINGS.accent);
     expect(body.settings.instanceLabel).toBeNull();
     expect(body.settings.updatedAt).not.toBe(DEFAULT_INSTANCE_SETTINGS.updatedAt);
+  });
+});
+
+/**
+ * The OpenRouter API key over REST (multi-provider Lot 6b).
+ *
+ * THE TEST THAT MATTERS is "never comes back in clear": the web client mirrors
+ * `GET /settings` into localStorage, so a plaintext key on that route would end
+ * up persisted in every operator's browser with no symptom whatsoever. The
+ * assertions below therefore search the RAW RESPONSE TEXT of every route that
+ * could plausibly serialise the settings row, not just the field we expect.
+ */
+const OR_KEY = 'sk-or-v1-integration-0123456789abcdef';
+
+describe('REST: /settings — the OpenRouter key', () => {
+  async function raw(path: string): Promise<string> {
+    const res = await fetch(url(path), { headers: authHeaders(stack.config.token) });
+    return res.text();
+  }
+
+  it('accepts a key, answers with the sentinel, and stores the real one', async () => {
+    const r = await patchSettings({ openrouterApiKey: OR_KEY });
+    expect(r.status).toBe(200);
+    // Masked in the response body…
+    expect(r.body.settings.openrouterApiKey).toBe(PASSWORD_SENTINEL);
+    // …and really stored server-side (the store is the only reader of the clear
+    // value, exactly as the opencode adapter reads it).
+    expect(stack.settingsStore.getOpenRouterApiKey()).toBe(OR_KEY);
+  });
+
+  it('NEVER returns the key in clear — on any route that serialises settings', async () => {
+    await patchSettings({ openrouterApiKey: OR_KEY });
+
+    const bodies: Array<[string, string]> = [
+      ['/settings', await raw('/settings')],
+      ['/info', await raw('/info')],
+      ['/health', await raw('/health')],
+      ['/orchestrators', await raw('/orchestrators')],
+      ['/providers', await raw('/providers')],
+      ['/plugins', await raw('/plugins')],
+    ];
+    for (const [route, text] of bodies) {
+      expect(text, `${route} must not contain the key`).not.toContain(OR_KEY);
+      // Not even a prefix: a truncated credential in a log is still a
+      // credential leak, and a "first 8 chars" display would pass the test above.
+      expect(text, `${route} must not contain a key prefix`).not.toContain('sk-or-v1-');
+    }
+    // The GET is masked, not empty — the drawer has to be able to render
+    // "configured" without ever receiving the secret.
+    expect(JSON.parse(bodies[0][1]).settings.openrouterApiKey).toBe(PASSWORD_SENTINEL);
+  });
+
+  it('keeps the stored key when the sentinel is echoed back', async () => {
+    await patchSettings({ openrouterApiKey: OR_KEY });
+    // Exactly what the form sends when the operator changes the accent and the
+    // masked field rides along untouched.
+    const r = await patchSettings({ openrouterApiKey: PASSWORD_SENTINEL, accent: '#8ab6e0' });
+    expect(r.body.settings.accent).toBe('#8ab6e0');
+    expect(r.body.settings.openrouterApiKey).toBe(PASSWORD_SENTINEL);
+    expect(stack.settingsStore.getOpenRouterApiKey()).toBe(OR_KEY);
+  });
+
+  it('survives an appearance PATCH that does not mention it', async () => {
+    await patchSettings({ openrouterApiKey: OR_KEY });
+    await patchSettings({ density: 'compact' });
+    expect(stack.settingsStore.getOpenRouterApiKey()).toBe(OR_KEY);
+  });
+
+  it('deletes on explicit null and on an emptied field', async () => {
+    await patchSettings({ openrouterApiKey: OR_KEY });
+    const nulled = await patchSettings({ openrouterApiKey: null });
+    expect(nulled.body.settings.openrouterApiKey).toBeNull();
+    expect(stack.settingsStore.getOpenRouterApiKey()).toBeNull();
+
+    await patchSettings({ openrouterApiKey: OR_KEY });
+    const blank = await patchSettings({ openrouterApiKey: '   ' });
+    expect(blank.body.settings.openrouterApiKey).toBeNull();
+    expect(stack.settingsStore.getOpenRouterApiKey()).toBeNull();
+  });
+
+  it('is preserved by /settings/reset — a theme reset must not revoke it', async () => {
+    await patchSettings({ openrouterApiKey: OR_KEY, accent: '#c79afa' });
+    const res = await fetch(url('/settings/reset'), {
+      method: 'POST',
+      headers: authHeaders(stack.config.token),
+    });
+    const body = (await res.json()) as { settings: { openrouterApiKey: string | null } };
+    expect(body.settings.openrouterApiKey).toBe(PASSWORD_SENTINEL);
+    expect(stack.settingsStore.getOpenRouterApiKey()).toBe(OR_KEY);
+  });
+
+  it('rejects a non-string, an over-long value, and a whitespace-bearing paste', async () => {
+    expect((await patchSettings({ openrouterApiKey: 42 })).status).toBe(400);
+    expect((await patchSettings({ openrouterApiKey: 'a'.repeat(513) })).status).toBe(400);
+    // A key with an embedded space or newline is a truncated copy. It would also
+    // land in the 0600 env file the agent's shell sources.
+    expect((await patchSettings({ openrouterApiKey: 'sk-or v1-abc' })).status).toBe(400);
+    expect((await patchSettings({ openrouterApiKey: 'sk-or\nv1-abc' })).status).toBe(400);
+    // …and nothing was stored by any of the rejected attempts.
+    expect(stack.settingsStore.getOpenRouterApiKey()).toBeNull();
+  });
+
+  it('never echoes a rejected value back in the error message', async () => {
+    const r = await patchSettings({ openrouterApiKey: `${OR_KEY} trailing garbage` });
+    expect(r.status).toBe(400);
+    expect(JSON.stringify(r.body)).not.toContain(OR_KEY);
   });
 });

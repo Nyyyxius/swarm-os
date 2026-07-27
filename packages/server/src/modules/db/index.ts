@@ -69,6 +69,8 @@ export interface OrchestratorRow {
   default_model: string;
   default_effort: string;
   default_permission_mode: string;
+  /** Provider inherited by every session of this team. `'claude'` for legacy rows. */
+  default_provider: string;
   lead_preamble: string | null;
   worker_preamble: string | null;
   created_at: string;
@@ -117,6 +119,8 @@ export interface RoleRow {
   default_model: string | null;
   default_effort: string | null;
   default_permission_mode: string | null;
+  /** NULL = inherit (instance default). Same shape as `default_model`. */
+  default_provider: string | null;
   connectors_json: string | null;
   schedule: string | null;
   schedule_message: string | null;
@@ -147,6 +151,17 @@ export interface InstanceSettingsRow {
    * is not a choice.
    */
   dismissed_update_version: string | null;
+  /**
+   * OpenRouter API key, IN CLEAR, as the `opencode` provider needs it at spawn
+   * (multi-provider Lot 6b). This is the one row in the database that holds a
+   * third-party credential, and the only legitimate reader is
+   * `SettingsStore.getOpenRouterApiKey()`.
+   *
+   * `SettingsStore.get()` — what every route serves — masks it with the plugin
+   * `PASSWORD_SENTINEL`, so the plaintext cannot reach a JSON response by
+   * accident. Anything that reads this field directly is bypassing that.
+   */
+  openrouter_api_key: string | null;
   updated_at: string;
 }
 
@@ -161,6 +176,8 @@ export interface SessionRow {
   model: string;
   effort: string;
   permission_mode: string;
+  /** Adapter id this agent runs under. `'claude'` for legacy rows. */
+  provider: string;
   status: SessionStatusRow;
   pid: number | null;
   started_at: string;
@@ -221,14 +238,18 @@ export class SwarmDb {
     this.applyMigrations();
 
     // Prepared statements — bound to `this` for use throughout the module.
+    // ⚠️ Adding a column here means adding it in THREE places: the INSERT list,
+    // the VALUES list, and the `ON CONFLICT DO UPDATE SET` list below. Miss the
+    // third and the column is written once at creation and never updated again
+    // — no error, no log, and the old value reappears after the next restart.
     this.upsertOrchStmt = this.db.prepare<OrchestratorRow>(`
       INSERT INTO orchestrators (
         id, name, role, role_id, status, lead_session_id, default_model, default_effort,
-        default_permission_mode, lead_preamble, worker_preamble, created_at,
+        default_permission_mode, default_provider, lead_preamble, worker_preamble, created_at,
         ended_at, hidden_at, last_error, stop_reason, last_resumed_at, resume_count
       ) VALUES (
         @id, @name, @role, @role_id, @status, @lead_session_id, @default_model, @default_effort,
-        @default_permission_mode, @lead_preamble, @worker_preamble, @created_at,
+        @default_permission_mode, @default_provider, @lead_preamble, @worker_preamble, @created_at,
         @ended_at, @hidden_at, @last_error, @stop_reason, @last_resumed_at, @resume_count
       )
       ON CONFLICT(id) DO UPDATE SET
@@ -240,6 +261,7 @@ export class SwarmDb {
         default_model = excluded.default_model,
         default_effort = excluded.default_effort,
         default_permission_mode = excluded.default_permission_mode,
+        default_provider = excluded.default_provider,
         lead_preamble = excluded.lead_preamble,
         worker_preamble = excluded.worker_preamble,
         ended_at = excluded.ended_at,
@@ -250,14 +272,15 @@ export class SwarmDb {
         -- hidden_at intentionally NOT overwritten: once hidden, stays hidden
     `);
 
+    // Same three-place rule as the orchestrator UPSERT above.
     this.upsertSessionStmt = this.db.prepare<SessionRow>(`
       INSERT INTO sessions (
         id, orchestrator_id, name, role, type, cwd, initial_prompt, model,
-        effort, permission_mode, status, pid, started_at, ended_at, exit_code,
+        effort, permission_mode, provider, status, pid, started_at, ended_at, exit_code,
         last_error, stop_reason, log_path, last_activity_at, hidden_at
       ) VALUES (
         @id, @orchestrator_id, @name, @role, @type, @cwd, @initial_prompt, @model,
-        @effort, @permission_mode, @status, @pid, @started_at, @ended_at, @exit_code,
+        @effort, @permission_mode, @provider, @status, @pid, @started_at, @ended_at, @exit_code,
         @last_error, @stop_reason, @log_path, @last_activity_at, @hidden_at
       )
       ON CONFLICT(id) DO UPDATE SET
@@ -269,6 +292,7 @@ export class SwarmDb {
         model = excluded.model,
         effort = excluded.effort,
         permission_mode = excluded.permission_mode,
+        provider = excluded.provider,
         status = excluded.status,
         pid = excluded.pid,
         ended_at = excluded.ended_at,
@@ -408,13 +432,13 @@ export class SwarmDb {
     this.insertRoleStmt = this.db.prepare<RoleRow>(`
       INSERT INTO roles (
         id, label, lead_prompt, lead_preamble, worker_preamble, worker_count,
-        default_model, default_effort, default_permission_mode, connectors_json,
-        schedule, schedule_message,
+        default_model, default_effort, default_permission_mode, default_provider,
+        connectors_json, schedule, schedule_message,
         created_at, updated_at
       ) VALUES (
         @id, @label, @lead_prompt, @lead_preamble, @worker_preamble, @worker_count,
-        @default_model, @default_effort, @default_permission_mode, @connectors_json,
-        @schedule, @schedule_message,
+        @default_model, @default_effort, @default_permission_mode, @default_provider,
+        @connectors_json, @schedule, @schedule_message,
         @created_at, @updated_at
       )
     `);
@@ -428,6 +452,7 @@ export class SwarmDb {
         default_model = @default_model,
         default_effort = @default_effort,
         default_permission_mode = @default_permission_mode,
+        default_provider = @default_provider,
         connectors_json = @connectors_json,
         schedule = @schedule,
         schedule_message = @schedule_message,
@@ -450,10 +475,10 @@ export class SwarmDb {
     this.upsertInstanceSettingsStmt = this.db.prepare<InstanceSettingsRow>(`
       INSERT INTO instance_settings (
         id, instance_label, accent, bg_tint, font_size, density, dark_mode,
-        dismissed_update_version, updated_at
+        dismissed_update_version, openrouter_api_key, updated_at
       ) VALUES (
         @id, @instance_label, @accent, @bg_tint, @font_size, @density, @dark_mode,
-        @dismissed_update_version, @updated_at
+        @dismissed_update_version, @openrouter_api_key, @updated_at
       )
       ON CONFLICT(id) DO UPDATE SET
         instance_label = excluded.instance_label,
@@ -463,6 +488,11 @@ export class SwarmDb {
         density = excluded.density,
         dark_mode = excluded.dark_mode,
         dismissed_update_version = excluded.dismissed_update_version,
+        -- A column missing from this list is written by the first INSERT and
+        -- never updated again: the operator saves a key, it works, and it is
+        -- silently gone after the next restart. settings/index.test.ts upserts
+        -- twice on purpose to catch exactly that.
+        openrouter_api_key = excluded.openrouter_api_key,
         updated_at = excluded.updated_at
     `);
   }
@@ -496,6 +526,19 @@ export class SwarmDb {
       // table wholesale), so every already-deployed instance gets the column
       // exclusively through this ALTER.
       { table: 'instance_settings', column: 'dismissed_update_version', ddl: 'ALTER TABLE instance_settings ADD COLUMN dismissed_update_version TEXT' },
+      // Multi-provider Lot 6b — OpenRouter credential for the `opencode`
+      // provider. Nullable with no default: "no key configured" is the state
+      // every existing instance is legitimately in, and the provider's probe
+      // already reports it as a distinct, actionable reason.
+      { table: 'instance_settings', column: 'openrouter_api_key', ddl: 'ALTER TABLE instance_settings ADD COLUMN openrouter_api_key TEXT' },
+      // Multi-provider (plan Lot 2). SQLite backfills a CONSTANT default on
+      // ADD COLUMN, so every pre-existing team/session row reads 'claude' —
+      // which is exactly what they were. No catch-up UPDATE, and none needed.
+      // `roles.default_provider` is nullable on purpose: NULL means "inherit",
+      // same convention as `roles.default_model`.
+      { table: 'orchestrators', column: 'default_provider', ddl: "ALTER TABLE orchestrators ADD COLUMN default_provider TEXT NOT NULL DEFAULT 'claude'" },
+      { table: 'roles',         column: 'default_provider', ddl: 'ALTER TABLE roles ADD COLUMN default_provider TEXT' },
+      { table: 'sessions',      column: 'provider',         ddl: "ALTER TABLE sessions ADD COLUMN provider TEXT NOT NULL DEFAULT 'claude'" },
     ];
     for (const a of additions) {
       try {
@@ -975,6 +1018,7 @@ CREATE TABLE IF NOT EXISTS orchestrators (
   default_model TEXT NOT NULL,
   default_effort TEXT NOT NULL,
   default_permission_mode TEXT NOT NULL,
+  default_provider TEXT NOT NULL DEFAULT 'claude',
   lead_preamble TEXT,
   worker_preamble TEXT,
   created_at TEXT NOT NULL,
@@ -999,6 +1043,7 @@ CREATE TABLE IF NOT EXISTS roles (
   default_model TEXT,
   default_effort TEXT,
   default_permission_mode TEXT,
+  default_provider TEXT,
   connectors_json TEXT,
   created_at TEXT NOT NULL,
   updated_at TEXT NOT NULL
@@ -1016,6 +1061,7 @@ CREATE TABLE IF NOT EXISTS sessions (
   model TEXT NOT NULL,
   effort TEXT NOT NULL,
   permission_mode TEXT NOT NULL,
+  provider TEXT NOT NULL DEFAULT 'claude',
   status TEXT NOT NULL,
   pid INTEGER,
   started_at TEXT NOT NULL,
@@ -1063,6 +1109,7 @@ CREATE TABLE IF NOT EXISTS instance_settings (
   density TEXT NOT NULL,
   dark_mode INTEGER NOT NULL DEFAULT 1,
   dismissed_update_version TEXT,
+  openrouter_api_key TEXT,
   updated_at TEXT NOT NULL
 );
 `;

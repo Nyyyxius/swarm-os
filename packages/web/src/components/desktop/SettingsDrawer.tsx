@@ -31,6 +31,7 @@ import { useNow } from '../../lib/useNow';
 import { formatUptime, formatClockShort } from '../../lib/format';
 import { AppearanceSection } from './AppearanceSection';
 import { MaintenanceSection } from './MaintenanceSection';
+import { OpenRouterKeySection } from './OpenRouterKeySection';
 import { UpdateSection } from './UpdateSection';
 import { type ShellMode } from '../../hooks/useShellMode';
 
@@ -191,6 +192,12 @@ export default function SettingsDrawer({
               </button>
             </div>
           </div>
+
+          {/* ── OPENROUTER ──────────────────────────────── */}
+          {/* Next to AUTHENTICATION because both are credentials, and the two
+              help texts spell out the difference: the token above never leaves
+              this browser, this key is stored server-side for the agents. */}
+          <OpenRouterKeySection />
 
           {/* ── ABOUT ───────────────────────────────────── */}
           <div className="drawer-section">

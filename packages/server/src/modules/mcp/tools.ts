@@ -468,7 +468,7 @@ export function registerTeamCommsTools(
     {
       title: 'Spawn a new worker session (lead-only)',
       description:
-        'Lead-only. Spawns a new claude PTY worker with its own mcp.json. Returns the new session metadata. cwd defaults to the lead\'s cwd; model/effort/permissionMode default to the orchestrator\'s defaults.',
+        "Lead-only. Spawns a new PTY worker agent with its own team-comms MCP. Returns the new session metadata. cwd defaults to the lead's cwd; provider/model/effort/permissionMode default to the team's defaults. `provider` selects which CLI the worker runs (see GET /providers) — that is how a mixed team is built, e.g. a claude lead with gemini workers.",
       inputSchema: {
         name: z.string(),
         role: z.string(),
@@ -477,6 +477,7 @@ export function registerTeamCommsTools(
         model: z.string().optional(),
         effort: z.string().optional(),
         permissionMode: z.string().optional(),
+        provider: z.string().optional(),
       },
       outputSchema: {
         session: z.object({
@@ -489,6 +490,7 @@ export function registerTeamCommsTools(
           model: z.string(),
           effort: z.string(),
           permissionMode: z.string(),
+          provider: z.string(),
         }),
       },
     },
@@ -503,6 +505,7 @@ export function registerTeamCommsTools(
         model?: string;
         effort?: string;
         permissionMode?: string;
+        provider?: string;
       };
       // Prompt size cap (same envelope as the REST orchestrator-create
       // surface, plan §13).
@@ -515,6 +518,21 @@ export function registerTeamCommsTools(
       }
       // Validate optional model/effort/permissionMode strings up-front so
       // the agent gets a clean MCP error rather than a vague spawn failure.
+      //
+      // The model is checked for EMPTINESS only, never against a catalogue: ids
+      // ship faster than our releases, so refusing a valid one is the worse
+      // failure. But `model: ""` is not a model id — it is an argv hole. Zod's
+      // `z.string()` accepts it, `??` inheritance does not treat it as absent,
+      // and the CLI receives `--model ''`. The HTTP twin
+      // (`routes/orchestrators.ts`, `POST /orchestrators/:id/workers`) has
+      // always answered 400 here; a lead calling the MCP tool must get the same
+      // answer, because a divergence between the two channels is itself a bug.
+      if (a.model != null && a.model.length === 0) {
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          'INVALID_MODEL: must be a non-empty string when provided',
+        );
+      }
       if (a.effort != null && !VALID_EFFORTS.has(a.effort)) {
         throw new McpError(
           ErrorCode.InvalidParams,
@@ -526,6 +544,27 @@ export function registerTeamCommsTools(
           ErrorCode.InvalidParams,
           `INVALID_PERMISSION_MODE: must be one of ${[...VALID_PERMS].join('|')}`,
         );
+      }
+      // Same up-front check for the provider id, against the live registry
+      // rather than a constant set (a plugin can add one). An unknown id would
+      // otherwise fall back to the team default and give the lead a worker it
+      // did not ask for, silently. The model string stays unvalidated on
+      // purpose — see `routes/orchestrators.ts`.
+      if (a.provider != null) {
+        const known = ctx.spawner.providerRegistry.types().map((t) => t.id);
+        if (!ctx.spawner.providerRegistry.has(a.provider)) {
+          throw new McpError(
+            ErrorCode.InvalidParams,
+            `UNKNOWN_PROVIDER: must be one of ${known.join('|')}`,
+          );
+        }
+        const availability = await ctx.spawner.providerAvailability.resolve(a.provider);
+        if (!availability.pending && !availability.available) {
+          throw new McpError(
+            ErrorCode.InvalidParams,
+            `PROVIDER_UNAVAILABLE: ${a.provider} — ${availability.reason ?? 'not available'}`,
+          );
+        }
       }
       // cwd validation — reuse the same realpath check as the REST surface
       // (plan §14). Defaults to the lead's cwd if omitted.
@@ -555,6 +594,7 @@ export function registerTeamCommsTools(
           model: a.model,
           effort: a.effort as EffortLevel | undefined,
           permissionMode: a.permissionMode as PermissionMode | undefined,
+          provider: a.provider,
         });
         logCall('team.spawn_worker', ctx, true);
         const v = worker.toView();
@@ -569,6 +609,7 @@ export function registerTeamCommsTools(
             model: v.model,
             effort: v.effort,
             permissionMode: v.permissionMode,
+            provider: v.provider,
           },
         });
       } catch (err) {

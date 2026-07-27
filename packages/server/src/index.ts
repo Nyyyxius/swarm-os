@@ -9,7 +9,7 @@ import { SwarmDb } from './modules/db/index.js';
 import { DbPersistence } from './modules/orchestrator/persistence.js';
 import { DiscordWebhookNotifier, NoOpNotifier, type Notifier } from './modules/notify/index.js';
 import { DiscordBotPool } from './modules/discord/pool.js';
-import { initClaudeRuntime } from './runtime/claude-init.js';
+import { createBuiltinProviderRegistry, OpencodeProvider } from './modules/providers/index.js';
 import { RoleStore } from './modules/roles/index.js';
 import { SettingsStore } from './modules/settings/index.js';
 import { MessagesAggregator } from './modules/metrics/aggregator.js';
@@ -91,27 +91,40 @@ log.info({
 // SSH transport: the host claude reads its own `~/.claude/` directly; no
 // container-side copy is needed and copying would actively re-introduce the
 // OAuth refresh race this mode is built to avoid. Skip.
+//
+// Goes through the PROVIDER REGISTRY rather than calling `initClaudeRuntime`
+// directly: the registry is the list of adapters this build ships, and each
+// one decides what (if anything) it needs materialised. Non-claude adapters
+// run on the host over SSH and answer `not-applicable`, so this loop is a
+// no-op for them — but a future adapter that DOES need a container-side copy
+// gets it for free instead of needing another branch here.
+const providerRegistry = createBuiltinProviderRegistry(config);
 if (config.agentTransport === 'ssh') {
   log.info({
     event: 'boot.claude_init_skipped',
     reason: 'ssh-transport',
-    note: 'host claude resolves ~/.claude/ in its own namespace',
+    note: 'host agents resolve their own ~/.X in the host namespace',
   });
 } else {
-  const claudeInit = initClaudeRuntime({
-    sourceDir: config.claudeSourceDir,
-    runtimeDir: config.claudeRuntimeDir,
-    claudeJsonSource: config.claudeJsonSource,
-  });
-  log.info({
-    event: 'boot.claude_init',
-    initialized: claudeInit.initialized,
-    copied: claudeInit.copied,
-    skipReason: claudeInit.skipReason ?? null,
-    entriesCopied: claudeInit.entriesCopied ?? null,
-    claudeJson: claudeInit.claudeJson ?? null,
-    claudeJsonSource: claudeInit.claudeJsonSource ?? null,
-  });
+  for (const provider of providerRegistry.list()) {
+    const outcome = provider.initRuntime({
+      sourceDir: config.claudeSourceDir,
+      runtimeDir: config.claudeRuntimeDir,
+      siblingSource: config.claudeJsonSource,
+    });
+    // Historical event name kept for claude: it is what operators grep when
+    // an agent lands on the interactive `/login` prompt.
+    log.info({
+      event: provider.id === 'claude' ? 'boot.claude_init' : 'boot.provider_init',
+      provider: provider.id,
+      initialized: outcome.initialized,
+      copied: outcome.copied,
+      skipReason: outcome.skipReason ?? null,
+      entriesCopied: outcome.entriesCopied ?? null,
+      claudeJson: outcome.sibling ?? null,
+      claudeJsonSource: outcome.siblingSource ?? null,
+    });
+  }
 }
 
 // ---- Phase 4: SQLite persistence ------------------------------------------
@@ -176,12 +189,41 @@ connectorRegistry.register('discord', new DiscordConnectorProvider(discordBotPoo
 
 const roleStore = new RoleStore(db);
 const settingsStore = new SettingsStore(db);
+
+// ---- Lot 6b: the opencode adapter's OpenRouter key ------------------------
+// The key lives in `instance_settings` (masked field in the settings drawer),
+// not in an env var: this deployment runs 24/7 and is never recreated for a
+// config change, so a credential that can only be rotated by replacing the
+// container is a credential that cannot be rotated.
+//
+// Bound HERE rather than in `createBuiltinProviderRegistry` because the
+// registry is built during phase 5 above, before the SQLite file is open —
+// there is no store to pass at construction. Nothing reads the key until a
+// spawn or an availability probe, both well after this line.
+const opencodeProvider = providerRegistry.get('opencode');
+if (opencodeProvider instanceof OpencodeProvider) {
+  opencodeProvider.useKeySource(settingsStore);
+  log.info({ event: 'boot.openrouter_key_source', source: 'instance_settings' });
+}
+
+// J2 — MCP tool registry. Consulted per-request when the SdkMcpServer is
+// rebuilt, and once per session spawn to list the plugin tools in the preamble.
+// Declared here, BEFORE the spawner, because the spawner takes it as a dep; it
+// has no constructor arguments, so the position is free.
+const pluginToolRegistry = new PluginToolRegistry();
+
 const spawner = new Spawner(config, {
   notifier,
   persistence,
   roleStore,
   discordBotPool,
   connectorRegistry,
+  // Every preamble — lead, worker, resumed, and whatever custom role text the
+  // operator wrote — gets the currently-registered plugin tools appended.
+  pluginTools: () => pluginToolRegistry.list(),
+  // Same registry the boot-time runtime init used, so `GET /providers` and the
+  // orchestrators answer from one table.
+  providerRegistry,
 });
 
 // ---- S9: in-memory `/metrics/messages` aggregator -------------------------
@@ -266,9 +308,9 @@ try {
     note: 'the plugin registry could not be opened — plugins are DISABLED for this boot and /plugins answers 404; every other subsystem is unaffected. Fix the plugins/plugin_kv schema and restart.',
   });
 }
-// J2 — registries consulted per-request (MCP tools) / per-request (HTTP zones).
-// Never torn down; enable/disable is a Map mutation.
-const pluginToolRegistry = new PluginToolRegistry();
+// J2 — registry consulted per-request (HTTP zones). Never torn down;
+// enable/disable is a Map mutation. Its MCP-tool sibling is declared ABOVE the
+// spawner, which reads it when building preambles.
 const pluginHttpRegistry = new PluginHttpRegistry();
 const pluginMessagingDefaults = {
   maxMessageSizeBytes: config.maxMessageSizeBytes,

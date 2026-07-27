@@ -78,6 +78,16 @@ export default [
     },
   },
   {
+    // Example plugins — plain ESM loaded in the server process (Node globals:
+    // fetch, Buffer, setTimeout, console…).
+    files: ['examples/**/*.{js,mjs,cjs}'],
+    languageOptions: {
+      globals: {
+        ...globals.node,
+      },
+    },
+  },
+  {
     // Phase 6 — service worker (runs in ServiceWorkerGlobalScope, not window).
     files: ['packages/web/public/sw.js'],
     languageOptions: {

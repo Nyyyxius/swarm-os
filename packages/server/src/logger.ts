@@ -71,6 +71,14 @@ const REDACT_PATHS = [
   // via a `format:'password'` field. Redacted wherever a plugin row is logged.
   'config_json',
   '*.config_json',
+  // Individual plugin secrets by conventional key name — `apiToken`
+  // (`examples/plugins/echo`, `novelai`) and `openaiApiKey`
+  // (`examples/plugins/discord-agent`). The `config_json` blob above only
+  // covers the whole row; these catch a single field pulled out of it.
+  'apiToken',
+  '*.apiToken',
+  'openaiApiKey',
+  '*.openaiApiKey',
 ];
 
 export function buildLogger(config?: Pick<Config, 'logLevel' | 'logPretty' | 'projectName'>): Logger {

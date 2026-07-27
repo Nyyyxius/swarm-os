@@ -13,6 +13,7 @@ import { createSessionsRouter } from './routes/sessions.js';
 import { createWsTicketRouter } from './routes/ws-ticket.js';
 import { createHooksRouter } from './routes/hooks.js';
 import { createRolesRouter } from './routes/roles.js';
+import { createProvidersRouter } from './routes/providers.js';
 import { createMetricsRouter } from './routes/metrics.js';
 import { createBackupRouter } from './routes/backup.js';
 import { createPreamblesRouter } from './routes/preambles.js';
@@ -297,7 +298,23 @@ export function createApp(
   app.use(createOrchestratorsRouter(spawner, config));
   app.use(createSessionsRouter(spawner, config));
   app.use(createWsTicketRouter(spawner));
-  app.use(createRolesRouter(roleStore, config, onRolesChanged, connectorRegistry));
+  // The provider registry is handed in so `defaultProvider` is validated by the
+  // form that sets it (400 UNKNOWN_PROVIDER) instead of surfacing days later at
+  // team creation.
+  app.use(
+    createRolesRouter(
+      roleStore,
+      config,
+      onRolesChanged,
+      connectorRegistry,
+      spawner.providerRegistry,
+    ),
+  );
+  // `GET /providers` — agent-provider catalogue + live availability. Mounted
+  // with the other business routes (behind X-Auth-Token): it names the CLIs
+  // installed on the deployment host, which is deployment detail, not public
+  // information like `/info`.
+  app.use(createProvidersRouter(spawner, config));
   app.use(createSettingsRouter(settingsStore));
   // `GET /ide-info` — VS Code web connection details for the authenticated
   // client. Mounted after the auth gate so it 401s without X-Auth-Token

@@ -33,6 +33,37 @@ ls ~/.claude/.credentials.json          # this file MUST exist afterwards
 Without `~/.claude/.credentials.json`, no agent can start — a spawned session
 hangs on the first-run theme picker.
 
+### Optional — the other agent providers
+
+Agents can also run on `codex` (OpenAI), `gemini` (Google) or `opencode`
+(any model reachable through OpenRouter), chosen per team and per agent. None
+of it is required for a standard install, and none of it changes the steps
+below — but two host facts decide whether those providers are usable at all:
+
+- **The image carries only the Claude Code CLI.** Under the default `local`
+  transport (what `examples/docker-compose.dist.yml` sets up) the other three
+  report themselves *unavailable*. That is the correct outcome, not a
+  misconfiguration. They become usable when the deployment runs the **`ssh`
+  transport**, where the agent process runs on the host.
+- **Each CLI must be installed *and logged in* on that host.** swarm-os ships
+  no API key for any provider; the agent inherits the host's credentials,
+  exactly as it does for Claude Code.
+
+```sh
+npm i -g @openai/codex      && codex login    # → ~/.codex/auth.json
+npm i -g @google/gemini-cli && gemini         # OAuth once → ~/.gemini/oauth_creds.json
+npm i -g opencode-ai                          # no login: the key is set in the UI
+```
+
+`opencode` authenticates with an **OpenRouter API key**, entered in the web UI
+under **SETTINGS ▸ OPENROUTER** (stored server-side, masked, applied to the next
+agent spawn without a restart). Without it, opencode reads as *installed but
+unavailable*.
+
+A CLI installed on the host becomes selectable at the next availability poll
+(60 s) — no container restart. Full guide, including what each CLI can and
+cannot express: [../providers.md](../providers.md).
+
 ---
 
 ## 2. Get the image (GHCR)
@@ -71,6 +102,28 @@ Edit `.env` — at minimum:
 
 The same file, next to `examples/docker-compose.dist.yml`, is
 [`examples/.env.example`](../../examples/.env.example).
+
+Optional, and only relevant if you use a provider other than Claude (§1):
+
+- `SWARM_OS_DEFAULT_PROVIDER` — `claude` (default), `codex`, `gemini` or
+  `opencode`; what a team gets when neither the request nor the role names one.
+  An unknown value stops the boot rather than falling back silently. It also
+  decides `SWARM_OS_DEFAULT_MODEL` when that one is left unset: the instance
+  default becomes the default model *of this provider*, never a claude id on a
+  foreign CLI.
+- `SWARM_OS_HOST_CODEX_DIR` / `SWARM_OS_HOST_GEMINI_DIR` /
+  `SWARM_OS_HOST_OPENCODE_DIR` — the host's state directory for each CLI,
+  siblings of `SWARM_OS_HOST_CLAUDE_DIR` and needed for the same reason. **Set
+  them explicitly under the `ssh` transport**: their default is derived from the
+  *container's* home (`/home/node/.codex`…), a path that does not exist on the
+  host, so the per-session credential symlinks dangle and the agent fails its
+  first turn on an authentication error with nothing visible at spawn.
+- `SWARM_OS_OPENROUTER_API_KEY` — a dev/CI fallback only. The normal path is
+  **SETTINGS ▸ OPENROUTER** in the UI; a key stored there always wins.
+
+As with `SWARM_OS_GITHUB_TOKEN`, a variable only reaches the process if the
+compose service names it in `environment:` — that block is an explicit
+allow-list (§7.4).
 
 ---
 
@@ -294,6 +347,18 @@ release.
 - **`pull access denied` / `unauthorized`** — log in to GHCR with a
   `read:packages` PAT and confirm the maintainer granted your account access to
   the package.
+- **A provider is greyed out when creating a team** — hover it: the reason comes
+  from a live probe. `not on PATH` means the CLI is missing *on the host that
+  runs the agents* (§1); install it and it lights up within 60 s, no restart.
+  Under the `local` transport everything but `claude` is unavailable by design.
+- **A codex/gemini agent starts, shows no error, then fails on authentication**
+  — either the CLI is not logged in on the host, or
+  `SWARM_OS_HOST_CODEX_DIR` / `_GEMINI_DIR` is unset and the per-session
+  credential symlinks point at a container path (§3).
+- **A codex/gemini/opencode team looks silent and never shows `waiting`** —
+  expected: those CLIs have no "blocked on a human" signal, so
+  `SWARM_OS_COMPACT_ON_WAITING` is a no-op for them. See
+  [../providers.md](../providers.md).
 - **IDE iframe is blank** — confirm port 8790 is published and (when remote)
   served over HTTPS matching the UI's scheme.
 - **SYSTEM UPDATE says "no SWARM_OS_GITHUB_TOKEN" although you set one** — the

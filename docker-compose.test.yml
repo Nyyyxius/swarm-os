@@ -49,6 +49,20 @@ services:
       SWARM_OS_SSH_KEY: /host-ssh/fyrel-dev-spawner
       SWARM_OS_HOST_DATA_DIR: ${HOME}/.swarm-os/test
       SWARM_OS_HOST_CLAUDE_DIR: ${HOME}/.claude
+      # Multi-provider: one host config dir per agent CLI. These MUST be set
+      # explicitly under the ssh transport — the default is derived from the
+      # CONTAINER home (/home/node), so an unset variable makes the per-session
+      # credential symlinks dangle and the agent fails on an auth error with no
+      # dialog to show for it. Harmless when the CLI is not installed on the
+      # host: the availability probe simply reports the provider unavailable.
+      SWARM_OS_HOST_CODEX_DIR: ${HOME}/.codex
+      SWARM_OS_HOST_GEMINI_DIR: ${HOME}/.gemini
+      SWARM_OS_HOST_OPENCODE_DIR: ${HOME}/.config/opencode
+      # gemini has no "use whatever works" auth mode and the container cannot
+      # see the host's ~/.gemini, so the adapter defaults to `gemini-api-key`
+      # (a failure visible in the PTY) rather than `oauth-personal` (a silent
+      # authorization prompt). Set this when the host is logged in with Google.
+      SWARM_OS_GEMINI_AUTH_TYPE: ${SWARM_OS_GEMINI_AUTH_TYPE:-}
       SWARM_OS_HOST_WORKSPACE_ROOT: ${HOME}/projets/test
       # Update detection. `environment:` here is an explicit allow-list, so a
       # variable that is not named on this line NEVER reaches the process —

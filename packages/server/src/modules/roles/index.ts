@@ -101,6 +101,11 @@ export interface Role {
   defaultModel: string | null;
   defaultEffort: EffortLevel | null;
   defaultPermissionMode: PermissionMode | null;
+  /**
+   * Agent provider a team of this role starts on. NULL = inherit the instance
+   * default (`config.defaultProvider`). Same nullable shape as `defaultModel`.
+   */
+  defaultProvider: string | null;
   connectors: Connector[];
   /**
    * 5-field cron expression. When set, the in-process RoleScheduler
@@ -129,6 +134,7 @@ export interface RoleInit {
   defaultModel?: string | null;
   defaultEffort?: EffortLevel | null;
   defaultPermissionMode?: PermissionMode | null;
+  defaultProvider?: string | null;
   connectors?: Connector[];
   schedule?: string | null;
   scheduleMessage?: string | null;
@@ -160,6 +166,7 @@ function rowToRole(row: RoleRow): Role {
     defaultModel: row.default_model,
     defaultEffort: row.default_effort as EffortLevel | null,
     defaultPermissionMode: row.default_permission_mode as PermissionMode | null,
+    defaultProvider: row.default_provider,
     connectors,
     schedule: row.schedule,
     scheduleMessage: row.schedule_message,
@@ -179,6 +186,7 @@ function roleToRow(r: Role): RoleRow {
     default_model: r.defaultModel,
     default_effort: r.defaultEffort,
     default_permission_mode: r.defaultPermissionMode,
+    default_provider: r.defaultProvider,
     connectors_json: r.connectors.length ? JSON.stringify(r.connectors) : null,
     schedule: r.schedule,
     schedule_message: r.scheduleMessage,
@@ -202,6 +210,7 @@ export class RoleStore {
       defaultModel: init.defaultModel ?? null,
       defaultEffort: init.defaultEffort ?? null,
       defaultPermissionMode: init.defaultPermissionMode ?? null,
+      defaultProvider: init.defaultProvider ?? null,
       connectors: init.connectors ?? [],
       schedule: init.schedule ?? null,
       scheduleMessage: init.scheduleMessage ?? null,
@@ -237,6 +246,8 @@ export class RoleStore {
         patch.defaultPermissionMode !== undefined
           ? patch.defaultPermissionMode
           : existing.defaultPermissionMode,
+      defaultProvider:
+        patch.defaultProvider !== undefined ? patch.defaultProvider : existing.defaultProvider,
       connectors: patch.connectors !== undefined ? patch.connectors : existing.connectors,
       schedule: patch.schedule !== undefined ? patch.schedule : existing.schedule,
       scheduleMessage:

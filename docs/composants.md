@@ -20,8 +20,8 @@ Backend Node.js / TypeScript (ESM, Node ≥22, runtime Docker `node:24-bookworm-
 | Validation | `zod` |
 | Logs structurés | `pino` (+ `pino-pretty` en dev) |
 
-Modules métier : `orchestrator`, `spawner`, `roles`, `preambles`, `notify`,
-`mcp`, `db`.
+Modules métier : `orchestrator`, `spawner`, `roles`, `preambles`, `providers`,
+`notify`, `mcp`, `db`.
 
 ---
 
@@ -41,8 +41,10 @@ SPA + PWA (shell mobile via Tailscale).
 
 ## 3. Sessions agents
 
-Composante centrale du système : une "session" = un processus `claude` (CLI
-Anthropic) lancé dans un **PTY** et piloté par le server.
+Composante centrale du système : une "session" = un processus CLI d'agent lancé
+dans un **PTY** et piloté par le server. Historiquement toujours `claude` (CLI
+Anthropic) — c'est ce que décrit cette section ; depuis le chantier
+multi-provider, le binaire dépend du provider choisi (cf. §3.7).
 
 ### 3.1 Anatomie d'une session
 
@@ -190,6 +192,58 @@ Pas d'isolation au runtime — toutes les sessions tournent en
 `bypassPermissions` dans le **même** container Docker. L'isolation = la
 frontière du container (plan §14). MCP et HTTP server bindent loopback
 uniquement.
+
+### 3.7 Providers d'agents (`modules/providers/`)
+
+Le binaire de session n'est plus câblé en dur. Un **registre d'adaptateurs**
+(`ProviderRegistry`, calqué sur `ConnectorRegistry`) porte quatre built-ins
+non masquables, et `Session` délègue à l'adaptateur tout ce qui est spécifique
+au CLI. Doc de référence : [`providers.md`](providers.md).
+
+| Provider | Binaire | Isolation par session | Préambule durable |
+|---|---|---|---|
+| `claude` | `claude` | `CLAUDE_CONFIG_DIR` | `--append-system-prompt` |
+| `codex` | `codex` | `CODEX_HOME` | `<sd>/AGENTS.md` |
+| `gemini` | `gemini` | `GEMINI_CLI_HOME` (config sous `<sd>/.gemini/`) | `<sd>/.gemini/GEMINI.md` |
+| `opencode` | `opencode` | `OPENCODE_CONFIG_CONTENT` + `XDG_*` par session | `instructions[]` |
+
+- **Contrat en trois phases** (`types.ts`), qui préserve l'ordre d'appel
+  historique de `Session` : `prepareSessionConfig` (constructeur — répertoire
+  0700, symlinks d'état partagé, pré-acceptation des dialogues de confiance,
+  hook de notification, préambule), `writeMcpConfig` (au spawn, dans le log déjà
+  ouvert), puis `buildSpawn` (pur : argv + env). Les adaptateurs écrivent des
+  chemins conteneur et les traduisent via un `AgentPathMapper` (`data()` pour ce
+  que le serveur a écrit, `workspace()` pour ce que l'**agent** résout), ce qui
+  les rend aveugles au transport.
+- **Secrets** : `PreparedSpawn.secretEnv` est écrit dans un fichier 0600 sourcé
+  par le shell distant, au lieu du préfixe `env K=V` visible par `ps` sur l'hôte.
+- **Disponibilité** (`availability.ts`) — cache TTL 60 s par
+  `(providerId, transport)`, serve-stale-and-refresh, single-flight ; sonde via
+  `spawnSync` en local et `ssh-exec` en SSH. Installer un CLI sur l'hôte le rend
+  sélectionnable au sondage suivant, **sans redémarrer le conteneur**.
+- **Exposition** : `GET /providers` (`http/routes/providers.ts`) rend le
+  catalogue — modèles, `capabilities`, `defaults`, `available` +
+  `unavailableReason` — et tue les 4 listes de modèles autrefois dupliquées
+  côté web.
+- **Persistance** : `orchestrators.default_provider` (défaut `claude`),
+  `roles.default_provider` (NULL = hérite), `sessions.provider` — l'auto-resume
+  relance chaque agent sur *son* provider.
+- **Capacités et dégradations assumées** : `effort` est faux pour `gemini` et
+  `opencode` (aucun équivalent CLI) ; seul `claude` a un vocabulaire de
+  permissions (les autres déclarent le seul `bypassPermissions`) ; la sémantique
+  de notification vaut `needs-human` (claude), `turn-complete` (codex, gemini —
+  jamais de statut `waiting`, donc `SWARM_OS_COMPACT_ON_WAITING` sans effet) ou
+  rien (opencode, dont le flux SSE `/event` n'a pas encore de consommateur).
+- **Renommage des outils MCP** : trois adaptateurs sur quatre rendent au modèle
+  des noms réécrits (`team.whoami` → `team_whoami` chez codex,
+  `mcp_team-comms_team.whoami` chez gemini, `team_team_whoami` chez opencode) ;
+  claude garde délibérément les noms pointés canoniques (cf. `providers.md`).
+  `AgentProvider.mcpToolName` est la source de vérité, consommée uniquement par
+  `orchestrator/preamble.ts` ; partout ailleurs le nom pointé canonique reste
+  l'identifiant.
+- **Clé OpenRouter** (provider `opencode`) : colonne `openrouter_api_key` de
+  `instance_settings`, masquée par `PASSWORD_SENTINEL`, éditable à chaud depuis
+  SETTINGS ▸ OPENROUTER ; `SWARM_OS_OPENROUTER_API_KEY` n'est qu'un repli dev/CI.
 
 ---
 

@@ -1,5 +1,5 @@
 import { useCallback, useEffect, useState } from 'react';
-import { api, type OrchestratorView } from '../api/client';
+import { api, type OrchestratorView, type SessionView } from '../api/client';
 
 interface State {
   orchestrators: OrchestratorView[];
@@ -10,6 +10,10 @@ interface State {
 export function useOrchestrators(refreshMs = 3000): State & {
   refresh: () => Promise<void>;
   create: (body: Parameters<typeof api.createOrchestrator>[0]) => Promise<OrchestratorView>;
+  spawnWorker: (
+    orchestratorId: string,
+    body: Parameters<typeof api.spawnWorker>[1],
+  ) => Promise<SessionView>;
   destroy: (id: string) => Promise<void>;
 } {
   const [state, setState] = useState<State>({ orchestrators: [], loading: true, error: null });
@@ -44,6 +48,26 @@ export function useOrchestrators(refreshMs = 3000): State & {
     [refresh],
   );
 
+  /**
+   * Multi-provider Lot 7 — add a worker to a live team. Awaits a `refresh()`
+   * before resolving, exactly like `create` above: the caller (and the map) must
+   * see the new session by the time the dialog closes, rather than waiting up to
+   * `refreshMs` for the next poll.
+   */
+  const spawnWorker = useCallback<
+    (
+      orchestratorId: string,
+      body: Parameters<typeof api.spawnWorker>[1],
+    ) => Promise<SessionView>
+  >(
+    async (orchestratorId, body) => {
+      const res = await api.spawnWorker(orchestratorId, body);
+      await refresh();
+      return res.session;
+    },
+    [refresh],
+  );
+
   const destroy = useCallback(
     async (id: string) => {
       await api.destroyOrchestrator(id);
@@ -52,5 +76,5 @@ export function useOrchestrators(refreshMs = 3000): State & {
     [refresh],
   );
 
-  return { ...state, refresh, create, destroy };
+  return { ...state, refresh, create, spawnWorker, destroy };
 }

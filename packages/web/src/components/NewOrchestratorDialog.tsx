@@ -1,7 +1,22 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
-import type { OrchestratorView, RoleView } from '../api/client';
+import { apiErrorMessage, type OrchestratorView, type RoleView } from '../api/client';
 import { useRoles } from '../hooks/useRoles';
+import { useProviders } from '../hooks/useProviders';
 import { RoleDialog } from './RoleDialog';
+import {
+  ModelSelect,
+  ProviderSelect,
+  defaultModelFor,
+  effortNote,
+  effortsFor,
+  findProvider,
+  isPermissionChoice,
+  notificationNote,
+  permissionNote,
+  permissionsFor,
+  unavailableNote,
+} from './ProviderFields';
+import { EFFORTS, PERMS } from './desktop/constants';
 
 /**
  * Phase C — Step 9 — v2 port.
@@ -19,6 +34,10 @@ import { RoleDialog } from './RoleDialog';
  * zIndex: 110 }}` to push it above this dialog's `.modal-backdrop` (which
  * lives at `z-index: 100`). Once RoleDialog is also ported to v2 (Step 10)
  * this prop can drop back to its default and we can remove the override.
+ *
+ * Multi-provider Lot 3 — PROVIDER is now the first technical field, and MODEL /
+ * EFFORT / PERMISSION are all derived from it (`GET /providers`). The local
+ * `MODELS` array this file used to carry is gone; see `ProviderFields.tsx`.
  */
 
 interface Props {
@@ -29,25 +48,25 @@ interface Props {
     role?: string;
     roleId?: string;
     lead: { cwd: string; prompt?: string; preamble?: string };
-    defaults?: { model?: string; effort?: string; permissionMode?: string };
+    defaults?: {
+      provider?: string;
+      model?: string;
+      effort?: string;
+      permissionMode?: string;
+    };
   }) => Promise<OrchestratorView>;
 }
 
 const CREATE_ROLE_SENTINEL = '__create_new__';
 
-const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
-const PERMS = ['auto', 'acceptEdits', 'bypassPermissions', 'default', 'dontAsk', 'plan'] as const;
-// Kept verbose on purpose (vs proto's `m.replace('claude-', '')`): operators
-// need to see the exact model id they're committing to. Source of truth for
-// supported models — do NOT replace with the proto's outdated list.
-const MODELS = [
-  { value: 'claude-opus-4-8', label: 'Opus 4.8 (claude-opus-4-8)' },
-  { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6 (claude-sonnet-4-6)' },
-  { value: 'claude-haiku-4-5-20251001', label: 'Haiku 4.5 (claude-haiku-4-5-20251001)' },
-] as const;
-
 export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
   const { roles, create: createRole } = useRoles();
+  const {
+    providers,
+    defaultProvider: serverDefaultProvider,
+    transport,
+    refresh: refreshProviders,
+  } = useProviders();
   const [name, setName] = useState('');
   const [selectedRoleId, setSelectedRoleId] = useState<string>('');
   const [role, setRole] = useState('');
@@ -56,7 +75,12 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
   const [cwd, setCwd] = useState('/');
   const [prompt, setPrompt] = useState('');
   const [preamble, setPreamble] = useState('');
-  const [model, setModel] = useState<string>('claude-opus-4-8');
+  const [provider, setProvider] = useState<string>('');
+  const [model, setModel] = useState<string>('');
+  // EFFORT / PERMISSION keep the operator's last explicit pick even while the
+  // selected provider cannot express it. What is displayed and submitted is the
+  // *effective* value derived below — so switching provider back restores the
+  // intent instead of having silently overwritten it.
   const [effort, setEffort] = useState<(typeof EFFORTS)[number]>('xhigh');
   const [perm, setPerm] = useState<(typeof PERMS)[number]>('bypassPermissions');
   const [submitting, setSubmitting] = useState(false);
@@ -93,17 +117,82 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
   useEffect(() => {
     if (!selectedRole) return;
     setRole(selectedRole.label);
-    if (selectedRole.defaultModel) setModel(selectedRole.defaultModel);
+    // PROVIDER before MODEL — and the role's MODEL only travels with the role's
+    // PROVIDER. This mirrors the server rule (`providers/resolve.ts`): a model id
+    // belongs to whoever supplied it.
+    //
+    // The case that matters is every role written before multi-provider: a
+    // `defaultModel` like `claude-opus-4-8` and NO `defaultProvider`. Such a role
+    // inherits the instance default, so picking it while the form sits on gemini
+    // used to paste a claude id into a gemini team — and because the operator
+    // then submits it EXPLICITLY, the server (rightly) never second-guesses the
+    // string. The browser is the only place this one can be caught.
+    const roleProvider = selectedRole.defaultProvider || serverDefaultProvider || '';
+    // Provider after this effect: the role's when it names one, otherwise the
+    // operator's current pick stands (a role with no opinion must not clobber it).
+    const nextProvider = selectedRole.defaultProvider || provider || serverDefaultProvider || '';
+    if (selectedRole.defaultProvider) setProvider(selectedRole.defaultProvider);
+    // `''` is not "no model": it means "use whatever `nextProvider` defaults to",
+    // which `effectiveModel` resolves and submits.
+    setModel(
+      selectedRole.defaultModel && roleProvider === nextProvider
+        ? selectedRole.defaultModel
+        : '',
+    );
     if (selectedRole.defaultEffort) setEffort(selectedRole.defaultEffort);
     if (selectedRole.defaultPermissionMode) {
       setPerm(selectedRole.defaultPermissionMode as (typeof PERMS)[number]);
     }
     if (!promptEditedRef.current) setPrompt(selectedRole.leadPrompt ?? '');
     if (!preambleEditedRef.current) setPreamble(selectedRole.leadPreamble ?? '');
-    // We intentionally depend only on `selectedRole` so retyping prompt/
-    // preamble doesn't trigger an auto-fill loop.
+    // `selectedRole` — plus `serverDefaultProvider`, because it is what a role
+    // with no `defaultProvider` inherits and the catalogue can land AFTER the
+    // role does (two independent async sources). Without it, a role picked
+    // during that window would keep the scoping decision it made while the
+    // instance default was still unknown. It transitions once, `undefined` →
+    // value, so this costs at most one extra idempotent pass. `provider` is
+    // deliberately NOT a dependency: re-running on the operator's own pick would
+    // undo it. Prompt/preamble are guarded by the *EditedRef flags either way.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [selectedRole]);
+  }, [selectedRole, serverDefaultProvider]);
+
+  // ── PROVIDER wiring ────────────────────────────────────────────────────
+  const selectedProvider = findProvider(providers, provider);
+  const efforts = effortsFor(selectedProvider);
+  const perms = permissionsFor(selectedProvider);
+  const permIsChoice = isPermissionChoice(selectedProvider);
+  // Displayed AND submitted. Falls back to the adapter's own default whenever
+  // the stored pick is not something this provider accepts, so the form can
+  // never promise a knob the CLI does not have.
+  const effectiveEffort = efforts.length > 0 ? effort : selectedProvider?.defaults.effort ?? effort;
+  const effectivePerm = perms.includes(perm) ? perm : perms[0] ?? perm;
+  // No model chosen anywhere ⇒ show (and send) the provider's own default. The
+  // server applies the same rule; showing it beats leaving the field blank.
+  const effectiveModel = model || defaultModelFor(selectedProvider);
+
+  // Re-probe on every open, not just on mount: the availability verdict has a
+  // 60 s TTL server-side, so a CLI installed on the host minutes ago appears
+  // without reloading the page — which matters for a container that never
+  // restarts. Bootstraps `provider` from the server default on the same beat.
+  useEffect(() => {
+    if (!open) return;
+    void refreshProviders();
+  }, [open, refreshProviders]);
+
+  useEffect(() => {
+    if (!open || provider || !serverDefaultProvider) return;
+    setProvider(serverDefaultProvider);
+  }, [open, provider, serverDefaultProvider]);
+
+  /**
+   * Switching provider resets MODEL to the new provider's default — leaving a
+   * `claude-opus-*` id selected under `gemini` would be a spawn failure the
+   * operator only discovers in the session log.
+   */
+  function onProviderPicked(id: string) {
+    setProvider(id);
+    setModel(defaultModelFor(findProvider(providers, id)));
+  }
 
   // The dialog stays mounted across open/close (DesktopShell toggles `open`),
   // so without an explicit reset every field would keep whatever the previous
@@ -121,7 +210,10 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
     setCwd('/');
     setPrompt('');
     setPreamble('');
-    setModel('claude-opus-4-8');
+    // Empty, not a hard-coded id: the effective value comes from the provider
+    // (`effectiveModel`), and the provider from the server default.
+    setProvider('');
+    setModel('');
     setEffort('xhigh');
     setPerm('bypassPermissions');
     setError(null);
@@ -164,11 +256,23 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
           prompt: prompt.trim(),
           ...(preamble.trim() ? { preamble: preamble.trim() } : {}),
         },
-        defaults: { model, effort, permissionMode: perm },
+        defaults: {
+          // Send what the form displays: the effective triplet, plus the
+          // provider so the server does not have to guess. Empty strings are
+          // omitted so the server's own body > role > config precedence keeps
+          // working when the catalogue never loaded.
+          ...(provider ? { provider } : {}),
+          ...(effectiveModel ? { model: effectiveModel } : {}),
+          effort: effectiveEffort,
+          permissionMode: effectivePerm,
+        },
       });
       onClose();
     } catch (err) {
-      setError(err instanceof Error ? err.message : String(err));
+      // `UNKNOWN_PROVIDER` (400) and `PROVIDER_UNAVAILABLE` (409) carry a code
+      // and a written reason; `HttpError.message` alone would read
+      // "HTTP 409 POST /orchestrators", which tells the operator nothing.
+      setError(apiErrorMessage(err));
     } finally {
       setSubmitting(false);
     }
@@ -265,19 +369,49 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
             />
           </div>
 
-          <div className="field-3">
+          {/* PROVIDER first: MODEL, EFFORT and PERMISSION are all derived
+              from it. Unavailable adapters stay listed and disabled with their
+              reason, so the operator learns WHY codex or gemini cannot be
+              picked instead of watching them silently not exist. */}
+          <div className="field-row">
+            <div className="field">
+              <label htmlFor="orch-provider">PROVIDER</label>
+              <ProviderSelect
+                id="orch-provider"
+                value={provider}
+                providers={providers}
+                onChange={onProviderPicked}
+              />
+              <div className="field-help">
+                {selectedProvider
+                  ? `${selectedProvider.binary}${
+                      selectedProvider.version ? ` · ${selectedProvider.version}` : ''
+                    }${transport ? ` · transport ${transport}` : ''}`
+                  : 'agent CLI driving this team'}
+              </div>
+            </div>
             <div className="field">
               <label htmlFor="orch-model">MODEL</label>
-              <select
+              <ModelSelect
                 id="orch-model"
-                value={model}
-                onChange={(e) => setModel(e.target.value)}
-              >
-                {MODELS.map((m) => (
-                  <option key={m.value} value={m.value}>{m.label}</option>
-                ))}
-              </select>
+                value={effectiveModel}
+                provider={selectedProvider}
+                onChange={setModel}
+              />
+              <div className="field-help">
+                exact id sent to the CLI — pick “other…” for one we do not list yet
+              </div>
             </div>
+          </div>
+
+          {unavailableNote(selectedProvider, transport) && (
+            <div className="field-warn">⚠ {unavailableNote(selectedProvider, transport)}</div>
+          )}
+          {notificationNote(selectedProvider) && (
+            <div className="field-help">{notificationNote(selectedProvider)}</div>
+          )}
+
+          <div className="field-row">
             <div className="field">
               <label>EFFORT</label>
               <div className="seg-radio" role="radiogroup" aria-label="effort">
@@ -286,30 +420,38 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
                     key={ef}
                     type="button"
                     role="radio"
-                    aria-checked={effort === ef}
-                    className={effort === ef ? 'on' : ''}
+                    aria-checked={effectiveEffort === ef}
+                    className={effectiveEffort === ef ? 'on' : ''}
+                    disabled={efforts.length === 0}
                     onClick={() => setEffort(ef)}
                   >
                     {ef}
                   </button>
                 ))}
               </div>
+              {effortNote(selectedProvider) && (
+                <div className="field-help">{effortNote(selectedProvider)}</div>
+              )}
             </div>
             <div className="field">
               <label htmlFor="orch-perm">PERMISSION</label>
               <select
                 id="orch-perm"
-                value={perm}
+                value={effectivePerm}
+                disabled={!permIsChoice}
                 onChange={(e) => setPerm(e.target.value as (typeof PERMS)[number])}
               >
-                {PERMS.map((p) => (
+                {perms.map((p) => (
                   <option key={p} value={p}>{p}</option>
                 ))}
               </select>
+              {permissionNote(selectedProvider) && (
+                <div className="field-help">{permissionNote(selectedProvider)}</div>
+              )}
             </div>
           </div>
 
-          {perm === 'bypassPermissions' && (
+          {effectivePerm === 'bypassPermissions' && (
             <div className="field-warn" role="alert">
               ⚠ bypassPermissions :: agent will skip ALL permission prompts.
               Safe inside the swarm-os container; do NOT use outside isolated

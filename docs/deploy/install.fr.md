@@ -34,6 +34,38 @@ ls ~/.claude/.credentials.json          # ce fichier DOIT exister ensuite
 Sans `~/.claude/.credentials.json`, aucun agent ne démarre — une session lancée se
 fige sur le sélecteur de thème du premier lancement.
 
+### Optionnel — les autres providers d'agents
+
+Les agents peuvent aussi tourner sur `codex` (OpenAI), `gemini` (Google) ou
+`opencode` (n'importe quel modèle joignable via OpenRouter), au choix par équipe
+et par agent. Rien de tout cela n'est requis pour une install standard et rien
+ne change dans les étapes ci-dessous — mais deux faits côté hôte décident si ces
+providers sont utilisables :
+
+- **L'image ne contient que le CLI Claude Code.** Sous le transport `local` par
+  défaut (ce que met en place `examples/docker-compose.dist.yml`), les trois
+  autres se déclarent *indisponibles*. C'est le comportement correct, pas une
+  erreur de configuration. Ils deviennent utilisables quand le déploiement passe
+  au transport **`ssh`**, où le process de l'agent tourne sur l'hôte.
+- **Chaque CLI doit être installé *et connecté* sur cet hôte.** swarm-os ne
+  contient aucune clé API pour aucun provider ; l'agent hérite des identifiants
+  de l'hôte, exactement comme pour Claude Code.
+
+```sh
+npm i -g @openai/codex      && codex login    # → ~/.codex/auth.json
+npm i -g @google/gemini-cli && gemini         # login OAuth une fois → ~/.gemini/oauth_creds.json
+npm i -g opencode-ai                          # pas de login : la clé se saisit dans l'UI
+```
+
+`opencode` s'authentifie avec une **clé API OpenRouter**, saisie dans l'UI web
+sous **SETTINGS ▸ OPENROUTER** (stockée côté serveur, masquée, appliquée au
+prochain spawn d'agent sans redémarrage). Sans elle, opencode apparaît *installé
+mais indisponible*.
+
+Un CLI installé sur l'hôte devient sélectionnable au prochain sondage de
+disponibilité (60 s) — sans redémarrer le conteneur. Guide complet, avec ce que
+chaque CLI sait et ne sait pas exprimer : [../providers.md](../providers.md).
+
 ---
 
 ## 2. Récupérer l'image (GHCR)
@@ -73,6 +105,30 @@ cp .env.example .env
 
 Le même fichier, à côté de `examples/docker-compose.dist.yml`, est
 [`examples/.env.example`](../../examples/.env.example).
+
+Optionnel, et utile uniquement si tu utilises un provider autre que Claude (§1) :
+
+- `SWARM_OS_DEFAULT_PROVIDER` — `claude` (défaut), `codex`, `gemini` ou
+  `opencode` ; ce que reçoit une équipe quand ni la requête ni le rôle n'en
+  nomme un. Une valeur inconnue arrête le boot au lieu de retomber
+  silencieusement sur un défaut. C'est aussi lui qui détermine
+  `SWARM_OS_DEFAULT_MODEL` quand celui-ci n'est pas renseigné : le défaut de
+  l'instance devient le modèle par défaut *de ce provider*, jamais un
+  identifiant claude sur un CLI étranger.
+- `SWARM_OS_HOST_CODEX_DIR` / `SWARM_OS_HOST_GEMINI_DIR` /
+  `SWARM_OS_HOST_OPENCODE_DIR` — le répertoire d'état de chaque CLI sur l'hôte,
+  frères de `SWARM_OS_HOST_CLAUDE_DIR` et nécessaires pour la même raison.
+  **À renseigner explicitement sous le transport `ssh`** : leur défaut dérive du
+  home du *conteneur* (`/home/node/.codex`…), un chemin qui n'existe pas sur
+  l'hôte — les liens symboliques d'identifiants par session pendouillent alors,
+  et l'agent échoue sur une erreur d'authentification au premier tour sans que
+  rien ne se voie au spawn.
+- `SWARM_OS_OPENROUTER_API_KEY` — repli dev/CI uniquement. Le chemin normal est
+  **SETTINGS ▸ OPENROUTER** dans l'UI ; une clé enregistrée là gagne toujours.
+
+Comme pour `SWARM_OS_GITHUB_TOKEN`, une variable n'atteint le processus que si
+le service compose la nomme dans `environment:` — ce bloc est une liste blanche
+explicite (§7.4).
 
 ---
 
@@ -296,6 +352,19 @@ crée aucune release.
   `CLAUDE_DIR` dans `.env` pointe dessus.
 - **`pull access denied` / `unauthorized`** — connecte-toi à GHCR avec un PAT
   `read:packages` et vérifie que le mainteneur a autorisé ton compte sur le package.
+- **Un provider est grisé à la création d'une équipe** — survole-le : la raison
+  vient d'une sonde en direct. `not on PATH` signifie que le CLI manque *sur
+  l'hôte qui exécute les agents* (§1) ; installe-le et il s'allume en moins de
+  60 s, sans redémarrage. Sous le transport `local`, tout sauf `claude` est
+  indisponible par construction.
+- **Un agent codex/gemini démarre, n'affiche aucune erreur, puis échoue à
+  l'authentification** — soit le CLI n'est pas connecté sur l'hôte, soit
+  `SWARM_OS_HOST_CODEX_DIR` / `_GEMINI_DIR` n'est pas renseigné et les liens
+  d'identifiants par session pointent vers un chemin du conteneur (§3).
+- **Une équipe codex/gemini/opencode semble muette et n'affiche jamais
+  `waiting`** — c'est attendu : ces CLI n'ont aucun signal « bloqué sur un
+  humain », donc `SWARM_OS_COMPACT_ON_WAITING` est sans effet pour elles. Voir
+  [../providers.md](../providers.md).
 - **Iframe IDE vide** — vérifie que le port 8790 est publié et (en distant) servi
   en HTTPS cohérent avec le schéma de l'UI.
 - **SYSTEM UPDATE dit « no SWARM_OS_GITHUB_TOKEN » alors que tu en as mis un** —

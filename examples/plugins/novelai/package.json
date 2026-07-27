@@ -1,0 +1,9 @@
+{
+  "name": "swarm-os-plugin-novelai",
+  "private": true,
+  "version": "0.1.0",
+  "type": "module",
+  "devDependencies": {
+    "@swarm-os/plugin-sdk": "^0.1.0"
+  }
+}

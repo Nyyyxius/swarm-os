@@ -22,6 +22,7 @@ import type { McpServer as SdkMcpServer } from '@modelcontextprotocol/sdk/server
 import { ok, requireLead, type ToolContext } from '../mcp/tools.js';
 import type { PluginGuard } from './api.js';
 import type { PluginToolDef, PluginToolContext } from './api-types.js';
+import type { PluginToolSummary } from '../orchestrator/preamble.js';
 import { withModule } from '../../logger.js';
 
 const log = withModule('plugins.mcp');
@@ -107,6 +108,21 @@ export class PluginToolRegistry {
   /** Diagnostics — count of registered tools across all plugins. */
   get size(): number {
     return this.tools.size;
+  }
+
+  /**
+   * Snapshot for the session preamble — see `buildPluginToolsSection`.
+   *
+   * A COPY, not a view: the spawner reads this once per session and the map
+   * keeps mutating as plugins are enabled and disabled underneath it.
+   */
+  list(): PluginToolSummary[] {
+    return [...this.tools.values()].map((t) => ({
+      pluginName: t.pluginName,
+      qualifiedName: t.qualifiedName,
+      title: typeof t.def.title === 'string' ? t.def.title : '',
+      leadOnly: t.def.leadOnly === true,
+    }));
   }
 
   /**

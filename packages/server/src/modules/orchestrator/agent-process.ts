@@ -64,8 +64,31 @@ export interface SshAgentOptions {
   sshPort?: number;
   /** Host-side directory the remote shell should `cd` into before exec. */
   remoteCwd: string;
-  /** Env vars to set on the remote side, e.g. `CLAUDE_CONFIG_DIR=<host-path>`. */
+  /**
+   * Env vars to set on the remote side, e.g. `CLAUDE_CONFIG_DIR=<host-path>`.
+   *
+   * ⚠️ These land on the remote COMMAND LINE (`env K=V … exec …`), which is
+   * world-readable through `ps` on the host. Anything secret belongs in
+   * `remoteEnvFile` instead.
+   */
   remoteEnv?: Record<string, string>;
+  /**
+   * HOST path of a 0600 file of `K='v'` lines the remote shell SOURCES before
+   * exec instead of receiving them as `env K=V` on the command line.
+   *
+   * This exists because the command line is world-readable: `ps` on the host
+   * shows every `env K=V` we emit, so an API key (opencode's
+   * `OPENROUTER_API_KEY`), a per-session MCP secret (opencode's
+   * `OPENCODE_CONFIG_CONTENT`) or a control-plane password
+   * (`OPENCODE_SERVER_PASSWORD`) must never travel that way. The file is written
+   * by `Session` into the per-session config dir — which lives under the dataDir
+   * bind mount, hence has a host-side path — and deleted when the session ends.
+   *
+   * Additive on purpose: when it is absent the emitted remote command is byte
+   * for byte what it has always been (claude / codex / gemini keep the plain
+   * `env K=V` prefix, frozen by the golden tests in `providers/claude.test.ts`).
+   */
+  remoteEnvFile?: string;
   /** Remote binary to invoke, e.g. `claude`. */
   remoteCommand: string;
   /** Args for the remote binary (claude flags + prompt). */
@@ -80,6 +103,44 @@ export interface SshAgentOptions {
    * only (plan §14). Set to 0 / omit to skip the reverse forward.
    */
   reverseTunnelPort?: number;
+}
+
+/**
+ * The one string the remote login shell parses. Extracted from the
+ * `SshAgentProcess` constructor so it can be frozen by a test: it is executed by
+ * bash on another machine, so a quoting slip is not a type error — it is an agent
+ * that fails to start with a message nobody sees.
+ *
+ * Shape:
+ *   `bash -lc 'cd <cwd> && [set -a && . <envfile> && set +a && ]exec [env K=V …] <cmd> <args…>'`
+ *
+ *  - `bash -lc` so the host's `~/.profile` runs and the CLI resolves on PATH
+ *    (user installs land in `~/.local/bin`, absent from the PATH ssh defaults to).
+ *  - `exec` replaces the login shell with the agent, so signals delivered to the
+ *    SSH server's child reach the agent directly.
+ *  - the env FILE, when present, is sourced with `set -a` (auto-export) rather
+ *    than passed as `env K=V`: the command line is world-readable through `ps`.
+ *    Absent ⇒ that clause disappears entirely and the string is byte for byte
+ *    what it was before the option existed.
+ */
+export function buildRemoteCommand(opts: {
+  remoteCwd: string;
+  remoteEnv?: Record<string, string> | undefined;
+  remoteEnvFile?: string | undefined;
+  remoteCommand: string;
+  args: readonly string[];
+}): string {
+  const envParts: string[] = [];
+  for (const [k, v] of Object.entries(opts.remoteEnv ?? {})) {
+    envParts.push(`${k}=${shellQuote(v)}`);
+  }
+  const remoteArgv = [opts.remoteCommand, ...opts.args].map(shellQuote).join(' ');
+  const envPrefix = envParts.length > 0 ? `env ${envParts.join(' ')} ` : '';
+  const sourcePrefix = opts.remoteEnvFile
+    ? `set -a && . ${shellQuote(opts.remoteEnvFile)} && set +a && `
+    : '';
+  const inner = `cd ${shellQuote(opts.remoteCwd)} && ${sourcePrefix}exec ${envPrefix}${remoteArgv}`;
+  return `bash -lc ${shellQuote(inner)}`;
 }
 
 /**
@@ -131,22 +192,17 @@ export class SshAgentProcess implements AgentProcess {
     }
     sshArgs.push(opts.sshTarget, '--');
 
-    // Build the remote command. `exec` replaces the login shell with claude so
-    // signals delivered to the SSH server's child go directly to claude.
-    //
-    // Wrap in `bash -lc '<…>'` so the remote `~/.profile` / `~/.bashrc` runs
-    // and `claude` resolves on PATH (typical user installs land in
-    // `~/.local/bin` which is NOT in the non-login PATH SSH defaults to).
-    const envParts: string[] = [];
-    for (const [k, v] of Object.entries(opts.remoteEnv ?? {})) {
-      envParts.push(`${k}=${shellQuote(v)}`);
-    }
-    const remoteArgv = [opts.remoteCommand, ...opts.args].map(shellQuote).join(' ');
-    const envPrefix = envParts.length > 0 ? `env ${envParts.join(' ')} ` : '';
-    const inner = `cd ${shellQuote(opts.remoteCwd)} && exec ${envPrefix}${remoteArgv}`;
-    const remoteCmd = `bash -lc ${shellQuote(inner)}`;
-
-    sshArgs.push(remoteCmd);
+    // The remote command — see `buildRemoteCommand` for the shape and why each
+    // piece is there.
+    sshArgs.push(
+      buildRemoteCommand({
+        remoteCwd: opts.remoteCwd,
+        remoteEnv: opts.remoteEnv,
+        remoteEnvFile: opts.remoteEnvFile,
+        remoteCommand: opts.remoteCommand,
+        args: opts.args,
+      }),
+    );
 
     this.proc = pty.spawn('ssh', sshArgs, {
       name: 'xterm-256color',

@@ -6,6 +6,7 @@ import {
   type OrchestratorStatus,
   type StartOptions,
 } from '../orchestrator/index.js';
+import type { PluginToolSummary } from '../orchestrator/preamble.js';
 import { eventBus } from '../../events.js';
 import { withModule } from '../../logger.js';
 import type { Config, EffortLevel, PermissionMode } from '../../config.js';
@@ -20,6 +21,9 @@ import { connectorConfig, isDiscordConnector } from '../roles/index.js';
 import type { SessionRow } from '../db/index.js';
 import type { DiscordBotPool } from '../discord/pool.js';
 import type { ConnectorRegistry } from '../plugins/connector-registry.js';
+import { createBuiltinProviderRegistry } from '../providers/index.js';
+import { ProviderAvailabilityCache } from '../providers/availability.js';
+import type { ProviderRegistry } from '../providers/registry.js';
 import type { PluginOrchSubscription } from '../plugins/api-types.js';
 import {
   isIdle,
@@ -156,10 +160,23 @@ export interface SpawnerDeps {
    * that don't exercise connectors.
    */
   connectorRegistry?: ConnectorRegistry;
+  /**
+   * Agent-provider adapters. Defaults to the built-in registry constructed
+   * from `config` (which is what carries the per-provider host state dirs).
+   * Overridable so a test can drive a `FakeProvider` end to end.
+   */
+  providerRegistry?: ProviderRegistry;
+  /**
+   * Snapshot source for the plugin-tools section of every preamble. Forwarded
+   * verbatim to each `Orchestrator`; see `OrchestratorDeps.pluginTools` for why
+   * it is a thunk. Absent in unit tests ⇒ no plugin section.
+   */
+  pluginTools?: () => readonly PluginToolSummary[];
 }
 
 export class Spawner {
   private readonly orchestrators = new Map<string, Orchestrator>();
+  private readonly pluginTools: (() => readonly PluginToolSummary[]) | null;
   /**
    * update_system D.5 — bookkeeping for the current `warnLeads()` round, keyed
    * by notice id. Carries (a) the text/sender so `leadNoticeStatus` can
@@ -182,6 +199,18 @@ export class Spawner {
   readonly roleStore: RoleStore | null;
   readonly discordBotPool: DiscordBotPool | null;
   readonly connectorRegistry: ConnectorRegistry | null;
+  /**
+   * The adapter table every orchestrator resolves ids against. Lives on the
+   * Spawner because it is the one long-lived object every surface already has
+   * a handle on (HTTP routers, MCP tools, the orchestrators themselves).
+   */
+  readonly providerRegistry: ProviderRegistry;
+  /**
+   * Availability verdicts, TTL-cached. Shared by `GET /providers` and the 409
+   * gate in `POST /orchestrators` so both see ONE set of probes — two caches
+   * would double the SSH round-trips and could disagree with each other.
+   */
+  readonly providerAvailability: ProviderAvailabilityCache;
 
   constructor(
     private readonly config: Config,
@@ -192,6 +221,12 @@ export class Spawner {
     this.roleStore = deps.roleStore ?? null;
     this.discordBotPool = deps.discordBotPool ?? null;
     this.connectorRegistry = deps.connectorRegistry ?? null;
+    this.providerRegistry = deps.providerRegistry ?? createBuiltinProviderRegistry(config);
+    this.pluginTools = deps.pluginTools ?? null;
+    this.providerAvailability = new ProviderAvailabilityCache({
+      registry: this.providerRegistry,
+      config,
+    });
     // Retro-wire live orchestrators when a connector provider registers late
     // (a plugin enabled while teams are already running — red-team I1).
     this.connectorRegistry?.setRetroactiveWirer((type) => this.retroWireConnectorType(type));
@@ -357,12 +392,14 @@ export class Spawner {
     const orch = new Orchestrator(spec, this.config, {
       notifier: effectiveNotifier,
       persistence: this.persistence,
+      providerRegistry: this.providerRegistry,
       // KILL UI flow on the lead: when the operator clicked KILL we ask the
       // orchestrator to call us back once it reaches terminal, so we can soft
       // delete the whole team from the map in one shot.
       onHideRequested: (id) => {
         this.hideOrchestrator(id);
       },
+      ...(this.pluginTools ? { pluginTools: this.pluginTools } : {}),
     });
     this.orchestrators.set(orch.id, orch);
     eventBus.emitEvent({
@@ -893,6 +930,7 @@ export class Spawner {
         defaultModel: row.default_model,
         defaultEffort: row.default_effort as EffortLevel,
         defaultPermissionMode: row.default_permission_mode as PermissionMode,
+        defaultProvider: row.default_provider,
         leadPreamble: row.lead_preamble,
         workerPreamble: row.worker_preamble,
         lead: {
@@ -907,7 +945,9 @@ export class Spawner {
       const orch = new Orchestrator(init, this.config, {
         notifier: effectiveNotifier,
         persistence: this.persistence,
+        providerRegistry: this.providerRegistry,
         onHideRequested: (id) => this.hideOrchestrator(id),
+        ...(this.pluginTools ? { pluginTools: this.pluginTools } : {}),
       });
       this.orchestrators.set(orch.id, orch);
 
@@ -1018,6 +1058,7 @@ export class Spawner {
         defaultModel: row.default_model,
         defaultEffort: row.default_effort as EffortLevel,
         defaultPermissionMode: row.default_permission_mode as PermissionMode,
+        defaultProvider: row.default_provider,
         leadPreamble: row.lead_preamble,
         workerPreamble: row.worker_preamble,
         lead: {

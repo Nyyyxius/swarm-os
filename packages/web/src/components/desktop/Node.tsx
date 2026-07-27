@@ -12,6 +12,13 @@ export interface NodeAgent {
   shape: Shape;
   status: string;
   inbox?: number;
+  /**
+   * Multi-provider Lot 3 — the adapter driving this agent (`SessionView.provider`).
+   * Rendered as a dim suffix on the role line so a mixed team (claude lead,
+   * codex workers) is readable straight off the map instead of requiring a
+   * click into the right panel. `undefined` on a server that predates Lot 2.
+   */
+  provider?: string;
 }
 
 interface Props {
@@ -91,7 +98,12 @@ export default function Node({
         </g>
       )}
       <text className="node-label" y={r + 16}>{agent.name}</text>
-      <text className="node-role" y={r + 28}>{agent.role}</text>
+      <text className="node-role" y={r + 28}>
+        {agent.role}
+        {agent.provider && (
+          <tspan className="node-provider">{` · ${agent.provider.toUpperCase()}`}</tspan>
+        )}
+      </text>
       {status === 'interrupted' && (
         <text className="node-svr-restart" y={r + 40}>·· SVR-RESTART ··</text>
       )}

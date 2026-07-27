@@ -98,6 +98,7 @@ export default function DesktopShell() {
         team={c.spawnFor}
         roles={c.roles}
         onClose={() => c.setSpawnFor(null)}
+        onSpawn={c.handleSpawnWorkerSubmit}
       />
       <EditConfigDialog
         open={c.editConfigFor !== null}

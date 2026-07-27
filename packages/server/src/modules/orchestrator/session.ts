@@ -8,13 +8,29 @@ import {
   type Disposable,
   PtyAgentProcess,
   SshAgentProcess,
+  shellQuote,
 } from './agent-process.js';
-import { writeSessionMcpConfig, removeSessionMcpConfig } from './mcp-config.js';
 import { eventBus } from '../../events.js';
 import { withModule } from '../../logger.js';
 import type { EffortLevel, PermissionMode } from '../../config.js';
-import { refreshClaudeSharedFiles } from '../../runtime/claude-init.js';
 import { toHostPath as toHostPathHelper } from './path-translate.js';
+import { sessionDirFor } from './mcp-config.js';
+import { CLAUDE_PROVIDER } from '../providers/claude.js';
+import {
+  IDENTITY_PATH_MAPPER,
+  type AgentPathMapper,
+  type AgentProvider,
+  type ContextResetCommand,
+  type ProviderCapabilities,
+  type ProviderId,
+} from '../providers/types.js';
+
+/**
+ * `buildClaudeArgs` now lives with the claude adapter
+ * (`modules/providers/claude.ts`). Re-exported here because it is part of this
+ * module's historical public surface.
+ */
+export { buildClaudeArgs } from '../providers/claude.js';
 
 /**
  * SSH transport bundle passed to a Session. When set, the session opens
@@ -49,6 +65,14 @@ const LOG_CAP_BYTES = 50 * 1024 * 1024; // 50 MB per plan §15
 const RING_BUFFER_LINES = 200;
 
 /**
+ * Name of the per-session 0600 file that carries `PreparedSpawn.secretEnv` to
+ * the remote shell (`set -a && . <file> && set +a && exec …`) instead of putting
+ * it on the remote command line, where `ps` exposes it to every user on the
+ * host. Leading dot so it is out of the way of the adapter's own files.
+ */
+const SECRET_ENV_FILENAME = '.swarm-agent-env';
+
+/**
  * update_system D.5 — backoff used when one PTY injector finds the other one
  * holding the line.
  *
@@ -74,10 +98,14 @@ export type SessionType = 'lead' | 'worker';
 
 /**
  * Context-reset commands the server can inject into a live PTY at a task
- * boundary. `/clear` wipes the conversation (role survives via the system
- * prompt — see `buildClaudeArgs`); `/compact` summarizes and continues.
+ * boundary. `/clear` wipes the conversation (the role survives via the
+ * provider's durable preamble); `/compact` summarizes and continues.
+ *
+ * Defined with the provider contract (`providers/types.ts`) since
+ * `AgentProvider.contextResetLine` is what turns it into a typed line;
+ * re-exported here for the existing importers.
  */
-export type ContextResetCommand = '/clear' | '/compact';
+export type { ContextResetCommand };
 
 /**
  * update_system D.5 — terminal outcome of an armed operator notice. A notice
@@ -154,8 +182,13 @@ export interface SessionInit {
   /** MCP HTTP host (must be loopback — enforced by McpServer.listen). */
   mcpHost: string;
   mcpPort: number;
-  claudeBin?: string;
-  /** Skip the actual claude CLI spawn — useful for smoke testing without claude. */
+  /**
+   * Adapter driving this agent. Optional with a fallback on the built-in
+   * claude adapter so every pre-multi-provider callsite keeps working
+   * untouched; the Orchestrator resolves the id → object mapping from Lot 2.
+   */
+  provider?: AgentProvider;
+  /** Skip the actual CLI spawn — useful for smoke testing without the agent. */
   skipSpawn?: boolean;
   /** Inject a preconstructed AgentProcess (tests). */
   agentProcessOverride?: AgentProcess;
@@ -186,38 +219,41 @@ export interface SessionInit {
    */
   autoCompactBytes?: number;
   /**
-   * Phase 4: hook token + main HTTP port. When both are set, `Session`
-   * writes a per-session `settings.json` under
-   * `<claudeRuntimeDir>/sessions/<id>/` and exports `CLAUDE_CONFIG_DIR` to
-   * the PTY env.
+   * Phase 4: hook token + main HTTP port. When both are set, the provider
+   * writes a per-session config dir under `<runtimeRoot>/sessions/<id>/`
+   * carrying the Notification hook, and exports its isolation env var
+   * (`CLAUDE_CONFIG_DIR`, `CODEX_HOME`, `GEMINI_CLI_HOME`, …) to the PTY.
    */
   hookToken?: string;
   mainHttpPort?: number;
   /**
-   * Phase 5: writable runtime root for per-container Claude state. The
-   * per-session `CLAUDE_CONFIG_DIR` is `<claudeRuntimeDir>/sessions/<id>`,
-   * with the standard Claude state subtree (`projects`, `history.jsonl`,
-   * `.credentials.json`, etc.) symlinked from `<claudeRuntimeDir>` so all
-   * sessions share the same auth + history without duplicating large
-   * directories on every spawn. Tradeoff: per-session writes to those
-   * shared paths land back in the runtime root (intended — that's how
-   * Claude updates its history). Phase 4 named this field
-   * `claudeConfigRoot` and pointed it at the dataDir; Phase 5 keeps the
-   * name for back-compat but the value MUST be the resolved
-   * `claudeRuntimeDir`.
+   * Phase 5: writable runtime root for the per-container agent state. The
+   * per-session config dir is `<runtimeRoot>/sessions/<id>`, with the CLI's
+   * shared state subtree (`projects`, `history.jsonl`, `.credentials.json`, …)
+   * symlinked from `<runtimeRoot>` so all sessions share the same auth +
+   * history without duplicating large directories on every spawn. Tradeoff:
+   * per-session writes to those shared paths land back in the runtime root
+   * (intended — that's how the CLI updates its history).
+   *
+   * Value MUST be the resolved `config.claudeRuntimeDir` for claude. Named
+   * `claudeConfigRoot` until Lot 2; the field is provider-agnostic and the
+   * name now says so.
    */
-  claudeConfigRoot?: string;
+  runtimeRoot?: string;
   /**
    * RO source mount path (host `~/.claude` exposed in the container — e.g.
-   * `/claude-source`). When present alongside `claudeConfigRoot`, the
-   * Session refreshes `.credentials.json` + `.claude.json` from source into
-   * the runtime root right before symlinking them per-session, so a host
-   * OAuth refresh that happened after container boot still propagates.
-   * Omit (or pass an unmounted path) to skip the refresh.
+   * `/claude-source`). When present alongside `runtimeRoot`, the provider
+   * refreshes the host-volatile files from source into the runtime root right
+   * before symlinking them per-session, so a host OAuth refresh that happened
+   * after container boot still propagates. Omit (or pass an unmounted path) to
+   * skip the refresh.
    */
-  claudeSourceDir?: string;
-  /** Optional explicit override for the `.claude.json` source path. */
-  claudeJsonSource?: string | null;
+  sourceDir?: string;
+  /**
+   * Explicit override for the config file that lives BESIDE the source dir
+   * (claude's `~/.claude.json`). Falls back to `<sourceDir>.json`.
+   */
+  siblingSource?: string | null;
   /**
    * SSH transport bundle. When provided, the session spawns `claude` on the
    * remote host via `ssh -tt` instead of locally via `node-pty`. Required
@@ -238,6 +274,12 @@ export interface SessionView {
   model: string;
   effort: EffortLevel;
   permissionMode: PermissionMode;
+  /**
+   * Adapter id driving this agent (`'claude'` unless the team / the spawn
+   * request asked for another). First-class since Lot 2: persisted, surfaced
+   * in the API, and what auto-resume brings the agent back on.
+   */
+  provider: ProviderId;
   status: SessionStatus;
   pid: number | null;
   startedAt: string;
@@ -248,78 +290,6 @@ export interface SessionView {
   logPath: string;
   lastActivityAt: string;
   // sessionSecret intentionally NOT included
-}
-
-/**
- * Build the argv for `claude` per Phase 0 bis report.
- *
- * Phase 2 wires `--mcp-config=<absolute path to mcp.json>` so each session
- * sees the team-comms MCP. Order: `[--model, --effort, --permission-mode,
- * --mcp-config=<path>, prompt]`. The mcp.json is generated by `Session._spawn`
- * before the PTY launch (see `mcp-config.ts`).
- *
- * IMPORTANT — `--mcp-config` is **variadic** in claude 2.1.142 (`<configs...>`):
- * `--mcp-config <path> <prompt>` would slurp the prompt as a SECOND config
- * file, manifesting as `Error: Invalid MCP configuration: ENAMETOOLONG`.
- * We therefore use the `--mcp-config=<path>` form (single token, can't be
- * variadic-extended) so the prompt argv that follows stays an unrelated
- * positional. See spike H4 for the flag contract; the variadic gotcha was
- * surfaced by the Phase 5 container smoke test.
- */
-export function buildClaudeArgs(opts: {
-  model: string;
-  effort: EffortLevel;
-  permissionMode: PermissionMode;
-  initialPrompt: string | null;
-  preamble: string | null;
-  /** One-shot prefix for the positional prompt (e.g. the resume notice). */
-  resumeNotice?: string | null;
-  /** Absolute path to the per-session mcp.json. Optional in test paths. */
-  mcpConfigPath?: string | null;
-}): string[] {
-  const args: string[] = [
-    '--model',
-    opts.model,
-    '--effort',
-    opts.effort,
-    '--permission-mode',
-    opts.permissionMode,
-  ];
-  // The preamble (role + team-comms instructions) goes into the system
-  // prompt via `--append-system-prompt`, NOT into the positional user prompt.
-  // Rationale: a `/clear` wipes the conversation (and therefore anything we
-  // passed positionally) but PRESERVES the system prompt — so routing the
-  // preamble here is what lets an agent reset its context without forgetting
-  // its role. `--append-system-prompt` is non-variadic (single value), so the
-  // two-token form is safe and won't swallow the positional prompt the way a
-  // bare `--mcp-config <path>` would.
-  if (opts.preamble) {
-    args.push('--append-system-prompt', opts.preamble);
-  }
-  if (opts.mcpConfigPath) {
-    // `=` form is mandatory: `--mcp-config <path>` would consume the
-    // following prompt argv as a second config file (variadic flag).
-    args.push(`--mcp-config=${opts.mcpConfigPath}`);
-    // `--strict-mcp-config` scopes the session to team-comms ONLY. Without
-    // it the seed `.claude.json` (copied from the host) drags every
-    // user-level MCP server (claude.ai connectors…) into the agent: the
-    // tool count explodes, claude 2.1.201 defers MCP tools behind
-    // ToolSearch, and smaller models fail the ToolSearch→call dance —
-    // observed 2026-07-04 as a sentinel unable to invoke team.* at all
-    // ("1 MCP server needs authentication" + "no mechanism to call them").
-    args.push('--strict-mcp-config');
-  }
-  // The positional argv is the seed task prompt, optionally prefixed by the
-  // one-shot resume notice. This is the part a `/clear` is meant to discard;
-  // durable instructions live in the system prompt above.
-  const positional =
-    opts.resumeNotice && opts.initialPrompt
-      ? `${opts.resumeNotice}\n\n${opts.initialPrompt}`
-      : (opts.resumeNotice ?? opts.initialPrompt ?? null);
-  if (positional) {
-    args.push(positional);
-  }
-  return args;
 }
 
 export class Session extends EventEmitter {
@@ -348,7 +318,22 @@ export class Session extends EventEmitter {
 
   private readonly mcpRuntimeDir: string;
   private mcpConfigPath: string | null = null;
+  /**
+   * Container path of the 0600 file holding this spawn's `secretEnv`, when the
+   * adapter asked for one. Written just before the SSH spawn and removed with
+   * the session — it holds credentials (`OPENROUTER_API_KEY`), a per-session MCP
+   * url and a control-plane password.
+   */
+  private _remoteEnvFile: string | null = null;
   private readonly sshTransport: SessionSshTransport | null;
+  /**
+   * Adapter that knows how to configure, launch and talk to this agent's CLI.
+   * Everything claude-specific used to be inlined here; it now lives behind
+   * this object (`modules/providers/`).
+   */
+  private readonly provider: AgentProvider;
+  /** Container → agent path translation, built once from `sshTransport`. */
+  private readonly _paths: AgentPathMapper;
 
   private agent: AgentProcess | null = null;
   private logStream: fs.WriteStream | null = null;
@@ -450,6 +435,10 @@ export class Session extends EventEmitter {
     this._idleSince = Date.now();
     this.mcpRuntimeDir = init.mcpRuntimeDir;
     this.sshTransport = init.sshTransport ?? null;
+    // Pre-multi-provider callsites pass nothing and get the built-in claude
+    // adapter — the exact code path that used to be hard-wired here.
+    this.provider = init.provider ?? CLAUDE_PROVIDER;
+    this._paths = this._buildPathMapper();
     this._onStateChange = init.onStateChange ?? null;
     this._onContextReset = init.onContextReset ?? null;
     this._idleThresholdMs = init.idleThresholdMs ?? 2000;
@@ -459,429 +448,86 @@ export class Session extends EventEmitter {
     fs.mkdirSync(orchLogDir, { recursive: true });
     this.logPath = path.join(orchLogDir, `${this.id}.log`);
 
-    // Phase 4: write per-session settings.json injecting the Notification hook.
-    // The CLAUDE_CONFIG_DIR is exported when the PTY is spawned.
-    this._claudeConfigDir = this._maybeWriteSessionSettings(init);
+    // PHASE A — prepare the per-session config dir (0700 mkdir, shared-state
+    // symlinks, pre-accepted trust dialogs, notification hook, preamble).
+    // Deliberately BEFORE `_openLog()` and `_spawn()`: phase A failures are
+    // reported through the structured logger, not the session log, and the
+    // config dir has to exist before the MCP write and the spawn read it.
+    const prepared = this.provider.prepareSessionConfig({
+      sessionId: this.id,
+      orchestratorId: this.orchestratorId,
+      cwd: this.cwd,
+      transport: this.sshTransport ? 'ssh' : 'local',
+      paths: this._paths,
+      preamble: init.preamble,
+      hookToken: init.hookToken,
+      mainHttpPort: init.mainHttpPort,
+      runtimeRoot: init.runtimeRoot,
+      sourceDir: init.sourceDir,
+      siblingSource: init.siblingSource,
+      hostSharedDir: this.sshTransport?.hostClaudeDir ?? null,
+    });
+    this._sessionConfigDir = prepared.configDir;
+    this._sessionCleanupPaths = prepared.cleanupPaths;
 
     this._openLog();
     this._spawn(init);
   }
 
+  private _sessionConfigDir: string | null = null;
   /**
-   * Phase 4: per-session `CLAUDE_CONFIG_DIR` (`<dataDir>/.claude-runtime/sessions/<id>/`)
-   * with a `settings.json` injecting the `Notification` hook (plan §13, spike H6).
+   * Paths the provider asked us to delete once the session is over. EMPTY for
+   * claude — its per-session dir holds symlinks and a trust seed, nothing that
+   * grows, and it is deliberately left in place.
    *
-   * The hook payload arrives on stdin per Anthropic's Claude Code spec
-   * (`{ session_id, transcript_path, cwd, hook_event_name, message }` — see
-   * spike report §5). We read stdin via `cat` then re-encode it in JSON to
-   * a single-line POST body that includes our orch_id / session_id (the ones
-   * Claude doesn't know about — Anthropic's session_id is its own internal id).
-   *
-   * Returns the path of the config dir (or null if not configured).
+   * Providers that keep a per-session SQLite state file (codex) return their
+   * config dir here: sharing those across sessions is a corruption recipe, so
+   * they are born and die with the session, and something has to do the dying.
    */
-  private _maybeWriteSessionSettings(init: SessionInit): string | null {
-    if (!init.hookToken || !init.mainHttpPort || !init.claudeConfigRoot) return null;
-    try {
-      // Phase 5: claudeConfigRoot is the resolved <claudeRuntimeDir>
-      // (typically `<dataDir>/.claude-runtime`). The per-session config dir
-      // is a sibling under `sessions/`. We mirror Phase 4's path layout
-      // exactly (sessions live under the runtime root).
-      const cfgDir = path.join(init.claudeConfigRoot, 'sessions', this.id);
-      fs.mkdirSync(cfgDir, { recursive: true, mode: 0o700 });
-      try {
-        fs.chmodSync(cfgDir, 0o700);
-      } catch {
-        /* best-effort */
-      }
-      // Refresh the host-volatile files (`.credentials.json` + `.claude.json`)
-      // from the RO source mount before symlinking. The boot-time copy is
-      // gated by the dir-mtime marker, which doesn't notice in-place edits
-      // of these files (host claude rotates OAuth tokens in-place). Without
-      // this, every team created after a host token rotation would inherit
-      // a stale runtime `.credentials.json` and the PTY would land on the
-      // interactive `/login` prompt.
-      //
-      // SSH transport: the container never reads or copies host credentials —
-      // the host claude resolves its own `~/.claude/.credentials.json`
-      // directly via the per-session symlink. Skip the refresh entirely.
-      if (init.claudeSourceDir && !this.sshTransport) {
-        try {
-          const refresh = refreshClaudeSharedFiles({
-            sourceDir: init.claudeSourceDir,
-            runtimeDir: init.claudeConfigRoot,
-            claudeJsonSource: init.claudeJsonSource ?? null,
-          });
-          if (refresh.credentials === 'lifted' || refresh.claudeJson === 'lifted') {
-            log.info({
-              event: 'session.shared_refresh',
-              sessionId: this.id,
-              credentials: refresh.credentials,
-              claudeJson: refresh.claudeJson,
-            });
-          }
-        } catch (err) {
-          log.warn({
-            event: 'session.shared_refresh_failed',
-            sessionId: this.id,
-            error: err instanceof Error ? err.message : String(err),
-          });
-        }
-      }
-      // Phase 5: symlink shared Claude state into the per-session dir so the
-      // per-session CLAUDE_CONFIG_DIR sees the credentials, history, etc.
-      // from the runtime copy. We pick the union of subdirectories Claude
-      // is known to look at (spike H7 inventory). Best-effort: if the
-      // shared dir doesn't have a given subentry, we skip the symlink.
-      this._linkSharedClaudeState(init.claudeConfigRoot, cfgDir);
-      // Pre-accept the trust + project-onboarding dialogs for this cwd so
-      // the PTY doesn't wedge on first spawn. Must run AFTER the symlink
-      // pass (which is now scoped to skip `.claude.json`) and BEFORE any
-      // settings.json write so the dialog state is in place before the
-      // claude CLI reads it.
-      //
-      // SSH mode: the container-side `<runtimeDir>/.claude.json` is never
-      // populated (claude-init is a no-op). Read the host's `.claude.json`
-      // directly through the RO source mount (`init.claudeJsonSource`,
-      // typically `/claude-source.json`, or `<sourceDir>.json` as fallback)
-      // so onboarding / userID / theme survive.
-      const sshJsonFallback =
-        init.claudeSourceDir && init.claudeSourceDir.length > 0
-          ? `${init.claudeSourceDir}.json`
-          : null;
-      const claudeJsonSrc = this.sshTransport
-        ? init.claudeJsonSource ?? sshJsonFallback
-        : path.join(init.claudeConfigRoot, '.claude.json');
-      this._seedClaudeJsonTrust(cfgDir, claudeJsonSrc);
-      // Build the hook command. Claude streams the JSON event on stdin per
-      // the spike H6 confirmation. We pipe stdin into jq if present; if not,
-      // we fall back to a minimal awk-based pass-through. Practically:
-      // re-emit the raw stdin verbatim and wrap our context around it. To
-      // keep the command simple we send only our orch_id/session_id +
-      // `message` as a separate field — Claude's stdin event is opaque on
-      // the wire (we don't try to parse it inside the shell).
-      //
-      // The shell runs `cat` to capture stdin (Claude's hook payload), then
-      // POSTs a minimal JSON envelope. Curl is mandatory — claude-code
-      // images include it (verified in the Phase 0 bis spike).
-      const hookUrl = `http://127.0.0.1:${init.mainHttpPort}/hooks/notification`;
-      // shell command — heredoc-style, single-quoted to avoid Node-side
-      // escape soup. The actual claude payload travels in the message
-      // field (we send the raw stdin string verbatim, JSON-escaped via
-      // python3 if available, else sed).
-      const shellCmd =
-        `payload=$(cat); ` +
-        `msg=$(printf '%s' "$payload" | python3 -c 'import json,sys; sys.stdout.write(json.dumps(sys.stdin.read()))' 2>/dev/null) || ` +
-        `msg=$(printf '"%s"' "$(printf '%s' "$payload" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g; s/\\n/\\\\n/g')"); ` +
-        `body=$(printf '{"orch_id":"%s","session_id":"%s","kind":"session.waiting","message":%s}' '${this.orchestratorId}' '${this.id}' "$msg"); ` +
-        `curl -s -X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer ${init.hookToken}' -d "$body" '${hookUrl}' >/dev/null 2>&1 || true`;
-      // Pre-accept the "bypass permissions mode" disclaimer at the
-      // user-settings level. claude-code 2.1.143 migrates the legacy
-      // `.claude.json#bypassPermissionsModeAccepted` flag into
-      // `userSettings.skipDangerousModePermissionPrompt` on first launch
-      // and then deletes the source field — the runtime check that opens
-      // the interactive disclaimer widget reads ONLY the user/local/flag/
-      // policy settings (`qu()` in the bundled CLI). Setting it directly
-      // here makes the pre-acceptance survive the migration and keeps
-      // the per-session `.claude.json` seed effective as a fallback for
-      // older builds.
-      //
-      // `tui: 'default'` pins the classic inline renderer. claude-code
-      // 2.1.201 shows a "Try the new fullscreen renderer?" upsell dialog
-      // whenever `settings.tui` is undefined; inside a headless PTY the
-      // injected wake-up text can accept it, after which claude re-execs
-      // itself in fullscreen mode whose constant repaints make the session
-      // look permanently busy (idle detection never fires, inbox signals
-      // are never delivered). Any defined `tui` value suppresses the
-      // dialog entirely.
-      const settings = {
-        skipDangerousModePermissionPrompt: true,
-        tui: 'default',
-        hooks: {
-          Notification: [
-            {
-              matcher: '',
-              hooks: [
-                {
-                  type: 'command',
-                  command: shellCmd,
-                },
-              ],
-            },
-          ],
-        },
-      };
-      const settingsPath = path.join(cfgDir, 'settings.json');
-      fs.writeFileSync(settingsPath, JSON.stringify(settings, null, 2), { mode: 0o600 });
-      try {
-        fs.chmodSync(settingsPath, 0o600);
-      } catch {
-        /* best-effort */
-      }
-      return cfgDir;
-    } catch (err) {
-      log.warn({
-        event: 'session.settings_failed',
-        sessionId: this.id,
-        error: err instanceof Error ? err.message : String(err),
-      });
-      return null;
-    }
-  }
-
-  private _claudeConfigDir: string | null = null;
-  /** Phase 4: public read-only accessor — used by tests / dev tooling. */
+  private _sessionCleanupPaths: readonly string[] = [];
+  /**
+   * Phase 4: public read-only accessor — used by tests / dev tooling. Kept
+   * under its historical name; it is the provider's per-session config dir
+   * (`CLAUDE_CONFIG_DIR` for claude, `CODEX_HOME` / `GEMINI_CLI_HOME` later).
+   */
   get claudeConfigDir(): string | null {
-    return this._claudeConfigDir;
+    return this._sessionConfigDir;
   }
 
   /**
-   * Phase 5: symlink the union of Claude-known state subentries from the
-   * shared runtime root into the per-session config dir. This lets
-   * `CLAUDE_CONFIG_DIR=<sessions/<id>>` see the credentials + history while
-   * keeping `settings.json` per-session (so each session can carry its own
-   * Notification hook context).
+   * What this session's adapter can express. Public because the decision does
+   * not always belong to `Session`: `http/routes/hooks.ts` has to know whether a
+   * notification callback means "a human is needed" (claude) or merely "the turn
+   * ended" (codex `notify`, gemini `AfterAgent`) before it flips a badge or
+   * pings Discord.
    *
-   * The list comes from the spike report H7 inventory — we don't try to be
-   * exhaustive (Claude may add new files at runtime); anything missing is
-   * just not symlinked. Per-session writes that would land on a brand-new
-   * shared file (e.g. a new top-level entry created by Claude post-link)
-   * land directly in the session dir — no shared corruption.
+   * Read off the session's OWN adapter instance rather than looked up in the
+   * registry: a plugin-provided provider can be unregistered while its sessions
+   * are still alive, and a session must keep behaving like what it is running.
    */
-  private _linkSharedClaudeState(runtimeDir: string, cfgDir: string): void {
-    // SSH transport: symlink targets must be HOST paths so the remote claude
-    // resolves them in its own namespace. We cannot stat the target from the
-    // container side (the host `~/.claude/` is not mounted RW in SSH mode);
-    // create the links best-effort and let claude silently skip missing
-    // entries on the host.
-    if (this.sshTransport) {
-      this._linkSharedClaudeStateSsh(cfgDir);
-      return;
-    }
-    // Spike H7 inventory: ~/.claude has these RW children. We deliberately
-    // include `settings.json` even though we override it below — if the
-    // user's host settings are present, they'll be referenced via this
-    // link until our writeFileSync replaces it with our own per-session
-    // settings.json (the writeFileSync below removes the symlink first).
-    const SHARED_ENTRIES = [
-      '.credentials.json',
-      // Phase 6 NOTE — `.claude.json` was previously symlinked here so the
-      // session inherited `hasCompletedOnboarding` + theme + userID from the
-      // lifted host copy. It is now owned per-session by
-      // `_seedClaudeJsonTrust` (which reads the runtime copy, merges in
-      // `projects[<cwd>].hasTrustDialogAccepted`, and writes a real file).
-      // Leaving the symlink in place would let our writeFileSync follow it
-      // and clobber the shared runtime copy.
-      '.last-cleanup',
-      'backups',
-      'cache',
-      'debug',
-      'file-history',
-      'history.jsonl',
-      'mcp-needs-auth-cache.json',
-      'paste-cache',
-      'plans',
-      'plugins',
-      'projects',
-      'session-env',
-      'sessions',
-      'shell-snapshots',
-      'tasks',
-      'telemetry',
-      'todos',
-    ];
-    for (const name of SHARED_ENTRIES) {
-      // Don't symlink `sessions/<id>` over our own session dir — that's where
-      // we ARE. The runtime `sessions/` dir is Claude-specific (per-claude
-      // session state); our per-orchestrator session dir lives in the same
-      // namespace which is unfortunate but the `id` collision risk is nil
-      // (UUID v4). If the shared `sessions/` exists at the runtime root, we
-      // skip linking the whole thing and rely on Claude creating its own
-      // entries directly in the per-session dir.
-      if (name === 'sessions') continue;
-      const srcPath = path.join(runtimeDir, name);
-      const linkPath = path.join(cfgDir, name);
-      try {
-        // Skip if the source doesn't exist (typical of dev mode where
-        // claude-init was a no-op).
-        fs.lstatSync(srcPath);
-      } catch {
-        continue;
-      }
-      try {
-        // Best-effort: if a stale link exists, remove it. fs.symlinkSync
-        // doesn't have a `force` option.
-        try {
-          fs.unlinkSync(linkPath);
-        } catch {
-          /* didn't exist — fine */
-        }
-        fs.symlinkSync(srcPath, linkPath);
-      } catch (err) {
-        log.warn({
-          event: 'session.shared_link_failed',
-          sessionId: this.id,
-          entry: name,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
+  get providerCapabilities(): ProviderCapabilities {
+    return this.provider.capabilities;
   }
 
   /**
-   * SSH-mode variant of `_linkSharedClaudeState`. Symlink targets point at the
-   * host's real `~/.claude/<entry>` paths. No existence check is possible from
-   * the container side (host `~/.claude` isn't mounted RW in SSH mode), so we
-   * write the symlinks unconditionally — the remote claude resolves them in
-   * its own namespace and ignores missing entries.
+   * Container path → agent-visible path. Identity in local transport; under
+   * SSH the agent runs in the host's namespace, so anything we hand it must
+   * already be translated. Two roots because `dataDir` and `workspaceRoot`
+   * are independent bind mounts.
    */
-  private _linkSharedClaudeStateSsh(cfgDir: string): void {
-    if (!this.sshTransport) return;
-    const hostClaudeDir = this.sshTransport.hostClaudeDir;
-    const SHARED_ENTRIES = [
-      '.credentials.json',
-      '.last-cleanup',
-      'backups',
-      'cache',
-      'debug',
-      'file-history',
-      'history.jsonl',
-      'mcp-needs-auth-cache.json',
-      'paste-cache',
-      'plans',
-      'plugins',
-      'projects',
-      'session-env',
-      'shell-snapshots',
-      'tasks',
-      'telemetry',
-      'todos',
-    ];
-    for (const name of SHARED_ENTRIES) {
-      const target = path.join(hostClaudeDir, name);
-      const linkPath = path.join(cfgDir, name);
-      try {
-        try {
-          fs.unlinkSync(linkPath);
-        } catch {
-          /* didn't exist — fine */
-        }
-        fs.symlinkSync(target, linkPath);
-      } catch (err) {
-        log.warn({
-          event: 'session.shared_link_ssh_failed',
-          sessionId: this.id,
-          entry: name,
-          target,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-  }
-
-  /**
-   * Pre-accept the trust dialog and project-onboarding prompts for this
-   * session's `cwd` by writing a per-session `.claude.json` under
-   * `<cfgDir>/.claude.json`. Without this, the claude CLI opens the
-   * interactive "Do you trust the files in this folder?" widget on first
-   * spawn into a never-before-seen cwd and wedges the PTY.
-   *
-   * Strategy: read the lifted runtime `.claude.json` so we preserve
-   * `hasCompletedOnboarding`, `userID`, theme, etc., merge in
-   * `projects[<this.cwd>]` with the trust flags set, then write the result
-   * as a REGULAR file (not a symlink) into the per-session config dir.
-   * If the runtime file is missing or unreadable we fall back to a
-   * minimal seed sufficient to silence the prompt.
-   *
-   * Why a per-session file (not a one-shot edit of the runtime copy):
-   *   - We don't want claude's mid-session writes (lastSessionId, lastCost,
-   *     etc.) leaking across sessions through the shared file.
-   *   - Avoids racing with concurrent spawns also mutating the same path.
-   */
-  private _seedClaudeJsonTrust(cfgDir: string, claudeJsonSrc: string | null): void {
-    const dest = path.join(cfgDir, '.claude.json');
-    // Projects in `~/.claude.json` are keyed by absolute path. In SSH mode the
-    // remote claude resolves the cwd as a host path; the trust entry must use
-    // the same key or claude re-opens the trust dialog.
-    const projectKey = this.sshTransport
-      ? toHostPathHelper({
-          containerPath: this.cwd,
-          dataDir: this.sshTransport.workspaceRoot,
-          hostDataDir: this.sshTransport.hostWorkspaceRoot,
-        })
-      : this.cwd;
-
-    let base: Record<string, unknown>;
-    try {
-      if (!claudeJsonSrc) throw new Error('no .claude.json source path');
-      const raw = fs.readFileSync(claudeJsonSrc, 'utf8');
-      const parsed: unknown = JSON.parse(raw);
-      base =
-        parsed && typeof parsed === 'object' && !Array.isArray(parsed)
-          ? (parsed as Record<string, unknown>)
-          : { hasCompletedOnboarding: true };
-    } catch {
-      // Missing or unreadable lifted file (dev mode without claude-init,
-      // or a partial container). The minimal seed below is enough — claude
-      // will create the rest of its state on its own.
-      base = { hasCompletedOnboarding: true };
-    }
-
-    // Pre-accept the global "bypass permissions mode disclaimer" so the
-    // CLI doesn't open an interactive disclaimer widget on first spawn
-    // under `--permission-mode bypassPermissions`. The field is a top-level
-    // boolean in `.claude.json` checked by the CLI before launching in
-    // bypass mode (verified against claude-code 2.1.143 — the binary
-    // references `E$().bypassPermissionsModeAccepted` from its arg parser).
-    // We set it unconditionally: the flag means "the user has seen the
-    // disclaimer once"; it's a no-op for other modes.
-    base.bypassPermissionsModeAccepted = true;
-
-    const projectsRaw = base.projects;
-    const projects: Record<string, Record<string, unknown>> =
-      projectsRaw && typeof projectsRaw === 'object' && !Array.isArray(projectsRaw)
-        ? (projectsRaw as Record<string, Record<string, unknown>>)
-        : {};
-    const existing = projects[projectKey];
-    const cwdEntry: Record<string, unknown> =
-      existing && typeof existing === 'object' && !Array.isArray(existing)
-        ? { ...existing }
-        : {};
-    cwdEntry.hasTrustDialogAccepted = true;
-    cwdEntry.hasCompletedProjectOnboarding = true;
-    cwdEntry.hasClaudeMdExternalIncludesApproved = true;
-    if (existing == null) {
-      // Brand-new project entry — populate the empty containers claude
-      // expects so it doesn't re-run any per-project initialisation.
-      cwdEntry.allowedTools = [];
-      cwdEntry.mcpContextUris = [];
-      cwdEntry.mcpServers = {};
-      cwdEntry.enabledMcpjsonServers = [];
-      cwdEntry.disabledMcpjsonServers = [];
-    }
-    projects[projectKey] = cwdEntry;
-    base.projects = projects;
-
-    // Remove any pre-existing entry at `dest` (typically nothing now that
-    // `.claude.json` is excluded from SHARED_ENTRIES, but be defensive in
-    // case a stale symlink from a previous server version is around — a
-    // writeFileSync onto a symlink would follow it and corrupt the shared
-    // runtime file).
-    try {
-      fs.unlinkSync(dest);
-    } catch {
-      /* nothing to remove */
-    }
-    try {
-      fs.writeFileSync(dest, JSON.stringify(base, null, 2), { mode: 0o600 });
-      fs.chmodSync(dest, 0o600);
-    } catch (err) {
-      log.warn({
-        event: 'session.claude_json_seed_failed',
-        sessionId: this.id,
-        cwd: this.cwd,
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
+  private _buildPathMapper(): AgentPathMapper {
+    const t = this.sshTransport;
+    if (!t) return IDENTITY_PATH_MAPPER;
+    return {
+      data: (containerPath) =>
+        toHostPathHelper({ containerPath, dataDir: t.dataDir, hostDataDir: t.hostDataDir }),
+      workspace: (containerPath) =>
+        toHostPathHelper({
+          containerPath,
+          dataDir: t.workspaceRoot,
+          hostDataDir: t.hostWorkspaceRoot,
+        }),
+    };
   }
 
   // --- Public API --------------------------------------------------------
@@ -935,6 +581,7 @@ export class Session extends EventEmitter {
       model: this.model,
       effort: this.effort,
       permissionMode: this.permissionMode,
+      provider: this.provider.id,
       status: this._status,
       pid: this._pid,
       startedAt: this.startedAt,
@@ -973,7 +620,11 @@ export class Session extends EventEmitter {
   submitInput(text: string): void {
     if (!this.agent) return;
     // We own the submit, so strip any trailing newlines a caller appended.
-    const body = text.replace(/[\r\n]+$/, '');
+    const trimmed = text.replace(/[\r\n]+$/, '');
+    // Providers whose TUI is not Ink parse a single chunk with a trailing CR
+    // as a submit, so the dance is pure latency for them: one write.
+    const dance = this.provider.capabilities.inkSubmitDance;
+    const body = dance ? trimmed : `${trimmed}\r`;
     try {
       this.agent.write(body);
       this._appendLog(body);
@@ -985,6 +636,7 @@ export class Session extends EventEmitter {
       });
       return;
     }
+    if (!dance) return;
     setTimeout(() => {
       if (!this.agent) return;
       try {
@@ -1018,11 +670,14 @@ export class Session extends EventEmitter {
    * can see why the agent suddenly checked its inbox.
    */
   notifySignal(text: string): void {
-    const intro = `\r${text}`;
+    // Providers without an Ink TUI submit fine from a single chunk, so they
+    // get `\r<text>\r` in one write instead of the two-step cadence.
+    const dance = this.provider.capabilities.inkSubmitDance;
+    const intro = dance ? `\r${text}` : `\r${text}\r`;
     if (!this.agent) {
       // skipSpawn / no-process sessions still get the signal in their log
       // for testability.
-      this._appendLog(`${intro}\r`);
+      this._appendLog(dance ? `${intro}\r` : intro);
       return;
     }
     try {
@@ -1035,6 +690,7 @@ export class Session extends EventEmitter {
       });
     }
     this._appendLog(intro);
+    if (!dance) return;
     // Submit on the next tick so the TUI sees a standalone CR keypress
     // instead of a pasted chunk. We do NOT bump lastActivityAt here: the
     // signal is server-injected, not agent-produced output, so it must
@@ -1130,9 +786,24 @@ export class Session extends EventEmitter {
     const pending = this._pendingContextReset;
     this._pendingContextReset = null;
     if (!pending || !this.agent) return;
+    // `null` ⇒ this provider has no working context reset. Resolve without
+    // writing: a half-working reset that wipes the role while leaving the
+    // tools in place is worse than never resetting at all.
+    const line = this.provider.contextResetLine(pending.cmd, pending.instructions);
+    if (line === null) {
+      log.info({
+        event: 'session.context_reset_unsupported',
+        sessionId: this.id,
+        cmd: pending.cmd,
+        provider: this.provider.id,
+      });
+      this._appendLog(
+        `[swarm-os] context ${pending.cmd} skipped — provider ${this.provider.id} has no context reset\n`,
+      );
+      return;
+    }
     // The reset shrinks the context, so restart the auto-compact accounting.
     this._bytesSinceReset = 0;
-    const line = pending.instructions ? `${pending.cmd} ${pending.instructions}` : pending.cmd;
     const intro = `\r${line}`;
     try {
       this.agent.write(intro);
@@ -1464,7 +1135,14 @@ export class Session extends EventEmitter {
     if (!this.agent) {
       this._setStatus('killed');
       this._endedAt ??= new Date().toISOString();
+      // Terminal state with no process: `_handleExit` will never run, so this is
+      // the ONLY place this session's on-disk artifacts can be reclaimed. Same
+      // three steps as `_handleExit`, same order (MCP block first — for a
+      // provider that merged it into a file inside the config dir, removing the
+      // directory first would make the MCP cleanup log a spurious failure).
       this._cleanupMcpConfig();
+      this._cleanupRemoteEnvFile();
+      this._cleanupSessionConfig();
       return;
     }
     // S5 §7.5 — SIGTERM on a SIGSTOP'd process is queued as pending and only
@@ -1592,20 +1270,24 @@ export class Session extends EventEmitter {
   // --- Internals ---------------------------------------------------------
 
   private _spawn(init: SessionInit): void {
-    // Generate the per-session mcp.json BEFORE spawning so claude sees a
-    // valid file at startup. We do it in skipSpawn mode too — Phase 2's
-    // MCP-direct test path needs the file on disk to read the URL even when
-    // the CLI itself isn't launched.
+    // PHASE B.1 — write the per-session MCP config BEFORE spawning so the
+    // agent sees a valid file at startup. We do it in skipSpawn mode too:
+    // Phase 2's MCP-direct test path needs the file on disk to read the URL
+    // even when the CLI itself isn't launched. This runs into the ALREADY
+    // OPEN session log — moving it after the `skipSpawn` early return would
+    // silently drop the `mcp.json written at …` line.
     try {
-      const result = writeSessionMcpConfig({
+      const result = this.provider.writeMcpConfig({
         runtimeDir: this.mcpRuntimeDir,
         orchestratorId: this.orchestratorId,
         sessionId: this.id,
         sessionSecret: this.sessionSecret,
         mcpHost: init.mcpHost,
         mcpPort: init.mcpPort,
+        configDir: this._sessionConfigDir,
+        paths: this._paths,
       });
-      this.mcpConfigPath = result.path;
+      this.mcpConfigPath = result?.path ?? null;
     } catch (err) {
       // Non-fatal in Phase 2 if /tmp is read-only (very unlikely): we'd
       // rather still let the session run without MCP than crash the spawn.
@@ -1621,7 +1303,7 @@ export class Session extends EventEmitter {
     if (init.skipSpawn) {
       // Smoke / dev mode: write a marker, mark running, no real subprocess.
       this._appendLog(
-        `[swarm-os] skipSpawn=true — no claude subprocess started (cwd=${this.cwd})\n`,
+        `[swarm-os] skipSpawn=true — no ${this.provider.id} subprocess started (cwd=${this.cwd})\n`,
       );
       if (this.mcpConfigPath) {
         this._appendLog(`[swarm-os] mcp.json written at ${this.mcpConfigPath}\n`);
@@ -1634,92 +1316,78 @@ export class Session extends EventEmitter {
     try {
       if (init.agentProcessOverride) {
         agent = init.agentProcessOverride;
-      } else if (this.sshTransport) {
-        // SSH transport: spawn claude on the host VM. The container-side
-        // CLAUDE_CONFIG_DIR + mcp.json + cwd all live under bind mounts; the
-        // host sees them at different paths. Translate before handing off.
-        const t = this.sshTransport;
-        const hostCfgDir = this._claudeConfigDir
-          ? toHostPathHelper({
-              containerPath: this._claudeConfigDir,
-              dataDir: t.dataDir,
-              hostDataDir: t.hostDataDir,
-            })
-          : null;
-        const hostMcp = this.mcpConfigPath
-          ? toHostPathHelper({
-              containerPath: this.mcpConfigPath,
-              dataDir: t.dataDir,
-              hostDataDir: t.hostDataDir,
-            })
-          : null;
-        // cwd is validated against workspaceRoot at API ingress (so always
-        // starts with `<workspaceRoot>/` or equals it). Translate to host.
-        const hostCwd = toHostPathHelper({
-          containerPath: this.cwd,
-          dataDir: t.workspaceRoot,
-          hostDataDir: t.hostWorkspaceRoot,
-        });
-        const args = buildClaudeArgs({
-          model: this.model,
-          effort: this.effort,
-          permissionMode: this.permissionMode,
-          initialPrompt: this.initialPrompt,
-          preamble: init.preamble,
-          resumeNotice: this.resumeNotice,
-          mcpConfigPath: hostMcp,
-        });
-        const remoteEnv: Record<string, string> = {};
-        if (hostCfgDir) remoteEnv.CLAUDE_CONFIG_DIR = hostCfgDir;
-        // Force MCP tools INLINE (no ToolSearch deferral). claude 2.1.201
-        // defers MCP tools behind a ToolSearch meta-tool in interactive
-        // mode; smaller models (haiku) fail the ToolSearch→call dance and
-        // effectively lose team-comms (observed 2026-07-04: sentinel
-        // "unable to invoke MCP tools even after ToolSearch loads their
-        // schemas"). "false" pins the pre-2.1.2xx inline behaviour.
-        remoteEnv.ENABLE_TOOL_SEARCH = 'false';
-        agent = new SshAgentProcess({
-          sshTarget: t.sshTarget,
-          sshKey: t.sshKey,
-          sshPort: t.sshPort,
-          remoteCwd: hostCwd,
-          remoteEnv,
-          remoteCommand: init.claudeBin ?? 'claude',
-          args,
-          // The remote claude reads `--mcp-config=<url to http://127.0.0.1:mcpPort>`.
-          // The container's MCP listens on loopback only (plan §14), so set
-          // up an SSH reverse tunnel so the host's 127.0.0.1:mcpPort routes
-          // back into the container's namespace. Skipped when mcp isn't
-          // wired (mcpPort=0 / test paths).
-          reverseTunnelPort: init.mcpPort > 0 ? init.mcpPort : 0,
-        });
       } else {
-        const args = buildClaudeArgs({
+        // PHASE B.2 — pure argv + env from the adapter. Every container path
+        // it references (config dir, mcp config) went through `this._paths`,
+        // so what comes back is already agent-resolvable. What remains here
+        // is a purely TRANSPORT-level branch.
+        const spawn = this.provider.buildSpawn({
           model: this.model,
           effort: this.effort,
           permissionMode: this.permissionMode,
           initialPrompt: this.initialPrompt,
           preamble: init.preamble,
           resumeNotice: this.resumeNotice,
-          mcpConfigPath: this.mcpConfigPath,
-        });
-        const env: NodeJS.ProcessEnv = {};
-        if (this._claudeConfigDir) env.CLAUDE_CONFIG_DIR = this._claudeConfigDir;
-        // Same rationale as the SSH path: keep MCP tools inline for small models.
-        env.ENABLE_TOOL_SEARCH = 'false';
-        agent = new PtyAgentProcess({
-          command: init.claudeBin ?? 'claude',
-          args,
           cwd: this.cwd,
-          env,
+          configDir: this._sessionConfigDir,
+          mcpConfigPath: this.mcpConfigPath,
+          paths: this._paths,
         });
+        // cwd is validated against workspaceRoot at API ingress (so always
+        // starts with `<workspaceRoot>/` or equals it).
+        const agentCwd = this._paths.workspace(this.cwd);
+        if (this.sshTransport) {
+          const t = this.sshTransport;
+          // `secretEnv` must NOT reach the remote command line: `ps` on the host
+          // is world-readable. Write it to a 0600 file the remote shell sources
+          // instead. Providers that declare no secret get `null` here and the
+          // emitted command is byte for byte the historical one.
+          const envFile = this._writeSecretEnvFile(spawn.secretEnv);
+          agent = new SshAgentProcess({
+            sshTarget: t.sshTarget,
+            sshKey: t.sshKey,
+            sshPort: t.sshPort,
+            remoteCwd: agentCwd,
+            remoteEnv: spawn.env,
+            ...(envFile ? { remoteEnvFile: this._paths.data(envFile) } : {}),
+            remoteCommand: spawn.command,
+            args: spawn.args,
+            // The remote agent reads an MCP url pointing at
+            // `http://127.0.0.1:<mcpPort>`. The container's MCP listens on
+            // loopback only (plan §14), so set up an SSH reverse tunnel so
+            // the host's 127.0.0.1:mcpPort routes back into the container's
+            // namespace. Skipped when mcp isn't wired (mcpPort=0 / tests).
+            reverseTunnelPort: init.mcpPort > 0 ? init.mcpPort : 0,
+          });
+        } else {
+          agent = new PtyAgentProcess({
+            command: spawn.command,
+            args: spawn.args,
+            cwd: agentCwd,
+            // Local transport has no command line to leak through: the child's
+            // environment is only readable by the same uid (and root), which is
+            // exactly where we already are. So the two env buckets merge, and no
+            // file is written at all.
+            env: { ...spawn.env, ...(spawn.secretEnv ?? {}) },
+          });
+        }
       }
     } catch (err) {
       this._lastError = err instanceof Error ? err.message : String(err);
       this._setStatus('failed');
       this._endedAt = new Date().toISOString();
-      this._appendLog(`[swarm-os] failed to spawn claude: ${this._lastError}\n`);
+      this._appendLog(
+        `[swarm-os] failed to spawn ${this.provider.id}: ${this._lastError}\n`,
+      );
       this._cleanupMcpConfig();
+      // A failed spawn is still a session that reached a terminal state, so its
+      // on-disk artifacts must go the same way they do on a normal exit.
+      // Previously only the MCP config was removed here, which left a partial
+      // per-session config dir behind FOREVER (`_handleExit` never runs — there
+      // is no process to exit). For codex/gemini that directory holds credential
+      // symlinks and the session's MCP url; for opencode, four XDG roots.
+      this._cleanupRemoteEnvFile();
+      this._cleanupSessionConfig();
       eventBus.emitEvent({
         kind: 'session.exited',
         orchestratorId: this.orchestratorId,
@@ -1786,6 +1454,8 @@ export class Session extends EventEmitter {
     );
     this._closeLog();
     this._cleanupMcpConfig();
+    this._cleanupRemoteEnvFile();
+    this._cleanupSessionConfig();
     // Clear the SIGKILL grace timer if it's still armed.
     if (this._killTimer) {
       clearTimeout(this._killTimer);
@@ -1837,14 +1507,166 @@ export class Session extends EventEmitter {
     this._notifyState(true);
   }
 
+  /**
+   * Materialise `PreparedSpawn.secretEnv` as a 0600 file of `K='v'` lines for
+   * the remote shell to source. Returns the CONTAINER path (the caller maps it
+   * for the host), or `null` when there is nothing to write.
+   *
+   * Why a file and not `env K=V` on the remote command line: that line is
+   * visible to every user on the host through `ps`. The same exposure exists
+   * today for the PROMPT text (`agent-process.ts` puts the whole positional argv
+   * there) — that is plan Risk 7, tracked separately; this fixes the credentials.
+   *
+   * Where: the provider's own per-session config dir when it has one, so the
+   * file dies with the directory the adapter already asked us to delete
+   * (`cleanupPaths`). Otherwise the per-session MCP dir, which is under `dataDir`
+   * in SSH mode for exactly the same reason (it must have a host-side path).
+   *
+   * Never throws: a failure here degrades to "no secret env" — the agent then
+   * fails on its own missing credential with a message in its log, which is
+   * strictly better than a session that never starts.
+   */
+  private _writeSecretEnvFile(secretEnv: Record<string, string> | undefined): string | null {
+    if (!secretEnv) return null;
+    const entries = Object.entries(secretEnv);
+    if (entries.length === 0) return null;
+    const lines: string[] = [];
+    for (const [k, v] of entries) {
+      // The file is SOURCED by the remote shell: a key it cannot parse as an
+      // identifier would abort the whole `. <file>` and take the spawn with it.
+      if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(k)) {
+        log.warn({
+          event: 'session.secret_env_key_rejected',
+          sessionId: this.id,
+          provider: this.provider.id,
+          key: k,
+        });
+        continue;
+      }
+      lines.push(`${k}=${shellQuote(v)}`);
+    }
+    if (lines.length === 0) return null;
+    const dir =
+      this._sessionConfigDir ??
+      sessionDirFor(this.mcpRuntimeDir, this.orchestratorId, this.id);
+    const file = path.join(dir, SECRET_ENV_FILENAME);
+    try {
+      fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
+      // Replace rather than write through: a stale symlink at this path would
+      // send the secrets wherever it points.
+      try {
+        fs.rmSync(file, { force: true });
+      } catch {
+        /* nothing to remove */
+      }
+      const fd = fs.openSync(file, 'w', 0o600);
+      try {
+        fs.writeSync(fd, `${lines.join('\n')}\n`);
+      } finally {
+        fs.closeSync(fd);
+      }
+      try {
+        fs.chmodSync(file, 0o600);
+      } catch {
+        /* best-effort */
+      }
+      this._remoteEnvFile = file;
+      log.info({
+        event: 'session.secret_env_written',
+        sessionId: this.id,
+        provider: this.provider.id,
+        // Names only. NEVER the values — that is the whole point of the file.
+        keys: lines.length,
+      });
+      return file;
+    } catch (err) {
+      log.error({
+        event: 'session.secret_env_write_failed',
+        sessionId: this.id,
+        provider: this.provider.id,
+        path: file,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
+  }
+
+  /**
+   * Delete the sourced env file. Called on every exit path — including a failed
+   * spawn, where the file exists but no process ever read it. Best-effort and
+   * idempotent; the provider's `cleanupPaths` usually removes the whole directory
+   * moments later, but a credential file must not depend on that.
+   */
+  private _cleanupRemoteEnvFile(): void {
+    const file = this._remoteEnvFile;
+    if (!file) return;
+    this._remoteEnvFile = null;
+    try {
+      fs.rmSync(file, { force: true });
+    } catch (err) {
+      log.warn({
+        event: 'session.secret_env_cleanup_failed',
+        sessionId: this.id,
+        path: file,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+
+  /**
+   * Hand the MCP teardown back to the provider.
+   *
+   * ⚠️ The call is NOT gated on `mcpConfigPath`, and that is a fix, not an
+   * oversight. `writeMcpConfig` returns `null` for every INLINE-config provider
+   * (opencode is the first: its whole config, MCP url included, travels in
+   * `OPENCODE_CONFIG_CONTENT` and never touches disk), so `mcpConfigPath` is
+   * permanently null for them — an early return here meant such a provider never
+   * received `removeMcpConfig` at all and had to sweep its own per-session state
+   * on a later spawn. `removeMcpConfig` is specified to be idempotent and to
+   * never throw, so calling it unconditionally is safe; every built-in adapter
+   * already early-returns when it has nothing to undo.
+   *
+   * Idempotent on our side too: `_handleExit` and the failed-spawn path both call
+   * it, and a second call is a no-op for the adapters.
+   */
   private _cleanupMcpConfig(): void {
-    if (!this.mcpConfigPath) return;
-    removeSessionMcpConfig({
+    this.provider.removeMcpConfig({
       runtimeDir: this.mcpRuntimeDir,
       orchestratorId: this.orchestratorId,
       sessionId: this.id,
+      configDir: this._sessionConfigDir,
     });
     this.mcpConfigPath = null;
+  }
+
+  /**
+   * Remove the per-session artifacts the provider declared disposable.
+   *
+   * Best-effort and idempotent: a session can reach `_handleExit` once, but the
+   * directory may already be gone (operator cleanup, a container restart mid
+   * flight). A failure here must never keep a session from reaching a terminal
+   * state, so it is logged and swallowed.
+   *
+   * Runs AFTER `_cleanupMcpConfig()`: for a provider that merged its MCP block
+   * into a file inside that same directory, removing the directory first would
+   * make the MCP cleanup log a spurious failure.
+   */
+  private _cleanupSessionConfig(): void {
+    if (this._sessionCleanupPaths.length === 0) return;
+    for (const target of this._sessionCleanupPaths) {
+      try {
+        fs.rmSync(target, { recursive: true, force: true });
+      } catch (err) {
+        log.warn({
+          event: 'session.config_cleanup_failed',
+          sessionId: this.id,
+          provider: this.provider.id,
+          path: target,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+    this._sessionCleanupPaths = [];
   }
 
   private _openLog(): void {

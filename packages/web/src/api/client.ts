@@ -44,6 +44,13 @@ export interface OrchestratorView {
   defaultModel: string;
   defaultEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   defaultPermissionMode: string;
+  /**
+   * Multi-provider Lot 2 — the adapter new agents of this team inherit
+   * (`'claude'` unless the creation request or the role named another).
+   * OPTIONAL on the wire on purpose: a server that predates the lot omits it,
+   * and the UI must degrade to "unknown provider" rather than crash.
+   */
+  defaultProvider?: string;
   leadPreamble: string | null;
   workerPreamble: string | null;
   createdAt: string;
@@ -102,6 +109,68 @@ export interface ConnectorTypeInfo {
   builtin: boolean;
 }
 
+/**
+ * What a provider adapter can express. Mirrors the server-side
+ * `ProviderCapabilities` (`modules/providers/types.ts`) as rendered by
+ * `GET /providers`.
+ *
+ * This is what lets the dialogs stop guessing: EFFORT is only a control when
+ * the CLI has an equivalent of `--effort` (gemini has none), and PERMISSION is
+ * only a choice when the adapter accepts more than one mode (codex has a
+ * sandbox, not claude's permission modes).
+ */
+export interface ProviderCapabilities {
+  effort: boolean;
+  permissionModes: string[];
+  fallbackPermissionMode: string;
+  notificationHook: boolean;
+  inkSubmitDance: boolean;
+  durablePreamble: boolean;
+  httpMcp: boolean;
+}
+
+/**
+ * One entry of `GET /providers`. Mirror of the server's
+ * `ProviderInfoPayload` (`http/routes/providers.ts`).
+ *
+ * THIS is what replaced the four hard-coded `MODELS` arrays the web bundle
+ * used to carry (`desktop/constants.ts`, `NewOrchestratorDialog`,
+ * `RoleDialog`, `RolesPage`) — a catalogue duplicated in four files is a
+ * catalogue that is wrong in at least three.
+ */
+export interface ProviderInfo {
+  id: string;
+  label: string;
+  binary: string;
+  builtin: boolean;
+  available: boolean;
+  /**
+   * Present only when `available` is false, and written for a human. The UI
+   * MUST surface it: an unusable provider is rendered disabled WITH its reason
+   * rather than hidden, because a missing option teaches the operator nothing
+   * while "`gemini` is not on PATH on the host" tells them exactly what to do.
+   */
+  unavailableReason?: string;
+  /** First line of `<binary> --version`, when the probe got one. */
+  version?: string;
+  /** Indicative catalogue. NOT exhaustive — see the free-text escape hatch. */
+  models: Array<{ value: string; label: string }>;
+  capabilities: ProviderCapabilities;
+  defaults: { model: string; effort: string; permissionMode: string };
+}
+
+/** Body of `GET /providers`. */
+export interface ProvidersView {
+  /** What a team gets when neither the request nor the role names one. */
+  defaultProvider: string;
+  /**
+   * Where agents run (`local` | `ssh`). Explains why a CLI installed on the
+   * host still reads as unavailable in `local` transport, and vice-versa.
+   */
+  transport: string;
+  providers: ProviderInfo[];
+}
+
 export interface DiscordConnectorView {
   type: 'discord';
   /**
@@ -148,6 +217,12 @@ export interface RoleView {
   defaultModel: string | null;
   defaultEffort: 'low' | 'medium' | 'high' | 'xhigh' | 'max' | null;
   defaultPermissionMode: string | null;
+  /**
+   * Multi-provider Lot 2 — `null` means "inherit the instance default", the
+   * same convention as `defaultModel`. Optional so fixtures and older servers
+   * that never sent the field keep type-checking.
+   */
+  defaultProvider?: string | null;
   connectors: ConnectorView[];
   /** 5-field cron expression, or null. When set, the server's in-process
    * scheduler pokes the lead inbox of every live instance of this role. */
@@ -233,6 +308,13 @@ export interface SessionView {
   model: string;
   effort: 'low' | 'medium' | 'high' | 'xhigh' | 'max';
   permissionMode: string;
+  /**
+   * Multi-provider Lot 2 — the adapter driving THIS agent. Per-agent, not
+   * per-team: a lead on `claude` may run workers on `codex`, which is what the
+   * provider tag on the map node exists to make visible. Optional for the same
+   * reason as `OrchestratorView.defaultProvider`.
+   */
+  provider?: string;
   status:
     | 'starting'
     | 'running'
@@ -268,6 +350,15 @@ export interface InstanceSettingsView {
   fontSize: number;
   density: InstanceDensity;
   darkMode: boolean;
+  /**
+   * OpenRouter API key used by the `opencode` agent provider — **never the real
+   * key**. The server masks it: `PASSWORD_SENTINEL` ('•••') when one is stored,
+   * `null` when none is. Same contract as a plugin password field.
+   *
+   * On a PATCH: echo the sentinel back to keep the stored key, send a new string
+   * to replace it, send `null` to delete it.
+   */
+  openrouterApiKey: string | null;
   updatedAt: string;
 }
 
@@ -285,6 +376,7 @@ export const INSTANCE_SETTINGS_DEFAULTS: InstanceSettingsView = {
   fontSize: 13,
   density: 'regular',
   darkMode: true,
+  openrouterApiKey: null,
   updatedAt: '1970-01-01T00:00:00.000Z',
 };
 
@@ -639,6 +731,29 @@ class HttpError extends Error {
   }
 }
 
+/**
+ * Turn a rejected `api.*` call into something an operator can act on.
+ *
+ * `HttpError.message` is only `HTTP 409 POST /orchestrators` — showing that in
+ * a dialog is a silent failure with extra steps. The server sends a written
+ * reason plus a machine code (`UNKNOWN_PROVIDER`, `PROVIDER_UNAVAILABLE`, …);
+ * this surfaces both, and appends `unavailableReason` when present since that
+ * is the sentence that actually tells the operator what to fix.
+ */
+export function apiErrorMessage(err: unknown): string {
+  if (err instanceof HttpError) {
+    const body = err.body as
+      | { error?: string; code?: string; unavailableReason?: string | null; known?: string[] }
+      | undefined;
+    const head = body?.error ?? err.message;
+    const parts = [body?.code ? `${body.code}: ${head}` : head];
+    if (body?.unavailableReason) parts.push(body.unavailableReason);
+    if (body?.known?.length) parts.push(`known providers: ${body.known.join(', ')}`);
+    return parts.join(' — ');
+  }
+  return err instanceof Error ? err.message : String(err);
+}
+
 async function request<T>(
   method: string,
   path: string,
@@ -712,11 +827,47 @@ export const api = {
     roleId?: string;
     lead: { cwd: string; prompt?: string; preamble?: string };
     workerPreamble?: string;
-    defaults?: { model?: string; effort?: string; permissionMode?: string };
+    defaults?: {
+      /** Multi-provider Lot 2 — resolved body > role > `config.defaultProvider`. */
+      provider?: string;
+      model?: string;
+      effort?: string;
+      permissionMode?: string;
+    };
   }) =>
     request<{ orchestrator: OrchestratorView; lead: SessionView }>(
       'POST',
       '/orchestrators',
+      body,
+    ),
+  /**
+   * Multi-provider Lot 7 — add a worker to an existing team. The HTTP twin of
+   * the MCP `team.spawn_worker` tool: only `prompt` is required, and every
+   * omitted field inherits the team default server-side (that is what makes
+   * "leave the selects alone" mean "inherit").
+   *
+   * Failures worth surfacing verbatim through `apiErrorMessage`: 400
+   * `UNKNOWN_PROVIDER`, 409 `PROVIDER_UNAVAILABLE` (carries
+   * `unavailableReason`), 409 `ORCH_NOT_ACTIVE`, 413 (prompt+preamble over the
+   * server cap), 429 `MAX_WORKERS_PER_ORCH`.
+   */
+  spawnWorker: (
+    orchestratorId: string,
+    body: {
+      name?: string;
+      role?: string;
+      prompt: string;
+      /** Per-worker override of the team's worker preamble. */
+      preamble?: string;
+      provider?: string;
+      model?: string;
+      effort?: string;
+      permissionMode?: string;
+    },
+  ) =>
+    request<{ session: SessionView }>(
+      'POST',
+      `/orchestrators/${orchestratorId}/workers`,
       body,
     ),
   getPreambleDefaults: () =>
@@ -735,6 +886,15 @@ export const api = {
   /** J4 — connector types available for role connectors (built-in + plugins). */
   listConnectorTypes: () =>
     request<{ connectorTypes: ConnectorTypeInfo[] }>('GET', '/connector-types'),
+  /**
+   * Multi-provider Lot 2 — the agent-provider catalogue: models, capabilities,
+   * server defaults and live availability, per adapter.
+   *
+   * The availability verdict has a 60 s TTL server-side, so a CLI freshly
+   * installed on the host shows up on the next call — which is why the dialogs
+   * re-fetch on open instead of only on mount.
+   */
+  listProviders: () => request<ProvidersView>('GET', '/providers'),
   // ---- Plugins (J1 socle) --------------------------------------------------
   listPlugins: () => request<{ plugins: PluginView[] }>('GET', '/plugins'),
   getPlugin: (name: string) =>

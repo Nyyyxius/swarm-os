@@ -23,6 +23,9 @@ CREATE TABLE IF NOT EXISTS orchestrators (
   default_model TEXT NOT NULL,
   default_effort TEXT NOT NULL,
   default_permission_mode TEXT NOT NULL,
+  -- Agent provider every session of this team inherits unless it names its own
+  -- (multi-provider plan, Lot 2). 'claude' is what every pre-existing row means.
+  default_provider TEXT NOT NULL DEFAULT 'claude',
   lead_preamble TEXT,
   worker_preamble TEXT,
   created_at TEXT NOT NULL,             -- ISO
@@ -58,6 +61,7 @@ CREATE TABLE IF NOT EXISTS roles (
   default_model TEXT,
   default_effort TEXT,
   default_permission_mode TEXT,
+  default_provider TEXT,                -- NULL = inherit the instance default
   connectors_json TEXT,
   schedule TEXT,
   schedule_message TEXT,
@@ -77,6 +81,9 @@ CREATE TABLE IF NOT EXISTS sessions (
   model TEXT NOT NULL,
   effort TEXT NOT NULL,
   permission_mode TEXT NOT NULL,
+  -- Which CLI this agent runs. Resolved at spawn (session > team default);
+  -- persisted so auto-resume brings the agent back on ITS provider, not claude.
+  provider TEXT NOT NULL DEFAULT 'claude',
   status TEXT NOT NULL,                 -- starting|running|waiting|exited|killed|interrupted|failed
   pid INTEGER,
   started_at TEXT NOT NULL,             -- ISO
@@ -142,5 +149,16 @@ CREATE TABLE IF NOT EXISTS instance_settings (
   -- NOTE: also added by SwarmDb.applyMigrations() — an existing DB only gets
   -- the column through the ALTER, since CREATE TABLE IF NOT EXISTS skips.
   dismissed_update_version TEXT,
+  -- OpenRouter credential used by the `opencode` provider (multi-provider Lot
+  -- 6b). Here rather than in an env var because this deployment runs 24/7 and
+  -- is never recreated for a config change: an env var can only be rotated by
+  -- replacing the container, a row can be rotated from the UI and takes effect
+  -- on the next spawn.
+  -- NEVER leaves the server in clear: `SettingsStore.get()` masks it with the
+  -- plugin PASSWORD_SENTINEL and only `getOpenRouterApiKey()` returns the
+  -- plaintext (see modules/settings/index.ts).
+  -- NOTE: also added by SwarmDb.applyMigrations() — an existing DB only gets
+  -- the column through the ALTER, since CREATE TABLE IF NOT EXISTS skips.
+  openrouter_api_key TEXT,
   updated_at TEXT NOT NULL              -- ISO 8601
 );

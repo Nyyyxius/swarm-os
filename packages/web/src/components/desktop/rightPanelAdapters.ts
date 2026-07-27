@@ -46,6 +46,9 @@ export function buildRightPanelTeam(
     model: orch.defaultModel,
     effort: orch.defaultEffort,
     permissionMode: orch.defaultPermissionMode,
+    // Multi-provider Lot 3 — the team default, used to flag an agent that
+    // diverges from it.
+    provider: orch.defaultProvider,
     cwd: leadCwd,
     leadPrompt: role?.leadPrompt ?? null,
     leadPreamble: orch.leadPreamble,
@@ -82,6 +85,7 @@ export function buildRightPanelAgent(
     load: undefined,
     logLines,
     writer,
+    provider: session.provider,
     exitCode: session.exitCode,
     stopReason: session.stopReason,
     lastError: session.lastError,

@@ -223,6 +223,7 @@ export function orchToRow(
     default_model: view.defaultModel,
     default_effort: view.defaultEffort,
     default_permission_mode: view.defaultPermissionMode,
+    default_provider: view.defaultProvider,
     lead_preamble: view.leadPreamble,
     worker_preamble: view.workerPreamble,
     created_at: view.createdAt,
@@ -251,6 +252,7 @@ export function sessionToRow(
     model: view.model,
     effort: view.effort,
     permission_mode: view.permissionMode,
+    provider: view.provider,
     status: view.status,
     pid: view.pid,
     started_at: view.startedAt,
@@ -284,6 +286,9 @@ export function rowToOrchView(
     defaultModel: row.default_model,
     defaultEffort: row.default_effort as OrchestratorView['defaultEffort'],
     defaultPermissionMode: row.default_permission_mode as OrchestratorView['defaultPermissionMode'],
+    // Legacy rows predate the column; SQLite's ADD COLUMN default already made
+    // them 'claude', the `??` only covers a hand-written row.
+    defaultProvider: row.default_provider ?? 'claude',
     leadPreamble: row.lead_preamble,
     workerPreamble: row.worker_preamble,
     createdAt: row.created_at,
@@ -317,6 +322,7 @@ export function rowToSessionView(row: SessionRow): SessionView {
     model: row.model,
     effort: row.effort as SessionView['effort'],
     permissionMode: row.permission_mode as SessionView['permissionMode'],
+    provider: row.provider ?? 'claude',
     status: row.status,
     pid: row.pid,
     startedAt: row.started_at,

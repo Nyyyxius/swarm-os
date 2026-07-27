@@ -1,0 +1,85 @@
+{
+  "name": "novelai",
+  "version": "0.1.0",
+  "displayName": "NovelAI",
+  "description": "Expose l'API NovelAI aux agents du swarm : génération de prose (Erato, Xialong, GLM) et synthèse vocale (TTS). Le plugin assemble le contexte d'une histoire — mémoire, note d'auteur, fenêtre glissante — et route vers la bonne API NovelAI selon le modèle. Le texte est retourné dans la réponse de l'outil ; l'audio est écrit dans le workspace et son chemin est retourné.",
+  "main": "index.js",
+  "apiVersion": 1,
+  "capabilities": [
+    "mcp-tools",
+    "agent-assets",
+    "db-kv",
+    "http-routes",
+    "notify",
+    "schedule"
+  ],
+  "agentAssets": {
+    "dir": "agent-assets"
+  },
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "apiToken": {
+        "type": "string",
+        "format": "password",
+        "title": "Token NovelAI",
+        "description": "Token persistant NovelAI (compte NovelAI -> Account -> Get Persistent API Token). Duree de vie 30 jours: le plugin previent 3 jours avant l'expiration et signale un 401 a l'operateur."
+      },
+      "textModel": {
+        "type": "string",
+        "default": "llama-3-erato-v1",
+        "title": "Modele texte",
+        "description": "Modele utilise par novelai.generate_text quand l'agent n'en precise pas. Prose classique: llama-3-erato-v1, kayra-v1, clio-v1. Modeles recents: xialong-v1, glm-4-6. Champ libre volontairement: NovelAI ajoute des modeles sans preavis. La liste a jour est dans GET /plugin-api/novelai/status (champ models)."
+      },
+      "defaultVoice": {
+        "type": "string",
+        "default": "Aini",
+        "title": "Voix par defaut",
+        "description": "Voix TTS utilisee quand l'agent n'en precise pas. Feminines: Ligeia, Aini, Orea, Claea, Lim, Aurae, Naia. Masculines: Aulon, Elei, Ogma, Raid, Pega, Lam."
+      },
+      "defaultMaxLength": {
+        "type": "number",
+        "default": 150,
+        "title": "Tokens generes par defaut",
+        "description": "Nombre de tokens generes quand l'agent ne precise pas max_length (borne a 1-300)."
+      },
+      "defaultTemperature": {
+        "type": "number",
+        "default": 1,
+        "title": "Temperature par defaut",
+        "description": "Defaut 1.0. Plus haut = plus creatif et plus instable (borne a 0.1-3)."
+      },
+      "outputDir": {
+        "type": "string",
+        "default": "novelai",
+        "title": "Repertoire de sortie",
+        "description": "Repertoire des fichiers audio generes, RELATIF a la racine du workspace. Un chemin absolu ou qui sort du workspace est refuse. Un .gitignore y est cree automatiquement (le workspace est un depot Git)."
+      },
+      "ttsFormat": {
+        "type": "string",
+        "enum": [
+          "opus",
+          "mp3"
+        ],
+        "default": "opus",
+        "title": "Format audio",
+        "description": "'opus' produit un OGG/Opus envoyable tel quel comme message vocal Discord. Aucun reencodage n'est possible (pas de ffmpeg dans l'image)."
+      },
+      "retentionDays": {
+        "type": "number",
+        "default": 7,
+        "title": "Retention (jours)",
+        "description": "Age au-dela duquel les fichiers audio generes sont purges. 0 = ne jamais purger. Le balayage passe au plus une fois par heure."
+      },
+      "requestTimeoutSec": {
+        "type": "number",
+        "default": 45,
+        "title": "Timeout des requetes (s)",
+        "description": "Delai maximal d'un appel NovelAI. Un depassement n'est jamais reessaye: le client MCP a deja abandonne et le slot doit etre rendu."
+      }
+    },
+    "required": [
+      "apiToken"
+    ]
+  }
+}

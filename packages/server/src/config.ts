@@ -3,6 +3,12 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+import {
+  BUILTIN_PROVIDER_DEFAULT_MODELS,
+  BUILTIN_PROVIDER_IDS,
+  DEFAULT_PROVIDER_ID,
+  type BuiltinProviderId,
+} from './modules/providers/ids.js';
 
 export type EffortLevel = 'low' | 'medium' | 'high' | 'xhigh' | 'max';
 export type PermissionMode =
@@ -39,9 +45,26 @@ export interface Config {
    */
   mcpPort: number;
   projectName: string;
+  /**
+   * `SWARM_OS_DEFAULT_MODEL`, or the default model of `defaultProvider` below
+   * when unset. The pair is always COHERENT: the id here is one this instance's
+   * default provider understands, never an unrelated vendor's.
+   */
   defaultModel: string;
   defaultEffort: EffortLevel;
   defaultPermissionMode: PermissionMode;
+  /**
+   * Agent provider used when neither the request nor the role names one
+   * (`SWARM_OS_DEFAULT_PROVIDER`, default `claude`). Validated at boot against
+   * the BUILT-IN ids (`modules/providers/ids.ts`) — see that module for why it
+   * is not validated against the live registry.
+   *
+   * `defaultModel` above belongs to THIS provider (they are resolved together
+   * in `loadConfig`). When a team is created on a different one without an
+   * explicit model, that provider's own default is used instead — the shared
+   * rule lives in `modules/providers/resolve.ts`.
+   */
+  defaultProvider: string;
   maxOrchestrators: number;
   maxPromptSizeBytes: number;
   claudeStartTimeoutMs: number;
@@ -217,6 +240,41 @@ export interface Config {
    * `/home/ubuntu/.claude`. Env: `SWARM_OS_HOST_CLAUDE_DIR`.
    */
   hostClaudeDir: string;
+  /**
+   * Host-side `~/.codex` — the codex adapter's equivalent of `hostClaudeDir`
+   * (SSH transport only). Env: `SWARM_OS_HOST_CODEX_DIR`, default
+   * `<host home>/.codex`.
+   */
+  hostCodexDir: string;
+  /**
+   * Host-side `~/.gemini`. Env: `SWARM_OS_HOST_GEMINI_DIR`, default
+   * `<host home>/.gemini`.
+   */
+  hostGeminiDir: string;
+  /**
+   * Which authentication method a gemini session pins in its own
+   * `settings.json` (`security.auth.selectedType`). Env:
+   * `SWARM_OS_GEMINI_AUTH_TYPE`, default `null` = let the adapter decide.
+   *
+   * It exists because under the SSH transport the adapter CANNOT decide
+   * correctly: the host's `~/.gemini` is not mounted, so whether
+   * `oauth_creds.json` exists there is unknowable from the container, and gemini
+   * offers no "pick whichever works" mode — an unpinned `selectedType` opens the
+   * auth-method picker, a modal that keeps the Ink renderer repainting so the
+   * agent is never idle, never gets its messages and never gets reset. See
+   * `providers/gemini.ts` (`_selectAuthType`) for the fallback and the trade-off.
+   *
+   * Set it to what the host is actually logged in with: `oauth-personal` after a
+   * `gemini` browser login, `gemini-api-key` when the host exports
+   * `GEMINI_API_KEY` (or has a key in its keychain).
+   */
+  geminiAuthType: string | null;
+  /**
+   * Host-side `~/.local/share/opencode` equivalent — kept as a single knob
+   * until spike S3 pins down opencode's real config root. Env:
+   * `SWARM_OS_HOST_OPENCODE_DIR`, default `<host home>/.opencode`.
+   */
+  hostOpencodeDir: string;
   /**
    * Host-side path matching `workspaceRoot` (container `/workspace`). Required
    * in SSH mode so a cwd stored in DB as `/workspace/foo` (the existing API
@@ -465,8 +523,6 @@ export function loadConfig(): Config {
   // Project name is technically required, but for `pnpm dev` convenience we default to 'dev'.
   const projectName = process.env.SWARM_OS_PROJECT_NAME ?? 'dev';
 
-  const defaultModel = process.env.SWARM_OS_DEFAULT_MODEL ?? 'claude-opus-4-8';
-
   const effortRaw = process.env.SWARM_OS_DEFAULT_EFFORT ?? 'xhigh';
   if (!VALID_EFFORTS.has(effortRaw)) {
     throw new Error(
@@ -480,6 +536,28 @@ export function loadConfig(): Config {
     throw new Error(`SWARM_OS_DEFAULT_PERMISSION_MODE invalid: ${permRaw}`);
   }
   const defaultPermissionMode = permRaw as PermissionMode;
+
+  // Instance-wide default agent provider. Validated against the built-in ids
+  // (see modules/providers/ids.ts): a typo here would otherwise surface much
+  // later as "every team falls back to claude", silently.
+  const providerRaw = process.env.SWARM_OS_DEFAULT_PROVIDER ?? DEFAULT_PROVIDER_ID;
+  if (!(BUILTIN_PROVIDER_IDS as readonly string[]).includes(providerRaw)) {
+    throw new Error(
+      `SWARM_OS_DEFAULT_PROVIDER must be one of ${BUILTIN_PROVIDER_IDS.join('|')}, got: ${providerRaw}`,
+    );
+  }
+  const defaultProvider = providerRaw as BuiltinProviderId;
+
+  // Resolved AFTER the provider, and from it: a model id only means something
+  // to the CLI it was written for. `SWARM_OS_DEFAULT_MODEL` unset used to mean
+  // `claude-opus-4-8` whatever the provider, so the documented pair
+  // (`SWARM_OS_DEFAULT_PROVIDER=codex`, no model) handed EVERY team and EVERY
+  // worker on the instance a claude id on a foreign CLI — and no downstream
+  // guard could catch it, since the config layer legitimately IS the codex
+  // layer. The operator's explicit value is still taken verbatim and never
+  // validated (`docs/providers.md`: ids ship faster than our releases).
+  const defaultModel =
+    process.env.SWARM_OS_DEFAULT_MODEL ?? BUILTIN_PROVIDER_DEFAULT_MODELS[defaultProvider];
 
   const maxOrchestrators = intEnv('SWARM_OS_MAX_ORCHESTRATORS', 10);
   const maxPromptSizeKb = intEnv('SWARM_OS_MAX_PROMPT_SIZE_KB', 64);
@@ -624,6 +702,26 @@ export function loadConfig(): Config {
   const hostClaudeDir = path.resolve(
     process.env.SWARM_OS_HOST_CLAUDE_DIR ?? path.join(os.homedir(), '.claude'),
   );
+  // Siblings of hostClaudeDir, one per non-claude built-in adapter. Same rule:
+  // set them explicitly on SSH mode; the fallback derives from the running
+  // user's home. They are only READ in ssh transport (in local transport the
+  // agent shares our filesystem namespace and resolves its own `~/.X`).
+  const hostCodexDir = path.resolve(
+    process.env.SWARM_OS_HOST_CODEX_DIR ?? path.join(os.homedir(), '.codex'),
+  );
+  const hostGeminiDir = path.resolve(
+    process.env.SWARM_OS_HOST_GEMINI_DIR ?? path.join(os.homedir(), '.gemini'),
+  );
+  const hostOpencodeDir = path.resolve(
+    process.env.SWARM_OS_HOST_OPENCODE_DIR ?? path.join(os.homedir(), '.opencode'),
+  );
+  // Not validated here: the adapter owns the vocabulary (it is gemini's, not
+  // ours) and logs what it does with an unknown value, rather than refusing to
+  // boot the whole server over one provider's setting.
+  const geminiAuthType =
+    process.env.SWARM_OS_GEMINI_AUTH_TYPE && process.env.SWARM_OS_GEMINI_AUTH_TYPE.length > 0
+      ? process.env.SWARM_OS_GEMINI_AUTH_TYPE.trim()
+      : null;
   const hostWorkspaceRoot =
     process.env.SWARM_OS_HOST_WORKSPACE_ROOT && process.env.SWARM_OS_HOST_WORKSPACE_ROOT.length > 0
       ? path.resolve(process.env.SWARM_OS_HOST_WORKSPACE_ROOT)
@@ -678,6 +776,7 @@ export function loadConfig(): Config {
     defaultModel,
     defaultEffort,
     defaultPermissionMode,
+    defaultProvider,
     maxOrchestrators,
     maxPromptSizeBytes: maxPromptSizeKb * 1024,
     claudeStartTimeoutMs: claudeStartTimeoutS * 1000,
@@ -713,6 +812,10 @@ export function loadConfig(): Config {
     sshPort,
     hostDataDir,
     hostClaudeDir,
+    hostCodexDir,
+    hostGeminiDir,
+    geminiAuthType,
+    hostOpencodeDir,
     hostWorkspaceRoot,
     ideEnabled,
     idePort,

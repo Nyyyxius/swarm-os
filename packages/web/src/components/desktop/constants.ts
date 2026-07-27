@@ -1,18 +1,19 @@
 // packages/web/src/components/desktop/constants.ts
 //
-// Phase C — Step 13 (§10 step 1 / §11 note 1) :
-// shared MODELS / EFFORTS / PERMS constants for the desktop dialogs.
+// OUR enumerations for the agent dialogs — effort levels and permission modes.
 //
-// These were duplicated inline in `NewOrchestratorDialog.tsx` (Step 9) and
-// are re-used by `EditConfigDialog.tsx` (this step). Extracted here to
-// avoid drift between the two surfaces — when the supported model list
-// changes, there is one source of truth.
+// These are swarm-os concepts (`EffortLevel` / `PermissionMode` server-side),
+// not a vendor catalogue, which is why they still live in the bundle. They are
+// nonetheless FILTERED PER PROVIDER at render time from
+// `ProviderInfo.capabilities`: gemini has no equivalent of `--effort` at all,
+// and codex has a sandbox rather than claude's permission modes. See
+// `components/ProviderFields.tsx` (`effortsFor` / `permissionsFor`).
 //
-// Note: `NewOrchestratorDialog` keeps its own `MODELS` array with verbose
-// labels ("Opus 4.8 (claude-opus-4-8)") because operators on the CREATE
-// surface need to see the exact model id they're committing to. The
-// short-label variant exported here matches the proto v2 EditConfigDialog
-// (`label: m.replace('claude-', '')`).
+// Multi-provider Lot 3 — the `MODELS` array that used to live here is GONE,
+// along with its three copies in `NewOrchestratorDialog`, `RoleDialog` and
+// `RolesPage`. Model ids now come from `GET /providers`, whose adapters own
+// their own catalogue: a list duplicated in four files was wrong in at least
+// three of them, and it could only ever describe claude.
 
 export const EFFORTS = ['low', 'medium', 'high', 'xhigh', 'max'] as const;
 export type Effort = (typeof EFFORTS)[number];
@@ -26,9 +27,3 @@ export const PERMS = [
   'plan',
 ] as const;
 export type PermissionMode = (typeof PERMS)[number];
-
-export const MODELS = [
-  { value: 'claude-opus-4-8', label: 'opus-4-8' },
-  { value: 'claude-sonnet-4-6', label: 'sonnet-4-6' },
-  { value: 'claude-haiku-4-5-20251001', label: 'haiku-4-5' },
-] as const;

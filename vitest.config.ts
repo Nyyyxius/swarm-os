@@ -16,6 +16,10 @@ export default defineConfig({
     projects: [
       './packages/server/vitest.config.ts',
       './packages/web/vitest.config.ts',
+      // Example plugins ship as verbatim directory copies, not as compiled
+      // packages, so they carry their own tests under `plugins/*/test/`.
+      // Without this third project nothing under `examples/` would ever run.
+      './examples/vitest.config.ts',
     ],
     coverage: {
       provider: 'v8',
@@ -38,6 +42,13 @@ export default defineConfig({
         '**/src/App.tsx',
         // Phase 6 PWA assets — pure HTML/CSS, nothing to instrument.
         '**/public/**',
+        // Example-plugin tests themselves — the belt to the `**/test/**`
+        // braces above. Note that `examples/**` is deliberately NOT excluded:
+        // Vitest 4 dropped `coverage.all`, so only files a test actually
+        // imports enter the denominator. Excluding the whole tree would throw
+        // away the one honest measurement we have on plugin code that IS
+        // tested, without sparing us a single untested line.
+        'examples/**/test/**',
       ],
       thresholds: {
         lines: 50,

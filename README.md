@@ -128,13 +128,39 @@ no-ops. See `docs/phase-1-spawner-lead.md` for the full local-dev wiring.
 - `packages/web/` — React + Vite + xterm.js UI + PWA shell
 - `packages/plugin-sdk/` — types-only SDK for plugin authors (`@swarm-os/plugin-sdk`)
 - `scripts/` — `verify-claude-code.ts` (spike harness), `gen-icons.ts` (PWA icons), `push-image.sh` (manual GHCR publish)
-- `examples/` — `docker-compose.{single,multi,dist}.yml` reference deployments (`dist` = third-party, `.env`-driven); `plugins/` — example plugins (`echo`, `slack-bridge`)
+- `examples/` — `docker-compose.{single,multi,dist}.yml` reference deployments (`dist` = third-party, `.env`-driven); `plugins/` — example plugins (`echo`, `slack-bridge`, `discord-agent`, `novelai`)
 - `install.sh` + `.env.example` — one-shot installer + config template for a third-party deployment
 - `docs/deploy/` — bilingual install + usage guides for shipping to a third party
 - `docs/` — phase-by-phase implementation reports (mandatory pre-reading)
 - `archives/` — superseded plan revisions (historical, do not edit)
 - `plan.md` — canonical specification (sections 1–17)
 - `Dockerfile` — multi-stage builder + runtime (claude CLI pinned at 2.1.142)
+
+---
+
+## Agent providers (multi-provider)
+
+An agent is a CLI process driven in a PTY, and that CLI is no longer always
+`claude`. Four adapters ship built in — `claude` (Anthropic), `codex` (OpenAI),
+`gemini` (Google) and `opencode` (any model reachable through OpenRouter) —
+selected **per team and per agent**, so a Claude lead with Gemini workers is a
+supported shape. `GET /providers` publishes each one's model catalogue,
+capabilities and whether it can run here; the UI greys out an unusable provider
+with its reason instead of hiding it, and the verdict is re-probed every 60 s,
+so installing a CLI on the host makes it selectable without a restart.
+
+Prerequisite for anything but `claude`: the CLI **installed and logged in on
+the host** — the image carries only the Claude Code CLI, and under the SSH
+transport the agent runs on the host with the host's own credentials — plus an
+OpenRouter key in SETTINGS ▸ OPENROUTER for `opencode`. Two accepted
+degradations to know before choosing: `gemini` and `opencode` have no
+`--effort` equivalent, and `codex`/`gemini`/`opencode` sessions never reach the
+`waiting` state (their callbacks fire at every turn boundary, or not at all),
+which makes `SWARM_OS_COMPACT_ON_WAITING` a no-op for them —
+`SWARM_OS_AUTO_COMPACT_BYTES` is the knob that works everywhere.
+
+Full reference — per-CLI contract, capabilities, host prerequisites, what the
+spikes proved and what they could not: `docs/providers.md`.
 
 ---
 
@@ -181,8 +207,11 @@ Drop the directory in `/data/plugins/<name>/`, hit **Scan** on `#/plugins`,
 then **Enable**. Everything registered through `api.*` returns a disposable
 and is torn down automatically on disable. Agents see MCP tools as
 `<name>.<tool>` (here `my-plugin.hello`). Working examples:
-`examples/plugins/echo` (events, MCP tool, HTTP route, config schema, UI panel)
-and `examples/plugins/slack-bridge` (channel connector, npm dependencies).
+`examples/plugins/echo` (events, MCP tool, HTTP route, config schema, UI panel),
+`examples/plugins/slack-bridge` (channel connector, npm dependencies),
+`examples/plugins/discord-agent` (Discord text + voice bound to a permanent
+lead), and `examples/plugins/novelai` (external API behind MCP tools, generated
+files written into the workspace with SSH-aware path translation).
 Use `packages/plugin-sdk` for typed autocompletion while authoring. A manifest
 may also declare `uiPanels` to surface its own pages as full-pane iframes in the
 SPA nav (enabled plugins only) — see `docs/plugins.md` §5.
@@ -275,6 +304,7 @@ Exit codes: `0` PASS, `1` FAIL, `2` prerequisites missing.
 - Specification: `plan.md`
 - Deployment & update guide: `docs/deploy/` (EN + FR; the update surface is
   §7 of `install.*.md`)
+- Agent providers (multi-provider): `docs/providers.md`
 - Plugin authoring guide: `docs/plugins.md`
 - Phase implementation reports: `docs/phase-*.md` (mandatory pre-reading
   before touching the corresponding code)

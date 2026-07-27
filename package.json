@@ -12,7 +12,10 @@
     "test": "vitest run",
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
-    "verify:claude": "pnpm --filter server exec tsx ../../scripts/verify-claude-code.ts"
+    "verify:claude": "pnpm --filter server exec tsx ../../scripts/verify-claude-code.ts",
+    "verify:codex": "pnpm --filter server exec tsx ../../scripts/verify-codex.ts",
+    "verify:opencode": "pnpm --filter server exec tsx ../../scripts/verify-opencode.ts",
+    "verify:gemini": "pnpm --filter server exec tsx ../../scripts/verify-gemini.ts"
   },
   "devDependencies": {
     "@eslint/js": "^9.18.0",

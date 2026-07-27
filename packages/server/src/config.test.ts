@@ -114,6 +114,48 @@ describe('loadConfig', () => {
     expect(() => loadConfig()).toThrow(/SWARM_OS_DEFAULT_PERMISSION_MODE/);
   });
 
+  describe('SWARM_OS_DEFAULT_PROVIDER ↔ SWARM_OS_DEFAULT_MODEL coherence', () => {
+    it('derives the default model from the default provider when no model is set', () => {
+      // The documented-as-valid pair (`docs/providers.md` §6): pick a provider,
+      // say nothing about the model. `defaultModel` used to be the hard-coded
+      // claude id regardless, and because the config layer legitimately IS the
+      // codex layer no downstream provider-scoping guard could catch it — every
+      // team and every worker on the instance ran `codex -m claude-opus-4-8`.
+      process.env.SWARM_OS_DEFAULT_PROVIDER = 'codex';
+      _resetConfigCacheForTesting();
+      const cfg = loadConfig();
+      expect(cfg.defaultProvider).toBe('codex');
+      expect(cfg.defaultModel).toBe('gpt-5.5');
+      expect(cfg.defaultModel).not.toMatch(/^claude-/);
+    });
+
+    it('does the same for gemini and opencode', () => {
+      for (const [provider, model] of [
+        ['gemini', 'gemini-3-pro-preview'],
+        ['opencode', 'anthropic/claude-opus-5'],
+      ] as const) {
+        process.env.SWARM_OS_DEFAULT_PROVIDER = provider;
+        _resetConfigCacheForTesting();
+        expect(loadConfig().defaultModel).toBe(model);
+      }
+    });
+
+    it('never overrides an explicit SWARM_OS_DEFAULT_MODEL', () => {
+      // The model string is never validated — ids ship faster than releases —
+      // so an operator who names one gets it verbatim, provider or no provider.
+      process.env.SWARM_OS_DEFAULT_PROVIDER = 'codex';
+      process.env.SWARM_OS_DEFAULT_MODEL = 'gpt-6-preview';
+      _resetConfigCacheForTesting();
+      expect(loadConfig().defaultModel).toBe('gpt-6-preview');
+    });
+
+    it('leaves a claude deployment exactly where it was', () => {
+      process.env.SWARM_OS_DEFAULT_PROVIDER = 'claude';
+      _resetConfigCacheForTesting();
+      expect(loadConfig().defaultModel).toBe('claude-opus-4-8');
+    });
+  });
+
   it('parses SWARM_OS_MAX_PROMPT_SIZE_KB into bytes', () => {
     process.env.SWARM_OS_MAX_PROMPT_SIZE_KB = '128';
     _resetConfigCacheForTesting();

@@ -38,6 +38,13 @@ export interface RightPanelAgent {
   exitCode?: number | null;
   stopReason?: string | null;
   lastError?: string | null;
+  /**
+   * Multi-provider Lot 3 — the adapter driving THIS agent
+   * (`SessionView.provider`). Shown as a chip next to the role because in a
+   * mixed team it may differ from `RightPanelTeam.provider`, and knowing which
+   * CLI you are looking at changes how you read the console.
+   */
+  provider?: string;
 }
 
 /** Forme partielle d'un team (orchestrator) attendue. */
@@ -47,6 +54,8 @@ export interface RightPanelTeam extends ConfigTabTeam {
   leadId: string;
   workerCount: number;
   discordWebhook?: string | null;
+  /** Multi-provider Lot 3 — the team's default adapter (`defaultProvider`). */
+  provider?: string;
   /**
    * Phase 8 — auto-resume audit. Drives the "Resumed N×" chip in the
    * header so operators can spot restart loops.
@@ -251,6 +260,27 @@ export default function RightPanel({
         </div>
         <div className="pr-role">
           <span>{selected.role}</span>
+          {/* Provider chip — same chrome as the DISCORD / RESUMED chips. Marked
+              when this agent diverges from its team's default, which is exactly
+              the case a mixed team creates. */}
+          {selected.provider && (
+            <span
+              className="discord-chip"
+              title={
+                team.provider && team.provider !== selected.provider
+                  ? `agent runs on ${selected.provider}; team default is ${team.provider}`
+                  : `agent provider: ${selected.provider}`
+              }
+              style={
+                team.provider && team.provider !== selected.provider
+                  ? { color: 'var(--warn)', borderColor: 'var(--warn)' }
+                  : undefined
+              }
+            >
+              ⬡ {selected.provider.toUpperCase()}
+              {team.provider && team.provider !== selected.provider ? ' ·MIXED' : ''}
+            </span>
+          )}
           {hasDiscord && (
             <span className="discord-chip" title={team.discordWebhook ?? ''}>◇ DISCORD</span>
           )}
@@ -368,7 +398,7 @@ export default function RightPanel({
         <button className="pr-action primary"
           disabled={!isLead || stopped || isFailed}
           onClick={() => onSpawnWorker(team)}
-          title={isLead ? 'spawn worker (v2 preview)' : 'lead-only action'}>
+          title={isLead ? 'spawn a worker in this team' : 'lead-only action'}>
           {ICON.fork}<span>+ WORKER</span>
         </button>
       </div>

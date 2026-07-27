@@ -1,9 +1,66 @@
 /**
  * Phase 4 — `/hooks/notification` endpoint (plan §6 Phase 4 + §13/§14).
  *
- * Receives the Claude Code `Notification` hook callback. The hook command
- * lives in each session's `<dataDir>/.claude-runtime/sessions/<id>/settings.json`
- * (see `Session._maybeWriteSessionSettings`). It POSTs JSON of the form:
+ * ⚠️ ONE ENDPOINT, THREE PROVIDER SEMANTICS. Read this before adding a side
+ * effect here.
+ *
+ * The endpoint was written for Claude Code's `Notification` hook, which fires
+ * when the agent is BLOCKED ON A HUMAN. Codex and gemini reach the same URL with
+ * a callback that fires at EVERY TURN BOUNDARY instead (codex `notify` ⇒
+ * `{"type":"agent-turn-complete"}`, spike S1 C5; gemini `hooks.AfterAgent`,
+ * which fires even on a failed turn, spike S2 C5). Firing all three side effects
+ * on every callback therefore meant: a codex lead running twenty turns produced
+ * twenty `waiting` badges, twenty Discord alerts and twenty armed compactions —
+ * for an agent nobody was waiting on.
+ *
+ * So the side effects are gated on the SESSION'S PROVIDER
+ * (`ProviderCapabilities.notificationHook`, `modules/providers/types.ts`):
+ *
+ *   `'needs-human'`   badge → `waiting`, Discord notification, armed `/compact`.
+ *   `'turn-complete'` LOGGED, and nothing else. See below — this is the one
+ *                     branch whose emptiness is a decision, not an omission.
+ *   `false`           nothing at all, not even a log at info level. The provider
+ *                     declares it sends no callback we consume, so a POST
+ *                     claiming otherwise is a stale config file and is ignored
+ *                     rather than trusted.
+ *
+ * WHY `'turn-complete'` ARMS NO `/compact`, having been considered and rejected.
+ * A finished turn IS a real inactivity boundary, so arming the context-management
+ * safety net there looks natural. It is redundant and unsafe:
+ *
+ *  1. **Redundant.** `Session._maybeAutoCompact` already arms `/compact` for ANY
+ *     provider once a session has produced `SWARM_OS_AUTO_COMPACT_BYTES` of
+ *     output since its last reset, with the SAME `idleMs` — so a
+ *     volume-driven compaction already lands on exactly the same idle boundary,
+ *     hook or no hook. The only thing this branch could add is compaction
+ *     UNCONDITIONALLY, on every turn, however small the context.
+ *  2. **Lossy and expensive at that cadence.** `/compact` summarises the
+ *     conversation: doing it after every turn spends a model call to degrade the
+ *     agent's own working memory, on a schedule nobody asked for.
+ *  3. **It can feed itself.** The compaction is itself agent activity, and both
+ *     providers fire on *every* turn (gemini's `AfterAgent` even on a failed
+ *     one). A callback after the compaction turn would arm the next `/compact`,
+ *     which fires at the next idle boundary, which fires the callback again — a
+ *     session that compacts forever and merely looks busy. Nothing in the spikes
+ *     rules that out, and `compactOnWaiting`'s own contract ("a *waiting* session
+ *     is paused on a blocker") is not what a finished turn is.
+ *
+ * The cost of this decision, stated rather than hidden: for codex/gemini,
+ * `SWARM_OS_COMPACT_ON_WAITING` does nothing. That is the honest consequence of
+ * a provider that cannot report "blocked on a human" at all, and it is what
+ * `capabilities.notificationHook` exists to make visible in the UI (plan Risk 8)
+ * — volume-driven compaction via `SWARM_OS_AUTO_COMPACT_BYTES` is the knob that
+ * works for every provider.
+ *
+ * The hook command itself is IDENTICAL for every provider (one shell string,
+ * `providers/session-config.ts`), and deliberately so: it is production-critical
+ * quoting that was paid for in incidents. The meaning is resolved here, where we
+ * know which provider the session runs, rather than by making each adapter
+ * invent its own payload.
+ *
+ * The hook command lives in each session's per-provider config dir (claude:
+ * `settings.json`; gemini: `.gemini/settings.json`; codex: `notify.sh` +
+ * `config.toml`). It POSTs JSON of the form:
  *
  *   {
  *     "orch_id":   "<UUID>",
@@ -23,12 +80,14 @@
  *
  * Response:
  *
- *   200 { ok: true }                        — accepted (mailbox+notify fired)
- *   200 { ok: true, ignored: '...' }        — orch/session unknown (per spike H6:
- *                                             Claude must not crash on hook
- *                                             failures, so we never return 4xx
- *                                             on unknown ids; we just log a
- *                                             warning and tell the hook
+ *   200 { ok: true }                        — accepted (side effects fired,
+ *                                             filtered by provider semantics)
+ *   200 { ok: true, ignored: '...' }        — orch/session unknown, or a provider
+ *                                             that declares no consumed callback
+ *                                             (per spike H6: Claude must not
+ *                                             crash on hook failures, so we never
+ *                                             return 4xx on unknown ids; we just
+ *                                             log a warning and tell the hook
  *                                             everything is fine)
  *   400 { error: ... }                      — body invalid
  *   401 { error: 'unauthorized' }           — missing/wrong bearer
@@ -127,15 +186,51 @@ export function createHooksRouter(
       return;
     }
 
-    // ---- Fire side effects --------------------------------------------
+    // ---- Resolve what this callback MEANS for this provider ------------
+    // The three CLIs POST the same body from different events; only the
+    // session's own adapter knows which. See the module header.
+    const semantics = session.providerCapabilities.notificationHook;
+    const providerId = session.toView().provider;
+
     log.info({
       event: 'hooks.notification',
       kind,
       orchId: orch.id,
       sessionId: session.id,
+      // Both fields, because they answer different questions: `provider` is what
+      // an operator greps, `semantics` is why the side effects below did or did
+      // not fire.
+      provider: providerId,
+      semantics: semantics === false ? 'none' : semantics,
       msgLen: message.length,
     });
 
+    if (semantics === false) {
+      // The adapter declares that nothing we consume calls back. Either a stale
+      // per-session config file from a previous provider assignment, or an
+      // adapter whose declaration is wrong. Trusting the POST over the
+      // declaration is how a provider that cannot report `waiting` starts
+      // reporting it — 200 (H6) and drop it.
+      log.warn({
+        event: 'hooks.notification_unexpected',
+        orchId: orch.id,
+        sessionId: session.id,
+        provider: providerId,
+      });
+      res.status(200).json({ ok: true, ignored: 'provider_sends_no_notification' });
+      return;
+    }
+
+    // ---- Turn boundary: recorded, never acted on ----------------------
+    // See the module header for why this branch is deliberately empty. The
+    // response says so explicitly, so an operator curling the endpoint can tell
+    // "filtered by design" from "Discord is broken".
+    if (semantics !== 'needs-human') {
+      res.status(200).json({ ok: true, notified: false, semantics });
+      return;
+    }
+
+    // ---- A human is needed --------------------------------------------
     // Emit a status_changed event so the UI badge flips to 'waiting'
     // immediately. We DO NOT actually mutate the SessionStatus here — the
     // session is still 'running' from the PTY's POV — we just want the UI to

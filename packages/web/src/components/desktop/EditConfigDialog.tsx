@@ -15,10 +15,27 @@
 // call-site `DesktopShell` doesn't have to be touched when the endpoint
 // lands — only the `canSave` calculation and the `.field-warn` block
 // will be removed). See spec §7.4.
+//
+// Multi-provider Lot 3 : the PROVIDER + MODEL controls are wired to
+// `GET /providers` here so this surface is ready when the endpoint lands.
+// The dialog is STILL DISABLED — activating it is Lot 7, not this one.
 
 import { useEffect, useState } from 'react';
 import type { OrchestratorView } from '../../api/client';
-import { EFFORTS, MODELS, PERMS, type Effort, type PermissionMode } from './constants';
+import { useProviders } from '../../hooks/useProviders';
+import {
+  ModelSelect,
+  ProviderSelect,
+  defaultModelFor,
+  effortNote,
+  effortsFor,
+  findProvider,
+  isPermissionChoice,
+  permissionNote,
+  permissionsFor,
+  unavailableNote,
+} from '../ProviderFields';
+import { EFFORTS, type Effort, type PermissionMode } from './constants';
 
 interface Props {
   open: boolean;
@@ -36,7 +53,9 @@ interface Props {
 const GAP_TOOLTIP = 'available in v2 — see workaround below (gap §4-2)';
 
 export default function EditConfigDialog({ open, team, onClose }: Props) {
-  const [model, setModel] = useState<string>('claude-opus-4-8');
+  const { providers, transport, refresh: refreshProviders } = useProviders();
+  const [provider, setProvider] = useState<string>('');
+  const [model, setModel] = useState<string>('');
   const [effort, setEffort] = useState<Effort>('high');
   const [perm, setPerm] = useState<PermissionMode>('default');
 
@@ -44,11 +63,27 @@ export default function EditConfigDialog({ open, team, onClose }: Props) {
   // spec §6.4 — pas de persistance entre ouvertures (parité proto).
   useEffect(() => {
     if (open && team) {
+      setProvider(team.defaultProvider ?? '');
       setModel(team.defaultModel);
       setEffort(team.defaultEffort);
       setPerm(team.defaultPermissionMode as PermissionMode);
     }
   }, [open, team]);
+
+  // Same reason as NewOrchestratorDialog: the server caches availability for
+  // 60 s, so re-probing on open is what makes a newly installed CLI show up
+  // without a page reload.
+  useEffect(() => {
+    if (!open) return;
+    void refreshProviders();
+  }, [open, refreshProviders]);
+
+  const selectedProvider = findProvider(providers, provider);
+  const efforts = effortsFor(selectedProvider);
+  const perms = permissionsFor(selectedProvider);
+  const permIsChoice = isPermissionChoice(selectedProvider);
+  const effectiveEffort = efforts.length > 0 ? effort : selectedProvider?.defaults.effort ?? effort;
+  const effectivePerm = perms.includes(perm) ? perm : perms[0] ?? perm;
 
   // Esc → onClose (parité BroadcastModal Step 12).
   useEffect(() => {
@@ -63,7 +98,8 @@ export default function EditConfigDialog({ open, team, onClose }: Props) {
   if (!open || !team) return null;
 
   // v1 : toujours disabled (gap §4-2). Quand l'endpoint arrivera :
-  // `canSave = (model !== team.defaultModel || effort !== team.defaultEffort
+  // `canSave = (provider !== team.defaultProvider || model !== team.defaultModel
+  //   || effort !== team.defaultEffort
   //   || perm !== team.defaultPermissionMode) && !submitting`. Cf. spec §7.4.
   const canSave = false;
 
@@ -89,16 +125,29 @@ export default function EditConfigDialog({ open, team, onClose }: Props) {
           </div>
 
           <div className="field">
+            <label htmlFor="edit-provider">PROVIDER</label>
+            <ProviderSelect
+              id="edit-provider"
+              value={provider}
+              providers={providers}
+              onChange={(id) => {
+                setProvider(id);
+                setModel(defaultModelFor(findProvider(providers, id)));
+              }}
+            />
+            {unavailableNote(selectedProvider, transport) && (
+              <div className="field-warn">⚠ {unavailableNote(selectedProvider, transport)}</div>
+            )}
+          </div>
+
+          <div className="field">
             <label htmlFor="edit-model">MODEL</label>
-            <select
+            <ModelSelect
               id="edit-model"
               value={model}
-              onChange={(e) => setModel(e.target.value)}
-            >
-              {MODELS.map((m) => (
-                <option key={m.value} value={m.value}>{m.label}</option>
-              ))}
-            </select>
+              provider={selectedProvider}
+              onChange={setModel}
+            />
           </div>
 
           <div className="field">
@@ -109,26 +158,34 @@ export default function EditConfigDialog({ open, team, onClose }: Props) {
                   key={ef}
                   type="button"
                   role="radio"
-                  aria-checked={effort === ef}
-                  className={effort === ef ? 'on' : ''}
+                  aria-checked={effectiveEffort === ef}
+                  className={effectiveEffort === ef ? 'on' : ''}
+                  disabled={efforts.length === 0}
                   onClick={() => setEffort(ef)}
                 >
                   {ef}
                 </button>
               ))}
             </div>
+            {effortNote(selectedProvider) && (
+              <div className="field-help">{effortNote(selectedProvider)}</div>
+            )}
           </div>
 
           <div className="field">
             <label htmlFor="edit-perm">PERMISSION MODE</label>
             <select
               id="edit-perm"
-              value={perm}
+              value={effectivePerm}
+              disabled={!permIsChoice}
               onChange={(e) => setPerm(e.target.value as PermissionMode)}
             >
-              {PERMS.map((p) => <option key={p} value={p}>{p}</option>)}
+              {perms.map((p) => <option key={p} value={p}>{p}</option>)}
             </select>
-            {perm === 'bypassPermissions' && (
+            {permissionNote(selectedProvider) && (
+              <div className="field-help">{permissionNote(selectedProvider)}</div>
+            )}
+            {effectivePerm === 'bypassPermissions' && (
               <div className="field-warn">
                 ⚠ bypassPermissions :: agent runs unattended. No permission prompts.
               </div>

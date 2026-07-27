@@ -1,5 +1,6 @@
 import { Router, type Request, type Response } from 'express';
 import { Spawner, SpawnerError } from '../../modules/spawner/index.js';
+import { WorkerCapError } from '../../modules/orchestrator/index.js';
 import { normalizeWorkspaceRelativeCwd, validateCwdUnderWorkspace } from '../validation.js';
 import type { Config, EffortLevel, PermissionMode } from '../../config.js';
 import {
@@ -10,6 +11,11 @@ import {
   rowToOrchView,
   rowToSessionView,
 } from '../../modules/orchestrator/persistence.js';
+import {
+  resolveAgentDefaults,
+  resolveProviderId,
+  type AgentDefaultsLayer,
+} from '../../modules/providers/resolve.js';
 
 const RECENT_HISTORY_LIMIT = 50;
 
@@ -41,7 +47,34 @@ interface CreateBody {
     model?: unknown;
     effort?: unknown;
     permissionMode?: unknown;
+    /** Agent provider id (`claude` | `codex` | …). Body > role > server default. */
+    provider?: unknown;
   };
+}
+
+/**
+ * Body of `POST /orchestrators/:id/workers` — the human-operator twin of the
+ * MCP `team.spawn_worker` tool (`modules/mcp/tools.ts`). Same operation, other
+ * channel: everything but `prompt` is optional and falls back to the team
+ * default inside `Orchestrator.addWorker`, so leaving a field out means
+ * "inherit" here exactly as it does for a lead calling the MCP tool.
+ *
+ * `cwd` is deliberately NOT accepted: the lead's cwd (already realpath-checked
+ * against the workspace root when the team was created) is the only value a UI
+ * caller could sensibly pick, and accepting one would re-open a path-escape
+ * surface for no gain. A lead that needs another cwd still has the MCP tool.
+ */
+interface SpawnWorkerBody {
+  name?: unknown;
+  role?: unknown;
+  prompt?: unknown;
+  /** Per-worker override of the team's `workerPreamble`. */
+  preamble?: unknown;
+  model?: unknown;
+  effort?: unknown;
+  permissionMode?: unknown;
+  /** Provider id for THIS worker — how a mixed team is built from the UI. */
+  provider?: unknown;
 }
 
 function isString(x: unknown): x is string {
@@ -131,34 +164,115 @@ export function createOrchestratorsRouter(spawner: Spawner, config: Config): Rou
       return;
     }
 
-    // Validate defaults — body > role > global config
-    let model = role?.defaultModel ?? config.defaultModel;
-    let effort: EffortLevel = (role?.defaultEffort as EffortLevel | null) ?? config.defaultEffort;
-    let permissionMode: PermissionMode =
-      (role?.defaultPermissionMode as PermissionMode | null) ?? config.defaultPermissionMode;
+    // Validate the body's own defaults first — everything below reasons over
+    // values that are already typed.
+    let bodyProvider: string | null = null;
+    let bodyModel: string | null = null;
+    let bodyEffort: EffortLevel | null = null;
+    let bodyPerm: PermissionMode | null = null;
     if (body.defaults) {
+      if (body.defaults.provider != null) {
+        if (!isString(body.defaults.provider)) {
+          res.status(400).json({ error: 'defaults.provider must be a non-empty string' });
+          return;
+        }
+        bodyProvider = body.defaults.provider;
+      }
       if (body.defaults.model != null) {
         if (!isString(body.defaults.model)) {
           res.status(400).json({ error: 'defaults.model must be a non-empty string' });
           return;
         }
-        model = body.defaults.model;
+        bodyModel = body.defaults.model;
       }
       if (body.defaults.effort != null) {
         if (!isString(body.defaults.effort) || !VALID_EFFORTS.has(body.defaults.effort)) {
           res.status(400).json({ error: 'defaults.effort must be one of low|medium|high|xhigh|max' });
           return;
         }
-        effort = body.defaults.effort as EffortLevel;
+        bodyEffort = body.defaults.effort as EffortLevel;
       }
       if (body.defaults.permissionMode != null) {
         if (!isString(body.defaults.permissionMode) || !VALID_PERMS.has(body.defaults.permissionMode)) {
           res.status(400).json({ error: 'defaults.permissionMode invalid' });
           return;
         }
-        permissionMode = body.defaults.permissionMode as PermissionMode;
+        bodyPerm = body.defaults.permissionMode as PermissionMode;
       }
     }
+
+    // body > role > config, as three layers rather than three `??` chains — so
+    // model/effort/permission are scoped to WHICH LAYER'S PROVIDER supplied
+    // them. The rule and the reason live in `providers/resolve.ts`; the short
+    // version is that a role written before multi-provider carries a claude
+    // `defaultModel` and NO `defaultProvider`, and re-pointing such a team at
+    // gemini used to keep the claude id — `gemini -m claude-opus-4-8`, a lead
+    // that dies inside its own PTY while the UI still says `running`.
+    const layers: AgentDefaultsLayer[] = [
+      {
+        source: 'body',
+        provider: bodyProvider,
+        model: bodyModel,
+        effort: bodyEffort,
+        permissionMode: bodyPerm,
+      },
+      {
+        source: 'role',
+        provider: role?.defaultProvider ?? null,
+        model: role?.defaultModel ?? null,
+        effort: (role?.defaultEffort as EffortLevel | null) ?? null,
+        permissionMode: (role?.defaultPermissionMode as PermissionMode | null) ?? null,
+      },
+      {
+        source: 'config',
+        provider: config.defaultProvider,
+        model: config.defaultModel,
+        effort: config.defaultEffort,
+        permissionMode: config.defaultPermissionMode,
+      },
+    ];
+    const provider = resolveProviderId(layers, config.defaultProvider);
+
+    // The provider ID is validated (unlike the model string, deliberately —
+    // see below): it addresses an adapter we either have or don't, and a typo
+    // would silently fall back to claude at spawn time.
+    const adapter = spawner.providerRegistry.get(provider);
+    if (!adapter) {
+      res.status(400).json({
+        error: `unknown provider '${provider}'`,
+        code: 'UNKNOWN_PROVIDER',
+        known: spawner.providerRegistry.types().map((t) => t.id),
+      });
+      return;
+    }
+    // …and refused when we KNOW it cannot run. `pending` (no probe has
+    // completed yet) fails OPEN: blocking a team creation because we have not
+    // finished asking would be worse than letting the spawn fail with the
+    // CLI's own error message in the session log.
+    const availability = await spawner.providerAvailability.resolve(provider);
+    if (!availability.pending && !availability.available) {
+      res.status(409).json({
+        error: `provider '${provider}' is not available`,
+        code: 'PROVIDER_UNAVAILABLE',
+        unavailableReason: availability.reason ?? null,
+      });
+      return;
+    }
+    // The model STRING itself is never validated: the code has deliberately
+    // never done it (model ids ship far faster than our releases, and a
+    // rejected-but-valid id is a worse failure than an accepted-but-wrong one,
+    // which the CLI reports on its own). Only the DEFAULT is chosen here — and
+    // `permissionMode` is coerced onto what this CLI can express, so the value
+    // the team card shows is the value the agent runs under.
+    const resolved = resolveAgentDefaults({
+      provider: adapter,
+      layers,
+      fallbackProvider: config.defaultProvider,
+      context: { channel: 'POST /orchestrators', team: body.name },
+    });
+    const model = resolved.model;
+    const effort = resolved.effort;
+    const permissionMode = resolved.permissionMode;
 
     // cwd realpath validation under workspace root
     let resolvedCwd: string;
@@ -181,6 +295,7 @@ export function createOrchestratorsRouter(spawner: Spawner, config: Config): Rou
         defaultModel: model,
         defaultEffort: effort,
         defaultPermissionMode: permissionMode,
+        defaultProvider: provider,
         leadPreamble: effectiveLeadPreamble,
         workerPreamble: effectiveWorkerPreamble,
         lead: {
@@ -331,6 +446,162 @@ export function createOrchestratorsRouter(spawner: Spawner, config: Config): Rou
       return;
     }
     res.json({ sessions: orch.listSessions().map((s) => s.toView()) });
+  });
+
+  /**
+   * Multi-provider Lot 7 — spawn a worker into an existing team from the UI.
+   *
+   * This is the HTTP twin of the MCP `team.spawn_worker` tool, and it is
+   * deliberately the same operation rather than a parallel one: both funnel into
+   * `Orchestrator.addWorker`, which owns the cap check (`WorkerCapError`) and the
+   * model/effort/permission/provider inheritance from the team defaults. The
+   * only thing this route adds is the validation the MCP layer also does — a
+   * clean status code instead of a vague spawn failure.
+   *
+   * Status codes and what triggers each:
+   *   404  orchestrator not in the live map (history rows cannot gain workers)
+   *   409  ORCH_NOT_ACTIVE       — team is stopping/stopped/failed
+   *   409  PROVIDER_UNAVAILABLE  — provider known not to run here (+ reason)
+   *   400  UNKNOWN_PROVIDER      — no adapter with that id
+   *   400  malformed / invalid effort or permissionMode
+   *   413  prompt (+preamble) over `maxPromptSizeBytes`
+   *   429  MAX_WORKERS_PER_ORCH  — worker cap reached, mirroring the 429 that
+   *                                `maxOrchestrators` produces on team creation
+   *   201  `{ session }` — the new worker's view
+   */
+  router.post('/orchestrators/:id/workers', async (req: Request<{ id: string }>, res: Response) => {
+    // Resource first, then body — same order as the broadcast route below.
+    const orch = spawner.get(req.params.id);
+    if (!orch) {
+      res.status(404).json({ error: 'not found' });
+      return;
+    }
+    // `addWorker` throws a bare Error for these; catching it below would turn a
+    // perfectly ordinary "the team is already dead" into a 500.
+    if (
+      orch.status === 'stopped' ||
+      orch.status === 'failed' ||
+      orch.status === 'stopping'
+    ) {
+      res.status(409).json({
+        error: `cannot spawn a worker while orchestrator is '${orch.status}'`,
+        code: 'ORCH_NOT_ACTIVE',
+      });
+      return;
+    }
+
+    const body = (req.body ?? {}) as SpawnWorkerBody;
+
+    if (!isString(body.prompt)) {
+      res.status(400).json({ error: 'prompt is required and must be a non-empty string' });
+      return;
+    }
+    if (body.name != null && !isString(body.name)) {
+      res.status(400).json({ error: 'name must be a non-empty string if provided' });
+      return;
+    }
+    if (body.role != null && !isString(body.role)) {
+      res.status(400).json({ error: 'role must be a non-empty string if provided' });
+      return;
+    }
+    if (body.preamble != null && typeof body.preamble !== 'string') {
+      res.status(400).json({ error: 'preamble must be a string if provided' });
+      return;
+    }
+    if (body.model != null && !isString(body.model)) {
+      res.status(400).json({ error: 'model must be a non-empty string if provided' });
+      return;
+    }
+    if (body.effort != null && (!isString(body.effort) || !VALID_EFFORTS.has(body.effort))) {
+      res.status(400).json({ error: 'effort must be one of low|medium|high|xhigh|max' });
+      return;
+    }
+    if (
+      body.permissionMode != null &&
+      (!isString(body.permissionMode) || !VALID_PERMS.has(body.permissionMode))
+    ) {
+      res.status(400).json({ error: 'permissionMode invalid' });
+      return;
+    }
+
+    // Same envelope as team creation: prompt AND the preamble that gets
+    // concatenated onto it, since it is the sum that reaches the agent.
+    const preamble = typeof body.preamble === 'string' ? body.preamble : null;
+    const promptBytes = bytesOf(body.prompt) + (preamble ? bytesOf(preamble) : 0);
+    if (promptBytes > config.maxPromptSizeBytes) {
+      res.status(413).json({
+        error: `prompt+preamble too large: ${promptBytes} bytes > ${config.maxPromptSizeBytes}`,
+      });
+      return;
+    }
+
+    // Provider: validated here for the same reason as on team creation — an
+    // unknown id would otherwise be silently coerced back to the team default
+    // by `Orchestrator._resolveProvider`, handing the operator a worker they
+    // did not ask for. The model string stays unvalidated, on purpose.
+    if (body.provider != null) {
+      if (!isString(body.provider)) {
+        res.status(400).json({ error: 'provider must be a non-empty string' });
+        return;
+      }
+      if (!spawner.providerRegistry.has(body.provider)) {
+        res.status(400).json({
+          error: `unknown provider '${body.provider}'`,
+          code: 'UNKNOWN_PROVIDER',
+          known: spawner.providerRegistry.types().map((t) => t.id),
+        });
+        return;
+      }
+      // Shared cache with `GET /providers`, `POST /orchestrators` and the MCP
+      // tool — a second one would double the SSH round-trips and could disagree
+      // with the first. `pending` fails OPEN, same rule as team creation.
+      const availability = await spawner.providerAvailability.resolve(body.provider);
+      if (!availability.pending && !availability.available) {
+        res.status(409).json({
+          error: `provider '${body.provider}' is not available`,
+          code: 'PROVIDER_UNAVAILABLE',
+          unavailableReason: availability.reason ?? null,
+        });
+        return;
+      }
+    }
+
+    // Defaults for the two fields `addWorker` requires but a UI caller may not
+    // want to invent: the team's own role, and the naming scheme the role-driven
+    // initial workers already use (`spawner.create`).
+    // Counted over EVERY worker the team ever had, terminated ones included, so
+    // an auto-name is never reused after a worker dies — two log files and two
+    // mailbox histories under one name is a debugging trap.
+    const workersEver = orch.listSessions().filter((s) => s.type === 'worker').length;
+    const name = isString(body.name)
+      ? body.name
+      : `${orch.name}-worker-${workersEver + 1}`;
+
+    try {
+      const worker = orch.addWorker({
+        name,
+        role: isString(body.role) ? body.role : orch.role,
+        prompt: body.prompt,
+        // cwd omitted ⇒ `addWorker` uses the lead's (already validated) cwd.
+        ...(isString(body.model) ? { model: body.model } : {}),
+        ...(isString(body.effort) ? { effort: body.effort as EffortLevel } : {}),
+        ...(isString(body.permissionMode)
+          ? { permissionMode: body.permissionMode as PermissionMode }
+          : {}),
+        ...(isString(body.provider) ? { provider: body.provider } : {}),
+        ...(preamble !== null ? { preamble } : {}),
+      });
+      res.status(201).json({ session: worker.toView() });
+    } catch (err) {
+      if (err instanceof WorkerCapError) {
+        res.status(429).json({ error: err.message, code: err.code });
+        return;
+      }
+      res.status(500).json({
+        error: 'failed to spawn worker',
+        reason: err instanceof Error ? err.message : String(err),
+      });
+    }
   });
 
   /**

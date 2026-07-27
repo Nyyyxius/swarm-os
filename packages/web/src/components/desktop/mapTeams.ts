@@ -48,6 +48,8 @@ export function toNodeAgent(
     shape: shapeForRole(s.role),
     status,
     inbox: inboxCount,
+    // Multi-provider Lot 3 — carried straight through so the node can tag it.
+    provider: s.provider,
   };
 }
 

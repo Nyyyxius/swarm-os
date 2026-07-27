@@ -14,10 +14,64 @@
 //    the destroy+recreate losses.
 //  - CANCEL, backdrop click, Escape, and `×` close button call onClose.
 
-import { describe, it, expect, vi } from 'vitest';
+import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { act, fireEvent, render, screen } from '@testing-library/react';
 import EditConfigDialog from './EditConfigDialog';
-import type { OrchestratorView } from '../../api/client';
+import { api, type OrchestratorView, type ProvidersView } from '../../api/client';
+
+/**
+ * Multi-provider Lot 3 — MODEL options now come from `GET /providers`, so the
+ * catalogue is stubbed rather than hard-coded in the bundle. The claude entry
+ * declares every permission mode and effort support so the pre-fill assertions
+ * below keep testing the pre-fill and not a capability filter.
+ */
+const CATALOGUE: ProvidersView = {
+  defaultProvider: 'claude',
+  transport: 'local',
+  providers: [
+    {
+      id: 'claude',
+      label: 'Claude Code',
+      binary: 'claude',
+      builtin: true,
+      available: true,
+      models: [
+        { value: 'claude-opus-4-8', label: 'opus-4-8' },
+        { value: 'claude-sonnet-4-6', label: 'sonnet-4-6' },
+        { value: 'claude-haiku-4-5-20251001', label: 'haiku-4-5' },
+      ],
+      capabilities: {
+        effort: true,
+        permissionModes: [
+          'auto',
+          'acceptEdits',
+          'bypassPermissions',
+          'default',
+          'dontAsk',
+          'plan',
+        ],
+        fallbackPermissionMode: 'bypassPermissions',
+        notificationHook: true,
+        inkSubmitDance: true,
+        durablePreamble: true,
+        httpMcp: true,
+      },
+      defaults: {
+        model: 'claude-opus-4-8',
+        effort: 'xhigh',
+        permissionMode: 'bypassPermissions',
+      },
+    },
+  ],
+};
+
+beforeEach(() => {
+  vi.spyOn(api, 'listProviders').mockResolvedValue(CATALOGUE);
+});
+
+afterEach(() => {
+  vi.restoreAllMocks();
+});
 
 function mkOrch(p: Partial<OrchestratorView> = {}): OrchestratorView {
   return {
@@ -27,8 +81,9 @@ function mkOrch(p: Partial<OrchestratorView> = {}): OrchestratorView {
     roleId: 'r-orch',
     status: 'running',
     leadSessionId: 's1',
-    // Keep in sync with `constants.ts` MODELS — an id that is no longer
-    // offered renders as the first option, not as itself.
+    defaultProvider: 'claude',
+    // One of the ids the stubbed catalogue offers. An id it does NOT offer
+    // still renders (as "· not in catalogue"), by design.
     defaultModel: 'claude-opus-4-8',
     defaultEffort: 'high',
     defaultPermissionMode: 'default',
@@ -244,17 +299,16 @@ describe('EditConfigDialog — close interactions', () => {
 });
 
 describe('EditConfigDialog — re-open resets from team defaults', () => {
-  it('reverts MODEL changes when the modal is re-opened', () => {
-    // The model MUST be one `constants.ts` still offers: a `<select>` whose
-    // value matches no `<option>` falls back to the first one, so a stale id
-    // would assert against the fallback rather than against the reset. It is
-    // also deliberately neither the component's initial state
-    // ('claude-opus-4-8') nor the value we change to — otherwise the test
+  it('reverts MODEL changes when the modal is re-opened', async () => {
+    // The model we switch TO must be one the catalogue offers, so we wait for
+    // `GET /providers` to land before changing it. It is also deliberately
+    // neither the team default nor the value we change to — otherwise the test
     // would pass on a component that never resets at all.
     const team = mkOrch({ defaultModel: 'claude-haiku-4-5-20251001' });
     const { rerender } = render(
       <EditConfigDialog open team={team} onClose={() => undefined} />,
     );
+    await screen.findByRole('option', { name: /sonnet-4-6/ });
     fireEvent.change(screen.getByLabelText('MODEL'), {
       target: { value: 'claude-sonnet-4-6' },
     });

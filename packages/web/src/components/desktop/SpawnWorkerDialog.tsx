@@ -1,22 +1,52 @@
 // packages/web/src/components/desktop/SpawnWorkerDialog.tsx
 //
-// Phase C — Step 13 : preview-disabled port of the v2 SpawnWorkerDialog
-// (`prototypes/v2/modals.jsx:312-372`).
+// Add a worker to a live team, with a per-agent provider and model.
 //
-// v1 contract (cf. `docs/redesign-desktop/13_spawn-worker-edit-config.md`
-// §4) : the dialog is fully interactive (name auto-uppercase, role
-// dropdown filtered, override textarea, inheritance helper line) but the
-// SPAWN button is **always disabled** with a tooltip and an inline
-// `.field-warn` block documenting the missing endpoint (gap §4-3 —
-// `POST /orchestrators/:id/workers`) and the manual MCP workaround.
+// History worth keeping: this dialog shipped in Phase C — Step 13 as a
+// preview with a permanently disabled SPAWN button, because the backend
+// route did not exist (gap §4-3) and the only way to add a worker was to
+// ask the lead to call `team.spawn_worker` over MCP. Multi-provider Lot 3
+// then wired the PROVIDER / MODEL selects to `GET /providers`, still
+// disabled. Lot 7 added `POST /orchestrators/:id/workers` and this file is
+// now the live surface: the MCP workaround snippet is gone, because a UI
+// that offers a button AND tells the operator to go type an MCP call
+// somewhere else says two contradictory things.
 //
-// `onSpawn` is reserved for v2 (kept in the prop signature so the
-// call-site `DesktopShell` doesn't have to be touched when the endpoint
-// lands — only the `canSpawn` calculation and the `.field-warn` block
-// will be removed). See spec §5.3.
+// Two behaviours are load-bearing and must not be "tidied" away:
+//
+//  1. **Inheritance is visible.** PROVIDER and MODEL are pre-filled from
+//     the team, and every control says whether it currently matches the
+//     team or deviates from it. A worker that silently runs a different
+//     model than its team is the kind of surprise that costs an hour of
+//     debugging. EFFORT and PERMISSION are not offered at all — they
+//     always inherit — and the help line says so rather than implying a
+//     choice exists.
+//  2. **Server errors are shown verbatim.** 400 UNKNOWN_PROVIDER, 409
+//     PROVIDER_UNAVAILABLE (+ its reason), 409 ORCH_NOT_ACTIVE, 413
+//     (prompt too large) and 429 (worker cap) each mean something precise
+//     and actionable. `apiErrorMessage` unwraps `{error, code,
+//     unavailableReason}`; the dialog stays OPEN on failure so the
+//     operator can fix the field and retry.
+//
+// The dialog does not pre-block an unavailable provider: `ProviderSelect`
+// already renders those as disabled options, and when the TEAM's own
+// provider has gone unavailable the operator should read the server's 409
+// (with the probe's reason) rather than a greyed-out button with no
+// explanation.
 
 import { useEffect, useMemo, useState } from 'react';
-import type { OrchestratorView, RoleView } from '../../api/client';
+import { apiErrorMessage, type OrchestratorView, type RoleView } from '../../api/client';
+import { useProviders } from '../../hooks/useProviders';
+import {
+  ModelSelect,
+  ProviderSelect,
+  defaultModelFor,
+  effortNote,
+  findProvider,
+  notificationNote,
+  permissionNote,
+  unavailableNote,
+} from '../ProviderFields';
 
 interface Props {
   open: boolean;
@@ -24,40 +54,61 @@ interface Props {
   roles: readonly RoleView[];
   onClose: () => void;
   /**
-   * Reserved for v2 once `POST /orchestrators/:id/workers` lands.
-   * v1: never invoked (button is disabled).
+   * `POST /orchestrators/:id/workers`. MUST reject on failure (and must not
+   * close the dialog): the rejection is what carries the server's code and
+   * reason to the error block below.
    */
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
-  onSpawn?: (spec: {
-    name: string;
-    roleId: string;
-    roleLabel: string;
-    workerPreambleOverride: string | null;
-  }) => Promise<void>;
+  onSpawn: (
+    orchestratorId: string,
+    body: {
+      name?: string;
+      role?: string;
+      prompt: string;
+      preamble?: string;
+      provider?: string;
+      model?: string;
+    },
+  ) => Promise<void>;
 }
 
-const GAP_TOOLTIP = 'available in v2 — see workaround below (gap §4-3)';
-
-export default function SpawnWorkerDialog({ open, team, roles, onClose }: Props) {
+export default function SpawnWorkerDialog({ open, team, roles, onClose, onSpawn }: Props) {
   // Pré-sélectionne le premier role non-ORCHESTRATOR (parité proto v2,
   // cf. `prototypes/v2/modals.jsx:339`).
   const workerRoles = useMemo(
     () => roles.filter((r) => r.label !== 'ORCHESTRATOR'),
     [roles],
   );
+  const { providers, transport, refresh: refreshProviders } = useProviders();
   const [name, setName] = useState('');
   const [roleId, setRoleId] = useState<string>('');
+  const [prompt, setPrompt] = useState('');
   const [override, setOverride] = useState('');
+  const [provider, setProvider] = useState<string>('');
+  const [model, setModel] = useState<string>('');
+  const [submitting, setSubmitting] = useState(false);
+  const [error, setError] = useState<string | null>(null);
 
   // Reset chaque (ré)ouverture — pas de persistance entre ouvertures
-  // (parité proto, cf. spec §11 note 7).
+  // (parité proto, cf. spec §11 note 7). A worker inherits the team's
+  // provider/model by default; the selects exist to override that per agent,
+  // which is the whole point of a mixed team.
   useEffect(() => {
     if (open) {
       setName('');
+      setPrompt('');
       setOverride('');
+      setError(null);
+      setSubmitting(false);
       setRoleId(workerRoles[0]?.id ?? '');
+      setProvider(team?.defaultProvider ?? '');
+      setModel(team?.defaultModel ?? '');
     }
-  }, [open, workerRoles]);
+  }, [open, workerRoles, team?.defaultProvider, team?.defaultModel]);
+
+  useEffect(() => {
+    if (!open) return;
+    void refreshProviders();
+  }, [open, refreshProviders]);
 
   // Esc → onClose (parité BroadcastModal Step 12).
   useEffect(() => {
@@ -72,12 +123,44 @@ export default function SpawnWorkerDialog({ open, team, roles, onClose }: Props)
   if (!open || !team) return null;
 
   const role = workerRoles.find((r) => r.id === roleId) ?? workerRoles[0] ?? null;
+  const selected = findProvider(providers, provider);
   const nameValid = name.trim().length > 0;
-  // v1 : toujours disabled (gap §4-3). `nameValid` est calculé pour le
-  // template MCP du `.field-warn` (snippet "ready-to-copy") — il ne
-  // gouverne pas le bouton. Quand l'endpoint arrivera : `canSpawn =
-  // nameValid && !!role && !submitting`. Cf. spec §5.3.
-  const canSpawn = false;
+  const promptValid = prompt.trim().length > 0;
+  // ROLE is deliberately NOT required: the server falls back to the team's own
+  // role when none is sent, so a deployment with no worker roles defined can
+  // still add a worker instead of facing a dialog it cannot submit.
+  const canSpawn = nameValid && promptValid && !submitting;
+  // Deviations from the team, computed once — they drive both the per-field
+  // markers and the summary line, so the two can never disagree.
+  const providerDeviates = !!provider && provider !== team.defaultProvider;
+  const modelDeviates = !!model && model !== team.defaultModel;
+
+  async function submit() {
+    if (!canSpawn || !team) return;
+    setError(null);
+    setSubmitting(true);
+    try {
+      await onSpawn(team.id, {
+        name: name.trim(),
+        ...(role ? { role: role.label } : {}),
+        prompt: prompt.trim(),
+        ...(override.trim() ? { preamble: override.trim() } : {}),
+        // Sent even when they match the team: what the form displays is what it
+        // commits to, and the server treats an explicit value identical to the
+        // default exactly the same way.
+        ...(provider ? { provider } : {}),
+        ...(model ? { model } : {}),
+      });
+      onClose();
+    } catch (err) {
+      // `HttpError.message` alone reads "HTTP 429 POST /orchestrators/…/workers",
+      // which tells the operator nothing. `apiErrorMessage` unwraps the code, the
+      // written reason, and `unavailableReason` when the provider probe failed.
+      setError(apiErrorMessage(err));
+    } finally {
+      setSubmitting(false);
+    }
+  }
 
   return (
     <div className="modal-backdrop" onClick={onClose}>
@@ -91,7 +174,7 @@ export default function SpawnWorkerDialog({ open, team, roles, onClose }: Props)
         <div className="modal-head">
           <div className="modal-title" id="spawn-worker-title">
             + SPAWN WORKER{' '}
-            <span className="sub">// in {team.name}</span>
+            <span className="sub">{'// in '}{team.name}</span>
           </div>
           <button className="pr-close" onClick={onClose} aria-label="Close">×</button>
         </div>
@@ -122,13 +205,81 @@ export default function SpawnWorkerDialog({ open, team, roles, onClose }: Props)
                   <option key={r.id} value={r.id}>{r.label}</option>
                 ))}
               </select>
+              {workerRoles.length === 0 && (
+                <div className="field-help">
+                  none defined — the worker takes {team.name}&apos;s role ({team.role})
+                </div>
+              )}
             </div>
           </div>
 
           <div className="field">
+            <label htmlFor="spawn-prompt">INITIAL TASK</label>
+            <textarea
+              id="spawn-prompt"
+              value={prompt}
+              onChange={(e) => setPrompt(e.target.value)}
+              placeholder="What should this worker do? e.g. Audit the auth module for missing token checks."
+              style={{ minHeight: 80 }}
+            />
+            <div className="field-help">
+              seeds the agent&apos;s first turn — the role preamble is prepended
+              automatically
+            </div>
+          </div>
+
+          {/* PROVIDER + MODEL per worker: this is how a claude lead ends up
+              running codex workers. Pre-filled from the team, and each label
+              states whether the current value inherits or deviates — leaving
+              them alone must never be a silent decision. */}
+          <div className="field-row">
+            <div className="field">
+              <label htmlFor="spawn-provider">
+                PROVIDER{' '}
+                <span style={{ color: providerDeviates ? 'var(--amber)' : 'var(--text-mute)' }}>
+                  {providerDeviates
+                    ? `// overrides ${team.name} (${team.defaultProvider})`
+                    : `// inherited from ${team.name}`}
+                </span>
+              </label>
+              <ProviderSelect
+                id="spawn-provider"
+                value={provider}
+                providers={providers}
+                onChange={(id) => {
+                  setProvider(id);
+                  setModel(defaultModelFor(findProvider(providers, id)));
+                }}
+              />
+            </div>
+            <div className="field">
+              <label htmlFor="spawn-model">
+                MODEL{' '}
+                <span style={{ color: modelDeviates ? 'var(--amber)' : 'var(--text-mute)' }}>
+                  {modelDeviates
+                    ? `// overrides ${team.name}`
+                    : `// inherited from ${team.name}`}
+                </span>
+              </label>
+              <ModelSelect
+                id="spawn-model"
+                value={model}
+                provider={selected}
+                onChange={setModel}
+              />
+            </div>
+          </div>
+
+          {unavailableNote(selected, transport) && (
+            <div className="field-warn">
+              ⚠ {unavailableNote(selected, transport)}
+            </div>
+          )}
+
+          <div className="field">
             <label htmlFor="spawn-override">
               WORKER PREAMBLE OVERRIDE{' '}
-              <span style={{ color: 'var(--text-mute)' }}>// optional</span>
+              <span style={{ color: 'var(--text-mute)' }}>{'// optional'}</span>
             </label>
             <textarea
               id="spawn-override"
@@ -143,63 +294,51 @@ export default function SpawnWorkerDialog({ open, team, roles, onClose }: Props)
           </div>
 
           <div className="field-help">
-            New worker will inherit MODEL{' '}
-            <b>{team.defaultModel.replace('claude-', '')}</b>{' '}
+            New worker will run MODEL{' '}
+            <b>{(model || team.defaultModel).replace('claude-', '')}</b>{' '}
             · EFFORT <b>{team.defaultEffort}</b>{' '}
             · PERM <b>{team.defaultPermissionMode}</b>{' '}
-            from {team.name}.
+            — effort and permission inherited from {team.name}.
           </div>
+          {/* Why the line above can be optimistic: the two capabilities that
+              make it a half-truth for a foreign CLI. Shown, not discovered. */}
+          {effortNote(selected) && (
+            <div className="field-help">{effortNote(selected)}</div>
+          )}
+          {permissionNote(selected) && (
+            <div className="field-help">{permissionNote(selected)}</div>
+          )}
+          {notificationNote(selected) && (
+            <div className="field-help">{notificationNote(selected)}</div>
+          )}
 
-          {/* gap §4-3 disclosure ─ documents the missing endpoint + the
-              manual MCP workaround. The snippet is intentionally ready
-              to copy: it reflects the live `name` / `role` inputs so
-              the operator can paste it into the TEAM composer. */}
-          <div className="field-warn">
-            <div style={{ fontWeight: 600, marginBottom: 4 }}>
-              ⚠ available in v2 — backend endpoint missing
+          {error && (
+            <div
+              className="field-warn"
+              role="alert"
+              style={{
+                color: 'var(--bad)',
+                borderLeftColor: 'var(--bad)',
+                background: 'rgba(224,101,74,0.06)',
+              }}
+            >
+              {error}
             </div>
-            <div style={{ color: 'var(--text-dim)', fontSize: 11, lineHeight: 1.55 }}>
-              <code>POST /orchestrators/:id/workers</code> is not implemented
-              yet (plan §4-3). The button below is disabled.
-              <br />
-              <span style={{ color: 'var(--text-mute)' }}>
-                Manual workaround: cancel, open the TEAM composer on this
-                lead, and broadcast:
-              </span>
-              <div
-                style={{
-                  marginTop: 6,
-                  padding: '6px 8px',
-                  background: 'rgba(232,176,74,0.06)',
-                  borderLeft: '2px solid var(--amber)',
-                  fontFamily: 'Geist Mono, monospace',
-                  fontSize: 10.5,
-                  color: 'var(--text)',
-                  whiteSpace: 'pre-wrap',
-                }}
-              >
-                {`Please call team.spawn_worker(\n  name="${nameValid ? name.trim() : 'PROBE-04'}",\n  role="${role?.label ?? 'BUILDER'}",\n  prompt="<your task here>"\n) from your MCP client.`}
-              </div>
-              <span style={{ color: 'var(--text-mute)' }}>
-                The lead will receive it in its mailbox and may invoke the MCP
-                tool. No acknowledgement is returned to the UI; the new
-                session will appear in MapView once spawned.
-              </span>
-            </div>
-          </div>
+          )}
         </div>
 
         <div className="modal-foot">
-          <button className="btn ghost" onClick={onClose}>CANCEL</button>
+          <button className="btn ghost" onClick={onClose} disabled={submitting}>
+            CANCEL
+          </button>
           <button
             className="btn primary"
             disabled={!canSpawn}
-            style={{ opacity: 0.4, cursor: 'not-allowed' }}
-            title={GAP_TOOLTIP}
-            aria-disabled="true"
+            onClick={() => void submit()}
+            style={{ opacity: canSpawn ? 1 : 0.4 }}
+            title={canSpawn ? undefined : 'NAME and INITIAL TASK are required'}
           >
-            SPAWN →{' '}
-            <span style={{ color: 'var(--text-mute)', fontSize: 10 }}>(v2)</span>
+            {submitting ? 'SPAWNING…' : 'SPAWN →'}
           </button>
         </div>
       </div>

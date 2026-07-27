@@ -67,7 +67,7 @@ function makeSession(opts: { sessionCwd?: string } = {}): Session {
     // Seed only runs when all three are set (production path).
     hookToken: 'test-hook',
     mainHttpPort: 12345,
-    claudeConfigRoot: claudeRuntimeDir,
+    runtimeRoot: claudeRuntimeDir,
   });
   openSessions.push(s);
   return s;
@@ -227,7 +227,7 @@ function makeS5Session(): { s: Session; fake: FakeAgentProcess } {
     agentProcessOverride: fake,
     hookToken: 'test-hook',
     mainHttpPort: 12345,
-    claudeConfigRoot: claudeRuntimeDir,
+    runtimeRoot: claudeRuntimeDir,
   });
   openSessions.push(s);
   return { s, fake };
@@ -416,7 +416,7 @@ describe('Session — requestContextReset (deferred /clear & /compact)', () => {
       agentProcessOverride: fake,
       hookToken: 'test-hook',
       mainHttpPort: 12345,
-      claudeConfigRoot: claudeRuntimeDir,
+      runtimeRoot: claudeRuntimeDir,
     });
     openSessions.push(s);
     return { s, fake };
@@ -480,7 +480,7 @@ describe('Session — requestContextReset (deferred /clear & /compact)', () => {
       agentProcessOverride: fake,
       hookToken: 'test-hook',
       mainHttpPort: 12345,
-      claudeConfigRoot: claudeRuntimeDir,
+      runtimeRoot: claudeRuntimeDir,
       idleThresholdMs: 10,
       autoCompactBytes: 50,
     });
@@ -522,7 +522,7 @@ describe('Session — armNotice (operator warning with a deadline)', () => {
       agentProcessOverride: fake,
       hookToken: 'test-hook',
       mainHttpPort: 12345,
-      claudeConfigRoot: claudeRuntimeDir,
+      runtimeRoot: claudeRuntimeDir,
     });
     openSessions.push(s);
     return { s, fake };

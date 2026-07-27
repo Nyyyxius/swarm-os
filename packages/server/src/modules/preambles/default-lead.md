@@ -92,7 +92,7 @@ flow is:
 2. The server pushes the message into your inbox.
 3. **If you are idle** (no terminal output for ≥ 2 s) the server injects a
    short line into your terminal:
-   `[swarm-os] new message in inbox — call team.read_inbox to fetch`.
+   `{{inboxSignal}}`.
 4. **If you are busy** (actively producing output) the server stays silent
    so it doesn't garble your work. You MUST still poll your inbox.
 

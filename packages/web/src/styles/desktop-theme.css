@@ -377,6 +377,9 @@
     font-family: "Geist Mono", monospace; font-size: 7px; letter-spacing: 0.16em;
     fill: var(--text-mute); text-anchor: middle; pointer-events: none;
   }
+  /* Multi-provider Lot 3 — provider suffix on the role line. Amber-dim so a
+     mixed team reads at a glance without competing with the agent name. */
+  .node-provider { fill: var(--amber-soft); opacity: 0.8; }
   .node-shape { pointer-events: none; }
   .node-status-dot { pointer-events: none; }
   .node-inbox-bg { fill: var(--amber); }
@@ -804,6 +807,13 @@
   .field input:focus, .field textarea:focus, .field select:focus {
     border-color: var(--border-hot);
   }
+  /* Multi-provider Lot 3 — a control the selected provider cannot express is
+     rendered disabled (with a `.field-help` saying why). Without this rule it
+     would look identical to an enabled one, which is worse than not disabling
+     it at all. Same treatment as `.pr-action[disabled]`. */
+  .field input:disabled, .field textarea:disabled, .field select:disabled {
+    opacity: 0.4; cursor: not-allowed;
+  }
   .field textarea { resize: vertical; min-height: 64px; font-family: "Geist Mono", monospace; }
   .field-help {
     font-family: "Geist Mono", monospace; font-size: 9.5px;
@@ -830,6 +840,7 @@
   }
   .seg-radio button + button { border-left: 1px solid var(--border); }
   .seg-radio button.on { background: rgba(255, 176, 96, 0.12); color: var(--amber); }
+  .seg-radio button:disabled { opacity: 0.4; cursor: not-allowed; }
   .btn {
     background: var(--panel-elev);
     border: 1px solid var(--border-strong);

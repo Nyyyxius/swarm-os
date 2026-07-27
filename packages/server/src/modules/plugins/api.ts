@@ -33,6 +33,11 @@ import type { PluginHttpRegistry } from './http-registry.js';
 import type { ConnectorRegistry } from './connector-registry.js';
 import { parseConfigSchema } from './config-schema.js';
 import {
+  resolveAgentDefaults,
+  resolveProviderId,
+  type AgentDefaultsLayer,
+} from '../providers/resolve.js';
+import {
   sendMessage,
   broadcast,
   readInbox,
@@ -357,14 +362,53 @@ export function buildPluginApi(
         const role = spec.roleId && deps.roleStore ? deps.roleStore.get(spec.roleId) : null;
         const normalized = normalizeWorkspaceRelativeCwd(spec.cwd, cfg.workspaceRoot);
         const resolvedCwd = await validateCwdUnderWorkspace(normalized, cfg.workspaceRoot);
+        // Fourth creation channel, same rule as the other three
+        // (`providers/resolve.ts`). It used to read the role's MODEL while
+        // ignoring the role's PROVIDER entirely, so a `defaultProvider: gemini`
+        // role produced a CLAUDE team running a gemini model id.
+        const layers: AgentDefaultsLayer[] = [
+          {
+            source: 'role',
+            provider: role?.defaultProvider ?? null,
+            model: role?.defaultModel ?? null,
+            effort: (role?.defaultEffort as EffortLevel | null) ?? null,
+            permissionMode: (role?.defaultPermissionMode as PermissionMode | null) ?? null,
+          },
+          {
+            source: 'config',
+            provider: cfg.defaultProvider,
+            model: cfg.defaultModel,
+            effort: cfg.defaultEffort,
+            permissionMode: cfg.defaultPermissionMode,
+          },
+        ];
+        const providerId = resolveProviderId(layers, cfg.defaultProvider);
+        // Unknown id ⇒ leave it to `Orchestrator._resolveProvider`, which warns
+        // and falls back rather than taking a team down. We only need SOME
+        // adapter here to scope the defaults against.
+        const adapter = sp.providerRegistry.get(providerId) ?? sp.providerRegistry.get(cfg.defaultProvider);
+        const resolved = adapter
+          ? resolveAgentDefaults({
+              provider: adapter,
+              layers,
+              fallbackProvider: cfg.defaultProvider,
+              context: { channel: 'plugin teams.create', team: spec.name },
+            })
+          : {
+              model: role?.defaultModel ?? cfg.defaultModel,
+              effort: (role?.defaultEffort as EffortLevel | null) ?? cfg.defaultEffort,
+              permissionMode:
+                (role?.defaultPermissionMode as PermissionMode | null) ??
+                cfg.defaultPermissionMode,
+            };
         const init: OrchestratorInit = {
           name: spec.name,
           role: role?.label ?? 'plugin',
           roleId: role?.id ?? null,
-          defaultModel: role?.defaultModel ?? cfg.defaultModel,
-          defaultEffort: (role?.defaultEffort as EffortLevel | null) ?? cfg.defaultEffort,
-          defaultPermissionMode:
-            (role?.defaultPermissionMode as PermissionMode | null) ?? cfg.defaultPermissionMode,
+          defaultModel: resolved.model,
+          defaultEffort: resolved.effort,
+          defaultPermissionMode: resolved.permissionMode,
+          defaultProvider: providerId,
           leadPreamble: role?.leadPreamble ?? null,
           workerPreamble: role?.workerPreamble ?? null,
           lead: {

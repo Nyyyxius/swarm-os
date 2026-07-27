@@ -30,6 +30,20 @@ export interface ConnectorTypeLookup {
   types(): ConnectorTypeInfo[];
 }
 
+/**
+ * Narrow view of the `ProviderRegistry` this route needs: "is this a provider id
+ * we have an adapter for?", plus the list to hand back on a rejection so the
+ * caller learns what it COULD have asked for.
+ *
+ * Kept as an interface (like `ConnectorTypeLookup`) so the roles route does not
+ * depend on the concrete registry class, and optional at construction so tests
+ * can mount the router without one.
+ */
+export interface ProviderIdLookup {
+  has(id: string): boolean;
+  types(): Array<{ id: string }>;
+}
+
 const VALID_EFFORTS: ReadonlySet<string> = new Set(['low', 'medium', 'high', 'xhigh', 'max']);
 const VALID_PERMS: ReadonlySet<string> = new Set([
   'auto',
@@ -63,6 +77,7 @@ interface RoleBody {
   defaultModel?: unknown;
   defaultEffort?: unknown;
   defaultPermissionMode?: unknown;
+  defaultProvider?: unknown;
   connectors?: unknown;
   schedule?: unknown;
   scheduleMessage?: unknown;
@@ -286,8 +301,53 @@ export function createRolesRouter(
    * way; without it, non-discord types are rejected as unknown).
    */
   connectorRegistry?: ConnectorTypeLookup,
+  /**
+   * Provider registry — gates `defaultProvider` (400 `UNKNOWN_PROVIDER`) so a
+   * typo is reported by the form that made it. Optional: without it the id is
+   * stored unchecked, exactly as before, and `POST /orchestrators` catches it at
+   * team-creation time.
+   */
+  providerRegistry?: ProviderIdLookup,
 ): Router {
   const router = Router();
+
+  /**
+   * Validate a role's `defaultProvider` against the registry.
+   *
+   * WHY here and not only at team creation: `POST /orchestrators` does validate
+   * (400 `UNKNOWN_PROVIDER`), but that is the wrong place to LEARN about a typo —
+   * the operator is then in a different dialog, days later, and the error names a
+   * provider they cannot see in the form they are looking at. `defaultEffort` and
+   * `defaultPermissionMode` have always been validated here for the same reason;
+   * `defaultProvider` addresses an adapter we either have or do not, so it
+   * belongs with them.
+   *
+   * The MODEL string next to it is still NOT validated, and that is deliberate
+   * and documented product behaviour: model ids ship far faster than our
+   * releases, and rejecting a valid one is a worse failure than accepting a wrong
+   * one (which the CLI reports on its own).
+   *
+   * `null` (= inherit the instance default) always passes. So does any id when no
+   * registry was supplied.
+   *
+   * Accepted cost: a role whose provider came from a plugin that is later
+   * disabled can no longer be PATCHED with that provider still in the body — the
+   * caller has to pick an available one or clear the field. Reading and using the
+   * role are unaffected (nothing re-validates on read, and team creation resolves
+   * its own fallback), and a plugin-less id that cannot create a team is worth
+   * surfacing rather than storing.
+   */
+  function checkProvider(value: string | null): { ok: true } | { ok: false; body: object } {
+    if (value == null || !providerRegistry || providerRegistry.has(value)) return { ok: true };
+    return {
+      ok: false,
+      body: {
+        error: `unknown provider '${value}'`,
+        code: 'UNKNOWN_PROVIDER',
+        known: providerRegistry.types().map((t) => t.id),
+      },
+    };
+  }
 
   router.get('/roles', (_req: Request, res: Response) => {
     res.json({ roles: store.list().map((r) => maskRole(r, connectorRegistry)) });
@@ -314,6 +374,13 @@ export function createRolesRouter(
     if (!wpre.ok) return res.status(400).json({ error: wpre.error });
     const dm = parseNullableString(body.defaultModel, 'defaultModel');
     if (!dm.ok) return res.status(400).json({ error: dm.error });
+    // Nullable string, exactly like defaultModel: NULL = inherit the instance
+    // default. Unlike defaultModel, the id IS checked against the registry —
+    // see `checkProvider`.
+    const dp = parseNullableString(body.defaultProvider, 'defaultProvider');
+    if (!dp.ok) return res.status(400).json({ error: dp.error });
+    const dpKnown = checkProvider(dp.value);
+    if (!dpKnown.ok) return res.status(400).json(dpKnown.body);
 
     let effort: EffortLevel | null = null;
     if (body.defaultEffort != null) {
@@ -362,6 +429,7 @@ export function createRolesRouter(
       defaultModel: dm.value,
       defaultEffort: effort,
       defaultPermissionMode: perm,
+      defaultProvider: dp.value,
       connectors: cn.value,
       schedule: sch.value,
       scheduleMessage: smsg.value,
@@ -414,6 +482,13 @@ export function createRolesRouter(
       const r = parseNullableString(body.defaultModel, 'defaultModel');
       if (!r.ok) return res.status(400).json({ error: r.error });
       patch.defaultModel = r.value;
+    }
+    if (body.defaultProvider !== undefined) {
+      const r = parseNullableString(body.defaultProvider, 'defaultProvider');
+      if (!r.ok) return res.status(400).json({ error: r.error });
+      const known = checkProvider(r.value);
+      if (!known.ok) return res.status(400).json(known.body);
+      patch.defaultProvider = r.value;
     }
     if (body.defaultEffort !== undefined) {
       if (body.defaultEffort === null) {

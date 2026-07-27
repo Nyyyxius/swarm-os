@@ -6,7 +6,7 @@ import {
   type ContextResetCommand,
 } from './session.js';
 import { Mailbox } from './mailbox.js';
-import { buildPreamble } from './preamble.js';
+import { buildPreamble, type PluginToolSummary } from './preamble.js';
 import { emitMailboxMessage, SIGNAL_TEXT } from './messaging.js';
 import { eventBus } from '../../events.js';
 import { withModule } from '../../logger.js';
@@ -20,6 +20,11 @@ import { computeOrchestratorHealth, type OrchestratorHealth } from './health.js'
 import { makeMailboxPersistenceForOrch } from './mailbox-persistence.js';
 import { buildResumeNotice } from './log-tail-reader.js';
 import type { SessionRow } from '../db/index.js';
+import { createBuiltinProviderRegistry } from '../providers/index.js';
+import { DEFAULT_PROVIDER_ID } from '../providers/ids.js';
+import type { ProviderRegistry } from '../providers/registry.js';
+import { resolveAgentDefaults } from '../providers/resolve.js';
+import type { AgentProvider } from '../providers/types.js';
 
 const log = withModule('orchestrator');
 
@@ -35,6 +40,12 @@ export interface OrchestratorInit {
   defaultModel: string;
   defaultEffort: EffortLevel;
   defaultPermissionMode: PermissionMode;
+  /**
+   * Provider id every session of this team inherits unless it names its own.
+   * Optional so pre-multi-provider callsites keep compiling; it then falls
+   * back to `config.defaultProvider` (itself `'claude'` by default).
+   */
+  defaultProvider?: string;
   leadPreamble: string | null;
   workerPreamble: string | null;
   lead: {
@@ -71,6 +82,8 @@ export interface OrchestratorView {
   defaultModel: string;
   defaultEffort: EffortLevel;
   defaultPermissionMode: PermissionMode;
+  /** Team-level provider default. Each session's own is on `SessionView.provider`. */
+  defaultProvider: string;
   leadPreamble: string | null;
   workerPreamble: string | null;
   createdAt: string;
@@ -112,6 +125,15 @@ export interface OrchestratorDeps {
   notifier?: Notifier;
   persistence?: Persistence;
   /**
+   * Adapter lookup table. The id → `AgentProvider` resolution happens HERE
+   * (not in `Session`): the orchestrator is the only layer that knows both the
+   * team default and the per-session override, and `Session` should receive an
+   * adapter, never a string it would have to resolve against global state.
+   *
+   * Omitted in unit tests ⇒ a private built-in registry is built from `config`.
+   */
+  providerRegistry?: ProviderRegistry;
+  /**
    * Invoked once when the orchestrator first reaches a terminal status
    * (`stopped` / `failed`) AND `setHideOnExit(true)` was called beforehand
    * (i.e. the operator clicked KILL on the lead). The Spawner wires this to
@@ -119,6 +141,18 @@ export interface OrchestratorDeps {
    * without a second REMOVE click.
    */
   onHideRequested?: (orchestratorId: string) => void;
+  /**
+   * Plugin tools to announce in every preamble this orchestrator builds.
+   *
+   * A THUNK, not an array: enable/disable mutates the registry while teams are
+   * running, and each session must be told what is registered at ITS spawn, not
+   * at the orchestrator's creation. A FUNCTION rather than the registry object
+   * for the same reason `mcpToolName` is one — this layer has no business
+   * knowing that a plugin subsystem exists.
+   *
+   * Omitted (every unit test, every embedder) ⇒ no plugin section.
+   */
+  pluginTools?: () => readonly PluginToolSummary[];
 }
 
 export interface StartOptions {
@@ -142,6 +176,12 @@ export interface WorkerSpec {
   model?: string;
   effort?: EffortLevel;
   permissionMode?: PermissionMode;
+  /**
+   * Provider id for THIS worker. Omitted ⇒ the team default. This is the field
+   * that makes a mixed team possible (an Opus lead with gemini workers); it is
+   * fed by `team.spawn_worker` and, from Lot 7, by the UI.
+   */
+  provider?: string;
   /** Optional override that wins over the orchestrator-level worker preamble. */
   preamble?: string | null;
   /** Test hooks — same as StartOptions for the lead. */
@@ -206,6 +246,10 @@ export class Orchestrator {
   readonly defaultModel: string;
   readonly defaultEffort: EffortLevel;
   readonly defaultPermissionMode: PermissionMode;
+  /** Team-level provider id (see `_resolveProvider` for id → adapter). */
+  readonly defaultProvider: string;
+  /** Adapter lookup — public so the MCP layer can validate a requested id. */
+  readonly providerRegistry: ProviderRegistry;
   readonly leadPreamble: string | null;
   readonly workerPreamble: string | null;
   readonly createdAt: string;
@@ -235,9 +279,32 @@ export class Orchestrator {
   readonly notifier: Notifier;
   readonly persistence: Persistence;
   private readonly _onHideRequested: ((orchestratorId: string) => void) | null;
+  private readonly _pluginTools: (() => readonly PluginToolSummary[]) | null;
 
   /** All sessions, including terminated ones, indexed by id. */
   private readonly sessions = new Map<string, Session>();
+
+  /**
+   * Snapshot the plugin tools for one preamble.
+   *
+   * Swallows a throwing thunk rather than failing the spawn — unlike the tool
+   * NAMER, which is load-bearing (a broken namer silently blanks the mailbox
+   * discipline, so it must fail loudly), this section is advisory. Losing a
+   * capability listing is worth strictly less than losing the team.
+   */
+  private _readPluginTools(): readonly PluginToolSummary[] {
+    if (!this._pluginTools) return [];
+    try {
+      return this._pluginTools();
+    } catch (err) {
+      log.warn({
+        event: 'orch.plugin_tools_unavailable',
+        orchId: this.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return [];
+    }
+  }
 
   constructor(
     private readonly init: OrchestratorInit,
@@ -254,6 +321,8 @@ export class Orchestrator {
     this.defaultModel = init.defaultModel;
     this.defaultEffort = init.defaultEffort;
     this.defaultPermissionMode = init.defaultPermissionMode;
+    this.defaultProvider = init.defaultProvider ?? config.defaultProvider ?? DEFAULT_PROVIDER_ID;
+    this.providerRegistry = deps.providerRegistry ?? createBuiltinProviderRegistry(config);
     this.leadPreamble = init.leadPreamble;
     this.workerPreamble = init.workerPreamble;
     this.createdAt = init.createdAt ?? new Date().toISOString();
@@ -262,6 +331,7 @@ export class Orchestrator {
     this.notifier = deps.notifier ?? new NoOpNotifier();
     this.persistence = deps.persistence ?? new NoOpPersistence();
     this._onHideRequested = deps.onHideRequested ?? null;
+    this._pluginTools = deps.pluginTools ?? null;
     // Phase 8 — write-through mailbox: every push/markDelivered routes to
     // SQLite via the hook below. Constructed AFTER persistence is set.
     // The hook impl is provided by mailbox-persistence.ts to keep the DB
@@ -277,6 +347,8 @@ export class Orchestrator {
    * KILL-on-lead flow: ask for soft-delete of the whole team once the
    * orchestrator reaches a terminal status. The actual hide is delegated to
    * the Spawner via the `onHideRequested` dep.
+   *
+   * (see `_readPluginTools` below for the preamble snapshot)
    */
   setHideOnExit(v: boolean): void {
     this._hideOnExit = v;
@@ -313,6 +385,36 @@ export class Orchestrator {
     };
   }
 
+  /**
+   * Provider id → adapter, for a session about to be built.
+   *
+   * Falls back to the team default, then to claude, and NEVER throws: an
+   * unknown id here means a row written by a newer version, or a plugin
+   * provider that has not (yet) re-registered after a restart. Refusing to
+   * build the session would take the whole team down at boot; falling back
+   * with a loud warn keeps the team alive and leaves a trace. Ingress
+   * surfaces (`POST /orchestrators`, `team.spawn_worker`) validate the id
+   * up-front, so an operator typo is still rejected at the door.
+   */
+  private _resolveProvider(id: string | null | undefined): AgentProvider {
+    const wanted = id ?? this.defaultProvider;
+    const found = this.providerRegistry.get(wanted);
+    if (found) return found;
+    const fallback =
+      this.providerRegistry.get(this.defaultProvider) ??
+      this.providerRegistry.get(DEFAULT_PROVIDER_ID);
+    log.warn({
+      event: 'orchestrator.provider_unknown',
+      orchId: this.id,
+      requested: wanted,
+      fallback: fallback?.id ?? null,
+    });
+    if (!fallback) {
+      throw new Error(`no provider adapter available for '${wanted}'`);
+    }
+    return fallback;
+  }
+
   // --- Lifecycle ---------------------------------------------------------
 
   start(opts: StartOptions = {}): Session {
@@ -322,6 +424,29 @@ export class Orchestrator {
     }
 
     const sessionId = crypto.randomUUID();
+    // Resolved BEFORE the preamble because the preamble is rendered for it: the
+    // CLIs do not agree on what an MCP tool is called, and a text that names
+    // tools the agent does not have is a team member that cannot reach its
+    // mailbox (`AgentProvider.mcpToolName`).
+    const provider = this._resolveProvider(this.defaultProvider);
+    // One layer, but the same rule and the same helper as everywhere else: it
+    // coerces `permissionMode` onto what this CLI can express, and it drops the
+    // team's model if `_resolveProvider` had to fall back to a DIFFERENT
+    // adapter (unknown id ⇒ another vendor's CLI would get this model id).
+    const resolved = resolveAgentDefaults({
+      provider,
+      layers: [
+        {
+          source: 'team',
+          provider: this.defaultProvider,
+          model: this.defaultModel,
+          effort: this.defaultEffort,
+          permissionMode: this.defaultPermissionMode,
+        },
+      ],
+      fallbackProvider: this.defaultProvider,
+      context: { channel: 'start', orchId: this.id },
+    });
     // Pre-build the preamble so the agent has the team-comms instructions
     // baked into its initial prompt. We use the orchestrator-level
     // `leadPreamble` as the optional override layered atop the default.
@@ -334,6 +459,8 @@ export class Orchestrator {
       },
       isLead: true,
       customOverride: this.init.lead.preamble ?? this.leadPreamble,
+      mcpToolName: (n) => provider.mcpToolName(n),
+      pluginTools: this._readPluginTools(),
     });
 
     const lead = new Session({
@@ -345,9 +472,11 @@ export class Orchestrator {
       cwd: this.init.lead.cwd,
       initialPrompt: this.init.lead.prompt,
       preamble,
-      model: this.defaultModel,
-      effort: this.defaultEffort,
-      permissionMode: this.defaultPermissionMode,
+      model: resolved.model,
+      effort: resolved.effort,
+      permissionMode: resolved.permissionMode,
+      // id → adapter resolution lives here; `Session` only ever sees objects.
+      provider,
       logsDir: this.config.logsDir,
       mcpRuntimeDir: this.config.mcpRuntimeDir,
       // MCP server is hardcoded to loopback (plan §14). The host string
@@ -366,9 +495,9 @@ export class Orchestrator {
       // hookToken + main HTTP port so the hook command can POST back.
       hookToken: this.config.hookToken,
       mainHttpPort: this.config.port,
-      claudeConfigRoot: this.config.claudeRuntimeDir,
-      claudeSourceDir: this.config.claudeSourceDir,
-      claudeJsonSource: this.config.claudeJsonSource,
+      runtimeRoot: this.config.claudeRuntimeDir,
+      sourceDir: this.config.claudeSourceDir,
+      siblingSource: this.config.claudeJsonSource,
       sshTransport: this._sshTransportBundle(),
     });
 
@@ -438,6 +567,30 @@ export class Orchestrator {
     const leadRow = opts.leadRow;
     const leadNotice = buildResumeNotice(leadRow.log_path, opts.banner);
 
+    // Resume on the provider the lead was ACTUALLY running (a mixed team's lead
+    // may differ from the team default) — and render its preamble for THAT
+    // provider, or a resumed gemini lead would come back with claude's tool
+    // names.
+    const provider = this._resolveProvider(leadRow.provider);
+    // The row is one coherent tuple, so this normally returns it verbatim. It
+    // earns its place on the two paths where the row is NOT coherent: a
+    // `permission_mode` written before server-side coercion existed, and a row
+    // naming a provider this build cannot resolve (`_resolveProvider` then
+    // hands back a different CLI, which must not inherit the old model id).
+    const resolved = resolveAgentDefaults({
+      provider,
+      layers: [
+        {
+          source: 'session-row',
+          provider: leadRow.provider,
+          model: leadRow.model,
+          effort: leadRow.effort as EffortLevel,
+          permissionMode: leadRow.permission_mode as PermissionMode,
+        },
+      ],
+      fallbackProvider: this.defaultProvider,
+      context: { channel: 'resume', orchId: this.id, sessionId: leadRow.id },
+    });
     // Build the preamble with the resume notice appended. We use the
     // persisted `init.lead.preamble` (already in `this.init.lead.preamble`)
     // OR the orchestrator-level `leadPreamble` for the customOverride —
@@ -451,6 +604,8 @@ export class Orchestrator {
       },
       isLead: true,
       customOverride: this.init.lead.preamble ?? this.leadPreamble,
+      mcpToolName: (n) => provider.mcpToolName(n),
+      pluginTools: this._readPluginTools(),
     });
 
     const lead = new Session({
@@ -464,9 +619,10 @@ export class Orchestrator {
       initialPrompt: leadRow.initial_prompt,
       preamble,
       resumeNotice: leadNotice,
-      model: leadRow.model,
-      effort: leadRow.effort as EffortLevel,
-      permissionMode: leadRow.permission_mode as PermissionMode,
+      model: resolved.model,
+      effort: resolved.effort,
+      permissionMode: resolved.permissionMode,
+      provider,
       logsDir: this.config.logsDir,
       mcpRuntimeDir: this.config.mcpRuntimeDir,
       mcpHost: '127.0.0.1',
@@ -477,9 +633,9 @@ export class Orchestrator {
       autoCompactBytes: this.config.contextAutoCompactBytes,
       hookToken: this.config.hookToken,
       mainHttpPort: this.config.port,
-      claudeConfigRoot: this.config.claudeRuntimeDir,
-      claudeSourceDir: this.config.claudeSourceDir,
-      claudeJsonSource: this.config.claudeJsonSource,
+      runtimeRoot: this.config.claudeRuntimeDir,
+      sourceDir: this.config.claudeSourceDir,
+      siblingSource: this.config.claudeJsonSource,
       sshTransport: this._sshTransportBundle(),
     });
 
@@ -522,6 +678,7 @@ export class Orchestrator {
           model: workerRow.model,
           effort: workerRow.effort as EffortLevel,
           permissionMode: workerRow.permission_mode as PermissionMode,
+          provider: workerRow.provider,
           existingId: workerRow.id,
           startedAt: workerRow.started_at,
           resumeNotice: buildResumeNotice(workerRow.log_path),
@@ -569,9 +726,39 @@ export class Orchestrator {
     }
 
     const cwd = spec.cwd ?? this.init.lead.cwd;
-    const model = spec.model ?? this.defaultModel;
-    const effort = spec.effort ?? this.defaultEffort;
-    const permissionMode = spec.permissionMode ?? this.defaultPermissionMode;
+    // The spec wins, the team default fills in. This is the seam a lead uses to
+    // build a mixed team through `team.spawn_worker`.
+    const provider = this._resolveProvider(spec.provider);
+    // …and the fill-in is PROVIDER-SCOPED for all three of model / effort /
+    // permission: the team's values only apply while the worker stays on the
+    // team's provider. A claude team spawning a gemini worker with no explicit
+    // model used to run `gemini -m claude-opus-…`, a spawn that fails inside
+    // the agent's own PTY with a vendor error message while the UI reports
+    // `running`. Same rule, same helper, as `POST /orchestrators`.
+    const resolved = resolveAgentDefaults({
+      provider,
+      layers: [
+        {
+          source: 'spec',
+          provider: spec.provider ?? null,
+          model: spec.model ?? null,
+          effort: spec.effort ?? null,
+          permissionMode: spec.permissionMode ?? null,
+        },
+        {
+          source: 'team',
+          provider: this.defaultProvider,
+          model: this.defaultModel,
+          effort: this.defaultEffort,
+          permissionMode: this.defaultPermissionMode,
+        },
+      ],
+      fallbackProvider: this.defaultProvider,
+      context: { channel: 'addWorker', orchId: this.id, worker: spec.name },
+    });
+    const model = resolved.model;
+    const effort = resolved.effort;
+    const permissionMode = resolved.permissionMode;
     // Phase 8: reuse the persisted id when resuming so the row + log path
     // + mailbox routing stay stable; otherwise mint a fresh UUID.
     const sessionId = spec.existingId ?? crypto.randomUUID();
@@ -584,6 +771,10 @@ export class Orchestrator {
       },
       isLead: false,
       customOverride: spec.preamble ?? this.workerPreamble,
+      // Rendered for the worker's OWN provider, which in a mixed team is not
+      // necessarily the team default (`team.spawn_worker({ provider })`).
+      mcpToolName: (n) => provider.mcpToolName(n),
+      pluginTools: this._readPluginTools(),
     });
 
     const worker = new Session({
@@ -600,6 +791,7 @@ export class Orchestrator {
       model,
       effort,
       permissionMode,
+      provider,
       logsDir: this.config.logsDir,
       mcpRuntimeDir: this.config.mcpRuntimeDir,
       mcpHost: '127.0.0.1',
@@ -612,9 +804,9 @@ export class Orchestrator {
       autoCompactBytes: this.config.contextAutoCompactBytes,
       hookToken: this.config.hookToken,
       mainHttpPort: this.config.port,
-      claudeConfigRoot: this.config.claudeRuntimeDir,
-      claudeSourceDir: this.config.claudeSourceDir,
-      claudeJsonSource: this.config.claudeJsonSource,
+      runtimeRoot: this.config.claudeRuntimeDir,
+      sourceDir: this.config.claudeSourceDir,
+      siblingSource: this.config.claudeJsonSource,
       sshTransport: this._sshTransportBundle(),
     });
 
@@ -870,6 +1062,11 @@ export class Orchestrator {
       model: old.model,
       effort: old.effort,
       permissionMode: old.permissionMode,
+      // Carry the provider across a restart. Omitting it would silently
+      // re-resolve to the TEAM default, so restarting the gemini worker of a
+      // claude team would bring it back as claude — with `old.model` (a gemini
+      // id) still pinned, which then fails inside the agent's PTY.
+      provider: old.toView().provider,
     };
     // Kill the old session if it's still alive — otherwise leave it as-is
     // (its row stays in history). Even terminated, mark the stop reason so
@@ -998,6 +1195,7 @@ export class Orchestrator {
       defaultModel: this.defaultModel,
       defaultEffort: this.defaultEffort,
       defaultPermissionMode: this.defaultPermissionMode,
+      defaultProvider: this.defaultProvider,
       leadPreamble: this.leadPreamble,
       workerPreamble: this.workerPreamble,
       createdAt: this.createdAt,

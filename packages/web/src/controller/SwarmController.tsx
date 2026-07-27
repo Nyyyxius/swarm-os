@@ -158,6 +158,15 @@ export interface SwarmControllerValue {
   handleToastOpen: (t: WaitingToast) => void;
   dismissToast: (id: string) => void;
   handleSpawnWorker: (team: RightPanelTeam) => void;
+  /**
+   * Lot 7 — the actual `POST /orchestrators/:id/workers` call behind
+   * `SpawnWorkerDialog`'s SPAWN button. Rejects with the server's `HttpError` so
+   * the dialog can render the code + reason; it does NOT close the dialog.
+   */
+  handleSpawnWorkerSubmit: (
+    orchestratorId: string,
+    body: Parameters<ReturnType<typeof useOrchestrators>['spawnWorker']>[1],
+  ) => Promise<void>;
   handleEditConfig: (team: RightPanelTeam) => void;
   handleCreateOrchestrator: (body: Parameters<ReturnType<typeof useOrchestrators>['create']>[0]) => Promise<OrchestratorView>;
   onTerminalRoleChange: (r: 'writer' | 'reader') => void;
@@ -189,7 +198,11 @@ export function SwarmControllerProvider({
 }: SwarmControllerProps) {
   // ── live orchestrators (single shared poll; resolves :id → leadSessionId
   //    AND feeds TopBar/Map/LeftPanel — one poll, not N) ─────────────────
-  const { orchestrators, create: createOrchestrator } = useOrchestrators();
+  const {
+    orchestrators,
+    create: createOrchestrator,
+    spawnWorker,
+  } = useOrchestrators();
 
   // ── now (1 s tick) drives `enrichWithIdle` (running→idle at 30 s). ────
   const now = useNow(1_000);
@@ -687,6 +700,24 @@ export function SwarmControllerProvider({
     [createOrchestrator, triggerFlash],
   );
 
+  /**
+   * Multi-provider Lot 7 — `SpawnWorkerDialog` submit. Goes through the same
+   * `useOrchestrators` handle as team creation (one shared poll, one WS), so the
+   * new session is in `orchestrators` before this resolves and the map shows it
+   * without waiting for the next tick.
+   *
+   * Errors are deliberately re-thrown: the dialog is the surface that knows how
+   * to render `UNKNOWN_PROVIDER` / `PROVIDER_UNAVAILABLE` / 413 / 429 next to the
+   * field the operator must change. Swallowing them here would close the dialog
+   * on a failure and lose the reason.
+   */
+  const handleSpawnWorkerSubmit = useCallback(
+    async (orchestratorId: string, body: Parameters<typeof spawnWorker>[1]) => {
+      await spawnWorker(orchestratorId, body);
+    },
+    [spawnWorker],
+  );
+
   // onAction dispatch (lead vs worker; fired AFTER user confirmation) ────
   const onAction = useCallback(async (agentId: string, action: AgentAction) => {
     if (!selectedOrch || !selectedSession) return;
@@ -830,6 +861,7 @@ export function SwarmControllerProvider({
     handleToastOpen,
     dismissToast: dismiss,
     handleSpawnWorker,
+    handleSpawnWorkerSubmit,
     handleEditConfig,
     handleCreateOrchestrator,
     onTerminalRoleChange,

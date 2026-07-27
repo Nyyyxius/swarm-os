@@ -146,6 +146,24 @@ export default function AgentSheet() {
           </div>
           <div className="m-as-role">
             <span>{selected.role}</span>
+            {/* Provider chip — mobile parity with RightPanel's `pr-role`. */}
+            {selected.provider && (
+              <span
+                className="discord-chip"
+                title={
+                  team.provider && team.provider !== selected.provider
+                    ? `agent runs on ${selected.provider}; team default is ${team.provider}`
+                    : `agent provider: ${selected.provider}`
+                }
+                style={
+                  team.provider && team.provider !== selected.provider
+                    ? { color: 'var(--warn)', borderColor: 'var(--warn)' }
+                    : undefined
+                }
+              >
+                ⬡ {selected.provider.toUpperCase()}
+              </span>
+            )}
             {hasDiscord && <span className="discord-chip">◇ DISCORD</span>}
             {team.resumeCount !== undefined && team.resumeCount > 0 && (
               <span
@@ -225,7 +243,7 @@ export default function AgentSheet() {
               className="m-as-action primary"
               disabled={stopped || isFailed}
               onClick={() => c.handleSpawnWorker(team)}
-              title="spawn worker (v2 preview)"
+              title="spawn a worker in this team"
             >+ WORKER</button>
           )}
         </div>

@@ -9,11 +9,13 @@ import * as path from 'node:path';
  * Mapping rule:
  *   <dataDir>/foo → <hostDataDir>/foo
  *
- * `workspaceRoot` is intentionally NOT translated here — when SSH mode is
- * active, the cwd stored in DB / passed to the session is already a host path
- * (per architectural decision: paths are host-native in SSH mode). Translation
- * is only needed for state created on the container side (per-session config
- * dirs, mcp.json runtime).
+ * This helper does not choose the roots — its callers do. `workspaceRoot` is
+ * translated too, just not here: `session.ts` (`_buildPathMapper`) builds a
+ * `workspace` mapper over `{workspaceRoot → hostWorkspaceRoot}` and runs the
+ * session cwd through it before handing it to ssh, `ssh-exec.ts`
+ * (`translateCwdForHost`) does the same for plugin-supplied cwds, and
+ * `plugins/agent-assets.ts` for agent asset paths. The cwd stored in DB is a
+ * CONTAINER path; it is translated at spawn time, not at rest.
  */
 export function toHostPath(opts: {
   containerPath: string;

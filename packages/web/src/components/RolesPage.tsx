@@ -31,6 +31,7 @@ import { useEffect, useMemo, useState } from 'react';
 import { useRoles } from '../hooks/useRoles';
 import {
   api,
+  apiErrorMessage,
   isDiscordConnectorView,
   type ConnectorView,
   type ConnectorTypeInfo,
@@ -40,6 +41,19 @@ import {
 } from '../api/client';
 import { DiscordOnboarding } from './DiscordOnboarding';
 import { useShellMode } from '../hooks/useShellMode';
+import { useProviders } from '../hooks/useProviders';
+import {
+  INHERIT,
+  ModelSelect,
+  ProviderSelect,
+  effortNote,
+  effortsFor,
+  findProvider,
+  isPermissionChoice,
+  permissionNote,
+  permissionsFor,
+  unavailableNote,
+} from './ProviderFields';
 
 interface Props {
   /** When `false`, the overlay is not rendered. The caller (App.tsx today,
@@ -51,24 +65,13 @@ interface Props {
   onClose: () => void;
 }
 
-const MODELS = [
-  { value: '', label: '(inherit global default)' },
-  { value: 'claude-opus-4-8', label: 'opus-4-8' },
-  { value: 'claude-sonnet-4-6', label: 'sonnet-4-6' },
-  { value: 'claude-haiku-4-5-20251001', label: 'haiku-4-5' },
-] as const;
-
-const EFFORTS = ['', 'low', 'medium', 'high', 'xhigh', 'max'] as const;
-
-const PERMS = [
-  '',
-  'auto',
-  'acceptEdits',
-  'bypassPermissions',
-  'default',
-  'dontAsk',
-  'plan',
-] as const;
+/**
+ * Multi-provider Lot 3 — the local `MODELS` array is gone. Model ids, effort
+ * support and permission modes now come from `GET /providers` (see
+ * `ProviderFields.tsx`); a role stores `defaultProvider = null` to inherit the
+ * instance default, exactly like `defaultModel`.
+ */
+const INHERIT_LABEL = '(inherit global default)';
 
 type SectionId =
   | 'defaults'
@@ -154,7 +157,9 @@ export function RolesPage({ open, onClose }: Props) {
       await update(role.id, body);
       setEditingSection(null);
     } catch (e) {
-      setOpError(e instanceof Error ? e.message : String(e));
+      // Unwrap the server's `{error, code}` body rather than showing
+      // "HTTP 400 PATCH /roles/:id", which names no field.
+      setOpError(apiErrorMessage(e));
       throw e;
     }
   }
@@ -184,6 +189,7 @@ export function RolesPage({ open, onClose }: Props) {
         defaultModel: role.defaultModel,
         defaultEffort: role.defaultEffort,
         defaultPermissionMode: role.defaultPermissionMode,
+        defaultProvider: role.defaultProvider,
         connectors: role.connectors,
         schedule: role.schedule,
         scheduleMessage: role.scheduleMessage,
@@ -257,6 +263,9 @@ export function RolesPage({ open, onClose }: Props) {
               <div className="r-tags">
                 {r.workerCount != null && r.workerCount > 0 && (
                   <span className="tag-pill">{r.workerCount} WRK</span>
+                )}
+                {r.defaultProvider && (
+                  <span className="tag-pill">{r.defaultProvider.toUpperCase()}</span>
                 )}
                 {r.defaultModel && (
                   <span className="tag-pill model">
@@ -400,7 +409,14 @@ function DefaultsSection({
   onCancel: () => void;
   onSave: (body: Partial<RoleInput>) => Promise<void>;
 }) {
+  const {
+    providers,
+    defaultProvider: serverDefaultProvider,
+    transport,
+    refresh: refreshProviders,
+  } = useProviders();
   const [workerCount, setWorkerCount] = useState<string>('');
+  const [provider, setProvider] = useState<string>(INHERIT);
   const [model, setModel] = useState<string>('');
   const [effort, setEffort] = useState<string>('');
   const [perm, setPerm] = useState<string>('');
@@ -411,11 +427,26 @@ function DefaultsSection({
   // refreshed values from the next poll).
   useEffect(() => {
     setWorkerCount(role.workerCount != null ? String(role.workerCount) : '');
+    setProvider(role.defaultProvider ?? INHERIT);
     setModel(role.defaultModel ?? '');
     setEffort(role.defaultEffort ?? '');
     setPerm(role.defaultPermissionMode ?? '');
     setError(null);
   }, [role.id, editing]);
+
+  // Entering EDIT re-probes the catalogue: same rationale as the dialogs, a CLI
+  // installed on the host after page load must be selectable without a reload.
+  useEffect(() => {
+    if (!editing) return;
+    void refreshProviders();
+  }, [editing, refreshProviders]);
+
+  // `null` = inherit, so the controls are filtered by the provider that would
+  // actually be used.
+  const effectiveProvider = findProvider(providers, provider || serverDefaultProvider);
+  const efforts = effortsFor(effectiveProvider);
+  const perms = permissionsFor(effectiveProvider);
+  const permIsChoice = isPermissionChoice(effectiveProvider);
 
   async function save() {
     setError(null);
@@ -434,6 +465,7 @@ function DefaultsSection({
         defaultModel: model || null,
         defaultEffort: (effort || null) as RoleInput['defaultEffort'],
         defaultPermissionMode: perm || null,
+        defaultProvider: provider || null,
       });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
@@ -468,6 +500,8 @@ function DefaultsSection({
         <div className="cfg-kv">
           <span className="k">WORKER COUNT</span>
           <span className="v">{role.workerCount ?? '— (inherit)'}</span>
+          <span className="k">PROVIDER</span>
+          <span className="v">{role.defaultProvider ?? '— (inherit)'}</span>
           <span className="k">MODEL</span>
           <span className="v">{role.defaultModel ?? '— (inherit)'}</span>
           <span className="k">EFFORT</span>
@@ -497,40 +531,69 @@ function DefaultsSection({
               placeholder="0"
             />
           </div>
+          {/* PROVIDER before MODEL — the catalogue below belongs to it. */}
+          <div className="field">
+            <label>PROVIDER</label>
+            <ProviderSelect
+              value={provider}
+              providers={providers}
+              inheritLabel={INHERIT_LABEL}
+              onChange={(id) => {
+                setProvider(id);
+                // Never leave another provider's model id in place.
+                setModel('');
+              }}
+            />
+            {unavailableNote(effectiveProvider, transport) && (
+              <div className="field-warn">
+                ⚠ {unavailableNote(effectiveProvider, transport)}
+              </div>
+            )}
+          </div>
           <div className="field">
             <label>MODEL</label>
-            <select value={model} onChange={(e) => setModel(e.target.value)}>
-              {MODELS.map((m) => (
-                <option key={m.value} value={m.value}>
-                  {m.label}
-                </option>
-              ))}
-            </select>
+            <ModelSelect
+              value={model}
+              provider={effectiveProvider}
+              inheritLabel={INHERIT_LABEL}
+              onChange={setModel}
+            />
           </div>
           <div className="field">
             <label>EFFORT</label>
             <div className="seg-radio">
-              {EFFORTS.map((ef) => (
+              {[INHERIT, ...efforts].map((ef) => (
                 <button
                   key={ef || '(inherit)'}
                   type="button"
                   className={effort === ef ? 'on' : ''}
+                  disabled={efforts.length === 0}
                   onClick={() => setEffort(ef)}
                 >
                   {ef || 'inherit'}
                 </button>
               ))}
             </div>
+            {effortNote(effectiveProvider) && (
+              <div className="field-help">{effortNote(effectiveProvider)}</div>
+            )}
           </div>
           <div className="field">
             <label>PERMISSION</label>
-            <select value={perm} onChange={(e) => setPerm(e.target.value)}>
-              {PERMS.map((p) => (
+            <select
+              value={perm}
+              disabled={!permIsChoice}
+              onChange={(e) => setPerm(e.target.value)}
+            >
+              {[INHERIT, ...perms].map((p) => (
                 <option key={p || '(inherit)'} value={p}>
                   {p || '(inherit)'}
                 </option>
               ))}
             </select>
+            {permissionNote(effectiveProvider) && (
+              <div className="field-help">{permissionNote(effectiveProvider)}</div>
+            )}
             {perm === 'bypassPermissions' && (
               <div className="field-warn">
                 ⚠ bypassPermissions :: agents in teams using this role will skip
