@@ -42,6 +42,18 @@ services:
     environment:
       SWARM_OS_PROJECT_NAME: stiix
       SWARM_OS_PUBLIC_URL: https://vps-00b690bc.tail240b2d.ts.net:8789
+      # MCP port — moved off the 8788 default ON PURPOSE. Under the ssh
+      # transport each agent session opens `ssh -R <mcpPort>:127.0.0.1:<mcpPort>`
+      # (agent-process.ts), which binds that port on the HOST loopback — it is
+      # NOT a container-private port. Two swarm-os instances sharing an mcpPort
+      # therefore fight over one host port, and `ExitOnForwardFailure=no` makes
+      # the loser fail SILENTLY: its agents simply can't reach the MCP server,
+      # with no error surfaced. This instance and `test` were both on 8788;
+      # whichever opened a session first won. Host map today:
+      #   8788 → test, 8790 → trader, 8794 → storyforge, 8796 → here.
+      # Keep it distinct from SWARM_OS_IDE_PORT (8790 default) too: those two
+      # share the container's loopback.
+      SWARM_OS_MCP_PORT: 8796
       # SSH transport: claude runs on the host, container only orchestrates.
       SWARM_OS_AGENT_TRANSPORT: ssh
       SWARM_OS_SSH_TARGET: ubuntu@host.docker.internal
