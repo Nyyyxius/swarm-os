@@ -12,6 +12,42 @@ import {
   serializeNote,
   parseWikiLinks,
 } from './store.js';
+import {
+  NoneEmbeddingProvider,
+  type EmbeddingProvider,
+  type EmbeddingCapabilities,
+} from './embeddings.js';
+
+/**
+ * Deterministic FAKE embedding provider for tests — NO network. Each text maps
+ * to a fixed set of "concept" axes by keyword presence, so cosine ranking is
+ * fully predictable: notes sharing concepts rank near the query.
+ */
+const CONCEPTS = ['database', 'parser', 'auth', 'cat'];
+class FakeEmbeddingProvider implements EmbeddingProvider {
+  readonly kind = 'api' as const; // pretend to be a real (non-degraded) backend
+  readonly model = 'fake-concept-v1';
+  readonly dim = CONCEPTS.length;
+  calls = 0;
+  async embed(texts: string[]): Promise<Array<Float32Array | null>> {
+    return texts.map((t) => this.vec(t));
+  }
+  async embedOne(text: string): Promise<Float32Array | null> {
+    this.calls++;
+    return this.vec(text);
+  }
+  private vec(text: string): Float32Array {
+    const lower = (text ?? '').toLowerCase();
+    const v = new Float32Array(this.dim);
+    CONCEPTS.forEach((c, i) => {
+      if (lower.includes(c)) v[i] = 1;
+    });
+    return v;
+  }
+  capabilities(): EmbeddingCapabilities {
+    return { semantic: true, degraded: false, provider: 'api', model: this.model, dim: this.dim };
+  }
+}
 
 let dir: string;
 let db: SwarmDb;
@@ -287,5 +323,118 @@ describe('MemoryStore boot reindex', () => {
       db2.close();
       fs.rmSync(dir2, { recursive: true, force: true });
     }
+  });
+});
+
+describe('MemoryStore semantic search', () => {
+  function seed(s: MemoryStore) {
+    s.upsertNote({ name: 'db-note', description: 'about the database', type: 'project', body: 'we migrated the database schema', createdBy: 's', team: null });
+    s.upsertNote({ name: 'parser-note', description: 'the parser', type: 'project', body: 'refactor the parser tokenizer', createdBy: 's', team: null });
+    s.upsertNote({ name: 'cat-note', description: 'a pet', type: 'reference', body: 'the cat sat on the mat', createdBy: 's', team: null });
+  }
+
+  it('ranks by cosine with a fake provider (semantic, not lexical)', async () => {
+    const fake = new FakeEmbeddingProvider();
+    const s = new MemoryStore(db, { dataDir: dir, eventBus: bus, embeddings: fake });
+    seed(s);
+    await s.flushEmbeddings();
+
+    // Query shares the "database" concept — db-note ranks first even though the
+    // query words don't all literally appear in it.
+    const hits = await s.searchSemantic('postgres database');
+    expect(hits[0]?.name).toBe('db-note');
+    expect(hits.every((h) => h.via === 'semantic')).toBe(true);
+    expect(hits.map((h) => h.name)).not.toContain('cat-note'); // no shared concept
+    expect(hits[0]?.score).toBeGreaterThan(0);
+  });
+
+  it('persists a vector per note and re-derives on reindex from disk', async () => {
+    const fake = new FakeEmbeddingProvider();
+    const s = new MemoryStore(db, { dataDir: dir, eventBus: bus, embeddings: fake });
+    seed(s);
+    await s.flushEmbeddings();
+    const vrow = db.db
+      .prepare('SELECT dim, model FROM memory_vectors WHERE name = ?')
+      .get('db-note') as { dim: number; model: string } | undefined;
+    expect(vrow?.model).toBe('fake-concept-v1');
+    expect(vrow?.dim).toBe(CONCEPTS.length);
+
+    // A fresh store over the SAME files with an EMPTY vector table backfills.
+    db.db.exec('DELETE FROM memory_vectors');
+    const s2 = new MemoryStore(db, { dataDir: dir, eventBus: bus, embeddings: new FakeEmbeddingProvider() });
+    await s2.flushEmbeddings();
+    const count = db.db.prepare('SELECT COUNT(*) AS n FROM memory_vectors').get() as { n: number };
+    expect(count.n).toBe(3);
+    expect((await s2.searchSemantic('parser')).map((h) => h.name)[0]).toBe('parser-note');
+  });
+
+  it('filters by type', async () => {
+    const s = new MemoryStore(db, { dataDir: dir, eventBus: bus, embeddings: new FakeEmbeddingProvider() });
+    seed(s);
+    await s.flushEmbeddings();
+    const hits = await s.searchSemantic('database', { type: 'reference' });
+    expect(hits.every((h) => h.type === 'reference')).toBe(true);
+    expect(hits.map((h) => h.name)).not.toContain('db-note');
+  });
+
+  it('degrades gracefully with the None provider: semantic empty, FTS intact, write ok', async () => {
+    const s = new MemoryStore(db, { dataDir: dir, eventBus: bus, embeddings: new NoneEmbeddingProvider() });
+    // Write must succeed even though nothing is embedded.
+    expect(() => seed(s)).not.toThrow();
+    await s.flushEmbeddings();
+    expect(await s.searchSemantic('database')).toEqual([]);
+    // No vectors were stored.
+    const count = db.db.prepare('SELECT COUNT(*) AS n FROM memory_vectors').get() as { n: number };
+    expect(count.n).toBe(0);
+    // FTS still works.
+    expect(s.search('database').map((h) => h.name)).toContain('db-note');
+    // runSearch(semantic) falls back to FTS when the provider is disabled.
+    const viaRun = await s.runSearch('database', { mode: 'semantic' });
+    expect(viaRun.map((h) => h.name)).toContain('db-note');
+    expect(viaRun.every((h) => h.via === 'fts')).toBe(true);
+    expect(s.embeddingInfo().semantic).toBe(false);
+  });
+
+  it('a failed embedding never fails the write and leaves no vector', async () => {
+    const flaky: EmbeddingProvider = {
+      kind: 'api',
+      model: 'flaky',
+      dim: 3,
+      embed: async (t) => t.map(() => null),
+      embedOne: async () => null, // always "fails"
+      capabilities: () => ({ semantic: true, degraded: false, provider: 'api', model: 'flaky', dim: 3 }),
+    };
+    const s = new MemoryStore(db, { dataDir: dir, eventBus: bus, embeddings: flaky });
+    expect(() =>
+      s.upsertNote({ name: 'x', description: '', type: 'project', body: 'hello', createdBy: 's', team: null }),
+    ).not.toThrow();
+    await s.flushEmbeddings();
+    const count = db.db.prepare('SELECT COUNT(*) AS n FROM memory_vectors').get() as { n: number };
+    expect(count.n).toBe(0); // no vector, but the note is fully written
+    expect(s.readNote('x')?.body).toBe('hello');
+  });
+
+  it('hybrid fuses FTS + semantic (RRF) and tags via', async () => {
+    const s = new MemoryStore(db, { dataDir: dir, eventBus: bus, embeddings: new FakeEmbeddingProvider() });
+    seed(s);
+    await s.flushEmbeddings();
+    const hits = await s.searchHybrid('database');
+    expect(hits.map((h) => h.name)).toContain('db-note');
+    // db-note matches BOTH FTS and semantic → tagged fts (stronger signal).
+    expect(hits.find((h) => h.name === 'db-note')?.via).toBe('fts');
+    expect(hits.every((h) => typeof h.score === 'number')).toBe(true);
+  });
+
+  it('default (no injected provider) uses the local hash provider: available + degraded', async () => {
+    const s = new MemoryStore(db, { dataDir: dir, eventBus: bus });
+    s.upsertNote({ name: 'alpha', description: 'database migration', type: 'project', body: 'schema upgrade for the database', createdBy: 's', team: null });
+    s.upsertNote({ name: 'beta', description: 'a quiet pet', type: 'reference', body: 'the cat sat on a warm mat', createdBy: 's', team: null });
+    await s.flushEmbeddings();
+    const info = s.embeddingInfo();
+    expect(info.semantic).toBe(true);
+    expect(info.degraded).toBe(true);
+    expect(info.provider).toBe('hash');
+    const hits = await s.searchSemantic('database schema');
+    expect(hits[0]?.name).toBe('alpha');
   });
 });

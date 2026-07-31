@@ -24,6 +24,7 @@ import { RoleScheduler } from './modules/schedule/index.js';
 import { IdeSupervisor } from './modules/ide/index.js';
 import { PluginStore } from './modules/plugins/store.js';
 import { MemoryStore } from './modules/memory/store.js';
+import { createEmbeddingProvider } from './modules/memory/embeddings.js';
 import { PluginHost } from './modules/plugins/host.js';
 import { PluginToolRegistry } from './modules/plugins/mcp-registry.js';
 import { PluginHttpRegistry } from './modules/plugins/http-registry.js';
@@ -146,8 +147,12 @@ const persistence = new DbPersistence(db);
 // while every other subsystem is unaffected.
 let memoryStore: MemoryStore | null = null;
 try {
-  memoryStore = new MemoryStore(db, { dataDir: config.dataDir, eventBus });
-  log.info({ event: 'boot.memory_store' });
+  // Embedding provider for semantic search (Phase 5). Built from env; on any
+  // misconfiguration it falls back to a safe local deterministic provider, so
+  // the boot never fails and the 24/7 server never blocks on a missing backend.
+  const embeddings = createEmbeddingProvider();
+  memoryStore = new MemoryStore(db, { dataDir: config.dataDir, eventBus, embeddings });
+  log.info({ event: 'boot.memory_store', embeddings: embeddings.capabilities() });
 } catch (err) {
   log.error({
     event: 'boot.memory_store_unavailable',

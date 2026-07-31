@@ -39,9 +39,10 @@ export function registerMemoryTools(server: McpServer, ctxResolver: () => ToolCo
     {
       title: 'Search the shared knowledge graph',
       description:
-        'Full-text search over the shared, deployment-wide memory (notes + wikilinks). Returns ranked hits with a snippet. Use this at the START of a task to recall what the swarm already knows. `type` optionally narrows to one note type; `limit` defaults to 20.',
+        'Search the shared, deployment-wide memory (notes + wikilinks). Returns ranked hits with a snippet. Use this at the START of a task to recall what the swarm already knows. `mode` selects the engine: `text` (default, exact full-text FTS — backward-compatible), `semantic` (embedding cosine — recall by meaning), or `hybrid` (fuse both). `type` optionally narrows to one note type; `limit` defaults to 20. Each hit carries `via` (`fts`|`semantic`) when known. Semantic degrades gracefully: if embeddings are not configured on this deployment it falls back to text.',
       inputSchema: {
         query: z.string().min(1),
+        mode: z.enum(['text', 'semantic', 'hybrid']).optional(),
         type: TYPE_ENUM.optional(),
         limit: z.number().int().positive().max(100).optional(),
       },
@@ -53,14 +54,24 @@ export function registerMemoryTools(server: McpServer, ctxResolver: () => ToolCo
             type: z.string(),
             snippet: z.string(),
             score: z.number(),
+            via: z.enum(['fts', 'semantic']).optional(),
           }),
         ),
       },
     },
-    (args) => {
+    async (args) => {
       const ctx = ctxResolver();
-      const a = args as { query: string; type?: string; limit?: number };
-      const results = memoryOf(ctx, 'memory.search').search(a.query, a.type ?? null, a.limit ?? 20);
+      const a = args as {
+        query: string;
+        mode?: 'text' | 'semantic' | 'hybrid';
+        type?: string;
+        limit?: number;
+      };
+      const results = await memoryOf(ctx, 'memory.search').runSearch(a.query, {
+        mode: a.mode ?? 'text',
+        type: a.type ?? null,
+        limit: a.limit ?? 20,
+      });
       logCall('memory.search', ctx, true);
       return ok({ results });
     },

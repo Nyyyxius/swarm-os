@@ -17,11 +17,14 @@ import {
  * Endpoints:
  *   GET    /api/memory                 -> { notes: MemoryNoteMeta[] }
  *   GET    /api/memory/graph           -> { nodes: GraphNode[], edges: GraphEdge[] }
- *   GET    /api/memory/search?q=&type=&limit= -> { results: SearchHit[] }
+ *   GET    /api/memory/capabilities    -> EmbeddingCapabilities (semantic on/off)
+ *   GET    /api/memory/search?q=&mode=&type=&limit= -> { results: SearchHit[] }
  *   GET    /api/memory/:name           -> MemoryNote (404 if absent)
  *   PUT    /api/memory/:name           -> MemoryNote (409 on version conflict)
  *   DELETE /api/memory/:name           -> { ok: true }
  */
+
+const VALID_MODES: ReadonlySet<string> = new Set(['text', 'semantic', 'hybrid']);
 
 const VALID_TYPES: ReadonlySet<string> = new Set(MEMORY_NOTE_TYPES);
 
@@ -40,13 +43,25 @@ export function createMemoryRouter(memory: MemoryStore): Router {
     res.json(memory.graph());
   });
 
-  // FTS search. `q` is the query; `type` narrows; `limit` caps (default 20).
+  // Embedding capabilities — lets the UI decide whether to offer the semantic /
+  // hybrid toggle (and label it honestly when it is the degraded local fallback).
+  router.get('/api/memory/capabilities', (_req: Request, res: Response) => {
+    res.json(memory.embeddingInfo());
+  });
+
+  // Search. `q` is the query; `mode` = text|semantic|hybrid (default text, for
+  // backward compatibility); `type` narrows; `limit` caps (default 20).
   router.get('/api/memory/search', (req: Request, res: Response) => {
     const q = typeof req.query.q === 'string' ? req.query.q : '';
     const type = typeof req.query.type === 'string' ? req.query.type : null;
+    const modeRaw = typeof req.query.mode === 'string' ? req.query.mode : 'text';
+    const mode = (VALID_MODES.has(modeRaw) ? modeRaw : 'text') as 'text' | 'semantic' | 'hybrid';
     const limitRaw = typeof req.query.limit === 'string' ? Number(req.query.limit) : NaN;
     const limit = Number.isFinite(limitRaw) ? limitRaw : 20;
-    res.json({ results: memory.search(q, type, limit) });
+    void memory
+      .runSearch(q, { mode, type, limit })
+      .then((results) => res.json({ results }))
+      .catch(() => res.json({ results: [] }));
   });
 
   router.get('/api/memory/:name', (req: Request<{ name: string }>, res: Response) => {
