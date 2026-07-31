@@ -377,7 +377,11 @@ export function buildPluginApi(
           {
             source: 'config',
             provider: cfg.defaultProvider,
-            model: cfg.defaultModel,
+            // Same rule as the other three creation channels, and for the same
+            // reason: a config layer that always names a model makes the
+            // adapter's own `defaults()` unreachable. See
+            // `Config.defaultModelExplicit`.
+            model: cfg.defaultModelExplicit ? cfg.defaultModel : null,
             effort: cfg.defaultEffort,
             permissionMode: cfg.defaultPermissionMode,
           },

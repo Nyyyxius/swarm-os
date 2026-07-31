@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { loadConfig, _resetConfigCacheForTesting } from './config.js';
+import { BUILTIN_PROVIDER_DEFAULT_MODELS } from './modules/providers/ids.js';
 
 /**
  * Phase 7 — config parsing/validation.
@@ -58,7 +59,10 @@ describe('loadConfig', () => {
     expect(cfg.port).toBe(8787);
     expect(cfg.mcpPort).toBe(8788);
     expect(cfg.host).toBe('127.0.0.1');
-    expect(cfg.defaultModel).toBe('claude-opus-4-8');
+    // The constant, not the literal: `pnpm models:sync` rewrites `ids.ts`
+    // before a release, and a frozen id here would make every model refresh
+    // a test edit.
+    expect(cfg.defaultModel).toBe(BUILTIN_PROVIDER_DEFAULT_MODELS.claude);
     expect(cfg.defaultEffort).toBe('xhigh');
     expect(cfg.defaultPermissionMode).toBe('bypassPermissions');
     expect(cfg.maxOrchestrators).toBe(10);
@@ -125,18 +129,17 @@ describe('loadConfig', () => {
       _resetConfigCacheForTesting();
       const cfg = loadConfig();
       expect(cfg.defaultProvider).toBe('codex');
-      expect(cfg.defaultModel).toBe('gpt-5.5');
+      expect(cfg.defaultModel).toBe(BUILTIN_PROVIDER_DEFAULT_MODELS.codex);
       expect(cfg.defaultModel).not.toMatch(/^claude-/);
     });
 
     it('does the same for gemini and opencode', () => {
-      for (const [provider, model] of [
-        ['gemini', 'gemini-3-pro-preview'],
-        ['opencode', 'anthropic/claude-opus-5'],
-      ] as const) {
+      for (const provider of ['gemini', 'opencode'] as const) {
         process.env.SWARM_OS_DEFAULT_PROVIDER = provider;
         _resetConfigCacheForTesting();
-        expect(loadConfig().defaultModel).toBe(model);
+        expect(loadConfig().defaultModel).toBe(
+          BUILTIN_PROVIDER_DEFAULT_MODELS[provider],
+        );
       }
     });
 
@@ -152,7 +155,29 @@ describe('loadConfig', () => {
     it('leaves a claude deployment exactly where it was', () => {
       process.env.SWARM_OS_DEFAULT_PROVIDER = 'claude';
       _resetConfigCacheForTesting();
-      expect(loadConfig().defaultModel).toBe('claude-opus-4-8');
+      expect(loadConfig().defaultModel).toBe(BUILTIN_PROVIDER_DEFAULT_MODELS.claude);
+    });
+
+    it('flags whether the OPERATOR named the model, not merely whether one exists', () => {
+      // `defaultModel` is never empty, so "is there a model?" cannot answer
+      // "should the config layer name one?". Without this flag the `'config'`
+      // layer always won for a team on the instance's own default provider, and
+      // the adapter's `defaults()` — where the live catalogue lands — was
+      // unreachable from the API. See `Config.defaultModelExplicit`.
+      _resetConfigCacheForTesting();
+      expect(loadConfig().defaultModelExplicit).toBe(false);
+
+      process.env.SWARM_OS_DEFAULT_MODEL = 'claude-opus-9';
+      _resetConfigCacheForTesting();
+      const named = loadConfig();
+      expect(named.defaultModelExplicit).toBe(true);
+      expect(named.defaultModel).toBe('claude-opus-9');
+
+      // An empty env var is UNSET, not "named the empty string" — the same
+      // reading `providers/resolve.ts` already applies to every layer.
+      process.env.SWARM_OS_DEFAULT_MODEL = '';
+      _resetConfigCacheForTesting();
+      expect(loadConfig().defaultModelExplicit).toBe(false);
     });
   });
 

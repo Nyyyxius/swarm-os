@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { BUILTIN_PROVIDER_DEFAULT_MODELS } from './ids.js';
 
 /**
  * Gemini adapter contract (plan Lot 5, spike S2 = `scripts/verify-gemini.report.md`).
@@ -118,7 +119,10 @@ function expectedHookCommand(opts: {
 const HOST_DATA_DIR = '/host/data';
 const HOST_WORKSPACE_ROOT = '/host/workspace';
 const HOST_CLAUDE_DIR = '/host/home/.claude';
-const MODEL = 'gemini-3-pro-preview';
+// The instance default, read from `ids.ts` rather than frozen here: `pnpm
+// models:sync` rewrites that table before a release, and this suite is about the
+// spawn plumbing, not about which gemini id is current.
+const MODEL = BUILTIN_PROVIDER_DEFAULT_MODELS.gemini;
 
 let tmpRoot: string;
 let dataDir: string;

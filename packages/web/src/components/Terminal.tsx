@@ -128,7 +128,12 @@ export function Terminal({ sessionId, onRoleChange, onDataFrame, hideChrome }: P
                   return;
                 case 'replay':
                   if (Array.isArray(o.lines)) {
+                    // Server-rendered scrollback: linearised, colour-preserving
+                    // lines from the on-disk PTY log (see console-tail.ts).
                     for (const l of o.lines) term.writeln(l);
+                    // The history keeps its SGR codes, so close any attribute
+                    // left open by the last line before the live stream starts.
+                    term.write('\x1b[0m');
                   }
                   return;
                 case 'data':

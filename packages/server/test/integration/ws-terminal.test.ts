@@ -8,6 +8,8 @@
  */
 
 import { describe, it, expect, beforeEach, afterEach } from 'vitest';
+import * as fs from 'node:fs';
+import * as path from 'node:path';
 import { WebSocket } from 'ws';
 import { bootTestStack, authHeaders, type TestStack } from './helpers.js';
 import { FakeAgentProcess } from '../../src/modules/orchestrator/agent-process.js';
@@ -163,12 +165,80 @@ describe('WebSocket terminal', () => {
     const buf = bufferMessages(w);
     await awaitOpen(w);
     await waitForMessage(buf, (m) => m.type === 'attached');
-    // resize: writer-only — nothing observable on the wire, but should not
-    // throw. FakeAgentProcess.resize() is a no-op (the agent doesn't track
-    // size), so writes stays empty.
+    // resize: writer-only. Nothing observable on the wire, and it must never
+    // be mistaken for terminal input.
     w.send(JSON.stringify({ type: 'resize', cols: 80, rows: 24 }));
     await new Promise((r) => setTimeout(r, 30));
     expect(fake.writes).toHaveLength(0);
+    w.close();
+  });
+
+  it('nudges the PTY size on the first resize so the TUI repaints on attach', async () => {
+    const { sessionId, fake } = makeSession();
+    const t = await getTicket(sessionId);
+    const w = openWs(sessionId, t);
+    const buf = bufferMessages(w);
+    await awaitOpen(w);
+    await waitForMessage(buf, (m) => m.type === 'attached');
+
+    w.send(JSON.stringify({ type: 'resize', cols: 80, rows: 24 }));
+    await new Promise((r) => setTimeout(r, 150));
+
+    // The kernel only raises SIGWINCH on an actual size change, so the attach
+    // must bracket the requested size with a one-row delta and settle back.
+    expect(fake.resizes.length).toBeGreaterThanOrEqual(2);
+    expect(fake.resizes[0]).toEqual({ cols: 80, rows: 23 });
+    expect(fake.resizes[fake.resizes.length - 1]).toEqual({ cols: 80, rows: 24 });
+    w.close();
+  });
+
+  it('passes later resizes straight through without re-nudging', async () => {
+    const { sessionId, fake } = makeSession();
+    const t = await getTicket(sessionId);
+    const w = openWs(sessionId, t);
+    const buf = bufferMessages(w);
+    await awaitOpen(w);
+    await waitForMessage(buf, (m) => m.type === 'attached');
+
+    w.send(JSON.stringify({ type: 'resize', cols: 80, rows: 24 }));
+    await new Promise((r) => setTimeout(r, 150));
+    const afterAttach = fake.resizes.length;
+
+    // A genuine window resize already changes the winsize; nudging again
+    // would make the TUI reflow twice for no reason.
+    w.send(JSON.stringify({ type: 'resize', cols: 100, rows: 40 }));
+    await new Promise((r) => setTimeout(r, 100));
+    expect(fake.resizes.slice(afterAttach)).toEqual([{ cols: 100, rows: 40 }]);
+    w.close();
+  });
+
+  it('replays deep scrollback rendered from the on-disk PTY log', async () => {
+    const { sessionId } = makeSession();
+    const found = stack.spawner.findSession(sessionId);
+    expect(found).toBeDefined();
+    const logPath = found!.session.logPath;
+    fs.mkdirSync(path.dirname(logPath), { recursive: true });
+    // Far more than the 50 lines the old ring-buffer replay sent, and laid
+    // out with column jumps the way a real TUI does.
+    const body = Array.from(
+      { length: 600 },
+      (_, i) => `\x1B[3Gline\x1B[9G${i}`,
+    ).join('\r\n');
+    fs.writeFileSync(logPath, `${body}\r\n`);
+
+    const t = await getTicket(sessionId);
+    const w = openWs(sessionId, t);
+    const buf = bufferMessages(w);
+    await awaitOpen(w);
+    const replay = await waitForMessage(buf, (m) => m.type === 'replay');
+    const lines = replay.lines as string[];
+
+    expect(lines.length).toBeGreaterThan(200);
+    // eslint-disable-next-line no-control-regex -- ESC is the subject matter here
+    const plain = lines.map((l) => l.replace(/\x1B\[[0-9;]*m/g, ''));
+    // Column jumps became real spacing rather than "line599": col 3 puts
+    // "line" at indices 2-5, col 9 resumes at index 8 — a two-space gap.
+    expect(plain[plain.length - 1]).toBe('  line  599');
     w.close();
   });
 

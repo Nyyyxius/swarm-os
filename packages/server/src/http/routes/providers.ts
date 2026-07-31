@@ -22,6 +22,7 @@ import { Router, type Request, type Response } from 'express';
 import type { Spawner } from '../../modules/spawner/index.js';
 import type { Config } from '../../config.js';
 import { AVAILABILITY_COLD_WAIT_MS } from '../../modules/providers/availability.js';
+import { MODEL_CATALOGUE_COLD_WAIT_MS } from '../../modules/providers/catalogue.js';
 
 /** One entry of the `providers` array. Mirrored by the web client in Lot 3. */
 export interface ProviderInfoPayload {
@@ -70,9 +71,17 @@ export function createProvidersRouter(spawner: Spawner, config: Config): Router 
     // registered. Anything still probing comes back as "not available yet"
     // WITH its pending reason, and the finished verdict is served to the next
     // caller from the cache — the UI polls, so nobody stares at a spinner.
-    const availability = await spawner.providerAvailability.resolveAll(
-      AVAILABILITY_COLD_WAIT_MS,
-    );
+    //
+    // The model catalogue rides the SAME deadline rather than a second one: both
+    // bodies reach their first `await` in this tick, so their two cold waits
+    // start together and the route's floor is a MAX (~3 s), not a sum. `models()`
+    // and `defaults()` below are synchronous and serve the pins if the catalogue
+    // has not landed — this await only decides whether the FIRST caller after a
+    // boot sees live data or waits one poll for it.
+    const [availability] = await Promise.all([
+      spawner.providerAvailability.resolveAll(AVAILABILITY_COLD_WAIT_MS),
+      spawner.modelCatalogue?.resolve(MODEL_CATALOGUE_COLD_WAIT_MS) ?? Promise.resolve(),
+    ]);
     const types = new Map(spawner.providerRegistry.types().map((t) => [t.id, t]));
 
     const providers: ProviderInfoPayload[] = spawner.providerRegistry

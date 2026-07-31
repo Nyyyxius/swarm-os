@@ -675,7 +675,7 @@ function LeadPromptSection({
               className="h-edit"
               onClick={() => void improve()}
               disabled={improving}
-              title="Améliorer avec Claude Opus 4.7"
+              title="Améliorer avec Claude"
             >
               {improving ? '… AMÉLIORATION' : '✨ AMÉLIORER'}
             </button>
@@ -788,7 +788,7 @@ function PreambleSection({
               className="h-edit"
               onClick={() => void improve()}
               disabled={improving}
-              title="Améliorer avec Claude Opus 4.7"
+              title="Améliorer avec Claude"
             >
               {improving ? '… AMÉLIORATION' : '✨ AMÉLIORER'}
             </button>

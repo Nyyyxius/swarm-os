@@ -17,6 +17,7 @@ import {
 import { validateCwdUnderWorkspace } from '../../http/validation.js';
 import { isDiscordConnector } from '../roles/index.js';
 import type { Config, EffortLevel, PermissionMode } from '../../config.js';
+import type { MemoryStore } from '../memory/store.js';
 import { withModule } from '../../logger.js';
 
 const log = withModule('mcp.tool');
@@ -60,6 +61,12 @@ export interface ToolContext {
   config: Config;
   /** Messaging defaults derived from config — passed once for clarity. */
   messagingDefaults: MessagingDefaults;
+  /**
+   * Shared knowledge-graph store, GLOBAL to the deployment (docs
+   * memoire-partagee.md). Optional so pre-memory test paths still build a
+   * context; production `McpServer` always threads it through from the Spawner.
+   */
+  memory?: MemoryStore;
 }
 
 /** Active sessions only (plan §10). */
@@ -152,7 +159,7 @@ export function requireLead(ctx: ToolContext, toolName: string): void {
  * id to keep log volume sane; the session secret is NEVER logged (it's not
  * even in scope here — McpServer drops it before invoking tools).
  */
-function logCall(tool: string, ctx: ToolContext, ok: boolean, err?: string): void {
+export function logCall(tool: string, ctx: ToolContext, ok: boolean, err?: string): void {
   log.info({
     event: 'mcp.call',
     tool,

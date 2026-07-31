@@ -36,9 +36,21 @@ export {
   ProviderAvailabilityCache,
   AVAILABILITY_TTL_MS,
   AVAILABILITY_COLD_WAIT_MS,
+  raceDeadline,
   type ProviderAvailabilityState,
 } from './availability.js';
 export {
+  ModelCatalogue,
+  MODEL_CATALOGUE_URL,
+  MODEL_CATALOGUE_TTL_MS,
+  MODEL_CATALOGUE_COLD_WAIT_MS,
+  deriveCatalogue,
+  deriveCodexCatalogue,
+  type ModelCatalogueOptions,
+  type ProviderCatalogueView,
+} from './catalogue.js';
+export {
+  BUILTIN_PROVIDER_DEFAULT_FAMILIES,
   BUILTIN_PROVIDER_DEFAULT_MODELS,
   BUILTIN_PROVIDER_IDS,
   DEFAULT_PROVIDER_ID,
@@ -47,6 +59,7 @@ export {
 } from './ids.js';
 
 import type { Config } from '../../config.js';
+import type { ModelCatalogue } from './catalogue.js';
 import { ProviderRegistry } from './registry.js';
 import { CLAUDE_PROVIDER } from './claude.js';
 import { CodexProvider } from './codex.js';
@@ -71,4 +84,38 @@ export function createBuiltinProviderRegistry(config?: Config): ProviderRegistry
   registry.register(new GeminiProvider(config), { builtin: true });
   registry.register(new OpencodeProvider(config), { builtin: true });
   return registry;
+}
+
+/** An adapter that can be handed the live catalogue. */
+interface CatalogueConsumer {
+  useCatalogue(catalogue: ModelCatalogue | null): void;
+}
+
+function isCatalogueConsumer(p: unknown): p is CatalogueConsumer {
+  return typeof (p as CatalogueConsumer | null)?.useCatalogue === 'function';
+}
+
+/**
+ * Hand the live catalogue to every registered adapter that accepts one.
+ *
+ * Called ONCE from `src/index.ts`, next to `useKeySource`. Duck-typed rather
+ * than keyed on the four built-in ids: `useCatalogue` is not part of
+ * `AgentProvider` (an adapter is free to have a fixed list — `FakeProvider`
+ * does), and a plugin adapter that wants live models should get them by
+ * implementing the method, not by being added to a list in core.
+ *
+ * Returns the ids that took it, so boot can log what it actually wired instead
+ * of what it intended to.
+ */
+export function bindModelCatalogue(
+  registry: ProviderRegistry,
+  catalogue: ModelCatalogue | null,
+): string[] {
+  const bound: string[] = [];
+  for (const provider of registry.list()) {
+    if (!isCatalogueConsumer(provider)) continue;
+    provider.useCatalogue(catalogue);
+    bound.push(provider.id);
+  }
+  return bound;
 }

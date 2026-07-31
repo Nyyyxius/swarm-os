@@ -16,6 +16,7 @@ import { Orchestrator } from './index.js';
 import { createBuiltinProviderRegistry, ProviderRegistry } from '../providers/index.js';
 import { FakeProvider } from '../providers/fake.js';
 import { registerTeamCommsTools } from '../mcp/tools.js';
+import { registerMemoryTools } from '../mcp/memory-tools.js';
 import type { Config } from '../../config.js';
 
 /**
@@ -339,20 +340,24 @@ describe('Orchestrator wiring — each session is rendered for ITS provider', ()
 
 describe('TEAM_TOOL_LOGICAL_NAMES', () => {
   it('is exactly what the MCP server registers', () => {
-    // Drift guard. `registerTeamCommsTools` is the source of truth; a tool added
-    // there and missing here would be handed to gemini/codex/opencode agents
-    // under a name that does not exist, which is precisely the bug this lot
-    // fixes. Only `registerTool` is ever called on the server, so a recorder is
-    // a sufficient stand-in.
+    // Drift guard. The tools mounted on the `team-comms` server are the source
+    // of truth; a tool added there and missing here would be handed to
+    // gemini/codex/opencode agents under a name that does not exist, which is
+    // precisely the bug this lot fixes. Both the built-in team-comms tools AND
+    // the shared-memory tools mount on the same server, so both must be counted.
+    // Only `registerTool` is ever called on the server, so a recorder is a
+    // sufficient stand-in.
     const registered: string[] = [];
     const stub = {
       registerTool: (name: string) => {
         registered.push(name);
       },
     } as unknown as McpServer;
-    registerTeamCommsTools(stub, () => {
+    const resolver = () => {
       throw new Error('the context resolver must not run at registration time');
-    });
+    };
+    registerTeamCommsTools(stub, resolver);
+    registerMemoryTools(stub, resolver);
     expect([...registered].sort()).toEqual([...TEAM_TOOL_LOGICAL_NAMES].sort());
   });
 

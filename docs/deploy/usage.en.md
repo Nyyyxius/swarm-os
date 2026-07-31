@@ -74,9 +74,17 @@ Behaviour:
 
 ## Cost awareness
 
-Defaults are `claude-opus-4-8` at `xhigh` effort — capable but expensive. Lower
+New teams default to the newest Claude **Opus** at `xhigh` effort — capable but
+expensive. The exact id is not frozen in the build: the server refreshes each
+provider's model list from models.dev, so a team created today starts on today's
+Opus (`GET /providers`, or the model dropdown, tells you which). Lower
 `SWARM_OS_DEFAULT_MODEL` and/or `SWARM_OS_DEFAULT_EFFORT` in `.env` for cheaper
 runs, then `./install.sh` to apply.
+
+The dropdown shows each model's price per million tokens — worth a glance, since
+a same-generation model can cost twice another for a different kind of work.
+Existing teams never change model on their own; only newly created ones pick up
+a newer default.
 
 ---
 

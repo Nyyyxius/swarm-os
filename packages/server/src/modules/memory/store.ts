@@ -1,0 +1,761 @@
+/**
+ * MemoryStore — the shared knowledge graph ("Obsidian-style" vault), GLOBAL to
+ * one deployment (one instance = one memory shared by every team).
+ *
+ * Storage model (docs/memoire-partagee.md §4, option C — hybrid):
+ *   - SOURCE OF TRUTH = markdown files at `<dataDir>/memory/<name>.md`, each
+ *     with a YAML-ish frontmatter (name, description, type, metadata, created_by,
+ *     team, created_at, updated_at, version) and a body carrying `[[wikilinks]]`.
+ *     The vault stays portable / Obsidian-compatible / git-friendly and rides
+ *     the `/data` hot backup.
+ *   - MIRROR = a SQLite index (`memory_nodes`, `memory_edges`, FTS5 `memory_fts`)
+ *     derived from the files, for O(1) graph rendering and FTS5 recall.
+ *
+ * ⚠️ Like `plugins/store.ts` and `updates/store.ts`, this class OWNS its tables
+ * via `CREATE TABLE IF NOT EXISTS` on the raw `Database` handle (`SwarmDb.db`).
+ * It deliberately touches NEITHER `schema.sql` NOR `INLINE_SCHEMA`: the inline
+ * fallback is the path that runs in the Docker image (tsc doesn't copy `.sql`),
+ * so the double source is a trap. Keeping the DDL here sidesteps it entirely.
+ *
+ * Robustness (docs §11): every method is wrapped in try/catch and logs on
+ * failure — a broken write NEVER crashes the 24/7 server. The ONE exception is
+ * an optimistic-lock version conflict, which is thrown as `MemoryConflictError`
+ * so the caller (MCP tool / REST) can answer 409 instead of silently losing a
+ * concurrent write.
+ */
+
+import * as fs from 'node:fs';
+import * as path from 'node:path';
+import type { Database as Db } from 'better-sqlite3';
+import { withModule } from '../../logger.js';
+import type { SwarmDb } from '../db/index.js';
+import type { SwarmEventBus } from '../../events.js';
+
+const log = withModule('memory.store');
+
+// --- DTO contract (identical on the frontend — do NOT change without cause) ---
+
+export type MemoryNoteType =
+  | 'user'
+  | 'feedback'
+  | 'project'
+  | 'reference'
+  | 'entity'
+  | 'decision';
+
+export const MEMORY_NOTE_TYPES: readonly MemoryNoteType[] = [
+  'user',
+  'feedback',
+  'project',
+  'reference',
+  'entity',
+  'decision',
+];
+
+export interface MemoryNoteMeta {
+  name: string;
+  description: string;
+  type: MemoryNoteType;
+  team?: string;
+  createdBy?: string;
+  /** Epoch millis. */
+  createdAt: number;
+  /** Epoch millis. */
+  updatedAt: number;
+  version: number;
+}
+
+export interface MemoryNote extends MemoryNoteMeta {
+  body: string;
+  outLinks: string[];
+  inLinks: string[];
+}
+
+export interface GraphNode {
+  name: string;
+  type: string;
+  description?: string;
+}
+
+export interface GraphEdge {
+  from: string;
+  to: string;
+  relation?: string;
+}
+
+export interface SearchHit {
+  name: string;
+  description: string;
+  type: string;
+  snippet: string;
+  score: number;
+}
+
+export interface MemoryGraph {
+  nodes: GraphNode[];
+  edges: GraphEdge[];
+}
+
+// --- Errors -----------------------------------------------------------------
+
+export class MemoryError extends Error {
+  constructor(
+    message: string,
+    public readonly code: string,
+  ) {
+    super(message);
+    this.name = 'MemoryError';
+  }
+}
+
+/** Optimistic-lock failure — thrown (never swallowed) so callers return 409. */
+export class MemoryConflictError extends MemoryError {
+  constructor(
+    public readonly currentVersion: number,
+    public readonly expectedVersion: number,
+  ) {
+    super(
+      `version conflict: expected ${expectedVersion} but current is ${currentVersion}`,
+      'VERSION_CONFLICT',
+    );
+    this.name = 'MemoryConflictError';
+  }
+}
+
+// --- Internal row + parse shapes --------------------------------------------
+
+interface NodeRow {
+  name: string;
+  description: string;
+  type: string;
+  team: string | null;
+  created_by: string | null;
+  created_at: number;
+  updated_at: number;
+  version: number;
+  body: string;
+  metadata: string | null;
+}
+
+interface ParsedNote {
+  name: string;
+  description: string;
+  type: string;
+  team: string | null;
+  createdBy: string | null;
+  createdAtMs: number;
+  updatedAtMs: number;
+  version: number;
+  metadata: Record<string, unknown>;
+  body: string;
+}
+
+export interface UpsertNoteInput {
+  name: string;
+  description: string;
+  type: string;
+  body: string;
+  /** Provenance is MANDATORY (docs §11) — who wrote it. */
+  createdBy: string;
+  /** Provenance — which orchestrator/team; `null` for operator/web writes. */
+  team: string | null;
+  /** Optimistic lock: when provided AND the note exists, must equal current version. */
+  expectedVersion?: number | null;
+  /** Optional structured metadata, round-tripped into the frontmatter. */
+  metadata?: Record<string, unknown>;
+}
+
+/** Relation used for edges auto-derived from `[[wikilinks]]` in the body. */
+const AUTO_RELATION = 'links';
+/** Default relation for a manual `addLink` when none is supplied. */
+const DEFAULT_LINK_RELATION = 'related';
+
+const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
+const MAX_NAME_LEN = 200;
+const MAX_DEPTH = 4;
+
+/** Extract `[[target]]` / `[[target|alias]]` link targets from a body. */
+export function parseWikiLinks(body: string): string[] {
+  const out = new Set<string>();
+  for (const m of body.matchAll(/\[\[([^\]]+)\]\]/g)) {
+    const raw = (m[1] ?? '').split('|')[0]?.trim() ?? '';
+    if (raw) out.add(raw);
+  }
+  return [...out];
+}
+
+function isoToMillis(iso: string | undefined, fallback: number): number {
+  if (!iso) return fallback;
+  const t = Date.parse(iso);
+  return Number.isFinite(t) ? t : fallback;
+}
+
+/** Serialize one frontmatter scalar as JSON (valid YAML too) for safe round-trip. */
+function fmScalar(v: string): string {
+  return JSON.stringify(v);
+}
+
+/**
+ * Parse a note's markdown (frontmatter + body). Tolerant: a missing/garbled
+ * frontmatter yields sensible defaults so a hand-edited or partial file still
+ * indexes. `name` falls back to the caller-supplied slug (the filename).
+ */
+export function parseNote(raw: string, fallbackName: string): ParsedNote {
+  const now = Date.now();
+  let fm = '';
+  let body = raw;
+  const m = /^﻿?---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(raw);
+  if (m) {
+    fm = m[1] ?? '';
+    body = m[2] ?? '';
+  }
+  const fields: Record<string, unknown> = {};
+  for (const line of fm.split(/\r?\n/)) {
+    const lm = /^([A-Za-z_][A-Za-z0-9_]*):\s?(.*)$/.exec(line);
+    if (!lm) continue;
+    const key = lm[1]!;
+    const rawVal = (lm[2] ?? '').trim();
+    if (rawVal === '') {
+      fields[key] = '';
+      continue;
+    }
+    try {
+      fields[key] = JSON.parse(rawVal) as unknown;
+    } catch {
+      fields[key] = rawVal;
+    }
+  }
+  const asStr = (v: unknown): string | null =>
+    typeof v === 'string' ? v : v == null ? null : String(v);
+  const name = asStr(fields.name) || fallbackName;
+  const description = asStr(fields.description) ?? '';
+  const type = asStr(fields.type) ?? 'reference';
+  const team = asStr(fields.team);
+  const createdBy = asStr(fields.created_by);
+  const createdAtMs = isoToMillis(asStr(fields.created_at) ?? undefined, now);
+  const updatedAtMs = isoToMillis(asStr(fields.updated_at) ?? undefined, createdAtMs);
+  const versionNum = Number(fields.version);
+  const version = Number.isFinite(versionNum) && versionNum > 0 ? Math.floor(versionNum) : 1;
+  const metadata =
+    fields.metadata && typeof fields.metadata === 'object' && !Array.isArray(fields.metadata)
+      ? (fields.metadata as Record<string, unknown>)
+      : {};
+  return {
+    name,
+    description,
+    type,
+    team,
+    createdBy,
+    createdAtMs,
+    updatedAtMs,
+    version,
+    metadata,
+    body: body.replace(/^\r?\n/, ''),
+  };
+}
+
+/** Render a note back to `<frontmatter>\n<body>` markdown. */
+export function serializeNote(p: {
+  name: string;
+  description: string;
+  type: string;
+  team: string | null;
+  createdBy: string | null;
+  createdAtMs: number;
+  updatedAtMs: number;
+  version: number;
+  metadata: Record<string, unknown>;
+  body: string;
+}): string {
+  const lines = [
+    '---',
+    `name: ${fmScalar(p.name)}`,
+    `description: ${fmScalar(p.description)}`,
+    `type: ${fmScalar(p.type)}`,
+    `metadata: ${JSON.stringify(p.metadata ?? {})}`,
+    `created_by: ${p.createdBy == null ? 'null' : fmScalar(p.createdBy)}`,
+    `team: ${p.team == null ? 'null' : fmScalar(p.team)}`,
+    `created_at: ${fmScalar(new Date(p.createdAtMs).toISOString())}`,
+    `updated_at: ${fmScalar(new Date(p.updatedAtMs).toISOString())}`,
+    `version: ${p.version}`,
+    '---',
+    '',
+  ];
+  const body = p.body.endsWith('\n') ? p.body : `${p.body}\n`;
+  return `${lines.join('\n')}${body}`;
+}
+
+export class MemoryStore {
+  private readonly db: Db;
+  private readonly vaultDir: string;
+  private readonly eventBus: SwarmEventBus | null;
+
+  private readonly getNodeStmt;
+  private readonly upsertNodeStmt;
+  private readonly deleteNodeStmt;
+  private readonly listAllStmt;
+  private readonly listByTypeStmt;
+  private readonly ftsDeleteStmt;
+  private readonly ftsInsertStmt;
+  private readonly deleteAutoEdgesStmt;
+  private readonly insertEdgeStmt;
+  private readonly deleteEdgesForNodeStmt;
+  private readonly outEdgesStmt;
+  private readonly inEdgesStmt;
+  private readonly allEdgesStmt;
+
+  constructor(swarmDb: SwarmDb, opts: { dataDir: string; eventBus?: SwarmEventBus }) {
+    this.db = swarmDb.db;
+    this.vaultDir = path.join(opts.dataDir, 'memory');
+    this.eventBus = opts.eventBus ?? null;
+
+    try {
+      fs.mkdirSync(this.vaultDir, { recursive: true });
+    } catch (err) {
+      log.warn({ event: 'memory.vault_mkdir_failed', error: String(err) });
+    }
+
+    this.db.exec(`
+      CREATE TABLE IF NOT EXISTS memory_nodes (
+        name        TEXT PRIMARY KEY,
+        description TEXT NOT NULL DEFAULT '',
+        type        TEXT NOT NULL,
+        team        TEXT,
+        created_by  TEXT,
+        created_at  INTEGER NOT NULL,
+        updated_at  INTEGER NOT NULL,
+        version     INTEGER NOT NULL DEFAULT 1,
+        body        TEXT NOT NULL DEFAULT '',
+        metadata    TEXT
+      );
+      CREATE INDEX IF NOT EXISTS idx_memory_nodes_type ON memory_nodes(type);
+      CREATE TABLE IF NOT EXISTS memory_edges (
+        src      TEXT NOT NULL,
+        dst      TEXT NOT NULL,
+        relation TEXT NOT NULL DEFAULT '${AUTO_RELATION}',
+        PRIMARY KEY (src, dst, relation)
+      );
+      CREATE INDEX IF NOT EXISTS idx_memory_edges_dst ON memory_edges(dst);
+      CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(name, description, body);
+    `);
+
+    this.getNodeStmt = this.db.prepare<[string], NodeRow>(
+      'SELECT * FROM memory_nodes WHERE name = ?',
+    );
+    this.upsertNodeStmt = this.db.prepare<NodeRow>(`
+      INSERT INTO memory_nodes (
+        name, description, type, team, created_by, created_at, updated_at, version, body, metadata
+      ) VALUES (
+        @name, @description, @type, @team, @created_by, @created_at, @updated_at, @version, @body, @metadata
+      )
+      ON CONFLICT(name) DO UPDATE SET
+        description = excluded.description,
+        type = excluded.type,
+        team = excluded.team,
+        created_by = excluded.created_by,
+        created_at = excluded.created_at,
+        updated_at = excluded.updated_at,
+        version = excluded.version,
+        body = excluded.body,
+        metadata = excluded.metadata
+    `);
+    this.deleteNodeStmt = this.db.prepare<[string]>('DELETE FROM memory_nodes WHERE name = ?');
+    this.listAllStmt = this.db.prepare<[], NodeRow>(
+      'SELECT * FROM memory_nodes ORDER BY updated_at DESC',
+    );
+    this.listByTypeStmt = this.db.prepare<[string], NodeRow>(
+      'SELECT * FROM memory_nodes WHERE type = ? ORDER BY updated_at DESC',
+    );
+    this.ftsDeleteStmt = this.db.prepare<[string]>('DELETE FROM memory_fts WHERE name = ?');
+    this.ftsInsertStmt = this.db.prepare<[string, string, string]>(
+      'INSERT INTO memory_fts (name, description, body) VALUES (?, ?, ?)',
+    );
+    this.deleteAutoEdgesStmt = this.db.prepare<[string, string]>(
+      'DELETE FROM memory_edges WHERE src = ? AND relation = ?',
+    );
+    this.insertEdgeStmt = this.db.prepare<[string, string, string]>(
+      'INSERT OR IGNORE INTO memory_edges (src, dst, relation) VALUES (?, ?, ?)',
+    );
+    this.deleteEdgesForNodeStmt = this.db.prepare<[string, string]>(
+      'DELETE FROM memory_edges WHERE src = ? OR dst = ?',
+    );
+    this.outEdgesStmt = this.db.prepare<[string], { dst: string; relation: string }>(
+      'SELECT dst, relation FROM memory_edges WHERE src = ? ORDER BY dst ASC',
+    );
+    this.inEdgesStmt = this.db.prepare<[string], { src: string; relation: string }>(
+      'SELECT src, relation FROM memory_edges WHERE dst = ? ORDER BY src ASC',
+    );
+    this.allEdgesStmt = this.db.prepare<[], { src: string; dst: string; relation: string }>(
+      'SELECT src, dst, relation FROM memory_edges',
+    );
+
+    this.reindexVault();
+  }
+
+  // --- helpers --------------------------------------------------------------
+
+  private assertValidName(name: string): void {
+    if (typeof name !== 'string' || name.length === 0 || name.length > MAX_NAME_LEN) {
+      throw new MemoryError(`invalid note name (1-${MAX_NAME_LEN} chars)`, 'INVALID_NAME');
+    }
+    if (name.includes('..') || name.includes('/') || name.includes('\\') || !NAME_RE.test(name)) {
+      throw new MemoryError(
+        `invalid note name '${name}': use [A-Za-z0-9._-], kebab-case slug, no path separators`,
+        'INVALID_NAME',
+      );
+    }
+  }
+
+  private normalizeType(type: string): MemoryNoteType {
+    return (MEMORY_NOTE_TYPES as readonly string[]).includes(type)
+      ? (type as MemoryNoteType)
+      : 'reference';
+  }
+
+  private fileFor(name: string): string {
+    const full = path.join(this.vaultDir, `${name}.md`);
+    // Defence in depth: the resolved path must stay inside the vault.
+    const rel = path.relative(this.vaultDir, full);
+    if (rel.startsWith('..') || path.isAbsolute(rel)) {
+      throw new MemoryError(`refusing to write outside the vault: ${name}`, 'INVALID_NAME');
+    }
+    return full;
+  }
+
+  private rowToMeta(row: NodeRow): MemoryNoteMeta {
+    return {
+      name: row.name,
+      description: row.description,
+      type: this.normalizeType(row.type),
+      ...(row.team ? { team: row.team } : {}),
+      ...(row.created_by ? { createdBy: row.created_by } : {}),
+      createdAt: row.created_at,
+      updatedAt: row.updated_at,
+      version: row.version,
+    };
+  }
+
+  private emit(kind: 'memory.node_created' | 'memory.node_updated' | 'memory.node_deleted', name: string, type: string): void {
+    try {
+      this.eventBus?.emitEvent({ kind, payload: { name, type } });
+    } catch (err) {
+      log.warn({ event: 'memory.emit_failed', kind, error: String(err) });
+    }
+  }
+
+  private emitEdge(from: string, to: string): void {
+    try {
+      this.eventBus?.emitEvent({ kind: 'memory.edge_created', payload: { from, to } });
+    } catch (err) {
+      log.warn({ event: 'memory.emit_failed', kind: 'memory.edge_created', error: String(err) });
+    }
+  }
+
+  /** Rebuild `memory_fts` + auto (`links`) edges for one node from its body. */
+  private indexDerived(name: string, description: string, body: string, emitEdges: boolean): void {
+    this.ftsDeleteStmt.run(name);
+    this.ftsInsertStmt.run(name, description, body);
+    // Which auto edges already exist, so we only fire events for new ones.
+    const existing = new Set(
+      this.outEdgesStmt
+        .all(name)
+        .filter((e) => e.relation === AUTO_RELATION)
+        .map((e) => e.dst),
+    );
+    this.deleteAutoEdgesStmt.run(name, AUTO_RELATION);
+    for (const target of parseWikiLinks(body)) {
+      if (target === name) continue; // no self-loops
+      this.insertEdgeStmt.run(name, target, AUTO_RELATION);
+      if (emitEdges && !existing.has(target)) this.emitEdge(name, target);
+    }
+  }
+
+  // --- boot reindex ---------------------------------------------------------
+
+  /** Index every `.md` in the vault that the SQLite mirror doesn't know yet. */
+  private reindexVault(): void {
+    let files: string[] = [];
+    try {
+      files = fs.readdirSync(this.vaultDir).filter((f) => f.endsWith('.md'));
+    } catch (err) {
+      log.warn({ event: 'memory.reindex_readdir_failed', error: String(err) });
+      return;
+    }
+    let indexed = 0;
+    for (const file of files) {
+      const name = file.slice(0, -3);
+      try {
+        if (!NAME_RE.test(name)) continue;
+        if (this.getNodeStmt.get(name)) continue; // already mirrored
+        const raw = fs.readFileSync(path.join(this.vaultDir, file), 'utf8');
+        const p = parseNote(raw, name);
+        const type = this.normalizeType(p.type);
+        this.db.transaction(() => {
+          this.upsertNodeStmt.run({
+            name,
+            description: p.description,
+            type,
+            team: p.team,
+            created_by: p.createdBy,
+            created_at: p.createdAtMs,
+            updated_at: p.updatedAtMs,
+            version: p.version,
+            body: p.body,
+            metadata: JSON.stringify(p.metadata ?? {}),
+          });
+          this.indexDerived(name, p.description, p.body, false);
+        })();
+        indexed++;
+      } catch (err) {
+        log.warn({ event: 'memory.reindex_file_failed', file, error: String(err) });
+      }
+    }
+    if (indexed > 0) log.info({ event: 'memory.reindexed', indexed, scanned: files.length });
+  }
+
+  // --- public API -----------------------------------------------------------
+
+  /**
+   * Create or update a note. Writes the file AND the index atomically (index in
+   * a transaction; the file is written first so a crash leaves a readable vault
+   * that the next boot reindexes). Bumps `version`, re-derives edges from
+   * `[[links]]`. Optimistic lock: when `expectedVersion` is supplied and the
+   * note exists, a mismatch throws `MemoryConflictError`.
+   */
+  upsertNote(input: UpsertNoteInput): { name: string; version: number } {
+    this.assertValidName(input.name);
+    const type = this.normalizeType(input.type);
+    const existing = this.getNodeStmt.get(input.name) ?? null;
+
+    if (
+      existing &&
+      input.expectedVersion != null &&
+      input.expectedVersion !== existing.version
+    ) {
+      throw new MemoryConflictError(existing.version, input.expectedVersion);
+    }
+
+    const now = Date.now();
+    const createdAtMs = existing ? existing.created_at : now;
+    const version = existing ? existing.version + 1 : 1;
+    const description = input.description ?? '';
+    const body = input.body ?? '';
+    const metadata =
+      input.metadata ??
+      (existing?.metadata ? (safeParseObj(existing.metadata) ?? {}) : {});
+
+    const file = this.fileFor(input.name);
+    const content = serializeNote({
+      name: input.name,
+      description,
+      type,
+      team: input.team ?? null,
+      createdBy: input.createdBy ?? null,
+      createdAtMs,
+      updatedAtMs: now,
+      version,
+      metadata,
+      body,
+    });
+
+    // File is the source of truth: write it first.
+    fs.writeFileSync(file, content, 'utf8');
+
+    this.db.transaction(() => {
+      this.upsertNodeStmt.run({
+        name: input.name,
+        description,
+        type,
+        team: input.team ?? null,
+        created_by: input.createdBy ?? null,
+        created_at: createdAtMs,
+        updated_at: now,
+        version,
+        body,
+        metadata: JSON.stringify(metadata),
+      });
+      this.indexDerived(input.name, description, body, true);
+    })();
+
+    this.emit(existing ? 'memory.node_updated' : 'memory.node_created', input.name, type);
+    return { name: input.name, version };
+  }
+
+  /** Full note (meta + body + neighbours). `null` when absent. */
+  readNote(name: string): MemoryNote | null {
+    try {
+      const row = this.getNodeStmt.get(name);
+      if (!row) return null;
+      const outLinks = [...new Set(this.outEdgesStmt.all(name).map((e) => e.dst))];
+      const inLinks = [...new Set(this.inEdgesStmt.all(name).map((e) => e.src))];
+      return { ...this.rowToMeta(row), body: row.body, outLinks, inLinks };
+    } catch (err) {
+      log.warn({ event: 'memory.read_failed', name, error: String(err) });
+      return null;
+    }
+  }
+
+  /** FTS5-ranked search. `type` optionally narrows; `limit` defaults to 20. */
+  search(query: string, type?: string | null, limit = 20): SearchHit[] {
+    const tokens = (query ?? '').toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [];
+    if (tokens.length === 0) return [];
+    const match = tokens.map((t) => `${t}*`).join(' ');
+    const cap = Math.max(1, Math.min(100, Math.floor(limit) || 20));
+    try {
+      const typeClause = type ? 'AND n.type = @type' : '';
+      const stmt = this.db.prepare<
+        { match: string; type?: string; limit: number },
+        { name: string; description: string; type: string; snippet: string; score: number }
+      >(`
+        SELECT n.name AS name, n.description AS description, n.type AS type,
+               snippet(memory_fts, 2, '[', ']', '…', 12) AS snippet,
+               bm25(memory_fts) AS score
+        FROM memory_fts
+        JOIN memory_nodes n ON n.name = memory_fts.name
+        WHERE memory_fts MATCH @match ${typeClause}
+        ORDER BY bm25(memory_fts) ASC
+        LIMIT @limit
+      `);
+      const rows = stmt.all({ match, ...(type ? { type } : {}), limit: cap });
+      // bm25 is negative (more negative = more relevant); expose a positive,
+      // higher-is-better relevance so `SearchHit.score` reads intuitively.
+      return rows.map((r) => ({
+        name: r.name,
+        description: r.description,
+        type: r.type,
+        snippet: r.snippet,
+        score: Math.round(-r.score * 1000) / 1000,
+      }));
+    } catch (err) {
+      log.warn({ event: 'memory.search_failed', error: String(err) });
+      return [];
+    }
+  }
+
+  /** Note metadata list, optionally filtered by `type` and/or name `prefix`. */
+  list(type?: string | null, prefix?: string | null): MemoryNoteMeta[] {
+    try {
+      const rows = type ? this.listByTypeStmt.all(type) : this.listAllStmt.all();
+      const filtered =
+        prefix && prefix.length > 0 ? rows.filter((r) => r.name.startsWith(prefix)) : rows;
+      return filtered.map((r) => this.rowToMeta(r));
+    } catch (err) {
+      log.warn({ event: 'memory.list_failed', error: String(err) });
+      return [];
+    }
+  }
+
+  /** The whole graph (every node + edge) — backs `GET /api/memory/graph`. */
+  graph(): MemoryGraph {
+    try {
+      const nodes: GraphNode[] = this.listAllStmt.all().map((r) => ({
+        name: r.name,
+        type: this.normalizeType(r.type),
+        description: r.description,
+      }));
+      const edges: GraphEdge[] = this.allEdgesStmt.all().map((e) => ({
+        from: e.src,
+        to: e.dst,
+        ...(e.relation && e.relation !== AUTO_RELATION ? { relation: e.relation } : {}),
+      }));
+      return { nodes, edges };
+    } catch (err) {
+      log.warn({ event: 'memory.graph_failed', error: String(err) });
+      return { nodes: [], edges: [] };
+    }
+  }
+
+  /** Sub-graph around `name` out to `depth` hops (both directions). */
+  neighbors(name: string, depth = 1): MemoryGraph {
+    const d = Math.max(1, Math.min(MAX_DEPTH, Math.floor(depth) || 1));
+    try {
+      const seen = new Set<string>([name]);
+      let frontier = [name];
+      const edges: GraphEdge[] = [];
+      const edgeKey = new Set<string>();
+      for (let hop = 0; hop < d; hop++) {
+        const next: string[] = [];
+        for (const node of frontier) {
+          const collect = (from: string, to: string, relation: string): void => {
+            const key = `${from} ${to} ${relation}`;
+            if (edgeKey.has(key)) return;
+            edgeKey.add(key);
+            edges.push({ from, to, ...(relation !== AUTO_RELATION ? { relation } : {}) });
+          };
+          for (const e of this.outEdgesStmt.all(node)) {
+            collect(node, e.dst, e.relation);
+            if (!seen.has(e.dst)) {
+              seen.add(e.dst);
+              next.push(e.dst);
+            }
+          }
+          for (const e of this.inEdgesStmt.all(node)) {
+            collect(e.src, node, e.relation);
+            if (!seen.has(e.src)) {
+              seen.add(e.src);
+              next.push(e.src);
+            }
+          }
+        }
+        frontier = next;
+        if (frontier.length === 0) break;
+      }
+      const nodes: GraphNode[] = [];
+      for (const n of seen) {
+        const row = this.getNodeStmt.get(n);
+        if (row) nodes.push({ name: row.name, type: this.normalizeType(row.type), description: row.description });
+        else nodes.push({ name: n, type: 'reference' }); // dangling link target
+      }
+      return { nodes, edges };
+    } catch (err) {
+      log.warn({ event: 'memory.neighbors_failed', name, error: String(err) });
+      return { nodes: [], edges: [] };
+    }
+  }
+
+  /** Add a typed edge between two notes. Returns false on failure (logged). */
+  addLink(from: string, to: string, relation?: string | null): boolean {
+    try {
+      if (!from || !to) throw new MemoryError('from and to are required', 'INVALID_LINK');
+      const rel = relation && relation.length > 0 ? relation : DEFAULT_LINK_RELATION;
+      this.insertEdgeStmt.run(from, to, rel);
+      this.emitEdge(from, to);
+      return true;
+    } catch (err) {
+      log.warn({ event: 'memory.add_link_failed', from, to, error: String(err) });
+      return false;
+    }
+  }
+
+  /** Delete a note: its file, its index row, its FTS entry, and all its edges. */
+  deleteNote(name: string): boolean {
+    try {
+      const row = this.getNodeStmt.get(name);
+      const type = row ? this.normalizeType(row.type) : 'reference';
+      this.db.transaction(() => {
+        this.deleteNodeStmt.run(name);
+        this.ftsDeleteStmt.run(name);
+        this.deleteEdgesForNodeStmt.run(name, name);
+      })();
+      try {
+        fs.rmSync(this.fileFor(name), { force: true });
+      } catch (err) {
+        log.warn({ event: 'memory.delete_file_failed', name, error: String(err) });
+      }
+      if (row) this.emit('memory.node_deleted', name, type);
+      return row != null;
+    } catch (err) {
+      log.warn({ event: 'memory.delete_failed', name, error: String(err) });
+      return false;
+    }
+  }
+}
+
+function safeParseObj(json: string): Record<string, unknown> | null {
+  try {
+    const v = JSON.parse(json) as unknown;
+    return v && typeof v === 'object' && !Array.isArray(v) ? (v as Record<string, unknown>) : null;
+  } catch {
+    return null;
+  }
+}

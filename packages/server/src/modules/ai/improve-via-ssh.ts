@@ -2,6 +2,7 @@ import { spawn } from 'node:child_process';
 import type { Config } from '../../config.js';
 import { shellQuote } from '../orchestrator/agent-process.js';
 import { buildSshBaseArgs } from '../orchestrator/ssh-exec.js';
+import { CLAUDE_PROVIDER } from '../providers/claude.js';
 import { withModule } from '../../logger.js';
 
 const log = withModule('ai-improve');
@@ -39,11 +40,19 @@ const SYSTEM_PROMPTS: Record<ImproveField, string> = {
 };
 
 function buildSshArgs(config: Config): string[] {
+  // The model comes from the claude adapter rather than from a literal here.
+  // It used to be a hard-coded `claude-opus-4-8`, which is how this call site
+  // silently became the LAST place in the product still naming a retired model:
+  // it is one line in one file, nothing tests which id it sends, and a wrong id
+  // fails as a 502 that reads like an SSH problem. Reading `defaults()` also
+  // means the live catalogue moves this forward with everything else — and with
+  // no catalogue bound it is exactly the pin, i.e. today's behaviour.
+  const model = CLAUDE_PROVIDER.defaults().model;
   // Shared connection-option prefix (ControlMaster mux, key, port, target),
   // then this path's own remote command. No PTY (plain exec channel).
   return [
     ...buildSshBaseArgs(config),
-    `bash -lc ${shellQuote('claude -p --model claude-opus-4-8 --output-format text')}`,
+    `bash -lc ${shellQuote(`claude -p --model ${model} --output-format text`)}`,
   ];
 }
 

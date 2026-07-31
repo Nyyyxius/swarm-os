@@ -54,6 +54,9 @@ interface Props {
   onSelectTeam: (sessionId: string) => void;
   onNewTeam: () => void;
   onOpenRoles: () => void;
+  /** Open the shared memory / knowledge-graph overlay (`#/memory`). Optional so
+   *  older call sites (and the badge-focused unit test) keep type-checking. */
+  onOpenMemory?: () => void;
   onOpenPlugins: () => void;
   /** Open the VS Code web IDE on the deployment workspace (fullscreen overlay). */
   onOpenIde: () => void;
@@ -66,7 +69,7 @@ const EMPTY_FLASH_SET: ReadonlySet<string> = new Set();
 
 export default function TopBar({
   teams, selectedTeamId, flashTeamIds, totalAgents, info,
-  onSelectTeam, onNewTeam, onOpenRoles, onOpenPlugins, onOpenIde, onOpenSettings,
+  onSelectTeam, onNewTeam, onOpenRoles, onOpenMemory, onOpenPlugins, onOpenIde, onOpenSettings,
   onOpenUpdates,
 }: Props) {
   const flashSet = flashTeamIds ?? EMPTY_FLASH_SET;
@@ -165,6 +168,9 @@ export default function TopBar({
         </button>
         <button className="tb-action" onClick={onOpenRoles} title="manage roles">
           {ICON.template}<span className="label">ROLES</span>
+        </button>
+        <button className="tb-action" onClick={() => onOpenMemory?.()} title="shared memory / knowledge graph">
+          {ICON.fork}<span className="label">MEMORY</span>
         </button>
         <button className="tb-action" onClick={onOpenPlugins} title="manage plugins">
           {ICON.link}<span className="label">PLUGINS</span>

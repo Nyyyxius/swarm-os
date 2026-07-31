@@ -415,6 +415,12 @@ export class FakeAgentProcess implements AgentProcess {
    * landed without having to spy on the kill() call directly.
    */
   readonly signals: string[] = [];
+  /**
+   * Public test-only log of every resize(cols, rows) the orchestrator
+   * requested. Lets tests assert the attach repaint nudge actually reached
+   * the PTY, since a real SIGWINCH is invisible from the server side.
+   */
+  readonly resizes: Array<{ cols: number; rows: number }> = [];
 
   constructor(opts: FakeAgentOptions) {
     this._pid = opts.pid ?? 1;
@@ -429,8 +435,9 @@ export class FakeAgentProcess implements AgentProcess {
     this.writes.push(data);
   }
 
-  resize(_cols: number, _rows: number): void {
-    // no-op
+  resize(cols: number, rows: number): void {
+    if (this.exited) return;
+    this.resizes.push({ cols, rows });
   }
 
   kill(signal?: NodeJS.Signals | number): void {

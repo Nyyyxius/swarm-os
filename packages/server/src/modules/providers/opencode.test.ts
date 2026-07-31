@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { BUILTIN_PROVIDER_DEFAULT_MODELS } from './ids.js';
 
 /**
  * Contract test for the opencode adapter (Lot 6a).
@@ -389,7 +390,8 @@ describe('opencode adapter — declared capabilities', () => {
       expect(m.value.startsWith('openrouter/')).toBe(false);
       expect(m.value).toContain('/');
     }
-    expect(p.defaults().model).toBe('anthropic/claude-opus-5');
+    // The constant, not the literal — `pnpm models:sync` owns that table.
+    expect(p.defaults().model).toBe(BUILTIN_PROVIDER_DEFAULT_MODELS.opencode);
     expect(p.defaults().permissionMode).toBe('bypassPermissions');
   });
 });

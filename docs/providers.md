@@ -410,11 +410,53 @@ because the server never validates a model string: ids ship faster than releases
 and rejecting a valid one is the worse failure.
 
 `SWARM_OS_DEFAULT_MODEL` follows the same rule and is resolved **from**
-`SWARM_OS_DEFAULT_PROVIDER`: leave it unset and the instance default is the
-default model of the configured provider (`gpt-5.5` for codex,
-`gemini-3-pro-preview` for gemini, `anthropic/claude-opus-5` for opencode,
-`claude-opus-4-8` for claude). Set it and it is taken verbatim, whatever the
-provider.
+`SWARM_OS_DEFAULT_PROVIDER`: leave it unset and a new team gets the configured
+provider's OWN default model (see "Live model catalogue" below for how that is
+chosen). Set it and it is taken verbatim, whatever the provider — an explicit
+value always wins, and is never validated.
+
+Unset is the interesting case, and it changed: the instance config used to name
+a model on every single team creation, which meant the provider adapter's own
+default could never apply on a team created through the API while the browser —
+which submits an explicit model — got a different answer. The config layer now
+speaks only when an operator actually set `SWARM_OS_DEFAULT_MODEL`.
+
+### Live model catalogue
+
+Each adapter's model list and default model are refreshed at runtime from
+[`models.dev`](https://models.dev/api.json) — a public, credential-free catalogue
+(the one opencode itself uses) — so a 24/7 deployment picks up new model ids
+without being redeployed. Nothing is scheduled: `GET /providers` refreshes the
+cache when it is older than the TTL and serves the previous answer meanwhile, so
+an unreachable models.dev costs nothing but freshness.
+
+| | |
+|---|---|
+| `SWARM_OS_MODEL_CATALOGUE_URL` | Source URL. **`off` disables the whole thing**: pinned lists only, no outbound call. |
+| `SWARM_OS_MODEL_CATALOGUE_TTL_MS` | Refresh interval. Default 6 h. |
+
+Three things worth knowing:
+
+- **The default model is the newest member of a pinned FAMILY**, not the newest
+  model overall (`BUILTIN_PROVIDER_DEFAULT_FAMILIES` in
+  `modules/providers/ids.ts`): `claude-opus-*` for claude, `gpt-5*` for codex,
+  `gemini-*-pro*` for gemini, `anthropic/claude-opus-*` for opencode. The
+  patterns are anchored, so variants like `-fast`, `-pro` or `-customtools` are
+  offered in the list but can never become the default.
+- **The scope is NEW teams.** A team's model is materialised into
+  `orchestrators.default_model` when it is created; existing teams keep theirs,
+  and so does a resumed one. "The instance follows the newest model" would be
+  wrong — "teams created from now on start on the newest" is right.
+- **codex does not use models.dev.** It reads the codex CLI's own
+  `~/.codex/models_cache.json` instead, because models.dev catalogues the *API*
+  and `codex exec` accepts strictly less: measured 2026-07-28, `-m gpt-5.6` (a
+  perfectly ordinary id there) answers HTTP 400 *"not supported when using Codex
+  with a ChatGPT account"*. When that file is unreadable, codex falls back to its
+  pinned list — not to models.dev.
+
+The pinned lists are the floor for all of this: they are what an offline
+instance, a `…_URL=off` instance and every test see. `pnpm models:sync` refreshes
+them from the same filters before a release.
 
 **Permission mode is coerced, server-side, at the point of resolution.** A
 provider only accepts the modes in its `capabilities.permissionModes`; anything

@@ -2,6 +2,7 @@ import { useEffect, useState } from 'react';
 import DesktopShell from './components/desktop/DesktopShell';
 import MobileShell from './components/mobile/MobileShell';
 import { RolesPage } from './components/RolesPage';
+import { MemoryPage } from './components/MemoryPage';
 import { PluginsPage } from './components/PluginsPage';
 import IdeOverlay from './components/desktop/IdeOverlay';
 import PluginPanelHost from './components/desktop/PluginPanelHost';
@@ -12,6 +13,7 @@ type Route =
   | { kind: 'list' }
   | { kind: 'detail'; id: string }
   | { kind: 'roles' }
+  | { kind: 'memory' }
   | { kind: 'plugins' }
   | { kind: 'ide' }
   | { kind: 'panel'; plugin: string; panel: string };
@@ -32,6 +34,7 @@ function parseHash(): Route {
   const p = /^#\/panel\/([a-z][a-z0-9-]{1,40})\/([a-z][a-z0-9-]*)$/.exec(h);
   if (p && p[1] && p[2]) return { kind: 'panel', plugin: p[1], panel: p[2] };
   if (h === '#/roles') return { kind: 'roles' };
+  if (h === '#/memory') return { kind: 'memory' };
   if (h === '#/plugins') return { kind: 'plugins' };
   if (h === '#/ide') return { kind: 'ide' };
   return { kind: 'list' };
@@ -41,6 +44,7 @@ function setHashRoute(route: Route): void {
   let target: string;
   if (route.kind === 'list') target = '#/';
   else if (route.kind === 'roles') target = '#/roles';
+  else if (route.kind === 'memory') target = '#/memory';
   else if (route.kind === 'plugins') target = '#/plugins';
   else if (route.kind === 'ide') target = '#/ide';
   else if (route.kind === 'panel') target = `#/panel/${route.plugin}/${route.panel}`;
@@ -94,6 +98,7 @@ export default function App() {
           routeOrchestratorId={route.kind === 'detail' ? route.id : null}
           onOpenOrchestrator={(id) => setRoute({ kind: 'detail', id })}
           onOpenRoles={() => setRoute({ kind: 'roles' })}
+          onOpenMemory={() => setRoute({ kind: 'memory' })}
           onOpenPlugins={() => setRoute({ kind: 'plugins' })}
           onOpenIde={() => setRoute({ kind: 'ide' })}
           onOpenPanel={(plugin, panel) => setRoute({ kind: 'panel', plugin, panel })}
@@ -109,6 +114,13 @@ export default function App() {
               gates rendering, so it's safe to always mount. */}
           <RolesPage
             open={route.kind === 'roles'}
+            onClose={() => setRoute({ kind: 'list' })}
+          />
+
+          {/* MemoryPage overlay — shared knowledge graph. Responsive, safe to
+              always mount (gated by `open`), same pattern as RolesPage. */}
+          <MemoryPage
+            open={route.kind === 'memory'}
             onClose={() => setRoute({ kind: 'list' })}
           />
 

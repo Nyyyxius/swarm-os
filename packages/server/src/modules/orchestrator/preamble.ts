@@ -64,7 +64,9 @@ export function getWorkerDefault(): string {
  * rewrite `discord.com` or `team.py` into a tool name. Anything not in this list
  * is left exactly as written.
  *
- * MUST stay in sync with `registerTeamCommsTools` (`modules/mcp/tools.ts`);
+ * MUST stay in sync with the tools registered on the `team-comms` MCP server —
+ * both `registerTeamCommsTools` (`modules/mcp/tools.ts`) AND `registerMemoryTools`
+ * (`modules/mcp/memory-tools.ts`), which mount on the same server.
  * `preamble.test.ts` registers the real tools on a recording stub and fails if
  * the two ever diverge, so a new tool cannot ship with a preamble that names it
  * wrongly for three of the four providers.
@@ -86,6 +88,14 @@ export const TEAM_TOOL_LOGICAL_NAMES: readonly string[] = [
   'swarm.broadcast_to_leads',
   'discord.send_message',
   'discord.create_thread',
+  // Shared knowledge-graph tools (docs/memoire-partagee.md) — mounted on the
+  // same team-comms server, so they are part of the renamed vocabulary.
+  'memory.search',
+  'memory.read',
+  'memory.write',
+  'memory.link',
+  'memory.list',
+  'memory.delete',
 ];
 
 /** Provider-supplied naming — `AgentProvider.mcpToolName`, narrowed to a fn. */

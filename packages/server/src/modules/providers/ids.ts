@@ -39,10 +39,45 @@ export const DEFAULT_PROVIDER_ID: BuiltinProviderId = 'claude';
  * is shared, because only the model is needed before the registry exists.
  */
 export const BUILTIN_PROVIDER_DEFAULT_MODELS: Record<BuiltinProviderId, string> = {
-  claude: 'claude-opus-4-8',
+  claude: 'claude-opus-5',
   codex: 'gpt-5.5',
-  gemini: 'gemini-3-pro-preview',
+  gemini: 'gemini-3.1-pro-preview',
   opencode: 'anthropic/claude-opus-5',
+};
+
+/**
+ * The FAMILY each provider's default belongs to — "give me the newest member of
+ * this line", evaluated against the live catalogue (`providers/catalogue.ts`).
+ *
+ * It sits beside `BUILTIN_PROVIDER_DEFAULT_MODELS` rather than replacing it:
+ * that table is the FLOOR, the answer `config.ts:560` needs before any network
+ * exists and the answer every adapter falls back to when no catalogue is bound
+ * (which is the case in every unit test, on purpose). This table only ever
+ * upgrades that floor to a newer member of the same line.
+ *
+ * EVERY PATTERN IS ANCHORED AT BOTH ENDS, and that is the load-bearing detail:
+ *
+ *  - `/^claude-opus-/` unanchored also matches `claude-opus-4-1`, which lists at
+ *    $15/$75 — three times the price of `claude-opus-5` ($5/$25) — and would win
+ *    on any day the newest opus happened to be absent from the payload.
+ *  - the tail `$` is what excludes the variant suffixes vendors keep bolting on:
+ *    `-fast` (openrouter), `-luna` / `-sol` / `-terra` (openai), `-customtools`
+ *    (google), `-pro` (openai). Those are different products at different prices
+ *    and sometimes different shapes; being newer is not a reason to run one.
+ *
+ * Claude ids use `-` between version digits (`claude-opus-4-8`) while OpenRouter
+ * uses `.` for the same model (`anthropic/claude-opus-4.8`) — hence the two
+ * different character classes. That is the vendors' inconsistency, not ours.
+ *
+ * A family that matches nothing in the live list is not an error: the adapter
+ * keeps its pin from the table above. So a payload that goes missing, changes
+ * naming convention, or arrives empty degrades to exactly today's behaviour.
+ */
+export const BUILTIN_PROVIDER_DEFAULT_FAMILIES: Record<BuiltinProviderId, RegExp> = {
+  claude: /^claude-opus-[\d-]+$/,
+  codex: /^gpt-5(\.\d+)?$/,
+  gemini: /^gemini-[\d.]+-pro(-preview)?$/,
+  opencode: /^anthropic\/claude-opus-[\d.]+$/,
 };
 
 /**

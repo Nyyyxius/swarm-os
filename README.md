@@ -149,6 +149,13 @@ capabilities and whether it can run here; the UI greys out an unusable provider
 with its reason instead of hiding it, and the verdict is re-probed every 60 s,
 so installing a CLI on the host makes it selectable without a restart.
 
+The model lists are live too. Model ids ship far faster than releases, so each
+adapter refreshes its catalogue — and its default model — from
+[models.dev](https://models.dev) every 6 h, with prices shown next to each entry;
+a running instance surfaces a newly released model without a redeploy, and new
+teams start on it. Set `SWARM_OS_MODEL_CATALOGUE_URL=off` to freeze everything on
+the ids the build shipped with. See [docs/providers.md](docs/providers.md).
+
 Prerequisite for anything but `claude`: the CLI **installed and logged in on
 the host** — the image carries only the Claude Code CLI, and under the SSH
 transport the agent runs on the host with the host's own credentials — plus an

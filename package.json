@@ -15,7 +15,8 @@
     "verify:claude": "pnpm --filter server exec tsx ../../scripts/verify-claude-code.ts",
     "verify:codex": "pnpm --filter server exec tsx ../../scripts/verify-codex.ts",
     "verify:opencode": "pnpm --filter server exec tsx ../../scripts/verify-opencode.ts",
-    "verify:gemini": "pnpm --filter server exec tsx ../../scripts/verify-gemini.ts"
+    "verify:gemini": "pnpm --filter server exec tsx ../../scripts/verify-gemini.ts",
+    "models:sync": "pnpm --filter server exec tsx ../../scripts/sync-models.ts"
   },
   "devDependencies": {
     "@eslint/js": "^9.18.0",

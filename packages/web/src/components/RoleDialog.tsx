@@ -467,7 +467,7 @@ function ImproveButton({
       type="button"
       onClick={onClick}
       disabled={disabled}
-      title="Améliorer avec Claude Opus 4.7"
+      title="Améliorer avec Claude"
       className="absolute top-1 right-1 text-[10px] px-1.5 py-0.5 rounded bg-slate-700 hover:bg-slate-600 disabled:opacity-50 text-slate-100"
     >
       {isThis ? '… Amélioration' : '✨ Améliorer'}

@@ -92,6 +92,26 @@ export interface PluginHostChangedEvent {
   enabled: boolean;
 }
 
+/**
+ * Normalized `memory.*` frame surfaced to the Memory view so the graph +
+ * note list refresh live (no second WebSocket — this rides the shared
+ * `/ws/events` channel). Covers `memory.node_created|node_updated|
+ * node_deleted` (payload `{name,type}`) and `memory.edge_created`
+ * (payload `{from,to}`). The web view only needs to know *something*
+ * changed; it re-fetches through the REST client rather than mutating a
+ * local graph from the payload.
+ */
+export interface MemoryEvent {
+  kind:
+    | 'memory.node_created'
+    | 'memory.node_updated'
+    | 'memory.node_deleted'
+    | 'memory.edge_created'
+    | string;
+  ts: string;
+  payload?: { name?: string; type?: string; from?: string; to?: string };
+}
+
 export interface UseEventsOptions {
   /** Callback fired on every well-formed mailbox.message frame. */
   onMailboxMessage?: (ev: MailboxMessageEvent) => void;
@@ -101,6 +121,8 @@ export interface UseEventsOptions {
   onOrchestratorCreated?: (ev: OrchestratorCreatedEvent) => void;
   /** Callback fired on every plugin.host.changed frame (J1 plugins). */
   onPluginHostChanged?: (ev: PluginHostChangedEvent) => void;
+  /** Callback fired on every memory.* frame (shared memory graph). */
+  onMemoryEvent?: (ev: MemoryEvent) => void;
 }
 
 const AUTO_DISMISS_MS = 30_000;
@@ -123,10 +145,12 @@ export function useEvents(opts: UseEventsOptions = {}): {
   const onCreatedRef = useRef<UseEventsOptions['onSessionCreated']>(opts.onSessionCreated);
   const onOrchCreatedRef = useRef<UseEventsOptions['onOrchestratorCreated']>(opts.onOrchestratorCreated);
   const onPluginRef = useRef<UseEventsOptions['onPluginHostChanged']>(opts.onPluginHostChanged);
+  const onMemoryRef = useRef<UseEventsOptions['onMemoryEvent']>(opts.onMemoryEvent);
   useEffect(() => { onMailRef.current = opts.onMailboxMessage; }, [opts.onMailboxMessage]);
   useEffect(() => { onCreatedRef.current = opts.onSessionCreated; }, [opts.onSessionCreated]);
   useEffect(() => { onOrchCreatedRef.current = opts.onOrchestratorCreated; }, [opts.onOrchestratorCreated]);
   useEffect(() => { onPluginRef.current = opts.onPluginHostChanged; }, [opts.onPluginHostChanged]);
+  useEffect(() => { onMemoryRef.current = opts.onMemoryEvent; }, [opts.onMemoryEvent]);
 
   const cancelTimer = (id: string): void => {
     const t = timersRef.current.get(id);
@@ -262,6 +286,20 @@ export function useEvents(opts: UseEventsOptions = {}): {
                     name: typeof p?.name === 'string' ? p.name : '',
                     status: typeof p?.status === 'string' ? p.status : '',
                     enabled: p?.enabled === true,
+                  });
+                }
+
+                // Shared memory graph — memory.* frames drive a live refresh
+                // of the Memory view. We only forward the kind + minimal
+                // payload; the view re-fetches via REST.
+                if (ev.kind.startsWith('memory.')) {
+                  const p = ev.payload as
+                    | { name?: string; type?: string; from?: string; to?: string }
+                    | undefined;
+                  onMemoryRef.current?.({
+                    kind: ev.kind,
+                    ts: ev.ts,
+                    payload: p,
                   });
                 }
 

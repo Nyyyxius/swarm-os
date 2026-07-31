@@ -252,8 +252,17 @@ export class ProviderAvailabilityCache {
  * Resolve when `p` settles or when `ms` elapses, whichever comes first. The
  * timer is `unref`'d and cleared so a pending probe can never hold the process
  * open (or leak a handle into a vitest run).
+ *
+ * Exported for `providers/catalogue.ts`, which needs the identical cold-wait
+ * semantics. Shared rather than copied on purpose: the `unref` and the
+ * `clearTimeout` are the whole substance of it, and a second copy is a second
+ * chance to omit one and leak a handle into every vitest run.
+ *
+ * ⚠️ It bounds the WAIT, never the work: `p` keeps running after the deadline,
+ * and nothing is cancelled. A caller whose work holds a socket open must ALSO
+ * give that socket its own timeout (see `MODEL_CATALOGUE_FETCH_TIMEOUT_MS`).
  */
-function raceDeadline(p: Promise<unknown>, ms: number): Promise<void> {
+export function raceDeadline(p: Promise<unknown>, ms: number): Promise<void> {
   if (ms <= 0) return Promise.resolve();
   return new Promise<void>((resolve) => {
     const timer = setTimeout(resolve, ms);

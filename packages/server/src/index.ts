@@ -9,7 +9,12 @@ import { SwarmDb } from './modules/db/index.js';
 import { DbPersistence } from './modules/orchestrator/persistence.js';
 import { DiscordWebhookNotifier, NoOpNotifier, type Notifier } from './modules/notify/index.js';
 import { DiscordBotPool } from './modules/discord/pool.js';
-import { createBuiltinProviderRegistry, OpencodeProvider } from './modules/providers/index.js';
+import {
+  bindModelCatalogue,
+  createBuiltinProviderRegistry,
+  ModelCatalogue,
+  OpencodeProvider,
+} from './modules/providers/index.js';
 import { RoleStore } from './modules/roles/index.js';
 import { SettingsStore } from './modules/settings/index.js';
 import { MessagesAggregator } from './modules/metrics/aggregator.js';
@@ -18,6 +23,7 @@ import { BackupScheduler } from './modules/backup/index.js';
 import { RoleScheduler } from './modules/schedule/index.js';
 import { IdeSupervisor } from './modules/ide/index.js';
 import { PluginStore } from './modules/plugins/store.js';
+import { MemoryStore } from './modules/memory/store.js';
 import { PluginHost } from './modules/plugins/host.js';
 import { PluginToolRegistry } from './modules/plugins/mcp-registry.js';
 import { PluginHttpRegistry } from './modules/plugins/http-registry.js';
@@ -131,6 +137,25 @@ if (config.agentTransport === 'ssh') {
 const db = new SwarmDb(config.dataDir);
 const persistence = new DbPersistence(db);
 
+// ---- Shared memory / knowledge graph (docs/memoire-partagee.md) ------------
+// GLOBAL to the deployment: one instance = one memory shared by every team.
+// The store OWNS its own tables on the raw Db handle (like PluginStore) and
+// keeps the vault of markdown files at `<dataDir>/memory/<name>.md` as its
+// source of truth. Wrapped so a memory-subsystem failure never stops the boot:
+// the memory MCP tools then answer MEMORY_UNAVAILABLE and `/api/memory` 404s,
+// while every other subsystem is unaffected.
+let memoryStore: MemoryStore | null = null;
+try {
+  memoryStore = new MemoryStore(db, { dataDir: config.dataDir, eventBus });
+  log.info({ event: 'boot.memory_store' });
+} catch (err) {
+  log.error({
+    event: 'boot.memory_store_unavailable',
+    error: err instanceof Error ? err.message : String(err),
+    note: 'the shared memory could not be opened — memory.* tools and /api/memory are DISABLED for this boot; every other subsystem is unaffected.',
+  });
+}
+
 // ---- Phase 8: auto-resume — classify what to bring back up ----------------
 // loadResumableState is the atomic-guard variant of the old recoverFromCrash:
 // it flips every resumable orch row to 'interrupted' synchronously BEFORE
@@ -206,6 +231,26 @@ if (opencodeProvider instanceof OpencodeProvider) {
   log.info({ event: 'boot.openrouter_key_source', source: 'instance_settings' });
 }
 
+// ---- Live model catalogue -------------------------------------------------
+// Same late-binding seam as the key source above, and the same 24/7 argument:
+// model ids ship far faster than our releases, and an operator must see
+// `claude-opus-5` appear without the container being recreated.
+//
+// Bound here, in production only. No test stack constructs one, so every unit
+// and integration test keeps answering from the pinned arrays.
+const modelCatalogue = new ModelCatalogue({ config });
+const catalogueBound = bindModelCatalogue(providerRegistry, modelCatalogue);
+log.info({
+  event: 'boot.model_catalogue',
+  enabled: modelCatalogue.enabled,
+  providers: catalogueBound,
+});
+// Fire-and-forget warm-up. Without it, an API client that creates a team before
+// anyone opens the UI gets the pinned default even on a perfectly online host:
+// `POST /orchestrators` awaits `providerAvailability` and nothing else, so the
+// catalogue would only ever be filled by the first `GET /providers`.
+void modelCatalogue.resolve();
+
 // J2 — MCP tool registry. Consulted per-request when the SdkMcpServer is
 // rebuilt, and once per session spawn to list the plugin tools in the preamble.
 // Declared here, BEFORE the spawner, because the spawner takes it as a dep; it
@@ -221,9 +266,15 @@ const spawner = new Spawner(config, {
   // Every preamble — lead, worker, resumed, and whatever custom role text the
   // operator wrote — gets the currently-registered plugin tools appended.
   pluginTools: () => pluginToolRegistry.list(),
+  // Carried so `GET /providers` can await the catalogue's cold resolve on the
+  // same deadline as the availability probes. The adapters already hold it.
+  modelCatalogue,
   // Same registry the boot-time runtime init used, so `GET /providers` and the
   // orchestrators answer from one table.
   providerRegistry,
+  // Shared knowledge-graph store — threaded into every ToolContext so the
+  // memory.* MCP tools reach it. `undefined` when the store failed to open.
+  ...(memoryStore ? { memory: memoryStore } : {}),
 });
 
 // ---- S9: in-memory `/metrics/messages` aggregator -------------------------
@@ -494,6 +545,7 @@ const handle = startServer(
   pluginInstaller ?? undefined,
   connectorRegistry,
   updates,
+  memoryStore ?? undefined,
 );
 
 // Start MCP HTTP listener on its own port (loopback only, plan §14).

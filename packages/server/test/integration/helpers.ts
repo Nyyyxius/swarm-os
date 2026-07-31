@@ -66,6 +66,13 @@ export interface TestStackOptions {
    * box and CI.
    */
   providerRegistry?: ProviderRegistry;
+  /**
+   * Extra `SWARM_OS_*` vars applied AFTER the wipe and after the stack's own
+   * settings, so a test can boot a second stack that differs from the default
+   * one by exactly one operator knob (`SWARM_OS_DEFAULT_MODEL`, say). Applied
+   * last on purpose: a test that overrides `SWARM_OS_PORT` deserves to win.
+   */
+  env?: Record<string, string>;
 }
 
 export interface TestStack {
@@ -154,6 +161,7 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
   process.env.SWARM_OS_HOST = '127.0.0.1';
   process.env.SWARM_OS_CLAUDE_SOURCE_DIR = path.join(tmpRoot, 'claude-source-missing');
   process.env.SWARM_OS_CLAUDE_RUNTIME_DIR = path.join(dataDir, '.claude-runtime');
+  for (const [k, v] of Object.entries(opts.env ?? {})) process.env[k] = v;
   _resetConfigCacheForTesting();
 
   const config = loadConfig();

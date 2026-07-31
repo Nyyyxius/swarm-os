@@ -77,9 +77,18 @@ Comportement :
 
 ## Maîtrise des coûts
 
-Les défauts sont `claude-opus-4-8` à l'effort `xhigh` — puissant mais coûteux.
-Baisse `SWARM_OS_DEFAULT_MODEL` et/ou `SWARM_OS_DEFAULT_EFFORT` dans `.env` pour des
+Une nouvelle équipe démarre sur le Claude **Opus** le plus récent à l'effort
+`xhigh` — puissant mais coûteux. L'identifiant exact n'est pas figé dans le
+build : le serveur rafraîchit la liste de modèles de chaque provider depuis
+models.dev, donc une équipe créée aujourd'hui démarre sur l'Opus du jour
+(`GET /providers`, ou la liste déroulante, dit lequel). Baisse
+`SWARM_OS_DEFAULT_MODEL` et/ou `SWARM_OS_DEFAULT_EFFORT` dans `.env` pour des
 exécutions moins chères, puis `./install.sh` pour appliquer.
+
+La liste déroulante affiche le prix au million de tokens de chaque modèle — ça
+vaut un coup d'œil : à génération égale, un modèle peut coûter le double d'un
+autre pour un usage différent. Les équipes existantes ne changent jamais de
+modèle toutes seules ; seules les nouvelles prennent le défaut le plus récent.
 
 ---
 

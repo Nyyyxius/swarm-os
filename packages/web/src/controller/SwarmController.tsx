@@ -71,6 +71,8 @@ export interface SwarmControllerProps {
   onCloseRightPanel: () => void;
   /** TopBar/Dock ROLES → route `#/roles`. */
   onOpenRoles?: () => void;
+  /** TopBar/Dock MEMORY → route `#/memory`. */
+  onOpenMemory?: () => void;
   /** TopBar/Dock PLUGINS → route `#/plugins`. */
   onOpenPlugins?: () => void;
   /** TopBar/Dock IDE → route `#/ide`. */
@@ -135,12 +137,15 @@ export interface SwarmControllerValue {
   setEditConfigFor: (o: OrchestratorView | null) => void;
   // route passthroughs
   onOpenRoles: () => void;
+  onOpenMemory: () => void;
   onOpenPlugins: () => void;
   onOpenIde: () => void;
   /** Open a plugin UI panel overlay (feature B.3). */
   onOpenPanel: (plugin: string, panelId: string) => void;
   /** Revision counter bumped on each plugin.host.changed WS event (live refresh). */
   pluginsRev: number;
+  /** Revision counter bumped on each memory.* WS event (live graph refresh). */
+  memoryRev: number;
   // shell-mode override (escape hatch from auto breakpoint)
   shellMode: ShellMode;
   setShellMode: (m: ShellMode) => void;
@@ -189,6 +194,7 @@ export function SwarmControllerProvider({
   onOpenOrchestrator,
   onCloseRightPanel,
   onOpenRoles,
+  onOpenMemory,
   onOpenPlugins,
   onOpenIde,
   onOpenPanel,
@@ -445,6 +451,13 @@ export function SwarmControllerProvider({
     setPluginsRev((v) => v + 1);
   }, []);
 
+  // Shared memory graph — bump a revision on each memory.* frame so the
+  // MemoryPage (via useMemoryNotes) re-fetches live on top of its 3 s poll.
+  const [memoryRev, setMemoryRev] = useState(0);
+  const handleMemoryEvent = useCallback(() => {
+    setMemoryRev((v) => v + 1);
+  }, []);
+
   // ── THE single useEvents() — waiting + connected + pulses pipeline ─────
   const {
     connected: eventsConnected,
@@ -455,6 +468,7 @@ export function SwarmControllerProvider({
     onSessionCreated: handleSessionCreated,
     onOrchestratorCreated: handleOrchestratorCreated,
     onPluginHostChanged: handlePluginHostChanged,
+    onMemoryEvent: handleMemoryEvent,
   });
 
   useEffect(() => {
@@ -801,6 +815,7 @@ export function SwarmControllerProvider({
 
   const setAuthMissing = useCallback(() => setAuthState('missing'), []);
   const onOpenRolesResolved = useCallback(() => { onOpenRoles?.(); }, [onOpenRoles]);
+  const onOpenMemoryResolved = useCallback(() => { onOpenMemory?.(); }, [onOpenMemory]);
   const onOpenPluginsResolved = useCallback(() => { onOpenPlugins?.(); }, [onOpenPlugins]);
   const onOpenIdeResolved = useCallback(() => { onOpenIde?.(); }, [onOpenIde]);
   const onOpenPanelResolved = useCallback(
@@ -845,10 +860,12 @@ export function SwarmControllerProvider({
     editConfigFor,
     setEditConfigFor,
     onOpenRoles: onOpenRolesResolved,
+    onOpenMemory: onOpenMemoryResolved,
     onOpenPlugins: onOpenPluginsResolved,
     onOpenIde: onOpenIdeResolved,
     onOpenPanel: onOpenPanelResolved,
     pluginsRev,
+    memoryRev,
     shellMode,
     setShellMode,
     selectAgent,

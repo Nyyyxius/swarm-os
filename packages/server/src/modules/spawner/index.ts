@@ -22,9 +22,11 @@ import type { SessionRow } from '../db/index.js';
 import type { DiscordBotPool } from '../discord/pool.js';
 import type { ConnectorRegistry } from '../plugins/connector-registry.js';
 import { createBuiltinProviderRegistry } from '../providers/index.js';
+import type { ModelCatalogue } from '../providers/catalogue.js';
 import { ProviderAvailabilityCache } from '../providers/availability.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import type { PluginOrchSubscription } from '../plugins/api-types.js';
+import type { MemoryStore } from '../memory/store.js';
 import {
   isIdle,
   SIGNAL_TEXT,
@@ -167,11 +169,28 @@ export interface SpawnerDeps {
    */
   providerRegistry?: ProviderRegistry;
   /**
+   * Live model catalogue, already bound to the adapters by `src/index.ts`.
+   *
+   * Carried here ONLY so `GET /providers` can await its cold resolve alongside
+   * the availability probes — the adapters reach it directly. Absent by default,
+   * which is what keeps every test hermetic: no test stack passes one, so no
+   * test ever touches models.dev, and the tests that pin model ids keep passing
+   * against the pinned constants without knowing this feature exists.
+   */
+  modelCatalogue?: ModelCatalogue;
+  /**
    * Snapshot source for the plugin-tools section of every preamble. Forwarded
    * verbatim to each `Orchestrator`; see `OrchestratorDeps.pluginTools` for why
    * it is a thunk. Absent in unit tests ⇒ no plugin section.
    */
   pluginTools?: () => readonly PluginToolSummary[];
+  /**
+   * The shared knowledge-graph store, GLOBAL to the deployment. Held on the
+   * Spawner because it is the one long-lived object every surface (MCP tools via
+   * `ToolContext`, REST) already reaches. Absent in unit tests that don't
+   * exercise memory ⇒ the memory MCP tools answer `MEMORY_UNAVAILABLE`.
+   */
+  memory?: MemoryStore;
 }
 
 export class Spawner {
@@ -212,6 +231,18 @@ export class Spawner {
    */
   readonly providerAvailability: ProviderAvailabilityCache;
 
+  /**
+   * The live model catalogue, or `null` when none was wired (every test, and any
+   * deployment running with the kill switch). Read by `GET /providers` only.
+   */
+  readonly modelCatalogue: ModelCatalogue | null;
+
+  /**
+   * The shared knowledge-graph store (docs/memoire-partagee.md), or `null` when
+   * none was wired. Threaded into every `ToolContext` by `McpServer`.
+   */
+  readonly memory: MemoryStore | null;
+
   constructor(
     private readonly config: Config,
     deps: SpawnerDeps = {},
@@ -227,6 +258,8 @@ export class Spawner {
       registry: this.providerRegistry,
       config,
     });
+    this.modelCatalogue = deps.modelCatalogue ?? null;
+    this.memory = deps.memory ?? null;
     // Retro-wire live orchestrators when a connector provider registers late
     // (a plugin enabled while teams are already running — red-team I1).
     this.connectorRegistry?.setRetroactiveWirer((type) => this.retroWireConnectorType(type));

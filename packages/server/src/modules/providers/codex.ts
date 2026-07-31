@@ -64,6 +64,7 @@ import {
   writeSessionFile,
   SESSION_EXEC_MODE,
 } from './session-config.js';
+import type { ModelCatalogue } from './catalogue.js';
 import { BUILTIN_PROVIDER_DEFAULT_MODELS } from './ids.js';
 import { probeCliBinary } from './probe.js';
 import type {
@@ -154,16 +155,22 @@ const CODEX_CAPABILITIES: ProviderCapabilities = {
 };
 
 /**
- * Indicative catalogue, read off the host's `~/.codex/models_cache.json`
- * (client 0.130.0). The UI keeps a free-text escape hatch, and the server
- * deliberately never validates a model string — ids ship faster than we do.
+ * Pinned floor, read off the host's `~/.codex/models_cache.json` (client
+ * 0.130.0). The UI keeps a free-text escape hatch, and the server deliberately
+ * never validates a model string — ids ship faster than we do.
+ *
+ * At RUNTIME the same file is re-read through `providers/catalogue.ts`, so a
+ * `codex` that learns a new model on a 24/7 host surfaces it at the next poll.
+ * This array is the answer when that read fails — and, unlike the other three
+ * adapters, there is no models.dev fallback behind it: models.dev is an API
+ * catalogue and `codex exec` on a ChatGPT account accepts strictly less (probed
+ * 2026-07-28: `-m gpt-5.6` → HTTP 400 "not supported when using Codex with a
+ * ChatGPT account"). See `deriveCodexCatalogue` for the full measurement.
  */
 const CODEX_MODELS: readonly ProviderModel[] = [
   { value: 'gpt-5.5', label: 'GPT-5.5 (gpt-5.5)' },
   { value: 'gpt-5.4', label: 'GPT-5.4 (gpt-5.4)' },
   { value: 'gpt-5.4-mini', label: 'GPT-5.4-Mini (gpt-5.4-mini)' },
-  { value: 'gpt-5.3-codex', label: 'GPT-5.3-Codex (gpt-5.3-codex)' },
-  { value: 'gpt-5.2', label: 'GPT-5.2 (gpt-5.2)' },
 ];
 
 /** Name of the per-session config root. Sibling of claude's, never inside it. */
@@ -313,17 +320,27 @@ export class CodexProvider implements AgentProvider {
    */
   protected readonly hostDir: string | null;
 
+  /** Live catalogue, or `null` for "pins only". See `useCatalogue`. */
+  private _catalogue: ModelCatalogue | null = null;
+
   constructor(config?: Config) {
     this.hostDir = config?.hostCodexDir ?? null;
   }
 
+  /** Late-bound live catalogue — see `ClaudeProvider.useCatalogue`. */
+  useCatalogue(catalogue: ModelCatalogue | null): void {
+    this._catalogue = catalogue;
+  }
+
   models(): readonly ProviderModel[] {
-    return CODEX_MODELS;
+    return this._catalogue?.models('codex', CODEX_MODELS) ?? CODEX_MODELS;
   }
 
   defaults(): { model: string; effort: EffortLevel; permissionMode: PermissionMode } {
     return {
-      model: BUILTIN_PROVIDER_DEFAULT_MODELS.codex,
+      model:
+        this._catalogue?.defaultModel('codex', BUILTIN_PROVIDER_DEFAULT_MODELS.codex) ??
+        BUILTIN_PROVIDER_DEFAULT_MODELS.codex,
       effort: 'xhigh',
       permissionMode: 'bypassPermissions',
     };

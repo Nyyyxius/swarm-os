@@ -226,7 +226,12 @@ export function createOrchestratorsRouter(spawner: Spawner, config: Config): Rou
       {
         source: 'config',
         provider: config.defaultProvider,
-        model: config.defaultModel,
+        // Only when an operator actually set `SWARM_OS_DEFAULT_MODEL`. Left as
+        // `config.defaultModel` (never empty), this layer always won for a team
+        // on the instance's own default provider, so the adapter's `defaults()`
+        // — where the live catalogue lands — could never be reached from the
+        // API. See `Config.defaultModelExplicit`.
+        model: config.defaultModelExplicit ? config.defaultModel : null,
         effort: config.defaultEffort,
         permissionMode: config.defaultPermissionMode,
       },

@@ -103,3 +103,63 @@ describe('getEventsTicket', () => {
     expect(last.url).toContain('/ws-ticket?events=1');
   });
 });
+
+describe('shared memory endpoints', () => {
+  it('lists notes under /api/memory (authed)', async () => {
+    setToken('mem-token');
+    await api.listMemory();
+    const last = calls[calls.length - 1]!;
+    expect(last.url).toBe('/api/memory');
+    const headers = (last.init?.headers as Record<string, string>) ?? {};
+    expect(headers['X-Auth-Token']).toBe('mem-token');
+  });
+
+  it('fetches the graph under /api/memory/graph', async () => {
+    setToken('t');
+    await api.getMemoryGraph();
+    expect(calls[calls.length - 1]!.url).toBe('/api/memory/graph');
+  });
+
+  it('builds the search query string with q, type and limit', async () => {
+    setToken('t');
+    await api.searchMemory('hello world', { type: 'project', limit: 10 });
+    const url = calls[calls.length - 1]!.url;
+    expect(url).toContain('/api/memory/search?');
+    expect(url).toContain('q=hello+world');
+    expect(url).toContain('type=project');
+    expect(url).toContain('limit=10');
+  });
+
+  it('encodes the note name in the path on GET', async () => {
+    setToken('t');
+    await api.getMemoryNote('a b/c');
+    expect(calls[calls.length - 1]!.url).toBe('/api/memory/a%20b%2Fc');
+  });
+
+  it('PUTs a note body with expectedVersion', async () => {
+    setToken('t');
+    await api.putMemoryNote('my-note', {
+      description: 'd',
+      type: 'reference',
+      body: 'hi',
+      expectedVersion: 3,
+    });
+    const last = calls[calls.length - 1]!;
+    expect(last.url).toBe('/api/memory/my-note');
+    expect(last.init?.method).toBe('PUT');
+    expect(JSON.parse(String(last.init?.body))).toEqual({
+      description: 'd',
+      type: 'reference',
+      body: 'hi',
+      expectedVersion: 3,
+    });
+  });
+
+  it('DELETEs a note by name', async () => {
+    setToken('t');
+    await api.deleteMemoryNote('gone');
+    const last = calls[calls.length - 1]!;
+    expect(last.url).toBe('/api/memory/gone');
+    expect(last.init?.method).toBe('DELETE');
+  });
+});

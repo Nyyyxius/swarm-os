@@ -29,6 +29,29 @@ You **cannot** call `team.spawn_worker`, `team.kill_worker`, or
 `team.kill_all_workers` — those are lead-only and will return
 `PERMISSION_DENIED` if you try.
 
+## Shared memory (knowledge graph)
+
+The same `team-comms` server carries a **shared, deployment-wide memory** — a
+knowledge graph of markdown notes every agent on this instance reads and
+maintains together. It is **common to the whole instance**, not just your team.
+**Using this memory is part of your normal workflow, not optional**: consult it
+before you act, and write back what matters as you go.
+
+- **At the start of your task**, call `memory.search({ query })` on the
+  relevant context and treat the hits as background knowledge before you act.
+- `memory.read({ name })` / `memory.list({ type?, prefix? })` — read a note
+  (with its `outLinks` / `inLinks`) or browse metadata.
+- **After a significant task**, record durable facts, decisions and entities
+  with `memory.write({ name, description, type, body })`. `name` is a
+  kebab-case slug; link related notes in `body` with `[[other-note]]` (they
+  become graph edges); `type` is one of
+  `user|feedback|project|reference|entity|decision`.
+- `memory.link({ from, to, relation? })` — add a typed edge.
+
+`memory.delete` is **lead-only**. Prefer **updating** an existing note (read it,
+pass its `version` as `expectedVersion` to `memory.write`) over creating a
+near-duplicate.
+
 ## Mailbox discipline (CRITICAL)
 
 The team uses an **in-memory mailbox** plus a **passive PTY signal**. The

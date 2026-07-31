@@ -6,6 +6,7 @@ import type { Spawner } from '../spawner/index.js';
 import type { Session } from '../orchestrator/session.js';
 import type { Orchestrator } from '../orchestrator/index.js';
 import { registerTeamCommsTools, type ToolContext } from './tools.js';
+import { registerMemoryTools } from './memory-tools.js';
 import type { Config } from '../../config.js';
 import type { MessagingDefaults } from '../orchestrator/messaging.js';
 import type { BusMetricsCollector } from '../metrics/busMetrics.js';
@@ -227,6 +228,9 @@ export class McpServer {
       { capabilities: {} },
     );
     registerTeamCommsTools(sdkServer, () => ctx);
+    // Shared knowledge-graph tools (memory.*), registered right after the
+    // built-in team-comms set so every agent sees them (docs memoire-partagee.md).
+    registerMemoryTools(sdkServer, () => ctx);
     this.pluginTools?.registerAll(sdkServer, () => ctx);
 
     const transport = new StreamableHTTPServerTransport({
@@ -319,6 +323,10 @@ export class McpServer {
       // REST surface — so production code MUST always pass `config`.
       config: this.config ?? ({} as Config),
       messagingDefaults: this.messagingDefaults,
+      // Shared knowledge-graph store — lives on the Spawner (global to the
+      // deployment). Absent in pre-memory test fixtures, in which case the
+      // memory.* tools answer MEMORY_UNAVAILABLE rather than crashing.
+      ...(this.spawner.memory ? { memory: this.spawner.memory } : {}),
     };
   }
 }

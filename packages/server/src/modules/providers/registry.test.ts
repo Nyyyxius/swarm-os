@@ -1,7 +1,9 @@
 import { describe, it, expect } from 'vitest';
 import { ProviderRegistry } from './registry.js';
-import { createBuiltinProviderRegistry } from './index.js';
+import { bindModelCatalogue, createBuiltinProviderRegistry } from './index.js';
 import { CLAUDE_PROVIDER } from './claude.js';
+import { ModelCatalogue } from './catalogue.js';
+import { MODELS_DEV_FIXTURE } from './catalogue.fixture.js';
 import { FakeProvider } from './fake.js';
 import { BUILTIN_PROVIDER_DEFAULT_MODELS, type BuiltinProviderId } from './ids.js';
 import { IDENTITY_PATH_MAPPER } from './types.js';
@@ -161,12 +163,25 @@ describe('createBuiltinProviderRegistry', () => {
       const d = p.defaults();
       expect(d.model.length).toBeGreaterThan(0);
       expect(p.capabilities.permissionModes).toContain(d.permissionMode);
-      // …and that default is THE one `config.ts` uses to answer
-      // "`SWARM_OS_DEFAULT_PROVIDER=<id>` and no `SWARM_OS_DEFAULT_MODEL` — then
-      // what?". config cannot import the registry (native-module cycle), so the
-      // value lives in the leaf `ids.ts` and the adapter reads it from there.
-      // Were the two allowed to drift, the instance-wide default would silently
-      // stop being a model this adapter has heard of.
+      // THE invariant that still holds once a live catalogue can move a default
+      // forward: whatever `defaults()` names, `models()` offers.
+      //
+      // This used to read `d.model === BUILTIN_PROVIDER_DEFAULT_MODELS[id]`,
+      // guarding a drift that mattered when both sides were literals. It cannot
+      // be that any more — `providers/catalogue.ts` exists precisely to make the
+      // adapter's default outrun the pin on a running instance — and leaving it
+      // would have been worse than deleting it: no test stack binds a catalogue,
+      // so it would have stayed GREEN while the property it names was false in
+      // production. A green test for a dead invariant is a liability.
+      //
+      // What replaces it is checked in two places: the pin/config coherence for
+      // `SWARM_OS_DEFAULT_PROVIDER=<id>` with no model is asserted in
+      // `config.test.ts` against `ids.ts` directly (no adapter involved), and the
+      // "a bound catalogue MAY move this" case is the next test down.
+      expect(p.models().map((m) => m.value)).toContain(d.model);
+      // Unbound (the state of every test), the default IS still the pin — which
+      // is what lets `codex.test.ts` &co. assert exact ids without knowing the
+      // catalogue exists.
       expect(d.model).toBe(BUILTIN_PROVIDER_DEFAULT_MODELS[id]);
       // Both reset commands map to a line or to an explicit `null` (= "no working
       // reset"); never to an empty string, which would submit a blank prompt.
@@ -175,6 +190,62 @@ describe('createBuiltinProviderRegistry', () => {
         expect(line === null || line.length > 0).toBe(true);
       }
     }
+  });
+
+  it('lets a BOUND catalogue move a default off its pin, and keeps it inside models()', async () => {
+    // The companion to the invariant above, and the thing the old
+    // `defaults().model === pin` assertion would have hidden: with a live
+    // catalogue the two are ALLOWED to diverge — that divergence is the whole
+    // feature — but `defaults().model ∈ models()` must survive it, or the UI
+    // renders "not in catalogue" (`ProviderFields.tsx:298`) against the value it
+    // has just pre-filled for the operator.
+    const registry = createBuiltinProviderRegistry();
+    // A payload carrying an opus NEWER than whatever `ids.ts` currently pins, so
+    // the divergence is structural rather than a coincidence of today's pins:
+    // `pnpm models:sync` keeps the pin converging on the newest real id, and an
+    // assertion built on `MODELS_DEV_FIXTURE` would quietly stop testing
+    // anything the moment the two met.
+    const ahead = {
+      anthropic: {
+        models: {
+          'claude-opus-6': {
+            id: 'claude-opus-6',
+            name: 'Claude Opus 6',
+            release_date: '2099-01-01',
+            tool_call: true,
+            modalities: { input: ['text'], output: ['text'] },
+            cost: { input: 5, output: 25 },
+          },
+          ...(MODELS_DEV_FIXTURE.anthropic as { models: Record<string, unknown> }).models,
+        },
+      },
+    };
+    const catalogue = new ModelCatalogue({
+      env: {},
+      fetchImpl: (async () =>
+        new Response(JSON.stringify(ahead), { status: 200 })) as unknown as typeof fetch,
+    });
+    // `CLAUDE_PROVIDER` is a module-level singleton shared by every registry
+    // (`index.ts:69`), so this binding is global to the test file and MUST be
+    // undone — otherwise the next test in this file reads a live default.
+    expect(bindModelCatalogue(registry, catalogue)).toEqual([
+      'claude',
+      'codex',
+      'gemini',
+      'opencode',
+    ]);
+    try {
+      await catalogue.resolve(1_000);
+      const claude = registry.get('claude')!;
+      expect(claude.defaults().model).toBe('claude-opus-6');
+      expect(claude.defaults().model).not.toBe(BUILTIN_PROVIDER_DEFAULT_MODELS.claude);
+      expect(claude.models().map((m) => m.value)).toContain(claude.defaults().model);
+    } finally {
+      bindModelCatalogue(registry, null);
+    }
+    expect(registry.get('claude')!.defaults().model).toBe(
+      BUILTIN_PROVIDER_DEFAULT_MODELS.claude,
+    );
   });
 
   it('has every built-in refuse to spawn without a per-session config dir', () => {
@@ -245,7 +316,10 @@ describe('createBuiltinProviderRegistry', () => {
     expect(claude.capabilities.durablePreamble).toBe(true);
     expect(claude.capabilities.httpMcp).toBe(true);
     expect(claude.defaults()).toEqual({
-      model: 'claude-opus-4-8',
+      // The constant, not the literal: `pnpm models:sync` rewrites the pins in
+      // `ids.ts` before a release, and a test that froze the id would turn every
+      // model refresh into a test edit — which is how a catalogue goes stale.
+      model: BUILTIN_PROVIDER_DEFAULT_MODELS.claude,
       effort: 'xhigh',
       permissionMode: 'bypassPermissions',
     });

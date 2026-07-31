@@ -1062,3 +1062,176 @@
 
   /* small svg icon helpers */
   .icon-sm { width: 12px; height: 12px; stroke: currentColor; fill: none; stroke-width: 1.5; }
+
+  /* ============================================================= */
+  /* ============ Memory view (shared knowledge graph) =========== */
+  /* Feature CSS for MemoryPage / MemoryGraph / MarkdownView.       */
+  /* Built entirely on the warm-black tokens above (no new colors). */
+  /* ============================================================= */
+  .mem-overlay {
+    position: fixed; inset: 56px 0 0 0;      /* leave the topbar visible */
+    background: var(--bg);
+    z-index: 60;
+    display: grid;                            /* columns set inline (2 or 3) */
+    animation: backdrop-in 200ms ease-out;
+    min-height: 0;
+  }
+  .mem-main { position: relative; overflow: hidden; min-width: 0; }
+
+  /* sidebar search */
+  .mem-search { padding: 12px 18px; border-bottom: 1px solid var(--border); }
+  .mem-search input {
+    width: 100%; background: #0a0806; border: 1px solid var(--border);
+    color: var(--text); padding: 8px 10px; border-radius: 2px; outline: none;
+    font-family: "Geist Mono", monospace; font-size: 11px; letter-spacing: 0.06em;
+  }
+  .mem-search input:focus { border-color: var(--border-strong); }
+  .mem-search input::placeholder { color: var(--text-mute); }
+  .mem-snippet {
+    grid-column: 1 / -1; margin-top: 6px;
+    font-family: "Geist", sans-serif; font-size: 10.5px; line-height: 1.4;
+    color: var(--text-dim); word-break: break-word;
+  }
+
+  /* empty / offline states in the canvas region */
+  .mem-empty {
+    position: absolute; inset: 0; display: flex; flex-direction: column;
+    align-items: center; justify-content: center; gap: 10px; padding: 40px;
+    text-align: center;
+  }
+  .mem-empty-title {
+    font-family: "Geist Mono", monospace; font-size: 16px; letter-spacing: 0.2em;
+    color: var(--text-dim);
+  }
+  .mem-empty-sub {
+    max-width: 460px; font-size: 12px; line-height: 1.6; color: var(--text-mute);
+  }
+  .mem-empty-sub code {
+    font-family: "Geist Mono", monospace; color: var(--amber);
+    background: rgba(255,176,96,0.08); padding: 0 4px; border-radius: 2px;
+  }
+
+  /* ── graph nodes ── */
+  .mem-node { cursor: pointer; }
+  .mem-node-glow { opacity: 0.10; }
+  .mem-node:hover .mem-node-glow { opacity: 0.20; }
+  .mem-node-ring { fill: var(--panel-solid); stroke-width: 1.25; }
+  .mem-node-ring.selected {
+    stroke-width: 2;
+    filter: drop-shadow(0 0 8px rgba(255, 176, 96, 0.7));
+  }
+  .mem-node-label {
+    text-anchor: middle; fill: var(--text);
+    font-family: "Geist Mono", monospace; font-size: 11px; letter-spacing: 0.06em;
+    pointer-events: none;
+  }
+  .mem-node-type {
+    text-anchor: middle;
+    font-family: "Geist Mono", monospace; font-size: 8px; letter-spacing: 0.16em;
+    opacity: 0.75; pointer-events: none;
+  }
+  .mem-edge { fill: none; stroke: var(--border-strong); stroke-width: 1; opacity: 0.55; }
+  .mem-edge.active { stroke: var(--amber); opacity: 0.9; }
+
+  /* ── note panel ── */
+  .mem-note-panel {
+    background: var(--panel-solid);
+    border-left: 1px solid var(--border);
+    overflow: auto; padding: 20px 22px 40px;
+    display: flex; flex-direction: column;
+  }
+  .mem-note-head {
+    display: flex; align-items: center; justify-content: space-between;
+    margin-bottom: 14px; gap: 10px;
+  }
+  .mem-note-title {
+    font-family: "Geist Mono", monospace; font-size: 15px; letter-spacing: 0.10em;
+    color: var(--text); word-break: break-all;
+  }
+  .mem-note-head .h-edit {
+    background: none; border: 1px solid var(--border); color: var(--text-mute);
+    font-family: "Geist Mono", monospace; font-size: 11px; line-height: 1;
+    padding: 4px 8px; cursor: pointer; flex: none;
+  }
+  .mem-note-head .h-edit:hover { color: var(--amber); border-color: var(--border-strong); }
+  .mem-note-meta { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; margin-bottom: 10px; }
+  .mem-note-meta .pill {
+    font-family: "Geist Mono", monospace; font-size: 8.5px; letter-spacing: 0.16em;
+    padding: 2px 7px; border: 1px solid var(--border);
+  }
+  .mem-note-sub {
+    font-family: "Geist Mono", monospace; font-size: 9.5px; letter-spacing: 0.08em;
+    color: var(--text-mute);
+  }
+  .mem-note-desc { font-size: 12px; color: var(--text-dim); line-height: 1.5; margin-bottom: 14px; }
+  .mem-note-body { flex: 1; min-height: 0; }
+  .mem-note-actions { display: flex; gap: 10px; margin-top: 22px; }
+  .mem-missing { padding: 8px 0; }
+
+  /* editor */
+  .mem-editor { display: grid; gap: 14px; }
+  .mem-field { display: grid; gap: 5px; }
+  .mem-field .k {
+    font-family: "Geist Mono", monospace; font-size: 9px; letter-spacing: 0.16em;
+    color: var(--text-mute);
+  }
+  .mem-field input, .mem-field select, .mem-field textarea {
+    width: 100%; background: #0a0806; border: 1px solid var(--border);
+    color: var(--text); padding: 8px 10px; border-radius: 2px; outline: none;
+    font-family: "Geist", sans-serif; font-size: 12px;
+  }
+  .mem-field textarea {
+    min-height: 260px; resize: vertical;
+    font-family: "Geist Mono", monospace; font-size: 12px; line-height: 1.55;
+  }
+  .mem-field input:focus, .mem-field select:focus, .mem-field textarea:focus {
+    border-color: var(--border-strong);
+  }
+
+  /* links / backlinks */
+  .mem-links { margin-top: 18px; display: grid; gap: 10px; }
+  .mem-links-row { display: grid; gap: 6px; }
+  .mem-links-row .k {
+    font-family: "Geist Mono", monospace; font-size: 9px; letter-spacing: 0.16em;
+    color: var(--text-mute);
+  }
+  .mem-links-chips { display: flex; flex-wrap: wrap; gap: 6px; }
+  .mem-chip {
+    background: rgba(255,176,96,0.06); border: 1px solid var(--border);
+    color: var(--text-dim); cursor: pointer;
+    font-family: "Geist Mono", monospace; font-size: 10px; letter-spacing: 0.06em;
+    padding: 3px 8px; border-radius: 2px;
+  }
+  .mem-chip:hover { color: var(--amber); border-color: var(--border-strong); }
+
+  /* ── rendered markdown (MarkdownView) ── */
+  .md-body { font-family: "Geist", sans-serif; font-size: 12.5px; line-height: 1.6; color: var(--text-dim); }
+  .md-body .md-h { font-family: "Geist Mono", monospace; color: var(--text); letter-spacing: 0.06em; margin: 16px 0 8px; line-height: 1.3; }
+  .md-body h1.md-h { font-size: 17px; }
+  .md-body h2.md-h { font-size: 15px; }
+  .md-body h3.md-h { font-size: 13px; }
+  .md-body h4.md-h, .md-body h5.md-h, .md-body h6.md-h { font-size: 12px; color: var(--text-dim); }
+  .md-p { margin: 0 0 10px; }
+  .md-list { margin: 0 0 10px; padding-left: 20px; }
+  .md-list li { margin: 2px 0; }
+  .md-quote {
+    margin: 0 0 10px; padding: 4px 12px; border-left: 2px solid var(--border-strong);
+    color: var(--text-mute); font-style: italic;
+  }
+  .md-hr { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+  .md-code {
+    font-family: "Geist Mono", monospace; font-size: 11px;
+    background: rgba(255,176,96,0.08); color: var(--amber); padding: 0 4px; border-radius: 2px;
+  }
+  .md-pre {
+    background: #0a0806; border: 1px solid var(--border); padding: 10px 12px;
+    overflow-x: auto; margin: 0 0 10px; border-radius: 2px;
+  }
+  .md-pre code { font-family: "Geist Mono", monospace; font-size: 11px; color: var(--text-dim); white-space: pre; }
+  .md-link { color: var(--info); text-decoration: underline; text-underline-offset: 2px; }
+  .md-wikilink {
+    background: none; border: none; padding: 0; cursor: pointer;
+    color: var(--amber); font: inherit; text-decoration: underline; text-underline-offset: 2px;
+  }
+  .md-wikilink:hover { filter: brightness(1.2); }
+  .md-empty { color: var(--text-mute); font-style: italic; }

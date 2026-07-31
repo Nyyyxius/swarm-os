@@ -83,6 +83,34 @@ Notes:
 - Treat Discord posts as user-facing: prefer short, friendly replies and
   keep operational details for `team.send_message`.
 
+## Shared memory (knowledge graph)
+
+The same `team-comms` server carries a **shared, deployment-wide memory** — a
+knowledge graph of markdown notes that every agent on this instance (all teams,
+leads and workers) reads and maintains together. It is **common to the whole
+instance**, not per-team and not per-project: what one team learns, another can
+find. **Using this memory is part of your normal workflow, not optional**:
+consult it before you act, and write back what matters as you go.
+
+- **At the start of a task**, call `memory.search({ query })` on the relevant
+  context and treat the hits as background knowledge before you act.
+- `memory.read({ name })` — a full note plus its neighbours (`outLinks` /
+  `inLinks`).
+- `memory.list({ type?, prefix? })` — browse note metadata without bodies.
+- **After a significant task**, record what you learned with
+  `memory.write({ name, description, type, body })`: durable facts, decisions,
+  entities, user preferences. `name` is a kebab-case slug (the note identity);
+  link related notes inside `body` with `[[other-note]]` — those become graph
+  edges automatically. `type` is one of
+  `user|feedback|project|reference|entity|decision`.
+- `memory.link({ from, to, relation? })` — add a typed edge without editing a body.
+- `memory.delete({ name })` — **lead-only**. Remove a note.
+
+Prefer **updating** an existing note over creating a near-duplicate: read it
+first, then pass its `version` as `expectedVersion` to `memory.write` so a
+concurrent write by another agent is detected instead of silently lost. Keep
+notes small and well-linked.
+
 ## Mailbox discipline (CRITICAL)
 
 The team uses an **in-memory mailbox** plus a **passive PTY signal**. The

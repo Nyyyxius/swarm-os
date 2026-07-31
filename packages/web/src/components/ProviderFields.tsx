@@ -134,6 +134,48 @@ export function modelOptionLabel(m: { value: string; label: string }): string {
   return m.label.includes(m.value) ? m.label : `${m.label} (${m.value})`;
 }
 
+/**
+ * Split a catalogue into `<optgroup>`s by VENDOR, or into one flat run when the
+ * ids carry no vendor.
+ *
+ * Only opencode's ids do (`anthropic/claude-opus-5`), and only opencode needs
+ * it: since the catalogue went live it offers ~200 OpenRouter slugs, and 200
+ * flat `<option>`s are unusable in a native `<select>` — type-ahead there
+ * matches the LABEL, which starts with the display name, so typing "qwen" jumps
+ * nowhere. claude / codex / gemini have no `/` in their ids and keep exactly the
+ * flat list they had; nothing about the submitted value changes either way.
+ *
+ * `null` as the group key means "render these ungrouped", which is what keeps
+ * the three other providers byte-identical instead of wrapping them in a
+ * one-group `<optgroup>` nobody asked for. Insertion order is preserved (the
+ * server sorts newest-first) rather than sorted alphabetically: the first vendor
+ * an operator sees should be the one that shipped most recently.
+ */
+export function groupModels(
+  models: readonly { value: string; label: string }[],
+): Array<[string | null, Array<{ value: string; label: string }>]> {
+  if (!models.some((m) => m.value.includes('/'))) return [[null, [...models]]];
+  const groups = new Map<string, Array<{ value: string; label: string }>>();
+  const ungrouped: Array<{ value: string; label: string }> = [];
+  for (const m of models) {
+    const slash = m.value.indexOf('/');
+    if (slash <= 0) {
+      ungrouped.push(m);
+      continue;
+    }
+    const vendor = m.value.slice(0, slash);
+    const bucket = groups.get(vendor);
+    if (bucket) bucket.push(m);
+    else groups.set(vendor, [m]);
+  }
+  const out: Array<[string | null, Array<{ value: string; label: string }>]> = [];
+  // Ungrouped first: a bare id in an otherwise vendored list is a hand-pinned
+  // entry or an operator's own, and burying it under the vendors would hide it.
+  if (ungrouped.length > 0) out.push([null, ungrouped]);
+  for (const [vendor, bucket] of groups) out.push([vendor, bucket]);
+  return out;
+}
+
 interface ProviderSelectProps {
   id?: string;
   /** Currently selected provider id, or `INHERIT`. */
@@ -299,11 +341,23 @@ export function ModelSelect({
           {catalogue.length > 0 ? `${value} · not in catalogue` : value}
         </option>
       )}
-      {catalogue.map((m) => (
-        <option key={m.value} value={m.value}>
-          {modelOptionLabel(m)}
-        </option>
-      ))}
+      {groupModels(catalogue).map(([vendor, models]) =>
+        vendor === null ? (
+          models.map((m) => (
+            <option key={m.value} value={m.value}>
+              {modelOptionLabel(m)}
+            </option>
+          ))
+        ) : (
+          <optgroup key={vendor} label={vendor}>
+            {models.map((m) => (
+              <option key={m.value} value={m.value}>
+                {modelOptionLabel(m)}
+              </option>
+            ))}
+          </optgroup>
+        ),
+      )}
       <option value={CUSTOM_MODEL}>other — type an exact id…</option>
     </select>
   );

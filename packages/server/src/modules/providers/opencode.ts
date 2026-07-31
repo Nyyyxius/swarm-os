@@ -52,6 +52,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { withModule } from '../../logger.js';
 import type { Config, EffortLevel, PermissionMode } from '../../config.js';
+import type { ModelCatalogue } from './catalogue.js';
 import { BUILTIN_PROVIDER_DEFAULT_MODELS } from './ids.js';
 import { probeCliBinary } from './probe.js';
 import { writeSessionFile } from './session-config.js';
@@ -282,7 +283,7 @@ const OPENCODE_CAPABILITIES: ProviderCapabilities = {
 };
 
 /**
- * Indicative catalogue. Values are OpenRouter slugs (`<vendor>/<model>`); the
+ * Pinned floor. Values are OpenRouter slugs (`<vendor>/<model>`); the
  * `openrouter/` provider prefix is added by `normalizeOpencodeModel`, so the
  * value is what an operator would type on openrouter.ai.
  *
@@ -294,13 +295,40 @@ const OPENCODE_CAPABILITIES: ProviderCapabilities = {
  * ids (or `https://openrouter.ai/api/v1/models`, which answers HTTP 200 with no
  * credentials, so the UI can populate itself without any installed CLI).
  */
-const OPENCODE_MODELS: readonly ProviderModel[] = [
-  { value: 'anthropic/claude-opus-5', label: 'Claude Opus 5 (OpenRouter)' },
-  { value: 'anthropic/claude-sonnet-4.5', label: 'Claude Sonnet 4.5 (OpenRouter)' },
-  { value: 'anthropic/claude-haiku-4.5', label: 'Claude Haiku 4.5 (OpenRouter)' },
-  { value: 'openai/gpt-5.5', label: 'GPT-5.5 (OpenRouter)' },
-  { value: 'google/gemini-3-pro-preview', label: 'Gemini 3 Pro (OpenRouter)' },
-  { value: 'deepseek/deepseek-chat', label: 'DeepSeek Chat (OpenRouter)' },
+const OPENCODE_PINNED_MODELS: readonly ProviderModel[] = [
+  { value: 'qwen/qwen3.7-flash', label: 'Qwen3.7 Flash (qwen/qwen3.7-flash)' },
+  { value: 'anthropic/claude-opus-5', label: 'Claude Opus 5 (anthropic/claude-opus-5)' },
+  { value: 'anthropic/claude-opus-5-fast', label: 'Claude Opus 5 (Fast) (anthropic/claude-opus-5-fast)' },
+  { value: 'google/gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash Lite (google/gemini-3.5-flash-lite)' },
+  { value: 'google/gemini-3.6-flash', label: 'Gemini 3.6 Flash (google/gemini-3.6-flash)' },
+  { value: 'moonshotai/kimi-k3', label: 'Kimi K3 (moonshotai/kimi-k3)' },
+  { value: 'openai/gpt-5.6-luna', label: 'GPT-5.6 Luna (openai/gpt-5.6-luna)' },
+  { value: 'openai/gpt-5.6-luna-pro', label: 'GPT-5.6 Luna Pro (openai/gpt-5.6-luna-pro)' },
+  { value: 'openai/gpt-5.6-sol', label: 'GPT-5.6 Sol (openai/gpt-5.6-sol)' },
+  { value: 'x-ai/grok-4.5', label: 'Grok 4.5 (x-ai/grok-4.5)' },
+  { value: 'anthropic/claude-sonnet-5', label: 'Claude Sonnet 5 (anthropic/claude-sonnet-5)' },
+  { value: 'z-ai/glm-5.2', label: 'GLM-5.2 (z-ai/glm-5.2)' },
+  { value: 'moonshotai/kimi-k2.7-code', label: 'Kimi K2.7 Code (moonshotai/kimi-k2.7-code)' },
+  { value: 'qwen/qwen3.7-plus', label: 'Qwen3.7 Plus (qwen/qwen3.7-plus)' },
+  { value: 'minimax/minimax-m3', label: 'MiniMax-M3 (minimax/minimax-m3)' },
+  { value: 'google/gemini-3-pro-image', label: 'Nano Banana Pro (google/gemini-3-pro-image)' },
+  { value: 'qwen/qwen3.7-max', label: 'Qwen3.7 Max (qwen/qwen3.7-max)' },
+  { value: 'mistralai/mistral-medium-3-5', label: 'Mistral Medium 3.5 (mistralai/mistral-medium-3-5)' },
+  { value: 'deepseek/deepseek-v4-flash', label: 'DeepSeek V4 Flash (deepseek/deepseek-v4-flash)' },
+  { value: 'deepseek/deepseek-v4-pro', label: 'DeepSeek V4 Pro (deepseek/deepseek-v4-pro)' },
+  { value: 'moonshotai/kimi-k2.6', label: 'Kimi K2.6 (moonshotai/kimi-k2.6)' },
+  { value: 'x-ai/grok-4.3', label: 'Grok 4.3 (x-ai/grok-4.3)' },
+  { value: 'x-ai/grok-build-0.1', label: 'Grok Build 0.1 (x-ai/grok-build-0.1)' },
+  { value: 'z-ai/glm-5.1', label: 'GLM-5.1 (z-ai/glm-5.1)' },
+  { value: 'z-ai/glm-5v-turbo', label: 'GLM-5V-Turbo (z-ai/glm-5v-turbo)' },
+  { value: 'minimax/minimax-m2.7', label: 'MiniMax-M2.7 (minimax/minimax-m2.7)' },
+  { value: 'mistralai/mistral-small-2603', label: 'Mistral Small 4 (mistralai/mistral-small-2603)' },
+  { value: 'minimax/minimax-m2.5', label: 'MiniMax-M2.5 (minimax/minimax-m2.5)' },
+  { value: 'mistralai/devstral-2512', label: 'Devstral 2 (mistralai/devstral-2512)' },
+  { value: 'deepseek/deepseek-chat', label: 'DeepSeek Chat (deepseek/deepseek-chat)' },
+  { value: 'meta-llama/llama-4-maverick', label: 'Llama 4 Maverick (meta-llama/llama-4-maverick)' },
+  { value: 'meta-llama/llama-4-scout', label: 'Llama 4 Scout (meta-llama/llama-4-scout)' },
+  { value: 'meta-llama/llama-3.3-70b-instruct', label: 'Llama-3.3-70B-Instruct (meta-llama/llama-3.3-70b-instruct)' },
 ];
 
 const OPENCODE_DEFAULT_MODEL = BUILTIN_PROVIDER_DEFAULT_MODELS.opencode;
@@ -308,13 +336,24 @@ const OPENCODE_DEFAULT_MODEL = BUILTIN_PROVIDER_DEFAULT_MODELS.opencode;
 /**
  * `<vendor>/<model>` → `openrouter/<vendor>/<model>`, idempotently: an operator
  * who free-texts the fully-qualified id in the UI must not end up with
- * `openrouter/openrouter/…`. An empty string falls back to the default model
- * rather than producing the bare prefix `openrouter/`, which opencode would
- * reject as a malformed id.
+ * `openrouter/openrouter/…`. An empty string falls back to `fallback` rather
+ * than producing the bare prefix `openrouter/`, which opencode would reject as
+ * a malformed id.
+ *
+ * `fallback` is a PARAMETER and not the module constant it used to be, because
+ * the empty-string path is really borrowed (`buildSpawn`, below) and the module
+ * constant is captured at import time. Left as-is, an emptied model field would
+ * resolve to a different id than the one `defaults()` had just advertised the
+ * moment a live catalogue moved the default — the adapter disagreeing with
+ * itself, one call apart. Callers outside the class have no catalogue to consult
+ * and keep the pinned default, which is also what the unit tests want.
  */
-export function normalizeOpencodeModel(model: string): string {
+export function normalizeOpencodeModel(
+  model: string,
+  fallback: string = OPENCODE_DEFAULT_MODEL,
+): string {
   const trimmed = model.trim();
-  if (trimmed.length === 0) return `${OPENCODE_MODEL_PREFIX}${OPENCODE_DEFAULT_MODEL}`;
+  if (trimmed.length === 0) return `${OPENCODE_MODEL_PREFIX}${fallback}`;
   return trimmed.startsWith(OPENCODE_MODEL_PREFIX)
     ? trimmed
     : `${OPENCODE_MODEL_PREFIX}${trimmed}`;
@@ -406,6 +445,9 @@ export class OpencodeProvider implements AgentProvider {
    */
   private _keySource: OpenRouterKeySource | null = null;
 
+  /** Live catalogue, or `null` for "pins only". See `useCatalogue`. */
+  private _catalogue: ModelCatalogue | null = null;
+
   constructor(config?: Config, keySource?: OpenRouterKeySource) {
     this.hostDir = config?.hostOpencodeDir ?? null;
     this._keySource = keySource ?? null;
@@ -428,13 +470,20 @@ export class OpencodeProvider implements AgentProvider {
     this._keySource = source;
   }
 
+  /** Late-bound live catalogue — see `ClaudeProvider.useCatalogue`. */
+  useCatalogue(catalogue: ModelCatalogue | null): void {
+    this._catalogue = catalogue;
+  }
+
   models(): readonly ProviderModel[] {
-    return OPENCODE_MODELS;
+    return this._catalogue?.models('opencode', OPENCODE_PINNED_MODELS) ?? OPENCODE_PINNED_MODELS;
   }
 
   defaults(): { model: string; effort: EffortLevel; permissionMode: PermissionMode } {
     return {
-      model: OPENCODE_DEFAULT_MODEL,
+      model:
+        this._catalogue?.defaultModel('opencode', OPENCODE_DEFAULT_MODEL) ??
+        OPENCODE_DEFAULT_MODEL,
       // Carried for interface completeness only — `capabilities.effort` is
       // false, so nothing ever reads this value into a flag.
       effort: 'high',
@@ -705,7 +754,10 @@ export class OpencodeProvider implements AgentProvider {
       throw new Error(resolved.error ? `${NO_API_KEY} (${resolved.error})` : NO_API_KEY);
     }
 
-    const model = normalizeOpencodeModel(req.model);
+    // The fallback is this adapter's CURRENT default, not the module constant:
+    // an empty `req.model` must land on the same id `defaults()` advertises,
+    // including when a live catalogue has moved it forward.
+    const model = normalizeOpencodeModel(req.model, this.defaults().model);
     const config = buildOpencodeConfig({
       model,
       // The AGENT resolves this path, but it is a file WE wrote inside our own

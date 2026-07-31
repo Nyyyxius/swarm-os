@@ -298,9 +298,39 @@ describe('POST /orchestrators — provider selection', () => {
       orchestrator: { defaultProvider: string; defaultModel: string };
     };
     expect(j.orchestrator.defaultProvider).toBe('claude');
-    // Provider === the instance default ⇒ `config.defaultModel` still applies,
-    // exactly as before this lot.
-    expect(j.orchestrator.defaultModel).toBe(stack.config.defaultModel);
+    // …and the ADAPTER's model, not `config.defaultModel`.
+    //
+    // This assertion is inverted from what it said before the live catalogue
+    // landed, and the inversion IS the feature. `config.defaultModel` is never
+    // empty (`config.ts` falls back to `ids.ts`), so as long as the `'config'`
+    // layer named it, `pickScoped` accepted it for any team on the instance's
+    // own default provider — which meant `resolve.ts:161`, the adapter's own
+    // `defaults()`, was dead code on this path. `GET /providers` would advertise
+    // one model while `POST /orchestrators` created teams on another.
+    //
+    // The config layer now speaks only when an operator set
+    // `SWARM_OS_DEFAULT_MODEL` (`Config.defaultModelExplicit`), which is what
+    // lets the adapter's live default reach a team created through the API. The
+    // stack sets no such env var, so this is the unnamed case.
+    expect(stack.config.defaultModelExplicit).toBe(false);
+    expect(j.orchestrator.defaultModel).toBe('fake-model');
+    expect(j.orchestrator.defaultModel).not.toBe(stack.config.defaultModel);
+  });
+
+  it('lets an EXPLICIT SWARM_OS_DEFAULT_MODEL still win over the adapter', async () => {
+    // The other half of the contract: making the config layer quiet must not
+    // make it deaf. An operator who names a model on a single-provider instance
+    // still gets exactly that model, unvalidated, as they always did.
+    await stack.teardown();
+    stack = await bootTestStack({
+      providerRegistry: fakeRegistry(),
+      env: { SWARM_OS_DEFAULT_MODEL: 'operator-pinned-model' },
+    });
+    expect(stack.config.defaultModelExplicit).toBe(true);
+    const res = await post('/orchestrators', body({}));
+    expect(res.status).toBe(201);
+    const j = (await res.json()) as { orchestrator: { defaultModel: string } };
+    expect(j.orchestrator.defaultModel).toBe('operator-pinned-model');
   });
 
   it('drops a ROLE model when the body switches provider (HIGH 1)', async () => {

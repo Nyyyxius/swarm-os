@@ -18,6 +18,7 @@ import {
   effortNote,
   effortsFor,
   findProvider,
+  groupModels,
   isPermissionChoice,
   permissionNote,
   permissionsFor,
@@ -202,5 +203,66 @@ describe('ModelSelect', () => {
     const select = screen.getByRole('combobox') as HTMLSelectElement;
     expect(select.value).toBe('claude-opus-9-9');
     expect(screen.getByRole('option', { name: /not in catalogue/ })).toBeTruthy();
+  });
+});
+
+describe('groupModels — the opencode <optgroup> case', () => {
+  it('leaves a vendorless catalogue flat, exactly as before', () => {
+    // claude / codex / gemini ids carry no `/`. Wrapping them in a single
+    // <optgroup> would change the rendered markup of three providers to solve a
+    // problem only the fourth has.
+    const flat = [
+      { value: 'claude-opus-5', label: 'Opus 5' },
+      { value: 'claude-sonnet-5', label: 'Sonnet 5' },
+    ];
+    expect(groupModels(flat)).toEqual([[null, flat]]);
+  });
+
+  it('groups vendored ids, preserving the server’s newest-first order', () => {
+    const grouped = groupModels([
+      { value: 'anthropic/claude-opus-5', label: 'Opus 5' },
+      { value: 'openai/gpt-5.5', label: 'GPT-5.5' },
+      { value: 'anthropic/claude-sonnet-5', label: 'Sonnet 5' },
+    ]);
+    expect(grouped.map(([vendor]) => vendor)).toEqual(['anthropic', 'openai']);
+    expect(grouped[0]?.[1].map((m) => m.value)).toEqual([
+      'anthropic/claude-opus-5',
+      'anthropic/claude-sonnet-5',
+    ]);
+  });
+
+  it('surfaces a bare id ahead of the vendor groups rather than burying it', () => {
+    const grouped = groupModels([
+      { value: 'anthropic/claude-opus-5', label: 'Opus 5' },
+      { value: 'hand-pinned-id', label: 'Hand pinned' },
+    ]);
+    expect(grouped[0]).toEqual([null, [{ value: 'hand-pinned-id', label: 'Hand pinned' }]]);
+  });
+
+  it('renders real <optgroup> elements, and the option values are unchanged', () => {
+    render(
+      <ModelSelect
+        value="anthropic/claude-opus-5"
+        provider={mkProvider({
+          id: 'opencode',
+          models: [
+            { value: 'anthropic/claude-opus-5', label: 'Claude Opus 5' },
+            { value: 'openai/gpt-5.5', label: 'GPT-5.5' },
+          ],
+        })}
+        onChange={() => undefined}
+      />,
+    );
+    const select = screen.getByRole('combobox') as HTMLSelectElement;
+    expect(Array.from(select.querySelectorAll('optgroup')).map((g) => g.label)).toEqual([
+      'anthropic',
+      'openai',
+    ]);
+    // Grouping is presentation only: the submitted value must not change.
+    expect(Array.from(select.options).map((o) => o.value)).toEqual([
+      'anthropic/claude-opus-5',
+      'openai/gpt-5.5',
+      '__custom_model__',
+    ]);
   });
 });

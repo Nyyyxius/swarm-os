@@ -23,6 +23,8 @@ import { createSettingsRouter } from './routes/settings.js';
 import { createIdeRouter } from './routes/ide.js';
 import { createPluginsRouter } from './routes/plugins.js';
 import { createUpdatesRouter } from './routes/updates.js';
+import { createMemoryRouter } from './routes/memory.js';
+import type { MemoryStore } from '../modules/memory/store.js';
 import type { UpdateService, InfoUpdateProjection } from '../modules/updates/index.js';
 import type { PluginHost } from '../modules/plugins/host.js';
 import type { PluginHttpRegistry } from '../modules/plugins/http-registry.js';
@@ -123,6 +125,7 @@ export function createApp(
   pluginInstaller?: PluginInstaller,
   connectorRegistry?: ConnectorRegistry,
   updates?: UpdateService,
+  memory?: MemoryStore,
 ): { app: express.Express; ideProxy: ProxyHandler | null } {
   const app = express();
   app.disable('x-powered-by');
@@ -316,6 +319,10 @@ export function createApp(
   // information like `/info`.
   app.use(createProvidersRouter(spawner, config));
   app.use(createSettingsRouter(settingsStore));
+  // Shared knowledge graph (docs/memoire-partagee.md) — `/api/memory/*`. Behind
+  // the X-Auth-Token gate like the other business routes. Mounted only when the
+  // store came up (a boot where it failed is unaffected everywhere else).
+  if (memory) app.use(createMemoryRouter(memory));
   // `GET /ide-info` — VS Code web connection details for the authenticated
   // client. Mounted after the auth gate so it 401s without X-Auth-Token
   // (parity with the other business routes). The IDE itself runs on its own
@@ -405,6 +412,7 @@ export function startServer(
   pluginInstaller?: PluginInstaller,
   connectorRegistry?: ConnectorRegistry,
   updates?: UpdateService,
+  memory?: MemoryStore,
 ): ServerHandle {
   const { app, ideProxy } = createApp(
     config,
@@ -421,6 +429,7 @@ export function startServer(
     pluginInstaller,
     connectorRegistry,
     updates,
+    memory,
   );
   const http = createServer(app);
 

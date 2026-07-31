@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
+import { BUILTIN_PROVIDER_DEFAULT_MODELS } from './ids.js';
 
 /**
  * Codex adapter contract (multi-provider plan, Lot 4).
@@ -252,11 +253,14 @@ describe('codex adapter — capabilities', () => {
       httpMcp: true,
     });
     expect(p.defaults()).toEqual({
-      model: 'gpt-5.5',
+      // Read from `ids.ts` rather than frozen here — `pnpm models:sync` rewrites
+      // that table, and this assertion is about the wiring, not about which id
+      // happens to be current.
+      model: BUILTIN_PROVIDER_DEFAULT_MODELS.codex,
       effort: 'xhigh',
       permissionMode: 'bypassPermissions',
     });
-    expect(p.models().map((m) => m.value)).toContain('gpt-5.5');
+    expect(p.models().map((m) => m.value)).toContain(BUILTIN_PROVIDER_DEFAULT_MODELS.codex);
   });
 
   it('maps our effort levels onto codex reasoning efforts (max → xhigh)', () => {

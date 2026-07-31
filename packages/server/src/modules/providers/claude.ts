@@ -30,6 +30,7 @@ import {
   linkSharedState,
   writeSessionFile,
 } from './session-config.js';
+import type { ModelCatalogue } from './catalogue.js';
 import { BUILTIN_PROVIDER_DEFAULT_MODELS } from './ids.js';
 import { probeCliBinary } from './probe.js';
 import type {
@@ -194,13 +195,24 @@ const CLAUDE_CAPABILITIES: ProviderCapabilities = {
   httpMcp: true,
 };
 
+/**
+ * The pinned floor. Refreshed offline by `pnpm models:sync`, and served as-is
+ * whenever no live catalogue is bound — which is the case in every unit test,
+ * deliberately, and on any deployment that has `SWARM_OS_MODEL_CATALOGUE_URL=off`
+ * or no route to models.dev.
+ */
 const CLAUDE_MODELS: readonly ProviderModel[] = [
-  { value: 'claude-opus-4-8', label: 'Opus 4.8 (claude-opus-4-8)' },
-  { value: 'claude-sonnet-4-6', label: 'Sonnet 4.6 (claude-sonnet-4-6)' },
-  {
-    value: 'claude-haiku-4-5-20251001',
-    label: 'Haiku 4.5 (claude-haiku-4-5-20251001)',
-  },
+  { value: 'claude-opus-5', label: 'Claude Opus 5 (claude-opus-5)' },
+  { value: 'claude-sonnet-5', label: 'Claude Sonnet 5 (claude-sonnet-5)' },
+  { value: 'claude-fable-5', label: 'Claude Fable 5 (claude-fable-5)' },
+  { value: 'claude-opus-4-8', label: 'Claude Opus 4.8 (claude-opus-4-8)' },
+  { value: 'claude-opus-4-7', label: 'Claude Opus 4.7 (claude-opus-4-7)' },
+  { value: 'claude-sonnet-4-6', label: 'Claude Sonnet 4.6 (claude-sonnet-4-6)' },
+  { value: 'claude-opus-4-6', label: 'Claude Opus 4.6 (claude-opus-4-6)' },
+  { value: 'claude-opus-4-5', label: 'Claude Opus 4.5 (claude-opus-4-5)' },
+  { value: 'claude-haiku-4-5', label: 'Claude Haiku 4.5 (claude-haiku-4-5)' },
+  { value: 'claude-sonnet-4-5', label: 'Claude Sonnet 4.5 (claude-sonnet-4-5)' },
+  { value: 'claude-opus-4-1', label: 'Claude Opus 4.1 (claude-opus-4-1)' },
 ];
 
 export class ClaudeProvider implements AgentProvider {
@@ -209,13 +221,34 @@ export class ClaudeProvider implements AgentProvider {
   readonly binary = 'claude';
   readonly capabilities = CLAUDE_CAPABILITIES;
 
+  /** Live catalogue, or `null` for "pins only". See `useCatalogue`. */
+  private _catalogue: ModelCatalogue | null = null;
+
+  /**
+   * Bind the live model catalogue AFTER construction — the same late-binding
+   * seam, for the same reason, as `OpencodeProvider.useKeySource`
+   * (`opencode.ts:414-429`): the provider registry is built during boot's
+   * runtime-materialisation phase, before anything that could own a cache
+   * exists, and reordering those phases buys nothing.
+   *
+   * An UNBOUND adapter behaves exactly like it did before this seam existed:
+   * pinned list, pinned default, no network. That is what makes every unit test
+   * hermetic BY CONSTRUCTION rather than by remembering not to install one —
+   * and it is why the tests that pin model ids need no `catalogue` awareness.
+   */
+  useCatalogue(catalogue: ModelCatalogue | null): void {
+    this._catalogue = catalogue;
+  }
+
   models(): readonly ProviderModel[] {
-    return CLAUDE_MODELS;
+    return this._catalogue?.models('claude', CLAUDE_MODELS) ?? CLAUDE_MODELS;
   }
 
   defaults(): { model: string; effort: EffortLevel; permissionMode: PermissionMode } {
     return {
-      model: BUILTIN_PROVIDER_DEFAULT_MODELS.claude,
+      model:
+        this._catalogue?.defaultModel('claude', BUILTIN_PROVIDER_DEFAULT_MODELS.claude) ??
+        BUILTIN_PROVIDER_DEFAULT_MODELS.claude,
       effort: 'xhigh',
       permissionMode: 'bypassPermissions',
     };

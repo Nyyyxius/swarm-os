@@ -721,6 +721,85 @@ export interface BusMetricsSnapshot {
   window_seconds: number;
 }
 
+/**
+ * ── Shared memory / knowledge-graph DTOs ──────────────────────────────────
+ * Hand-maintained mirror of the server's `MemoryStore` view types (design doc
+ * `docs/memoire-partagee.md` §7-8). `web` does not depend on `server`, so a
+ * field added there must be mirrored here. Field names are wire-contractual —
+ * do NOT rename them.
+ *
+ * A note is a markdown file with frontmatter; the graph nodes are notes and the
+ * edges are the `[[wikilinks]]` between them (plus optional typed relations).
+ */
+export type MemoryNoteType =
+  | 'user'
+  | 'feedback'
+  | 'project'
+  | 'reference'
+  | 'entity'
+  | 'decision'
+  | (string & {});
+
+/** Frontmatter-level metadata — what `GET /api/memory` returns per note. */
+export interface MemoryNoteMeta {
+  /** Slug (kebab-case) = filename = node identity. */
+  name: string;
+  description: string;
+  type: MemoryNoteType;
+  /** Provenance: orchestrator id that authored it (optional). */
+  team?: string;
+  /** Provenance: session/agent that authored it (optional). */
+  createdBy?: string;
+  /** Epoch ms. */
+  createdAt: number;
+  /** Epoch ms. */
+  updatedAt: number;
+  /** Optimistic-concurrency counter, bumped on every write. */
+  version: number;
+}
+
+/** A full note — `GET /api/memory/:name`. */
+export interface MemoryNote extends MemoryNoteMeta {
+  /** Markdown body (below the frontmatter). */
+  body: string;
+  /** Names this note links out to (derived from `[[links]]`). */
+  outLinks: string[];
+  /** Names that link into this note (back-links). */
+  inLinks: string[];
+}
+
+/** One node of `GET /api/memory/graph`. */
+export interface GraphNode {
+  name: string;
+  type: MemoryNoteType;
+  description?: string;
+}
+
+/** One edge of `GET /api/memory/graph`. */
+export interface GraphEdge {
+  from: string;
+  to: string;
+  relation?: string;
+}
+
+/** One hit of `GET /api/memory/search`. */
+export interface SearchHit {
+  name: string;
+  description: string;
+  type: MemoryNoteType;
+  snippet: string;
+  score: number;
+}
+
+/** Body of `PUT /api/memory/:name`. */
+export interface MemoryNoteInput {
+  description: string;
+  type: MemoryNoteType;
+  body: string;
+  /** Optimistic lock — the version the client last read. Omit to force. */
+  expectedVersion?: number;
+}
+
 class HttpError extends Error {
   constructor(
     message: string,
@@ -1158,6 +1237,36 @@ export const api = {
    */
   getIdeInfo: () =>
     request<{ basePath: string; folder: string; token: string }>('GET', '/ide-info'),
+  // ---- Shared memory / knowledge graph (docs/memoire-partagee.md §7-8) -----
+  //
+  // These live under `/api/*` (proxied by vite.config.ts) unlike most routes
+  // above. All are authenticated (X-Auth-Token) like the rest of the client.
+  // The web view feature-detects: a 404 on `listMemory` means the backend
+  // predates this surface and the page renders a graceful empty state.
+  /** List note metadata (no bodies). */
+  listMemory: () => request<{ notes: MemoryNoteMeta[] }>('GET', '/api/memory'),
+  /** Nodes + edges for the graph canvas. */
+  getMemoryGraph: () =>
+    request<{ nodes: GraphNode[]; edges: GraphEdge[] }>('GET', '/api/memory/graph'),
+  /** FTS-ranked search. `type` filters by note type; `limit` caps results. */
+  searchMemory: (q: string, opts: { type?: string; limit?: number } = {}) => {
+    const qs = new URLSearchParams({ q });
+    if (opts.type) qs.set('type', opts.type);
+    if (opts.limit != null) qs.set('limit', String(opts.limit));
+    return request<{ results: SearchHit[] }>('GET', `/api/memory/search?${qs.toString()}`);
+  },
+  /** Full note (body + links). 404 when the note does not exist. */
+  getMemoryNote: (name: string) =>
+    request<MemoryNote>('GET', `/api/memory/${encodeURIComponent(name)}`),
+  /**
+   * Create or update a note. Returns the stored note (with bumped version).
+   * 409 when `expectedVersion` no longer matches (another writer won the race).
+   */
+  putMemoryNote: (name: string, body: MemoryNoteInput) =>
+    request<MemoryNote>('PUT', `/api/memory/${encodeURIComponent(name)}`, body),
+  /** Delete a note (lead-only server-side). */
+  deleteMemoryNote: (name: string) =>
+    request<{ ok: true }>('DELETE', `/api/memory/${encodeURIComponent(name)}`),
 };
 
 export { HttpError };

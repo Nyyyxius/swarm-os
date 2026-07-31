@@ -16,12 +16,38 @@ export type BuiltinSwarmEventKind =
   | 'plugin.host.changed';
 
 /**
+ * Shared-memory (knowledge graph) event kinds. Emitted by `MemoryStore` via the
+ * event bus and rebroadcast on `/ws/events` so the web Memory page can patch its
+ * graph without a refetch. Added to the open union below — additive, non-breaking.
+ */
+export type MemorySwarmEventKind =
+  | 'memory.node_created'
+  | 'memory.node_updated'
+  | 'memory.node_deleted'
+  | 'memory.edge_created';
+
+/**
  * Open union: plugins emit `plugin.<name>.<subKind>` via `api.events.emit`
  * (the host forces the prefix, so a plugin can never forge a core kind). The
  * `EventsHub` rebroadcasts everything unfiltered and the web client matches
  * kinds with independent `if`s, so unknown kinds are ignored gracefully.
  */
-export type SwarmEventKind = BuiltinSwarmEventKind | `plugin.${string}`;
+export type SwarmEventKind =
+  | BuiltinSwarmEventKind
+  | MemorySwarmEventKind
+  | `plugin.${string}`;
+
+/** Payload of `memory.node_created` / `memory.node_updated` / `memory.node_deleted`. */
+export interface MemoryNodeEventPayload {
+  name: string;
+  type: string;
+}
+
+/** Payload of `memory.edge_created`. */
+export interface MemoryEdgeEventPayload {
+  from: string;
+  to: string;
+}
 
 export interface SwarmEvent {
   kind: SwarmEventKind;

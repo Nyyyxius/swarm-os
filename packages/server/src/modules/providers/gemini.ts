@@ -78,6 +78,7 @@ import {
   writeSessionFile,
   writeSessionJson,
 } from './session-config.js';
+import type { ModelCatalogue } from './catalogue.js';
 import { BUILTIN_PROVIDER_DEFAULT_MODELS } from './ids.js';
 import { PROBE_DEFAULT_TIMEOUT_MS } from './probe.js';
 import type {
@@ -309,18 +310,30 @@ const GEMINI_CAPABILITIES: ProviderCapabilities = {
 };
 
 /**
- * Indicative catalogue, read off `@google/gemini-cli-core`'s
- * `config/models.js` (0.35.2). Aliases (`pro`, `flash`, `auto`) are valid input
- * too but are deliberately not listed — a stored alias would silently change
- * meaning under the operator when Google re-points it.
+ * Pinned floor, read off `@google/gemini-cli-core`'s `config/models.js`
+ * (0.35.2). Aliases (`pro`, `flash`, `auto`, and models.dev's `*-latest` ids)
+ * are valid input too but are deliberately not listed — a stored alias would
+ * silently change meaning under the operator when Google re-points it. The live
+ * catalogue applies the same rule (`providers/catalogue.ts`), which is why its
+ * gemini filter excludes `*-latest` while its ANTHROPIC filter deliberately
+ * prefers the undated id: an undated Anthropic id is version-stable, a Google
+ * `-latest` one is not.
  */
 const GEMINI_MODELS: readonly ProviderModel[] = [
-  { value: 'gemini-3-pro-preview', label: 'Gemini 3 Pro (preview)' },
-  { value: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro (preview)' },
-  { value: 'gemini-3-flash-preview', label: 'Gemini 3 Flash (preview)' },
-  { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro' },
-  { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash' },
-  { value: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash-Lite' },
+  { value: 'gemini-3.5-flash-lite', label: 'Gemini 3.5 Flash Lite (gemini-3.5-flash-lite)' },
+  { value: 'gemini-3.6-flash', label: 'Gemini 3.6 Flash (gemini-3.6-flash)' },
+  { value: 'gemini-3.5-flash', label: 'Gemini 3.5 Flash (gemini-3.5-flash)' },
+  { value: 'gemini-3.1-flash-lite', label: 'Gemini 3.1 Flash Lite (gemini-3.1-flash-lite)' },
+  { value: 'gemini-3.1-flash-lite-preview', label: 'Gemini 3.1 Flash Lite Preview (gemini-3.1-flash-lite-preview)' },
+  { value: 'gemini-3.1-pro-preview', label: 'Gemini 3.1 Pro Preview (gemini-3.1-pro-preview)' },
+  { value: 'gemini-3.1-pro-preview-customtools', label: 'Gemini 3.1 Pro Preview Custom Tools (gemini-3.1-pro-preview-customtools)' },
+  { value: 'gemini-3-flash-preview', label: 'Gemini 3 Flash Preview (gemini-3-flash-preview)' },
+  { value: 'gemini-3-pro-preview', label: 'Gemini 3 Pro Preview (gemini-3-pro-preview)' },
+  { value: 'gemini-2.5-flash', label: 'Gemini 2.5 Flash (gemini-2.5-flash)' },
+  { value: 'gemini-2.5-flash-lite', label: 'Gemini 2.5 Flash-Lite (gemini-2.5-flash-lite)' },
+  { value: 'gemini-2.5-pro', label: 'Gemini 2.5 Pro (gemini-2.5-pro)' },
+  { value: 'gemini-2.0-flash', label: 'Gemini 2.0 Flash (gemini-2.0-flash)' },
+  { value: 'gemini-2.0-flash-lite', label: 'Gemini 2.0 Flash-Lite (gemini-2.0-flash-lite)' },
 ];
 
 // ---------------------------------------------------------------------------
@@ -491,6 +504,9 @@ export class GeminiProvider implements AgentProvider {
   private readonly _spawnSync: ProbeSpawnSync;
   private readonly _hostExec: ProbeHostExec;
 
+  /** Live catalogue, or `null` for "pins only". See `useCatalogue`. */
+  private _catalogue: ModelCatalogue | null = null;
+
   constructor(config?: Config, deps: GeminiProviderDeps = {}) {
     this.hostDir = config?.hostGeminiDir ?? null;
     this.authTypeOverride = config?.geminiAuthType ?? null;
@@ -498,15 +514,22 @@ export class GeminiProvider implements AgentProvider {
     this._hostExec = deps.hostExec ?? nodeHostExec;
   }
 
+  /** Late-bound live catalogue — see `ClaudeProvider.useCatalogue`. */
+  useCatalogue(catalogue: ModelCatalogue | null): void {
+    this._catalogue = catalogue;
+  }
+
   models(): readonly ProviderModel[] {
-    return GEMINI_MODELS;
+    return this._catalogue?.models('gemini', GEMINI_MODELS) ?? GEMINI_MODELS;
   }
 
   defaults(): { model: string; effort: EffortLevel; permissionMode: PermissionMode } {
     // `effort` is inert for this provider (capabilities.effort === false); the
     // value is carried so the shared session plumbing keeps one shape.
     return {
-      model: BUILTIN_PROVIDER_DEFAULT_MODELS.gemini,
+      model:
+        this._catalogue?.defaultModel('gemini', BUILTIN_PROVIDER_DEFAULT_MODELS.gemini) ??
+        BUILTIN_PROVIDER_DEFAULT_MODELS.gemini,
       effort: 'high',
       permissionMode: 'bypassPermissions',
     };

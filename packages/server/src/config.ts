@@ -51,6 +51,31 @@ export interface Config {
    * default provider understands, never an unrelated vendor's.
    */
   defaultModel: string;
+  /**
+   * Did the OPERATOR name that model, or is it merely the built-in floor?
+   *
+   * Load-bearing, and the whole reason the live catalogue is reachable at all.
+   * `defaultModel` is never empty, so the `'config'` layer that
+   * `POST /orchestrators` and `plugins/api.ts` build always named a model, and
+   * `pickScoped` (`providers/resolve.ts:131-146`) accepts it as soon as the
+   * layer belongs to the running provider — which is true BY CONSTRUCTION for
+   * the instance's own default provider. So `own.model` (`resolve.ts:161`, the
+   * adapter's `defaults()`) was unreachable on the API path for a claude team on
+   * a claude instance, and an adapter that resolved a newer model would have
+   * been ignored: `GET /providers` would advertise `claude-opus-5` while
+   * `POST /orchestrators` created the team on `claude-opus-4-8`.
+   *
+   * The browser did not show the bug — `NewOrchestratorDialog.tsx:171` puts
+   * `defaultModelFor(provider)` in the submitted body, i.e. in layer 0 — which
+   * is exactly what made it a two-answers-for-one-question defect rather than a
+   * visible one.
+   *
+   * So: the config layer names a model only when an operator actually wrote one.
+   * `defaultModel` keeps its old meaning for every other reader (docs, the UI's
+   * "what will I get?" copy) and for the `SWARM_OS_DEFAULT_PROVIDER=codex`
+   * coherence guarantee above.
+   */
+  defaultModelExplicit: boolean;
   defaultEffort: EffortLevel;
   defaultPermissionMode: PermissionMode;
   /**
@@ -558,6 +583,11 @@ export function loadConfig(): Config {
   // validated (`docs/providers.md`: ids ship faster than our releases).
   const defaultModel =
     process.env.SWARM_OS_DEFAULT_MODEL ?? BUILTIN_PROVIDER_DEFAULT_MODELS[defaultProvider];
+  // Whether the value above came from the operator or from the built-in floor.
+  // See `Config.defaultModelExplicit`: an empty string counts as UNSET, because
+  // `providers/resolve.ts` already treats `''` as "named nothing" and the two
+  // must not disagree about what an empty env var means.
+  const defaultModelExplicit = (process.env.SWARM_OS_DEFAULT_MODEL ?? '').length > 0;
 
   const maxOrchestrators = intEnv('SWARM_OS_MAX_ORCHESTRATORS', 10);
   const maxPromptSizeKb = intEnv('SWARM_OS_MAX_PROMPT_SIZE_KB', 64);
@@ -774,6 +804,7 @@ export function loadConfig(): Config {
     mcpPort,
     projectName,
     defaultModel,
+    defaultModelExplicit,
     defaultEffort,
     defaultPermissionMode,
     defaultProvider,
