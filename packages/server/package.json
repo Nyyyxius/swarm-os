@@ -15,7 +15,8 @@
     "verify:phase2": "tsx scripts/verify-phase-2.ts",
     "verify:phase3": "tsx scripts/verify-phase-3.ts",
     "verify:phase4": "tsx scripts/verify-phase-4.ts",
-    "verify:phase5": "tsx scripts/verify-phase-5.ts"
+    "verify:phase5": "tsx scripts/verify-phase-5.ts",
+    "test": "vitest run"
   },
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.29.0",

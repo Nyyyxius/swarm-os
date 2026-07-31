@@ -30,6 +30,14 @@ import type { Database as Db } from 'better-sqlite3';
 import { withModule } from '../../logger.js';
 import type { SwarmDb } from '../db/index.js';
 import type { SwarmEventBus } from '../../events.js';
+import {
+  type EmbeddingProvider,
+  type EmbeddingCapabilities,
+  HashingEmbeddingProvider,
+  cosineSimilarity,
+  encodeVector,
+  decodeVector,
+} from './embeddings.js';
 
 const log = withModule('memory.store');
 
@@ -110,7 +118,17 @@ export interface SearchHit {
   type: string;
   snippet: string;
   score: number;
+  /**
+   * Which engine surfaced this hit (Phase 5, additive/optional). `fts` = exact
+   * full-text; `semantic` = embedding cosine. In `hybrid` mode a hit found by
+   * both is tagged `fts` (the lexical match is the stronger signal to show);
+   * hits only the embeddings found are tagged `semantic`.
+   */
+  via?: 'fts' | 'semantic';
 }
+
+/** Search entry point — `text` (FTS), `semantic` (embeddings), or `hybrid`. */
+export type SearchMode = 'text' | 'semantic' | 'hybrid';
 
 export interface MemoryGraph {
   nodes: GraphNode[];
@@ -156,6 +174,23 @@ interface NodeRow {
   version: number;
   body: string;
   metadata: string | null;
+}
+
+interface VectorRow {
+  name: string;
+  dim: number;
+  model: string;
+  vector: Buffer;
+  updated_at: number;
+}
+
+interface VectorJoinRow {
+  name: string;
+  description: string;
+  type: string;
+  body: string;
+  vector: Buffer;
+  dim: number;
 }
 
 interface ParsedNote {
@@ -387,6 +422,20 @@ export class MemoryStore {
   private readonly db: Db;
   private readonly vaultDir: string;
   private readonly eventBus: SwarmEventBus | null;
+  private readonly embeddings: EmbeddingProvider;
+
+  // Non-blocking embedding pipeline: upsert/reindex enqueue a name here and a
+  // single background drainer computes + stores the vector. A note write NEVER
+  // waits on (or fails because of) embedding — see `enqueueEmbed`.
+  private readonly embedQueue = new Set<string>();
+  private embedDraining: Promise<void> | null = null;
+
+  private readonly getVectorStmt;
+  private readonly upsertVectorStmt;
+  private readonly deleteVectorStmt;
+  private readonly listVectorsStmt;
+  private readonly listVectorsByTypeStmt;
+  private readonly missingVectorsStmt;
 
   private readonly getNodeStmt;
   private readonly upsertNodeStmt;
@@ -404,10 +453,16 @@ export class MemoryStore {
   private readonly inEdgesStmt;
   private readonly allEdgesStmt;
 
-  constructor(swarmDb: SwarmDb, opts: { dataDir: string; eventBus?: SwarmEventBus }) {
+  constructor(
+    swarmDb: SwarmDb,
+    opts: { dataDir: string; eventBus?: SwarmEventBus; embeddings?: EmbeddingProvider },
+  ) {
     this.db = swarmDb.db;
     this.vaultDir = path.join(opts.dataDir, 'memory');
     this.eventBus = opts.eventBus ?? null;
+    // Default to the safe local (deterministic, offline) provider so semantic
+    // search works out of the box and the server never depends on network.
+    this.embeddings = opts.embeddings ?? new HashingEmbeddingProvider();
 
     try {
       fs.mkdirSync(this.vaultDir, { recursive: true });
@@ -438,6 +493,17 @@ export class MemoryStore {
       );
       CREATE INDEX IF NOT EXISTS idx_memory_edges_dst ON memory_edges(dst);
       CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(name, description, body);
+      -- Phase 5 semantic index. Vectors are DERIVED from the notes (name +
+      -- description + body) and live ONLY here — never written into the .md
+      -- source of truth. model/dim let a provider change re-derive stale
+      -- vectors on the next boot. Same ownership pattern as the tables above.
+      CREATE TABLE IF NOT EXISTS memory_vectors (
+        name       TEXT PRIMARY KEY,
+        dim        INTEGER NOT NULL,
+        model      TEXT NOT NULL,
+        vector     BLOB NOT NULL,
+        updated_at INTEGER NOT NULL
+      );
     `);
     // Idempotent migration for instances whose `memory_edges` predates the
     // `origin` column (CREATE TABLE IF NOT EXISTS skips an existing table
@@ -500,7 +566,44 @@ export class MemoryStore {
       'SELECT src, dst, relation FROM memory_edges',
     );
 
+    this.getVectorStmt = this.db.prepare<[string], VectorRow>(
+      'SELECT name, dim, model, vector, updated_at FROM memory_vectors WHERE name = ?',
+    );
+    this.upsertVectorStmt = this.db.prepare<{
+      name: string;
+      dim: number;
+      model: string;
+      vector: Buffer;
+      updated_at: number;
+    }>(`
+      INSERT INTO memory_vectors (name, dim, model, vector, updated_at)
+      VALUES (@name, @dim, @model, @vector, @updated_at)
+      ON CONFLICT(name) DO UPDATE SET
+        dim = excluded.dim, model = excluded.model,
+        vector = excluded.vector, updated_at = excluded.updated_at
+    `);
+    this.deleteVectorStmt = this.db.prepare<[string]>('DELETE FROM memory_vectors WHERE name = ?');
+    this.listVectorsStmt = this.db.prepare<[], VectorJoinRow>(`
+      SELECT n.name AS name, n.description AS description, n.type AS type, n.body AS body,
+             v.vector AS vector, v.dim AS dim
+      FROM memory_vectors v JOIN memory_nodes n ON n.name = v.name
+    `);
+    this.listVectorsByTypeStmt = this.db.prepare<[string], VectorJoinRow>(`
+      SELECT n.name AS name, n.description AS description, n.type AS type, n.body AS body,
+             v.vector AS vector, v.dim AS dim
+      FROM memory_vectors v JOIN memory_nodes n ON n.name = v.name
+      WHERE n.type = ?
+    `);
+    // Nodes with no vector, or a vector from a different model/dim (stale) —
+    // re-embedded lazily so vectors stay re-derivable from the notes.
+    this.missingVectorsStmt = this.db.prepare<[string, number], { name: string }>(`
+      SELECT n.name AS name
+      FROM memory_nodes n LEFT JOIN memory_vectors v ON v.name = n.name
+      WHERE v.name IS NULL OR v.model != ? OR v.dim != ?
+    `);
+
     this.reindexVault();
+    this.backfillEmbeddings();
   }
 
   // --- helpers --------------------------------------------------------------
@@ -721,6 +824,9 @@ export class MemoryStore {
     })();
 
     this.emit(existing ? 'memory.node_updated' : 'memory.node_created', input.name, type);
+    // Embedding is computed OUT of band — the write already succeeded and must
+    // not wait on (or be failed by) the embedding provider.
+    this.enqueueEmbed(input.name);
     return { name: input.name, version };
   }
 
@@ -899,7 +1005,9 @@ export class MemoryStore {
         this.deleteNodeStmt.run(name);
         this.ftsDeleteStmt.run(name);
         this.deleteEdgesForNodeStmt.run(name, name);
+        this.deleteVectorStmt.run(name);
       })();
+      this.embedQueue.delete(name);
       try {
         fs.rmSync(this.fileFor(name), { force: true });
       } catch (err) {
@@ -911,6 +1019,218 @@ export class MemoryStore {
       log.warn({ event: 'memory.delete_failed', name, error: String(err) });
       return false;
     }
+  }
+
+  // --- semantic search (Phase 5) --------------------------------------------
+
+  /** What the active embedding provider offers — backs `/api/memory/capabilities`. */
+  embeddingInfo(): EmbeddingCapabilities {
+    return this.embeddings.capabilities();
+  }
+
+  /** True when semantic search is usable (provider is not `none`). */
+  private get semanticEnabled(): boolean {
+    return this.embeddings.kind !== 'none';
+  }
+
+  /** Enqueue a note for background (re)embedding. Non-blocking, never throws. */
+  private enqueueEmbed(name: string): void {
+    if (!this.semanticEnabled) return;
+    this.embedQueue.add(name);
+    this.kickEmbedDrain();
+  }
+
+  /** Enqueue every node lacking an up-to-date vector (stale model/dim or none). */
+  private backfillEmbeddings(): void {
+    if (!this.semanticEnabled) return;
+    try {
+      const rows = this.missingVectorsStmt.all(this.embeddings.model, this.embeddings.dim);
+      for (const r of rows) this.embedQueue.add(r.name);
+      if (rows.length > 0) this.kickEmbedDrain();
+    } catch (err) {
+      log.warn({ event: 'memory.embed_backfill_failed', error: String(err) });
+    }
+  }
+
+  /** Start the single background drainer if one is not already running. */
+  private kickEmbedDrain(): void {
+    if (this.embedDraining) return;
+    this.embedDraining = this.drainEmbedQueue().finally(() => {
+      this.embedDraining = null;
+    });
+  }
+
+  /** Process the queue one note at a time. Each failure is isolated + logged. */
+  private async drainEmbedQueue(): Promise<void> {
+    while (this.embedQueue.size > 0) {
+      const name = this.embedQueue.values().next().value as string;
+      this.embedQueue.delete(name);
+      await this.embedNode(name);
+    }
+  }
+
+  /** Compute + persist one note's vector. Never throws (logs on failure). */
+  private async embedNode(name: string): Promise<void> {
+    try {
+      if (!this.semanticEnabled) return;
+      const row = this.getNodeStmt.get(name);
+      if (!row) return; // deleted meanwhile
+      const text = `${row.name}\n${row.description}\n${row.body}`;
+      const vec = await this.embeddings.embedOne(text);
+      if (!vec || vec.length === 0) return; // failed — leave prior/absent vector
+      this.upsertVectorStmt.run({
+        name,
+        dim: vec.length,
+        model: this.embeddings.model,
+        vector: encodeVector(vec),
+        updated_at: Date.now(),
+      });
+    } catch (err) {
+      log.warn({ event: 'memory.embed_node_failed', name, error: String(err) });
+    }
+  }
+
+  /**
+   * Wait for the background embedding queue to settle. FOR TESTS and for callers
+   * that want vectors present before searching; production search does not need
+   * it (it just ranks whatever vectors exist so far).
+   */
+  async flushEmbeddings(): Promise<void> {
+    while (this.embedDraining) await this.embedDraining;
+  }
+
+  /** A short snippet from the body around the first query token (else the head). */
+  private snippetFor(body: string, tokens: string[]): string {
+    const text = (body ?? '').replace(/\s+/g, ' ').trim();
+    if (text.length === 0) return '';
+    const lower = text.toLowerCase();
+    let at = -1;
+    for (const t of tokens) {
+      const i = lower.indexOf(t);
+      if (i >= 0 && (at < 0 || i < at)) at = i;
+    }
+    const start = at < 0 ? 0 : Math.max(0, at - 30);
+    const slice = text.slice(start, start + 160);
+    return (start > 0 ? '…' : '') + slice + (start + 160 < text.length ? '…' : '');
+  }
+
+  /**
+   * Embedding-ranked search: embed the query, rank candidate vectors by cosine.
+   * Returns `[]` (never throws) when semantic is unavailable, the query is
+   * empty, or the query cannot be embedded — the caller then falls back to FTS.
+   */
+  async searchSemantic(
+    query: string,
+    opts: { limit?: number; type?: string | null } = {},
+  ): Promise<SearchHit[]> {
+    try {
+      if (!this.semanticEnabled) return [];
+      const q = (query ?? '').trim();
+      if (q.length === 0) return [];
+      const cap = Math.max(1, Math.min(100, Math.floor(opts.limit ?? 20) || 20));
+      const qv = await this.embeddings.embedOne(q);
+      if (!qv || qv.length === 0) return [];
+
+      const tokens = q.toLowerCase().match(/[\p{L}\p{N}_]+/gu) ?? [];
+      const rows = opts.type
+        ? this.listVectorsByTypeStmt.all(opts.type)
+        : this.listVectorsStmt.all();
+
+      const scored: Array<{ row: VectorJoinRow; sim: number }> = [];
+      for (const row of rows) {
+        if (row.dim !== qv.length) continue; // skip vectors from another model
+        const sim = cosineSimilarity(qv, decodeVector(row.vector));
+        if (sim > 0) scored.push({ row, sim });
+      }
+      scored.sort((a, b) => b.sim - a.sim);
+      return scored.slice(0, cap).map(({ row, sim }) => ({
+        name: row.name,
+        description: row.description,
+        type: row.type,
+        snippet: this.snippetFor(row.body, tokens),
+        score: Math.round(sim * 1000) / 1000,
+        via: 'semantic' as const,
+      }));
+    } catch (err) {
+      log.warn({ event: 'memory.search_semantic_failed', error: String(err) });
+      return [];
+    }
+  }
+
+  /**
+   * Hybrid search: fuse the FTS and semantic rankings with Reciprocal Rank
+   * Fusion (RRF, k=60). A note surfaced by BOTH is boosted and tagged `fts`
+   * (the exact match is the stronger signal); a note only embeddings found is
+   * tagged `semantic`. Degrades to plain FTS when semantic is unavailable.
+   */
+  async searchHybrid(
+    query: string,
+    opts: { limit?: number; type?: string | null } = {},
+  ): Promise<SearchHit[]> {
+    const cap = Math.max(1, Math.min(100, Math.floor(opts.limit ?? 20) || 20));
+    const pool = Math.max(cap, 20);
+    const ftsHits = this.search(query, opts.type ?? null, pool);
+    if (!this.semanticEnabled) {
+      return ftsHits.slice(0, cap).map((h) => ({ ...h, via: 'fts' as const }));
+    }
+    const semHits = await this.searchSemantic(query, { limit: pool, type: opts.type ?? null });
+
+    const K = 60;
+    interface Fused {
+      hit: SearchHit;
+      rrf: number;
+      via: 'fts' | 'semantic';
+    }
+    const acc = new Map<string, Fused>();
+    ftsHits.forEach((h, i) => {
+      acc.set(h.name, { hit: h, rrf: 1 / (K + i + 1), via: 'fts' });
+    });
+    semHits.forEach((h, i) => {
+      const cur = acc.get(h.name);
+      const add = 1 / (K + i + 1);
+      if (cur) {
+        cur.rrf += add; // present in both — boost, keep `fts` tag + its snippet
+      } else {
+        acc.set(h.name, { hit: h, rrf: add, via: 'semantic' });
+      }
+    });
+
+    return [...acc.values()]
+      .sort((a, b) => b.rrf - a.rrf)
+      .slice(0, cap)
+      .map(({ hit, rrf, via }) => ({
+        name: hit.name,
+        description: hit.description,
+        type: hit.type,
+        snippet: hit.snippet,
+        score: Math.round(rrf * 100000) / 100000,
+        via,
+      }));
+  }
+
+  /** Unified entry: dispatch by mode. `text` is sync-fast; the others await. */
+  async runSearch(
+    query: string,
+    opts: { mode?: SearchMode; limit?: number; type?: string | null } = {},
+  ): Promise<SearchHit[]> {
+    const mode = opts.mode ?? 'text';
+    if (mode === 'semantic') {
+      const hits = await this.searchSemantic(query, { limit: opts.limit, type: opts.type ?? null });
+      // Graceful fallback: if semantic yields nothing usable, return FTS so the
+      // caller/UI is never left empty-handed by an unconfigured backend.
+      if (hits.length > 0 || this.semanticEnabled) return hits;
+      return this.search(query, opts.type ?? null, opts.limit ?? 20).map((h) => ({
+        ...h,
+        via: 'fts' as const,
+      }));
+    }
+    if (mode === 'hybrid') {
+      return this.searchHybrid(query, { limit: opts.limit, type: opts.type ?? null });
+    }
+    return this.search(query, opts.type ?? null, opts.limit ?? 20).map((h) => ({
+      ...h,
+      via: 'fts' as const,
+    }));
   }
 }
 

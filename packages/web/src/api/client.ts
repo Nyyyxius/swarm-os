@@ -798,6 +798,9 @@ export interface GraphEdge {
   relation?: string;
 }
 
+/** Search engine for `GET /api/memory/search?mode=`. */
+export type MemorySearchMode = 'text' | 'semantic' | 'hybrid';
+
 /** One hit of `GET /api/memory/search`. */
 export interface SearchHit {
   name: string;
@@ -805,6 +808,30 @@ export interface SearchHit {
   type: MemoryNoteType;
   snippet: string;
   score: number;
+  /**
+   * Phase 5 — which engine surfaced this hit. Optional on the wire: a server
+   * that predates semantic search omits it, and the UI treats absent as `fts`.
+   */
+  via?: 'fts' | 'semantic';
+}
+
+/**
+ * `GET /api/memory/capabilities` — mirror of the server's `EmbeddingCapabilities`
+ * (`modules/memory/embeddings.ts`). Lets the UI decide whether to offer the
+ * semantic / hybrid toggle, and label it honestly when it is the degraded local
+ * fallback. Absent endpoint (404) is treated by the caller as "no semantic".
+ */
+export interface MemoryCapabilities {
+  /** Is semantic search usable at all (provider !== 'none')? */
+  semantic: boolean;
+  /** True when backed by the local hash fallback — a real ranking, not model meaning. */
+  degraded: boolean;
+  /** Active provider kind (`hash` | `api` | `none`). */
+  provider: string;
+  /** Model identifier behind the vectors. */
+  model: string;
+  /** Vector dimension (0 when disabled). */
+  dim: number;
 }
 
 /** Body of `PUT /api/memory/:name`. */
@@ -1264,11 +1291,25 @@ export const api = {
   /** Nodes + edges for the graph canvas. */
   getMemoryGraph: () =>
     request<{ nodes: GraphNode[]; edges: GraphEdge[] }>('GET', '/api/memory/graph'),
-  /** FTS-ranked search. `type` filters by note type; `limit` caps results. */
-  searchMemory: (q: string, opts: { type?: string; limit?: number } = {}) => {
+  /**
+   * Embedding capabilities — drives the search-mode toggle. 404 on a server
+   * predating Phase 5; the caller treats that as "semantic unavailable".
+   */
+  getMemoryCapabilities: () =>
+    request<MemoryCapabilities>('GET', '/api/memory/capabilities'),
+  /**
+   * Ranked search. `mode` selects the engine (`text` default = exact FTS;
+   * `semantic` = embedding cosine; `hybrid` = fuse both). `type` filters by note
+   * type; `limit` caps results.
+   */
+  searchMemory: (
+    q: string,
+    opts: { type?: string; limit?: number; mode?: MemorySearchMode } = {},
+  ) => {
     const qs = new URLSearchParams({ q });
     if (opts.type) qs.set('type', opts.type);
     if (opts.limit != null) qs.set('limit', String(opts.limit));
+    if (opts.mode) qs.set('mode', opts.mode);
     return request<{ results: SearchHit[] }>('GET', `/api/memory/search?${qs.toString()}`);
   },
   /** Distinct relation labels currently in use (for typed-relation UI). */

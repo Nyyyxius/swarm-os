@@ -25,6 +25,8 @@ import {
   HttpError,
   type MemoryNote,
   type MemoryNoteType,
+  type MemoryCapabilities,
+  type MemorySearchMode,
   type SearchHit,
 } from '../api/client';
 import MarkdownView from './memory/MarkdownView';
@@ -61,6 +63,34 @@ export function MemoryPage({ open, onClose }: Props) {
   const [search, setSearch] = useState('');
   const [results, setResults] = useState<SearchHit[] | null>(null);
   const [searching, setSearching] = useState(false);
+  const [mode, setMode] = useState<MemorySearchMode>('text');
+
+  // ── embedding capabilities (drives the mode toggle) ─────────────────────
+  const [caps, setCaps] = useState<MemoryCapabilities | null>(null);
+  // Semantic is offered when the backend reports it; a 404 / error leaves caps
+  // null and the toggle stays text-only (graceful degradation).
+  const semanticAvailable = caps?.semantic === true;
+
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    api
+      .getMemoryCapabilities()
+      .then((c) => {
+        if (!cancelled) setCaps(c);
+      })
+      .catch(() => {
+        if (!cancelled) setCaps(null);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open]);
+
+  // If semantic becomes unavailable while a non-text mode is selected, snap back.
+  useEffect(() => {
+    if (!semanticAvailable && mode !== 'text') setMode('text');
+  }, [semanticAvailable, mode]);
 
   // ── selected note ──────────────────────────────────────────────────────
   const [selectedName, setSelectedName] = useState<string | null>(null);
@@ -115,10 +145,10 @@ export function MemoryPage({ open, onClose }: Props) {
       return;
     }
     setSearching(true);
+    let cancelled = false;
     const t = setTimeout(() => {
-      let cancelled = false;
       api
-        .searchMemory(q, { limit: 30 })
+        .searchMemory(q, { limit: 30, mode })
         .then((r) => {
           if (!cancelled) {
             setResults(r.results);
@@ -131,12 +161,12 @@ export function MemoryPage({ open, onClose }: Props) {
             setSearching(false);
           }
         });
-      return () => {
-        cancelled = true;
-      };
     }, 250);
-    return () => clearTimeout(t);
-  }, [search, open, memoryRev]);
+    return () => {
+      cancelled = true;
+      clearTimeout(t);
+    };
+  }, [search, open, memoryRev, mode]);
 
   // Load the full note whenever the selection (or a reload trigger) changes.
   useEffect(() => {
@@ -326,6 +356,56 @@ export function MemoryPage({ open, onClose }: Props) {
             placeholder="search notes…"
             aria-label="search memory notes"
           />
+          <div
+            className="mem-mode"
+            role="group"
+            aria-label="search mode"
+            style={{ display: 'flex', gap: 4, marginTop: 6 }}
+          >
+            {(['text', 'semantic', 'hybrid'] as MemorySearchMode[]).map((m) => {
+              const disabled = m !== 'text' && !semanticAvailable;
+              const title = disabled
+                ? 'semantic search unavailable — no embedding provider configured on this server'
+                : m === 'semantic'
+                  ? caps?.degraded
+                    ? 'rank by meaning (local fallback embeddings)'
+                    : `rank by meaning (${caps?.model ?? 'embeddings'})`
+                  : m === 'hybrid'
+                    ? 'fuse full-text + semantic'
+                    : 'exact full-text search';
+              return (
+                <button
+                  key={m}
+                  type="button"
+                  className={`mem-mode-btn ${mode === m ? 'active' : ''}`}
+                  onClick={() => !disabled && setMode(m)}
+                  disabled={disabled}
+                  aria-pressed={mode === m}
+                  title={title}
+                  style={{
+                    flex: 1,
+                    padding: '3px 6px',
+                    fontSize: 10,
+                    letterSpacing: 0.4,
+                    textTransform: 'uppercase',
+                    cursor: disabled ? 'not-allowed' : 'pointer',
+                    opacity: disabled ? 0.4 : 1,
+                    borderRadius: 3,
+                    border: '1px solid var(--border-strong, #444)',
+                    background: mode === m ? 'var(--amber, #ffb060)' : 'transparent',
+                    color: mode === m ? '#000' : 'var(--fg, #ccc)',
+                  }}
+                >
+                  {m}
+                </button>
+              );
+            })}
+          </div>
+          {mode === 'semantic' && caps?.degraded && (
+            <div className="field-help" style={{ fontSize: 10, marginTop: 4, opacity: 0.7 }}>
+              local fallback embeddings — lexical ranking, not model meaning
+            </div>
+          )}
         </div>
 
         <div className="roles-list">
@@ -361,6 +441,27 @@ export function MemoryPage({ open, onClose }: Props) {
                   <div className="r-name">{h.name}</div>
                   <div className="r-id" style={{ color: accentForType(h.type) }}>
                     {String(h.type).toUpperCase()}
+                    {h.via && (
+                      <span
+                        className="mem-via"
+                        title={
+                          h.via === 'semantic'
+                            ? 'surfaced by semantic (embedding) search'
+                            : 'surfaced by full-text search'
+                        }
+                        style={{
+                          marginLeft: 6,
+                          fontSize: 9,
+                          padding: '0 4px',
+                          borderRadius: 3,
+                          border: '1px solid var(--border-strong, #444)',
+                          opacity: 0.75,
+                          color: h.via === 'semantic' ? 'var(--amber, #ffb060)' : 'inherit',
+                        }}
+                      >
+                        {h.via}
+                      </span>
+                    )}
                   </div>
                   {h.snippet && (
                     <div className="mem-snippet">{h.snippet}</div>

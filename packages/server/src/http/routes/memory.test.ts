@@ -161,4 +161,44 @@ describe('memory REST router', () => {
     expect((await del.json()) as { ok: boolean }).toEqual({ ok: true });
     expect((await fetch(`${base}/api/memory/searchable`)).status).toBe(404);
   });
+
+  it('GET /api/memory/capabilities reports the (default local) embedding provider', async () => {
+    const caps = (await (await fetch(`${base}/api/memory/capabilities`)).json()) as {
+      semantic: boolean;
+      degraded: boolean;
+      provider: string;
+    };
+    // Default store (no injected provider) uses the local hash fallback.
+    expect(caps.semantic).toBe(true);
+    expect(caps.degraded).toBe(true);
+    expect(caps.provider).toBe('hash');
+  });
+
+  it('GET /api/memory/search?mode=semantic returns hits tagged via=semantic', async () => {
+    await fetch(`${base}/api/memory/dbnote`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ description: 'database schema', type: 'project', body: 'migrate the database schema' }),
+    });
+    // Give the background embedding a beat to settle (local provider is fast).
+    await store.flushEmbeddings();
+    const hits = (await (await fetch(`${base}/api/memory/search?q=database&mode=semantic`)).json()) as {
+      results: Array<{ name: string; via?: string }>;
+    };
+    expect(hits.results.map((r) => r.name)).toContain('dbnote');
+    expect(hits.results.find((r) => r.name === 'dbnote')?.via).toBe('semantic');
+  });
+
+  it('GET /api/memory/search?mode=hybrid still returns FTS matches', async () => {
+    await fetch(`${base}/api/memory/parsernote`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ description: 'the parser', type: 'project', body: 'tokenizer refactor' }),
+    });
+    await store.flushEmbeddings();
+    const hits = (await (await fetch(`${base}/api/memory/search?q=parser&mode=hybrid`)).json()) as {
+      results: Array<{ name: string; via?: string }>;
+    };
+    expect(hits.results.map((r) => r.name)).toContain('parsernote');
+  });
 });
