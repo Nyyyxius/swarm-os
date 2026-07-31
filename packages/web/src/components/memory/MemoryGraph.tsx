@@ -248,12 +248,39 @@ export default function MemoryGraph({ nodes, edges, selectedName, onSelect }: Pr
             const b = positions[e.to];
             if (!a || !b) return null;
             const active = selectedName === e.from || selectedName === e.to;
+            // Server omits `relation` for plain `[[wikilinks]]` (relation
+            // 'links'); anything present here is a typed relation worth labelling.
+            const typed = !!e.relation && e.relation !== 'links';
             return (
               <path
                 key={`E${i}`}
-                className={`mem-edge ${active ? 'active' : ''}`}
+                className={`mem-edge ${typed ? 'typed' : ''} ${active ? 'active' : ''}`}
                 d={curveBetween(a, b, 0.14)}
               />
+            );
+          })}
+        </g>
+
+        {/* Relation labels — drawn above the edges so they read on top. */}
+        <g>
+          {layout.edges.map((e, i) => {
+            if (!e.relation || e.relation === 'links') return null;
+            const a = positions[e.from];
+            const b = positions[e.to];
+            if (!a || !b) return null;
+            const mx = (a.x + b.x) / 2;
+            const my = (a.y + b.y) / 2;
+            const active = selectedName === e.from || selectedName === e.to;
+            const label = e.relation;
+            // Cheap width estimate for the readability backdrop (monospace 8px).
+            const w = label.length * 5.2 + 8;
+            return (
+              <g key={`L${i}`} transform={`translate(${mx}, ${my})`} pointerEvents="none">
+                <rect className="mem-edge-label-bg" x={-w / 2} y={-6} width={w} height={11} rx={2} />
+                <text className={`mem-edge-label ${active ? 'active' : ''}`} y={2.5}>
+                  {label}
+                </text>
+              </g>
             );
           })}
         </g>

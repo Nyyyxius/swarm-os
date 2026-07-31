@@ -11,6 +11,8 @@ import {
   parseNote,
   serializeNote,
   parseWikiLinks,
+  parseTypedLinks,
+  stripTypedLinks,
 } from './store.js';
 
 let dir: string;
@@ -48,6 +50,56 @@ describe('parseWikiLinks', () => {
       'beta',
     ]);
     expect(parseWikiLinks('no links here')).toEqual([]);
+  });
+});
+
+describe('parseTypedLinks', () => {
+  it('parses a whole-line Dataview field into a typed link', () => {
+    expect(parseTypedLinks('depends_on:: [[db-schema]]')).toEqual([
+      { relation: 'depends_on', target: 'db-schema' },
+    ]);
+  });
+
+  it('parses several targets on one field line, in order, respecting aliases', () => {
+    expect(parseTypedLinks('related:: [[a]], [[b|Bee]] and [[c]]')).toEqual([
+      { relation: 'related', target: 'a' },
+      { relation: 'related', target: 'b' },
+      { relation: 'related', target: 'c' },
+    ]);
+  });
+
+  it('parses a bracketed inline field mid-sentence (both [..] and (..))', () => {
+    expect(parseTypedLinks('this [supersedes:: [[old-plan]]] entirely')).toEqual([
+      { relation: 'supersedes', target: 'old-plan' },
+    ]);
+    expect(parseTypedLinks('note (blocks:: [[ship-it]]) here')).toEqual([
+      { relation: 'blocks', target: 'ship-it' },
+    ]);
+  });
+
+  it('ignores a scalar field (no wikilink value) and plain wikilinks', () => {
+    expect(parseTypedLinks('rating:: 5')).toEqual([]);
+    expect(parseTypedLinks('just a [[plain]] link, no relation')).toEqual([]);
+  });
+
+  it('de-duplicates identical (relation,target) pairs', () => {
+    expect(parseTypedLinks('uses:: [[x]]\nuses:: [[x]]')).toEqual([
+      { relation: 'uses', target: 'x' },
+    ]);
+  });
+});
+
+describe('stripTypedLinks', () => {
+  it('removes typed-field spans so their wikilinks are not counted as plain', () => {
+    const body = 'see [[plain]]\ndepends_on:: [[typed]]\nand [inline:: [[both]]] too';
+    const remaining = parseWikiLinks(stripTypedLinks(body));
+    expect(remaining).toEqual(['plain']); // typed + inline targets stripped out
+  });
+
+  it('leaves prose and scalar `key:: value` lines untouched', () => {
+    const body = 'rating:: 5\nplain prose with [[keep-me]]';
+    expect(stripTypedLinks(body)).toContain('rating:: 5');
+    expect(parseWikiLinks(stripTypedLinks(body))).toEqual(['keep-me']);
   });
 });
 
@@ -154,6 +206,38 @@ describe('MemoryStore.upsertNote', () => {
     expect(g.edges).toContainEqual({ from: 'beta', to: 'alpha' });
   });
 
+  it('derives TYPED edges from body Dataview fields and exposes out/inEdges', () => {
+    store.upsertNote({
+      name: 'alpha',
+      description: 'a',
+      type: 'project',
+      body: 'depends_on:: [[beta]]\n\nalso a plain [[gamma]] link',
+      createdBy: 's',
+      team: null,
+    });
+    const alpha = store.readNote('alpha');
+    // Plain string DTO stays intact (backward-compat) — covers both targets.
+    expect(alpha?.outLinks.sort()).toEqual(['beta', 'gamma']);
+    // Typed DTO carries the relation label per edge.
+    expect(alpha?.outEdges).toContainEqual({ to: 'beta', relation: 'depends_on' });
+    expect(alpha?.outEdges).toContainEqual({ to: 'gamma', relation: 'links' });
+
+    // The typed target is NOT double-counted as a plain `links` edge.
+    const betaEdges = alpha?.outEdges.filter((e) => e.to === 'beta') ?? [];
+    expect(betaEdges).toEqual([{ to: 'beta', relation: 'depends_on' }]);
+
+    // The graph surfaces the typed relation; plain links omit it.
+    const g = store.graph();
+    expect(g.edges).toContainEqual({ from: 'alpha', to: 'beta', relation: 'depends_on' });
+    expect(g.edges).toContainEqual({ from: 'alpha', to: 'gamma' });
+
+    // Back-links carry the relation too.
+    const beta = store.readNote('beta') ?? null; // dangling target has no row
+    expect(beta).toBeNull();
+    store.upsertNote({ name: 'beta', description: 'b', type: 'project', body: '', createdBy: 's', team: null });
+    expect(store.readNote('beta')?.inEdges).toContainEqual({ from: 'alpha', relation: 'depends_on' });
+  });
+
   it('re-derives edges on update: a removed link drops its edge', () => {
     store.upsertNote({ name: 'a', description: '', type: 'project', body: '[[b]] [[c]]', createdBy: 's', team: null });
     expect(store.readNote('a')?.outLinks.sort()).toEqual(['b', 'c']);
@@ -223,6 +307,24 @@ describe('MemoryStore.addLink / neighbors', () => {
     expect(n.nodes.map((nn) => nn.name).sort()).toEqual(['x', 'y']);
     expect(n.edges).toContainEqual({ from: 'x', to: 'y', relation: 'depends_on' });
   });
+
+  it('a MANUAL (addLink) edge survives a body re-derivation of the source note', () => {
+    store.upsertNote({ name: 'x', description: '', type: 'entity', body: 'v1', createdBy: 's', team: null });
+    store.upsertNote({ name: 'y', description: '', type: 'entity', body: '', createdBy: 's', team: null });
+    store.addLink('x', 'y', 'uses');
+    // Rewriting x's body re-derives its BODY edges but must not wipe the manual one.
+    store.upsertNote({ name: 'x', description: '', type: 'entity', body: 'v2 [[y]]', createdBy: 's', team: null });
+    const edges = store.readNote('x')?.outEdges ?? [];
+    expect(edges).toContainEqual({ to: 'y', relation: 'uses' }); // manual, preserved
+    expect(edges).toContainEqual({ to: 'y', relation: 'links' }); // freshly derived
+  });
+
+  it('listRelations reports distinct relation labels in use', () => {
+    store.upsertNote({ name: 'a', description: '', type: 'project', body: 'blocks:: [[b]]', createdBy: 's', team: null });
+    store.upsertNote({ name: 'b', description: '', type: 'project', body: '[[a]]', createdBy: 's', team: null });
+    store.addLink('a', 'b', 'uses');
+    expect(store.listRelations().sort()).toEqual(['blocks', 'links', 'uses']);
+  });
 });
 
 describe('MemoryStore.deleteNote', () => {
@@ -286,6 +388,42 @@ describe('MemoryStore boot reindex', () => {
     } finally {
       db2.close();
       fs.rmSync(dir2, { recursive: true, force: true });
+    }
+  });
+
+  it('re-derives TYPED body edges from disk on a fresh reindex (durability)', () => {
+    // A typed relation encoded in the body must round-trip through the markdown:
+    // a brand-new SQLite mirror rebuilt from the vault still has the typed edge.
+    const dir3 = fs.mkdtempSync(path.join(os.tmpdir(), 'memory-typed-reindex-'));
+    const db3 = new SwarmDb(dir3);
+    try {
+      fs.mkdirSync(path.join(dir3, 'memory'), { recursive: true });
+      const md = serializeNote({
+        name: 'plan',
+        description: 'the plan',
+        type: 'decision',
+        team: null,
+        createdBy: 'disk',
+        createdAtMs: Date.now(),
+        updatedAtMs: Date.now(),
+        version: 1,
+        metadata: {},
+        body: 'depends_on:: [[db-schema]]\n\nsee also [[appendix]]',
+      });
+      fs.writeFileSync(path.join(dir3, 'memory', 'plan.md'), md, 'utf8');
+
+      const store3 = new MemoryStore(db3, { dataDir: dir3 });
+      const note = store3.readNote('plan');
+      expect(note?.outEdges).toContainEqual({ to: 'db-schema', relation: 'depends_on' });
+      expect(note?.outEdges).toContainEqual({ to: 'appendix', relation: 'links' });
+      expect(store3.graph().edges).toContainEqual({
+        from: 'plan',
+        to: 'db-schema',
+        relation: 'depends_on',
+      });
+    } finally {
+      db3.close();
+      fs.rmSync(dir3, { recursive: true, force: true });
     }
   });
 });

@@ -1132,6 +1132,14 @@
   }
   .mem-edge { fill: none; stroke: var(--border-strong); stroke-width: 1; opacity: 0.55; }
   .mem-edge.active { stroke: var(--amber); opacity: 0.9; }
+  .mem-edge.typed { stroke-dasharray: 4 3; opacity: 0.7; }
+  .mem-edge-label {
+    text-anchor: middle; fill: var(--text-mute);
+    font-family: "Geist Mono", monospace; font-size: 8px; letter-spacing: 0.10em;
+    pointer-events: none;
+  }
+  .mem-edge-label.active { fill: var(--amber); }
+  .mem-edge-label-bg { fill: var(--bg); opacity: 0.72; }
 
   /* ── note panel ── */
   .mem-note-panel {
@@ -1203,6 +1211,26 @@
     padding: 3px 8px; border-radius: 2px;
   }
   .mem-chip:hover { color: var(--amber); border-color: var(--border-strong); }
+  /* typed relations */
+  .mem-rel-chip { display: inline-flex; align-items: baseline; gap: 5px; }
+  .mem-rel-tag {
+    font-family: "Geist Mono", monospace; font-size: 8px; letter-spacing: 0.12em;
+    color: var(--text-mute); text-transform: uppercase;
+  }
+  .mem-addrel { margin-top: 16px; display: grid; gap: 6px; }
+  .mem-addrel .k {
+    font-family: "Geist Mono", monospace; font-size: 9px; letter-spacing: 0.16em;
+    color: var(--text-mute);
+  }
+  .mem-addrel-row { display: flex; gap: 6px; flex-wrap: wrap; }
+  .mem-addrel-row input {
+    flex: 1 1 110px; min-width: 0; background: #0a0806; border: 1px solid var(--border);
+    color: var(--text); padding: 6px 8px; border-radius: 2px; outline: none;
+    font-family: "Geist Mono", monospace; font-size: 11px;
+  }
+  .mem-addrel-row input:focus { border-color: var(--border-strong); }
+  .mem-addrel-row .btn { flex: 0 0 auto; }
+  .mem-addrel-hint { font-size: 10px; color: var(--text-mute); line-height: 1.4; }
 
   /* ── rendered markdown (MarkdownView) ── */
   .md-body { font-family: "Geist", sans-serif; font-size: 12.5px; line-height: 1.6; color: var(--text-dim); }
