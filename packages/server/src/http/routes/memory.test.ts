@@ -113,6 +113,38 @@ describe('memory REST router', () => {
     expect(graph.edges).toContainEqual({ from: 'a', to: 'b' });
   });
 
+  it('exposes typed body edges (relation) in the note DTO, graph and /relations', async () => {
+    const put = await fetch(`${base}/api/memory/plan`, {
+      method: 'PUT',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({
+        description: 'the plan',
+        type: 'decision',
+        body: 'depends_on:: [[db-schema]]\n\nsee [[appendix]]',
+      }),
+    });
+    expect(put.status).toBe(200);
+    const note = (await put.json()) as {
+      outEdges: Array<{ to: string; relation: string }>;
+      outLinks: string[];
+    };
+    expect(note.outLinks.sort()).toEqual(['appendix', 'db-schema']);
+    expect(note.outEdges).toContainEqual({ to: 'db-schema', relation: 'depends_on' });
+    expect(note.outEdges).toContainEqual({ to: 'appendix', relation: 'links' });
+
+    const graph = (await (await fetch(`${base}/api/memory/graph`)).json()) as {
+      edges: Array<{ from: string; to: string; relation?: string }>;
+    };
+    expect(graph.edges).toContainEqual({ from: 'plan', to: 'db-schema', relation: 'depends_on' });
+    expect(graph.edges).toContainEqual({ from: 'plan', to: 'appendix' });
+
+    const rel = (await (await fetch(`${base}/api/memory/relations`)).json()) as {
+      relations: string[];
+    };
+    expect(rel.relations).toContain('depends_on');
+    expect(rel.relations).toContain('links');
+  });
+
   it('GET /api/memory/search returns ranked hits; DELETE removes the note', async () => {
     await fetch(`${base}/api/memory/searchable`, {
       method: 'PUT',

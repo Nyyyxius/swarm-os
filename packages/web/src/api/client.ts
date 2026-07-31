@@ -758,6 +758,18 @@ export interface MemoryNoteMeta {
   version: number;
 }
 
+/** A directed out-edge with its relation label (`links` = plain wikilink). */
+export interface MemoryOutEdge {
+  to: string;
+  relation: string;
+}
+
+/** A directed in-edge (back-link) with its relation label. */
+export interface MemoryInEdge {
+  from: string;
+  relation: string;
+}
+
 /** A full note — `GET /api/memory/:name`. */
 export interface MemoryNote extends MemoryNoteMeta {
   /** Markdown body (below the frontmatter). */
@@ -766,6 +778,10 @@ export interface MemoryNote extends MemoryNoteMeta {
   outLinks: string[];
   /** Names that link into this note (back-links). */
   inLinks: string[];
+  /** Typed out-edges: one per (target, relation). Mirrors the server DTO. */
+  outEdges: MemoryOutEdge[];
+  /** Typed in-edges (back-links): one per (source, relation). */
+  inEdges: MemoryInEdge[];
 }
 
 /** One node of `GET /api/memory/graph`. */
@@ -1255,6 +1271,9 @@ export const api = {
     if (opts.limit != null) qs.set('limit', String(opts.limit));
     return request<{ results: SearchHit[] }>('GET', `/api/memory/search?${qs.toString()}`);
   },
+  /** Distinct relation labels currently in use (for typed-relation UI). */
+  listMemoryRelations: () =>
+    request<{ relations: string[] }>('GET', '/api/memory/relations'),
   /** Full note (body + links). 404 when the note does not exist. */
   getMemoryNote: (name: string) =>
     request<MemoryNote>('GET', `/api/memory/${encodeURIComponent(name)}`),

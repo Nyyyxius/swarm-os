@@ -17,6 +17,7 @@ import {
  * Endpoints:
  *   GET    /api/memory                 -> { notes: MemoryNoteMeta[] }
  *   GET    /api/memory/graph           -> { nodes: GraphNode[], edges: GraphEdge[] }
+ *   GET    /api/memory/relations       -> { relations: string[] }
  *   GET    /api/memory/search?q=&type=&limit= -> { results: SearchHit[] }
  *   GET    /api/memory/:name           -> MemoryNote (404 if absent)
  *   PUT    /api/memory/:name           -> MemoryNote (409 on version conflict)
@@ -38,6 +39,12 @@ export function createMemoryRouter(memory: MemoryStore): Router {
   // Whole graph — declared BEFORE `/:name` so it isn't captured as a note name.
   router.get('/api/memory/graph', (_req: Request, res: Response) => {
     res.json(memory.graph());
+  });
+
+  // Distinct relation labels in use — declared BEFORE `/:name`. Handy for the UI
+  // (relation autocomplete) and additive: no existing endpoint changes shape.
+  router.get('/api/memory/relations', (_req: Request, res: Response) => {
+    res.json({ relations: memory.listRelations() });
   });
 
   // FTS search. `q` is the query; `type` narrows; `limit` caps (default 20).

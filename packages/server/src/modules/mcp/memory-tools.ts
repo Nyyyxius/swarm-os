@@ -72,7 +72,7 @@ export function registerMemoryTools(server: McpServer, ctxResolver: () => ToolCo
     {
       title: 'Read one note from the shared memory',
       description:
-        'Fetch a full note by `name`: its body (markdown with `[[wikilinks]]`), metadata and its neighbours (`outLinks` / `inLinks`). Returns `{ found: false }` when the note does not exist.',
+        'Fetch a full note by `name`: its body (markdown with `[[wikilinks]]`), metadata and its neighbours. `outLinks`/`inLinks` are the plain de-duplicated neighbour names; `outEdges`/`inEdges` add the RELATION label of each edge (`links` = plain wikilink, anything else = a typed relation such as `depends_on`). Returns `{ found: false }` when the note does not exist.',
       inputSchema: {
         name: z.string().min(1),
       },
@@ -91,6 +91,8 @@ export function registerMemoryTools(server: McpServer, ctxResolver: () => ToolCo
             body: z.string(),
             outLinks: z.array(z.string()),
             inLinks: z.array(z.string()),
+            outEdges: z.array(z.object({ to: z.string(), relation: z.string() })),
+            inEdges: z.array(z.object({ from: z.string(), relation: z.string() })),
           })
           .optional(),
       },
@@ -167,7 +169,7 @@ export function registerMemoryTools(server: McpServer, ctxResolver: () => ToolCo
     {
       title: 'Add a typed edge between two notes',
       description:
-        'Create a directed edge `from` → `to` in the knowledge graph, with an optional `relation` label (defaults to "related"). Wikilinks in a body already create edges; use this for typed relations you want without editing the body.',
+        'Create a directed edge `from` → `to` in the knowledge graph, with an optional `relation` label (defaults to "related"). This edge lives only in the index (not re-derivable from any file), so it survives edits but NOT a from-scratch reindex. For a DURABLE typed relation, encode it in the source note body instead — a Dataview inline field `relation:: [[target]]` (e.g. `depends_on:: [[db-schema]]`) becomes a typed edge that round-trips through the markdown. Plain `[[wikilinks]]` remain relation="links".',
       inputSchema: {
         from: z.string().min(1),
         to: z.string().min(1),

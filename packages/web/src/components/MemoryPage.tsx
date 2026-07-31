@@ -29,6 +29,7 @@ import {
 } from '../api/client';
 import MarkdownView from './memory/MarkdownView';
 import MemoryGraph, { accentForType } from './memory/MemoryGraph';
+import { appendTypedLink, typedLinkLine } from '../lib/wikilinks';
 
 interface Props {
   open: boolean;
@@ -77,8 +78,32 @@ export function MemoryPage({ open, onClose }: Props) {
   const [opError, setOpError] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
 
+  // ── add-typed-relation form (durably encoded into the note body) ─────────
+  const [addRel, setAddRel] = useState('');
+  const [addTarget, setAddTarget] = useState('');
+  const [addingRel, setAddingRel] = useState(false);
+  const [relOptions, setRelOptions] = useState<string[]>([]);
+
   const editingRef = useRef(editing);
   editingRef.current = editing;
+
+  // Distinct relation labels already in use → datalist autocomplete. Best-effort
+  // (older backend without the endpoint just yields no suggestions).
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    api
+      .listMemoryRelations()
+      .then((r) => {
+        if (!cancelled) setRelOptions(r.relations.filter((x) => x && x !== 'links'));
+      })
+      .catch(() => {
+        /* endpoint absent — no suggestions, no error surfaced */
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [open, memoryRev]);
 
   // Debounced search: empty query → show the full note list.
   useEffect(() => {
@@ -212,6 +237,39 @@ export function MemoryPage({ open, onClose }: Props) {
       }
     } finally {
       setSaving(false);
+    }
+  }
+
+  // Create a durable typed relation by appending `rel:: [[target]]` to THIS
+  // note's body (source of truth) and PUTting it — so it round-trips through the
+  // markdown and survives a reindex, unlike a SQLite-only edge.
+  async function addRelation() {
+    if (!selectedName || !note || addingRel) return;
+    if (!typedLinkLine(addRel, addTarget)) {
+      setOpError('Enter a valid relation (letters/digits/_/-) and a target note name.');
+      return;
+    }
+    setAddingRel(true);
+    setOpError(null);
+    try {
+      const saved = await api.putMemoryNote(selectedName, {
+        description: note.description,
+        type: note.type,
+        body: appendTypedLink(note.body, addRel, addTarget),
+        expectedVersion: note.version,
+      });
+      setNote(saved);
+      setAddRel('');
+      setAddTarget('');
+      await refresh();
+    } catch (err) {
+      if (err instanceof HttpError && err.status === 409) {
+        setOpError('Version conflict — this note changed. Reload, then re-add the relation.');
+      } else {
+        setOpError(apiErrorMessage(err));
+      }
+    } finally {
+      setAddingRel(false);
     }
   }
 
@@ -475,34 +533,98 @@ export function MemoryPage({ open, onClose }: Props) {
                 <MarkdownView source={note.body} onOpenNote={openNote} />
               </div>
 
-              {(note.outLinks.length > 0 || note.inLinks.length > 0) && (
-                <div className="mem-links">
-                  {note.outLinks.length > 0 && (
-                    <div className="mem-links-row">
-                      <span className="k">LINKS →</span>
-                      <span className="mem-links-chips">
-                        {note.outLinks.map((l) => (
-                          <button key={l} className="mem-chip" onClick={() => openNote(l)}>
-                            {l}
-                          </button>
-                        ))}
-                      </span>
-                    </div>
-                  )}
-                  {note.inLinks.length > 0 && (
-                    <div className="mem-links-row">
-                      <span className="k">← BACKLINKS</span>
-                      <span className="mem-links-chips">
-                        {note.inLinks.map((l) => (
-                          <button key={l} className="mem-chip" onClick={() => openNote(l)}>
-                            {l}
-                          </button>
-                        ))}
-                      </span>
-                    </div>
-                  )}
+              {(() => {
+                // Prefer the typed edges (with relation labels); fall back to the
+                // plain string DTO for an older backend that predates outEdges.
+                const outE =
+                  note.outEdges ?? note.outLinks.map((to) => ({ to, relation: 'links' }));
+                const inE =
+                  note.inEdges ?? note.inLinks.map((from) => ({ from, relation: 'links' }));
+                if (outE.length === 0 && inE.length === 0) return null;
+                return (
+                  <div className="mem-links">
+                    {outE.length > 0 && (
+                      <div className="mem-links-row">
+                        <span className="k">LINKS →</span>
+                        <span className="mem-links-chips">
+                          {outE.map((e, i) => (
+                            <button
+                              key={`o${i}-${e.to}-${e.relation}`}
+                              className="mem-chip mem-rel-chip"
+                              onClick={() => openNote(e.to)}
+                              title={e.relation !== 'links' ? `${e.relation} → ${e.to}` : e.to}
+                            >
+                              {e.relation !== 'links' && (
+                                <span className="mem-rel-tag">{e.relation}</span>
+                              )}
+                              {e.to}
+                            </button>
+                          ))}
+                        </span>
+                      </div>
+                    )}
+                    {inE.length > 0 && (
+                      <div className="mem-links-row">
+                        <span className="k">← BACKLINKS</span>
+                        <span className="mem-links-chips">
+                          {inE.map((e, i) => (
+                            <button
+                              key={`i${i}-${e.from}-${e.relation}`}
+                              className="mem-chip mem-rel-chip"
+                              onClick={() => openNote(e.from)}
+                              title={e.relation !== 'links' ? `${e.from} → ${e.relation}` : e.from}
+                            >
+                              {e.relation !== 'links' && (
+                                <span className="mem-rel-tag">{e.relation}</span>
+                              )}
+                              {e.from}
+                            </button>
+                          ))}
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                );
+              })()}
+
+              <div className="mem-addrel">
+                <span className="k">+ TYPED RELATION</span>
+                <div className="mem-addrel-row">
+                  <input
+                    list="mem-rel-options"
+                    value={addRel}
+                    onChange={(e) => setAddRel(e.target.value)}
+                    placeholder="relation (e.g. depends_on)"
+                    aria-label="relation"
+                  />
+                  <input
+                    value={addTarget}
+                    onChange={(e) => setAddTarget(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === 'Enter') void addRelation();
+                    }}
+                    placeholder="target note"
+                    aria-label="target note"
+                  />
+                  <button
+                    className="btn"
+                    onClick={() => void addRelation()}
+                    disabled={addingRel || !typedLinkLine(addRel, addTarget)}
+                    title="append a durable typed relation to this note's body"
+                  >
+                    {addingRel ? '…' : 'ADD'}
+                  </button>
                 </div>
-              )}
+                <datalist id="mem-rel-options">
+                  {relOptions.map((r) => (
+                    <option key={r} value={r} />
+                  ))}
+                </datalist>
+                <div className="mem-addrel-hint">
+                  Stored in the body as <code>relation:: [[target]]</code> — durable &
+                  Obsidian/Dataview-compatible.
+                </div>
+              </div>
 
               <div className="mem-note-actions">
                 <button className="btn" onClick={startEdit}>

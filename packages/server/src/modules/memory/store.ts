@@ -65,10 +65,31 @@ export interface MemoryNoteMeta {
   version: number;
 }
 
+/** A directed edge leaving a note, with its relation label ('links' = plain). */
+export interface MemoryOutEdge {
+  to: string;
+  relation: string;
+}
+
+/** A directed edge entering a note (back-link), with its relation label. */
+export interface MemoryInEdge {
+  from: string;
+  relation: string;
+}
+
 export interface MemoryNote extends MemoryNoteMeta {
   body: string;
+  /**
+   * Plain, de-duplicated out-link targets (kept for backward-compat — the
+   * frontend depends on this exact shape). Covers EVERY edge relation.
+   */
   outLinks: string[];
+  /** Plain, de-duplicated back-link sources (backward-compat). */
   inLinks: string[];
+  /** Typed out-edges: one entry per (target, relation). ADDITIVE. */
+  outEdges: MemoryOutEdge[];
+  /** Typed in-edges (back-links): one entry per (source, relation). ADDITIVE. */
+  inEdges: MemoryInEdge[];
 }
 
 export interface GraphNode {
@@ -170,6 +191,17 @@ const AUTO_RELATION = 'links';
 /** Default relation for a manual `addLink` when none is supplied. */
 const DEFAULT_LINK_RELATION = 'related';
 
+/**
+ * Edge provenance. `body` edges are DERIVED from the markdown (plain wikilinks
+ * + typed Dataview fields) and are re-derived on every write / boot reindex, so
+ * they are durable and portable. `manual` edges come from `addLink` (MCP
+ * `memory.link`) and live ONLY in SQLite — they survive body re-derivation but
+ * NOT a from-scratch reindex (documented escape hatch; prefer body-encoded
+ * typed links for anything durable).
+ */
+const EDGE_ORIGIN_BODY = 'body';
+const EDGE_ORIGIN_MANUAL = 'manual';
+
 const NAME_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
 const MAX_NAME_LEN = 200;
 const MAX_DEPTH = 4;
@@ -182,6 +214,72 @@ export function parseWikiLinks(body: string): string[] {
     if (raw) out.add(raw);
   }
   return [...out];
+}
+
+/** One typed link derived from the body: a `relation → target` edge. */
+export interface TypedLink {
+  relation: string;
+  target: string;
+}
+
+/**
+ * Typed-link syntax = **Dataview inline fields whose value is a `[[wikilink]]`**
+ * — a well-specified, Obsidian/Dataview-compatible way to carry a *typed*
+ * relation INSIDE the markdown body, so it survives a reindex (unlike a
+ * SQLite-only `addLink`). Two forms are recognised:
+ *
+ *   1. Whole-line field:      `depends_on:: [[db-schema]]`
+ *                             `related:: [[a]], [[b]]`   (several targets ok)
+ *   2. Bracketed inline field: `… as noted [supersedes:: [[old-plan]]] here.`
+ *                              (`(rel:: [[x]])` parens form too, single target)
+ *
+ * The relation key is `[A-Za-z][A-Za-z0-9_-]*`. A field whose value carries NO
+ * wikilink (e.g. `rating:: 5`) is NOT a typed link and is ignored here. Plain
+ * `[[wikilinks]]` stay relation='links' (see `AUTO_RELATION`).
+ *
+ * Regexes are built fresh per call so the shared `g`-flag `lastIndex` can never
+ * leak between `matchAll`/`replace` uses (a 24/7 correctness footgun).
+ */
+const TYPED_LINE_SRC = String.raw`^[ \t]*([A-Za-z][A-Za-z0-9_-]*)[ \t]*::[ \t]*(.+?)[ \t]*$`;
+const TYPED_INLINE_SRC = String.raw`[[(]\s*([A-Za-z][A-Za-z0-9_-]*)\s*::\s*\[\[([^\]|]+)(?:\|[^\]]*)?\]\]\s*[\])]`;
+const WIKILINK_IN_VALUE = /\[\[([^\]|]+)(?:\|[^\]]*)?\]\]/g;
+
+export function parseTypedLinks(body: string): TypedLink[] {
+  const out: TypedLink[] = [];
+  const seen = new Set<string>();
+  const push = (relation: string, rawTarget: string): void => {
+    const rel = relation.trim();
+    const target = rawTarget.trim();
+    if (!rel || !target) return;
+    const key = `${rel}\u0000${target}`;
+    if (seen.has(key)) return;
+    seen.add(key);
+    out.push({ relation: rel, target });
+  };
+  // Bracketed inline fields (single wikilink value).
+  for (const m of body.matchAll(new RegExp(TYPED_INLINE_SRC, 'g'))) {
+    push(m[1] ?? '', m[2] ?? '');
+  }
+  // Whole-line fields; the value may hold several wikilinks.
+  for (const m of body.matchAll(new RegExp(TYPED_LINE_SRC, 'gm'))) {
+    const rel = m[1] ?? '';
+    for (const w of (m[2] ?? '').matchAll(WIKILINK_IN_VALUE)) push(rel, w[1] ?? '');
+  }
+  return out;
+}
+
+/**
+ * Blank out every typed-link field span so the remaining `[[wikilinks]]` can be
+ * parsed as PLAIN links without double-counting a target that a typed field
+ * already claimed. A whole-line field is only stripped when it actually carried
+ * a wikilink (a real typed link), leaving prose / scalar fields untouched.
+ */
+export function stripTypedLinks(body: string): string {
+  return body
+    .replace(new RegExp(TYPED_INLINE_SRC, 'g'), ' ')
+    .replace(new RegExp(TYPED_LINE_SRC, 'gm'), (line, _key: string, value: string) =>
+      /\[\[[^\]]+\]\]/.test(value) ? ' ' : line,
+    );
 }
 
 function isoToMillis(iso: string | undefined, fallback: number): number {
@@ -297,8 +395,10 @@ export class MemoryStore {
   private readonly listByTypeStmt;
   private readonly ftsDeleteStmt;
   private readonly ftsInsertStmt;
-  private readonly deleteAutoEdgesStmt;
+  private readonly deleteBodyEdgesStmt;
+  private readonly bodyEdgesStmt;
   private readonly insertEdgeStmt;
+  private readonly distinctRelationsStmt;
   private readonly deleteEdgesForNodeStmt;
   private readonly outEdgesStmt;
   private readonly inEdgesStmt;
@@ -333,11 +433,16 @@ export class MemoryStore {
         src      TEXT NOT NULL,
         dst      TEXT NOT NULL,
         relation TEXT NOT NULL DEFAULT '${AUTO_RELATION}',
+        origin   TEXT NOT NULL DEFAULT '${EDGE_ORIGIN_BODY}',
         PRIMARY KEY (src, dst, relation)
       );
       CREATE INDEX IF NOT EXISTS idx_memory_edges_dst ON memory_edges(dst);
       CREATE VIRTUAL TABLE IF NOT EXISTS memory_fts USING fts5(name, description, body);
     `);
+    // Idempotent migration for instances whose `memory_edges` predates the
+    // `origin` column (CREATE TABLE IF NOT EXISTS skips an existing table
+    // wholesale — same pattern as SwarmDb.applyMigrations / UpdateStore).
+    this.applyEdgeOriginMigration();
 
     this.getNodeStmt = this.db.prepare<[string], NodeRow>(
       'SELECT * FROM memory_nodes WHERE name = ?',
@@ -370,11 +475,17 @@ export class MemoryStore {
     this.ftsInsertStmt = this.db.prepare<[string, string, string]>(
       'INSERT INTO memory_fts (name, description, body) VALUES (?, ?, ?)',
     );
-    this.deleteAutoEdgesStmt = this.db.prepare<[string, string]>(
-      'DELETE FROM memory_edges WHERE src = ? AND relation = ?',
+    this.deleteBodyEdgesStmt = this.db.prepare<[string]>(
+      `DELETE FROM memory_edges WHERE src = ? AND origin = '${EDGE_ORIGIN_BODY}'`,
     );
-    this.insertEdgeStmt = this.db.prepare<[string, string, string]>(
-      'INSERT OR IGNORE INTO memory_edges (src, dst, relation) VALUES (?, ?, ?)',
+    this.bodyEdgesStmt = this.db.prepare<[string], { dst: string; relation: string }>(
+      `SELECT dst, relation FROM memory_edges WHERE src = ? AND origin = '${EDGE_ORIGIN_BODY}'`,
+    );
+    this.insertEdgeStmt = this.db.prepare<[string, string, string, string]>(
+      'INSERT OR IGNORE INTO memory_edges (src, dst, relation, origin) VALUES (?, ?, ?, ?)',
+    );
+    this.distinctRelationsStmt = this.db.prepare<[], { relation: string }>(
+      'SELECT DISTINCT relation FROM memory_edges ORDER BY relation ASC',
     );
     this.deleteEdgesForNodeStmt = this.db.prepare<[string, string]>(
       'DELETE FROM memory_edges WHERE src = ? OR dst = ?',
@@ -451,23 +562,55 @@ export class MemoryStore {
     }
   }
 
-  /** Rebuild `memory_fts` + auto (`links`) edges for one node from its body. */
+  /**
+   * Add the `origin` column to a pre-existing `memory_edges`. The duplicate
+   * -column error is the normal outcome from the second boot on and is
+   * swallowed; anything else is logged (never thrown — a migration hiccup must
+   * not crash the 24/7 server).
+   */
+  private applyEdgeOriginMigration(): void {
+    try {
+      this.db.exec(
+        `ALTER TABLE memory_edges ADD COLUMN origin TEXT NOT NULL DEFAULT '${EDGE_ORIGIN_BODY}'`,
+      );
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      if (!/duplicate column name/i.test(msg)) {
+        log.warn({ event: 'memory.edge_origin_migration_failed', error: msg });
+      }
+    }
+  }
+
+  /**
+   * Rebuild `memory_fts` + all BODY-derived edges for one node from its body:
+   * typed edges from Dataview inline fields (`relation:: [[target]]`) plus plain
+   * `links` edges from the remaining `[[wikilinks]]`. Body edges are wiped and
+   * re-derived every time, so they survive a reindex; `manual` (addLink) edges
+   * are left untouched.
+   */
   private indexDerived(name: string, description: string, body: string, emitEdges: boolean): void {
     this.ftsDeleteStmt.run(name);
     this.ftsInsertStmt.run(name, description, body);
-    // Which auto edges already exist, so we only fire events for new ones.
-    const existing = new Set(
-      this.outEdgesStmt
-        .all(name)
-        .filter((e) => e.relation === AUTO_RELATION)
-        .map((e) => e.dst),
-    );
-    this.deleteAutoEdgesStmt.run(name, AUTO_RELATION);
-    for (const target of parseWikiLinks(body)) {
-      if (target === name) continue; // no self-loops
-      this.insertEdgeStmt.run(name, target, AUTO_RELATION);
-      if (emitEdges && !existing.has(target)) this.emitEdge(name, target);
-    }
+
+    // Snapshot existing body edges so we only fire events for genuinely new ones.
+    const existing = new Set(this.bodyEdgesStmt.all(name).map((e) => `${e.dst} ${e.relation}`));
+    this.deleteBodyEdgesStmt.run(name);
+
+    const inserted = new Set<string>();
+    const addEdge = (target: string, relation: string): void => {
+      if (!target || target === name) return; // no self-loops
+      const key = `${target} ${relation}`;
+      if (inserted.has(key)) return;
+      inserted.add(key);
+      this.insertEdgeStmt.run(name, target, relation, EDGE_ORIGIN_BODY);
+      if (emitEdges && !existing.has(key)) this.emitEdge(name, target);
+    };
+
+    // Typed links first (they claim their targets); then plain wikilinks from
+    // the body with the typed-field spans stripped, so a typed target isn't also
+    // counted as a plain `links` edge.
+    for (const t of parseTypedLinks(body)) addEdge(t.target, t.relation);
+    for (const target of parseWikiLinks(stripTypedLinks(body))) addEdge(target, AUTO_RELATION);
   }
 
   // --- boot reindex ---------------------------------------------------------
@@ -586,9 +729,13 @@ export class MemoryStore {
     try {
       const row = this.getNodeStmt.get(name);
       if (!row) return null;
-      const outLinks = [...new Set(this.outEdgesStmt.all(name).map((e) => e.dst))];
-      const inLinks = [...new Set(this.inEdgesStmt.all(name).map((e) => e.src))];
-      return { ...this.rowToMeta(row), body: row.body, outLinks, inLinks };
+      const outRows = this.outEdgesStmt.all(name);
+      const inRows = this.inEdgesStmt.all(name);
+      const outLinks = [...new Set(outRows.map((e) => e.dst))];
+      const inLinks = [...new Set(inRows.map((e) => e.src))];
+      const outEdges = outRows.map((e) => ({ to: e.dst, relation: e.relation }));
+      const inEdges = inRows.map((e) => ({ from: e.src, relation: e.relation }));
+      return { ...this.rowToMeta(row), body: row.body, outLinks, inLinks, outEdges, inEdges };
     } catch (err) {
       log.warn({ event: 'memory.read_failed', name, error: String(err) });
       return null;
@@ -713,17 +860,33 @@ export class MemoryStore {
     }
   }
 
-  /** Add a typed edge between two notes. Returns false on failure (logged). */
+  /**
+   * Add a MANUAL typed edge between two notes (MCP `memory.link`). Stored with
+   * `origin='manual'` so a body re-derivation does not wipe it — but it lives
+   * only in SQLite (not re-derivable from any file), so a from-scratch reindex
+   * drops it. For a durable typed relation, encode it in the body as
+   * `relation:: [[target]]` instead. Returns false on failure (logged).
+   */
   addLink(from: string, to: string, relation?: string | null): boolean {
     try {
       if (!from || !to) throw new MemoryError('from and to are required', 'INVALID_LINK');
       const rel = relation && relation.length > 0 ? relation : DEFAULT_LINK_RELATION;
-      this.insertEdgeStmt.run(from, to, rel);
+      this.insertEdgeStmt.run(from, to, rel, EDGE_ORIGIN_MANUAL);
       this.emitEdge(from, to);
       return true;
     } catch (err) {
       log.warn({ event: 'memory.add_link_failed', from, to, error: String(err) });
       return false;
+    }
+  }
+
+  /** Distinct relation labels currently present on any edge. Empty on failure. */
+  listRelations(): string[] {
+    try {
+      return this.distinctRelationsStmt.all().map((r) => r.relation);
+    } catch (err) {
+      log.warn({ event: 'memory.list_relations_failed', error: String(err) });
+      return [];
     }
   }
 
