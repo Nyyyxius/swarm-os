@@ -1270,3 +1270,307 @@
   }
   .md-wikilink:hover { filter: brightness(1.2); }
   .md-empty { color: var(--text-mute); font-style: italic; }
+
+  /* ============================================================= */
+  /* Task board / Kanban overlay (Phase 4)                         */
+  /* ============================================================= */
+
+  .board-overlay {
+    position: fixed; inset: 56px 0 0 0;
+    background: var(--bg);
+    z-index: 60;
+    display: grid;               /* columns set inline (2 or 3) */
+    animation: backdrop-in 200ms ease-out;
+    min-height: 0;
+    overflow: hidden;
+  }
+
+  /* ── sidebar ── */
+  .board-side {
+    border-right: 1px solid var(--border);
+    display: flex; flex-direction: column;
+    overflow-y: auto; min-width: 0;
+  }
+  .board-side-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 18px 10px;
+    border-bottom: 1px solid var(--border);
+    flex-shrink: 0;
+  }
+  .board-side-title {
+    font-family: "Geist Mono", monospace; font-size: 11px;
+    letter-spacing: 0.12em; color: var(--text); font-weight: 600;
+  }
+  .board-team-select { padding: 12px 18px; border-bottom: 1px solid var(--border); }
+  .board-label {
+    display: block; font-family: "Geist Mono", monospace; font-size: 9px;
+    letter-spacing: 0.14em; color: var(--text-mute); margin-bottom: 6px;
+  }
+  .board-select {
+    width: 100%; background: #0a0806; border: 1px solid var(--border);
+    color: var(--text); padding: 6px 8px; border-radius: 2px; outline: none;
+    font-family: "Geist Mono", monospace; font-size: 11px;
+  }
+  .board-select:focus { border-color: var(--border-strong); }
+  .board-col-counts { padding: 10px 18px; display: flex; flex-direction: column; gap: 6px; }
+  .board-count-row {
+    display: flex; align-items: center; gap: 8px;
+    font-family: "Geist Mono", monospace; font-size: 11px;
+  }
+  .board-count-label { flex: 1; color: var(--text-dim); letter-spacing: 0.06em; }
+  .board-count-num { color: var(--text-mute); }
+
+  /* ── status dots ── */
+  .board-status-dot {
+    width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+    display: inline-block;
+  }
+  .board-status-dot.todo    { background: var(--text-mute); }
+  .board-status-dot.doing   { background: var(--info); }
+  .board-status-dot.blocked { background: var(--danger, #ef4444); }
+  .board-status-dot.review  { background: var(--amber); }
+  .board-status-dot.done    { background: var(--ok, #22c55e); }
+
+  /* ── main area ── */
+  .board-main {
+    overflow-x: auto; overflow-y: hidden;
+    min-width: 0; position: relative;
+    display: flex; flex-direction: column;
+  }
+  .board-columns {
+    display: flex; flex-direction: row; gap: 0;
+    height: 100%; min-width: 0;
+  }
+  .board-col {
+    flex: 1; min-width: 160px; max-width: 280px;
+    display: flex; flex-direction: column;
+    border-right: 1px solid var(--border);
+    overflow: hidden;
+  }
+  .board-col:last-child { border-right: none; }
+  .board-col-head {
+    display: flex; align-items: center; gap: 6px; padding: 10px 12px 8px;
+    border-bottom: 1px solid var(--border); flex-shrink: 0;
+    font-family: "Geist Mono", monospace; font-size: 10px; letter-spacing: 0.1em;
+  }
+  .board-col-label { flex: 1; color: var(--text-dim); }
+  .board-col-count {
+    font-size: 10px; color: var(--text-mute);
+    background: rgba(255,255,255,0.04); padding: 1px 5px; border-radius: 8px;
+  }
+  .board-col-cards {
+    flex: 1; overflow-y: auto; padding: 8px;
+    display: flex; flex-direction: column; gap: 6px;
+  }
+  /* Column accent top-border */
+  .board-col-todo    { border-top: 2px solid var(--text-mute); }
+  .board-col-doing   { border-top: 2px solid var(--info); }
+  .board-col-blocked { border-top: 2px solid var(--danger, #ef4444); }
+  .board-col-review  { border-top: 2px solid var(--amber); }
+  .board-col-done    { border-top: 2px solid var(--ok, #22c55e); }
+
+  /* ── cards ── */
+  .board-card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 3px; padding: 8px 10px;
+    display: flex; flex-direction: column; gap: 5px;
+    cursor: pointer; text-align: left; width: 100%;
+    transition: border-color 120ms, background 120ms;
+    font-family: inherit;
+  }
+  .board-card:hover  { border-color: var(--border-strong); background: var(--panel-solid); }
+  .board-card.selected { border-color: var(--amber); }
+  .board-card.orphaned { border-color: var(--danger, #ef4444); }
+  .board-card-head { display: flex; align-items: center; gap: 6px; }
+  .board-card-title {
+    font-family: "Geist Mono", monospace; font-size: 11px;
+    color: var(--text); line-height: 1.35;
+    word-break: break-word;
+  }
+  .board-card-assignee {
+    font-family: "Geist Mono", monospace; font-size: 10px;
+    color: var(--text-mute); letter-spacing: 0.04em;
+  }
+  .board-card-labels { display: flex; flex-wrap: wrap; gap: 4px; }
+  .board-label-chip {
+    font-family: "Geist Mono", monospace; font-size: 9px;
+    background: rgba(255,176,96,0.1); color: var(--amber);
+    border: 1px solid rgba(255,176,96,0.25);
+    padding: 1px 5px; border-radius: 2px; letter-spacing: 0.06em;
+  }
+
+  /* ── priority badges ── */
+  .board-prio {
+    font-family: "Geist Mono", monospace; font-size: 9px; letter-spacing: 0.1em;
+    padding: 1px 5px; border-radius: 2px; font-weight: 600; flex-shrink: 0;
+  }
+  .board-prio.p1 { background: rgba(239,68,68,0.18); color: #ef4444; }
+  .board-prio.p2 { background: rgba(255,176,96,0.15); color: var(--amber); }
+  .board-prio.p3 { background: rgba(255,255,255,0.06); color: var(--text-mute); }
+
+  /* ── orphan / auto badges ── */
+  .board-orphan-badge {
+    font-family: "Geist Mono", monospace; font-size: 9px; letter-spacing: 0.1em;
+    background: rgba(239,68,68,0.18); color: #ef4444;
+    border: 1px solid rgba(239,68,68,0.35);
+    padding: 1px 5px; border-radius: 2px;
+  }
+  .board-auto-badge {
+    font-family: "Geist Mono", monospace; font-size: 9px; letter-spacing: 0.1em;
+    background: rgba(100,160,255,0.12); color: var(--info);
+    border: 1px solid rgba(100,160,255,0.25);
+    padding: 1px 5px; border-radius: 2px;
+  }
+
+  /* ── empty / unavailable states ── */
+  .board-empty {
+    display: flex; flex-direction: column; align-items: center; justify-content: center;
+    height: 100%; gap: 8px; padding: 32px;
+  }
+  .board-empty-title {
+    font-family: "Geist Mono", monospace; font-size: 12px;
+    letter-spacing: 0.08em; color: var(--text-dim);
+  }
+  .board-empty-sub {
+    font-family: "Geist", sans-serif; font-size: 11px; color: var(--text-mute);
+    text-align: center;
+  }
+  .board-empty-sub code { color: var(--amber); font-family: "Geist Mono", monospace; }
+  .board-unavail {
+    padding: 16px 18px; text-align: center;
+  }
+  .board-unavail-title {
+    font-family: "Geist Mono", monospace; font-size: 11px;
+    color: var(--text-dim); margin-bottom: 4px;
+  }
+  .board-unavail-sub {
+    font-family: "Geist", sans-serif; font-size: 10px; color: var(--text-mute);
+  }
+  .board-error {
+    font-family: "Geist Mono", monospace; font-size: 10px;
+    color: var(--danger, #ef4444); padding: 8px 18px;
+  }
+  .board-loading {
+    font-family: "Geist Mono", monospace; font-size: 11px; color: var(--text-mute);
+    padding: 24px; text-align: center;
+  }
+
+  /* ── detail panel ── */
+  .board-detail {
+    border-left: 1px solid var(--border);
+    display: flex; flex-direction: column; overflow-y: auto; min-width: 0;
+  }
+  .board-detail-head {
+    display: flex; align-items: center; justify-content: space-between;
+    padding: 14px 18px 10px; border-bottom: 1px solid var(--border); flex-shrink: 0;
+  }
+  .board-detail-title {
+    font-family: "Geist Mono", monospace; font-size: 11px;
+    letter-spacing: 0.12em; color: var(--text); font-weight: 600;
+  }
+  .board-detail-body { padding: 16px 18px; display: flex; flex-direction: column; gap: 12px; }
+  .board-detail-card-title {
+    font-family: "Geist Mono", monospace; font-size: 13px;
+    color: var(--text); line-height: 1.4; margin: 0;
+  }
+  .board-detail-meta {
+    display: flex; align-items: center; gap: 8px; flex-wrap: wrap;
+    font-family: "Geist Mono", monospace; font-size: 10px;
+  }
+  .board-detail-meta-val { color: var(--text-dim); letter-spacing: 0.06em; }
+  .board-detail-sep { color: var(--border-strong); }
+  .board-detail-row {
+    display: flex; flex-direction: column; gap: 3px;
+  }
+  .board-detail-key {
+    font-family: "Geist Mono", monospace; font-size: 9px;
+    letter-spacing: 0.14em; color: var(--text-mute);
+  }
+  .board-detail-val {
+    font-family: "Geist Mono", monospace; font-size: 11px; color: var(--text-dim);
+    word-break: break-all;
+  }
+  .board-detail-section { display: flex; flex-direction: column; gap: 6px; }
+  .board-detail-section-title {
+    font-family: "Geist Mono", monospace; font-size: 9px;
+    letter-spacing: 0.14em; color: var(--text-mute);
+  }
+  .board-detail-body-text {
+    font-family: "Geist Mono", monospace; font-size: 11px; color: var(--text-dim);
+    white-space: pre-wrap; word-break: break-word; margin: 0;
+    background: #0a0806; border: 1px solid var(--border);
+    padding: 8px 10px; border-radius: 2px;
+  }
+
+  /* ── dependency lists ── */
+  .board-dep-list { margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px; }
+  .board-dep-item { display: flex; }
+  .board-dep-link {
+    background: none; border: none; padding: 0; cursor: pointer;
+    font-family: "Geist Mono", monospace; font-size: 11px;
+    color: var(--info); text-decoration: underline; text-underline-offset: 2px;
+    text-align: left;
+  }
+  .board-dep-link:hover { filter: brightness(1.2); }
+
+  /* ── audit timeline ── */
+  .board-timeline {
+    list-style: none; margin: 0; padding: 0;
+    display: flex; flex-direction: column; gap: 0;
+    border-left: 1px solid var(--border); margin-left: 6px;
+  }
+  .board-tl-item {
+    display: flex; align-items: flex-start; gap: 8px;
+    padding: 4px 0 4px 10px; position: relative;
+  }
+  .board-tl-dot {
+    position: absolute; left: -5px; top: 9px;
+    width: 8px; height: 8px; border-radius: 50%;
+    background: var(--border-strong); flex-shrink: 0;
+  }
+  .board-tl-item.board-tl-created .board-tl-dot { background: var(--ok, #22c55e); }
+  .board-tl-item.board-tl-deleted .board-tl-dot { background: var(--danger, #ef4444); }
+  .board-tl-item.board-tl-orphaned .board-tl-dot { background: var(--danger, #ef4444); }
+  .board-tl-item.board-tl-moved .board-tl-dot { background: var(--info); }
+  .board-tl-content { display: flex; flex-direction: column; gap: 1px; }
+  .board-tl-kind {
+    font-family: "Geist Mono", monospace; font-size: 10px;
+    color: var(--text-dim); letter-spacing: 0.06em;
+  }
+  .board-tl-actor { color: var(--text-mute); font-size: 10px; }
+  .board-tl-ts {
+    font-family: "Geist Mono", monospace; font-size: 9px;
+    color: var(--text-mute);
+  }
+
+  /* ── detail action buttons ── */
+  .board-detail-actions { padding-top: 8px; border-top: 1px solid var(--border); }
+  .board-btn {
+    display: inline-flex; align-items: center; gap: 6px;
+    padding: 6px 12px; border-radius: 2px; cursor: pointer; font-size: 11px;
+    font-family: "Geist Mono", monospace; letter-spacing: 0.06em;
+    background: rgba(255,255,255,0.06); border: 1px solid var(--border);
+    color: var(--text-dim); transition: background 120ms, border-color 120ms;
+  }
+  .board-btn:hover:not(:disabled) { background: rgba(255,255,255,0.10); border-color: var(--border-strong); }
+  .board-btn:disabled { opacity: 0.5; cursor: default; }
+  .board-btn svg { width: 13px; height: 13px; stroke: currentColor; fill: none; stroke-width: 1.6; }
+  .board-btn.danger { background: rgba(239,68,68,0.1); border-color: rgba(239,68,68,0.3); color: #ef4444; }
+  .board-btn.danger:hover:not(:disabled) { background: rgba(239,68,68,0.18); border-color: #ef4444; }
+  .board-btn.danger.prominent { font-weight: 600; }
+  .board-delete-confirm {
+    display: flex; flex-direction: column; gap: 8px; padding: 12px;
+    background: rgba(239,68,68,0.06); border: 1px solid rgba(239,68,68,0.25);
+    border-radius: 3px;
+  }
+  .board-delete-confirm-msg {
+    font-family: "Geist Mono", monospace; font-size: 11px; color: var(--text-dim);
+  }
+  .board-delete-err {
+    font-family: "Geist Mono", monospace; font-size: 10px; color: #ef4444;
+  }
+  .board-delete-confirm-btns { display: flex; gap: 8px; }
+  .board-delete-modal {
+    position: absolute; bottom: 20px; right: 20px;
+    z-index: 70; min-width: 260px;
+  }

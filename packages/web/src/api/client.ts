@@ -843,6 +843,72 @@ export interface MemoryNoteInput {
   expectedVersion?: number;
 }
 
+// ── Taskboard / Kanban DTOs ──────────────────────────────────────────────────
+// Hand-maintained mirror of server's `TaskboardStore` types. The web cannot
+// import the server package, so these are kept in sync manually with
+// `packages/server/src/modules/taskboard/store.ts`.
+
+export type BoardStatus = 'todo' | 'doing' | 'blocked' | 'review' | 'done';
+
+export type BoardEventKind =
+  | 'created'
+  | 'updated'
+  | 'moved'
+  | 'assigned'
+  | 'dep_added'
+  | 'dep_removed'
+  | 'comment'
+  | 'closed'
+  | 'reopened'
+  | 'deleted'
+  | 'orphaned';
+
+/** One card in the board — mirrors `TaskboardCard`. */
+export interface BoardCard {
+  id: string;
+  orchestratorId: string;
+  title: string;
+  body: string;
+  status: BoardStatus;
+  assigneeSessionId: string | null;
+  priority: number;
+  labels: string[];
+  orderKey: string;
+  createdBy: string;
+  createdAt: number;
+  updatedAt: number;
+  version: number;
+  closedAt: number | null;
+  orphanedAt: number | null;
+  autoCreated: boolean;
+  hiddenAt: number | null;
+}
+
+/** One audit-journal entry — mirrors `TaskboardEvent`. */
+export interface BoardAuditEvent {
+  id: string;
+  cardId: string;
+  orchestratorId: string;
+  actorSessionId: string | null;
+  kind: BoardEventKind;
+  data: Record<string, unknown> | null;
+  ts: number;
+}
+
+/** Card detail with deps + audit journal — mirrors `TaskboardCardDetail`. */
+export interface BoardCardDetail extends BoardCard {
+  dependsOn: string[];
+  blocks: string[];
+  events: BoardAuditEvent[];
+}
+
+/** Team selector entry — mirrors `TaskboardTeam`. */
+export interface BoardTeam {
+  orchestratorId: string;
+  total: number;
+  open: number;
+}
+
 class HttpError extends Error {
   constructor(
     message: string,
@@ -1327,6 +1393,35 @@ export const api = {
   /** Delete a note (lead-only server-side). */
   deleteMemoryNote: (name: string) =>
     request<{ ok: true }>('DELETE', `/api/memory/${encodeURIComponent(name)}`),
+
+  // ---- Taskboard / Kanban (Phase 4, read-only web surface) ----------------
+  // Feature-detect: a 404 on `listBoard` means the backend predates this
+  // surface — the page renders a graceful empty state.
+
+  /** List cards for one team. `status` and `assignee` are optional filters. */
+  listBoard: (
+    orchId: string,
+    opts: { status?: BoardStatus; assignee?: string } = {},
+  ) => {
+    const qs = new URLSearchParams({ orch: orchId });
+    if (opts.status) qs.set('status', opts.status);
+    if (opts.assignee) qs.set('assignee', opts.assignee);
+    return request<{ cards: BoardCard[] }>('GET', `/api/board?${qs.toString()}`);
+  },
+
+  /** Team selector data (all teams with cards). */
+  listBoardTeams: () => request<{ teams: BoardTeam[] }>('GET', '/api/board/teams'),
+
+  /** Full card detail with deps + audit journal. 404 when absent. */
+  getBoardCard: (id: string) =>
+    request<BoardCardDetail>('GET', `/api/board/card/${encodeURIComponent(id)}`),
+
+  /** Operator cleanup — soft-delete a card (typically orphaned ones). */
+  deleteBoardCard: (id: string) =>
+    request<{ ok: boolean; deleted: boolean }>(
+      'DELETE',
+      `/api/board/card/${encodeURIComponent(id)}`,
+    ),
 };
 
 export { HttpError };

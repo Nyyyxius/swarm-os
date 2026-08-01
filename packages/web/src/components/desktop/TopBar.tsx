@@ -57,6 +57,9 @@ interface Props {
   /** Open the shared memory / knowledge-graph overlay (`#/memory`). Optional so
    *  older call sites (and the badge-focused unit test) keep type-checking. */
   onOpenMemory?: () => void;
+  /** Open the durable task board (Kanban) overlay (`#/board`). Optional for
+   *  backward compatibility with existing call sites. */
+  onOpenBoard?: () => void;
   onOpenPlugins: () => void;
   /** Open the VS Code web IDE on the deployment workspace (fullscreen overlay). */
   onOpenIde: () => void;
@@ -69,7 +72,7 @@ const EMPTY_FLASH_SET: ReadonlySet<string> = new Set();
 
 export default function TopBar({
   teams, selectedTeamId, flashTeamIds, totalAgents, info,
-  onSelectTeam, onNewTeam, onOpenRoles, onOpenMemory, onOpenPlugins, onOpenIde, onOpenSettings,
+  onSelectTeam, onNewTeam, onOpenRoles, onOpenMemory, onOpenBoard, onOpenPlugins, onOpenIde, onOpenSettings,
   onOpenUpdates,
 }: Props) {
   const flashSet = flashTeamIds ?? EMPTY_FLASH_SET;
@@ -171,6 +174,9 @@ export default function TopBar({
         </button>
         <button className="tb-action" onClick={() => onOpenMemory?.()} title="shared memory / knowledge graph">
           {ICON.fork}<span className="label">MEMORY</span>
+        </button>
+        <button className="tb-action" onClick={() => onOpenBoard?.()} title="task board (Kanban)">
+          {ICON.template}<span className="label">BOARD</span>
         </button>
         <button className="tb-action" onClick={onOpenPlugins} title="manage plugins">
           {ICON.link}<span className="label">PLUGINS</span>

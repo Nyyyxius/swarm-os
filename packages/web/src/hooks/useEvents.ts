@@ -112,6 +112,18 @@ export interface MemoryEvent {
   payload?: { name?: string; type?: string; from?: string; to?: string };
 }
 
+/**
+ * Normalized `taskboard.*` frame — any event emitted by the TaskboardStore.
+ * The web board only needs to know *something* changed; it re-fetches via REST
+ * rather than applying partial diffs. Covers all taskboard.* event kinds
+ * (card_created, card_moved, card_deleted, card_orphaned, …).
+ */
+export interface BoardEvent {
+  kind: string;
+  ts: string;
+  payload?: Record<string, unknown>;
+}
+
 export interface UseEventsOptions {
   /** Callback fired on every well-formed mailbox.message frame. */
   onMailboxMessage?: (ev: MailboxMessageEvent) => void;
@@ -123,6 +135,8 @@ export interface UseEventsOptions {
   onPluginHostChanged?: (ev: PluginHostChangedEvent) => void;
   /** Callback fired on every memory.* frame (shared memory graph). */
   onMemoryEvent?: (ev: MemoryEvent) => void;
+  /** Callback fired on every taskboard.* frame (Kanban board). */
+  onBoardEvent?: (ev: BoardEvent) => void;
 }
 
 const AUTO_DISMISS_MS = 30_000;
@@ -146,11 +160,13 @@ export function useEvents(opts: UseEventsOptions = {}): {
   const onOrchCreatedRef = useRef<UseEventsOptions['onOrchestratorCreated']>(opts.onOrchestratorCreated);
   const onPluginRef = useRef<UseEventsOptions['onPluginHostChanged']>(opts.onPluginHostChanged);
   const onMemoryRef = useRef<UseEventsOptions['onMemoryEvent']>(opts.onMemoryEvent);
+  const onBoardRef = useRef<UseEventsOptions['onBoardEvent']>(opts.onBoardEvent);
   useEffect(() => { onMailRef.current = opts.onMailboxMessage; }, [opts.onMailboxMessage]);
   useEffect(() => { onCreatedRef.current = opts.onSessionCreated; }, [opts.onSessionCreated]);
   useEffect(() => { onOrchCreatedRef.current = opts.onOrchestratorCreated; }, [opts.onOrchestratorCreated]);
   useEffect(() => { onPluginRef.current = opts.onPluginHostChanged; }, [opts.onPluginHostChanged]);
   useEffect(() => { onMemoryRef.current = opts.onMemoryEvent; }, [opts.onMemoryEvent]);
+  useEffect(() => { onBoardRef.current = opts.onBoardEvent; }, [opts.onBoardEvent]);
 
   const cancelTimer = (id: string): void => {
     const t = timersRef.current.get(id);
@@ -300,6 +316,16 @@ export function useEvents(opts: UseEventsOptions = {}): {
                     kind: ev.kind,
                     ts: ev.ts,
                     payload: p,
+                  });
+                }
+
+                // Taskboard — taskboard.* frames drive a live refresh of
+                // the BoardPage. The view re-fetches via REST.
+                if (ev.kind.startsWith('taskboard.')) {
+                  onBoardRef.current?.({
+                    kind: ev.kind,
+                    ts: ev.ts,
+                    payload: ev.payload as Record<string, unknown> | undefined,
                   });
                 }
 

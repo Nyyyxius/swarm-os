@@ -3,6 +3,7 @@ import DesktopShell from './components/desktop/DesktopShell';
 import MobileShell from './components/mobile/MobileShell';
 import { RolesPage } from './components/RolesPage';
 import { MemoryPage } from './components/MemoryPage';
+import { BoardPage } from './components/BoardPage';
 import { PluginsPage } from './components/PluginsPage';
 import IdeOverlay from './components/desktop/IdeOverlay';
 import PluginPanelHost from './components/desktop/PluginPanelHost';
@@ -14,6 +15,7 @@ type Route =
   | { kind: 'detail'; id: string }
   | { kind: 'roles' }
   | { kind: 'memory' }
+  | { kind: 'board' }
   | { kind: 'plugins' }
   | { kind: 'ide' }
   | { kind: 'panel'; plugin: string; panel: string };
@@ -35,6 +37,7 @@ function parseHash(): Route {
   if (p && p[1] && p[2]) return { kind: 'panel', plugin: p[1], panel: p[2] };
   if (h === '#/roles') return { kind: 'roles' };
   if (h === '#/memory') return { kind: 'memory' };
+  if (h === '#/board') return { kind: 'board' };
   if (h === '#/plugins') return { kind: 'plugins' };
   if (h === '#/ide') return { kind: 'ide' };
   return { kind: 'list' };
@@ -45,6 +48,7 @@ function setHashRoute(route: Route): void {
   if (route.kind === 'list') target = '#/';
   else if (route.kind === 'roles') target = '#/roles';
   else if (route.kind === 'memory') target = '#/memory';
+  else if (route.kind === 'board') target = '#/board';
   else if (route.kind === 'plugins') target = '#/plugins';
   else if (route.kind === 'ide') target = '#/ide';
   else if (route.kind === 'panel') target = `#/panel/${route.plugin}/${route.panel}`;
@@ -99,6 +103,7 @@ export default function App() {
           onOpenOrchestrator={(id) => setRoute({ kind: 'detail', id })}
           onOpenRoles={() => setRoute({ kind: 'roles' })}
           onOpenMemory={() => setRoute({ kind: 'memory' })}
+          onOpenBoard={() => setRoute({ kind: 'board' })}
           onOpenPlugins={() => setRoute({ kind: 'plugins' })}
           onOpenIde={() => setRoute({ kind: 'ide' })}
           onOpenPanel={(plugin, panel) => setRoute({ kind: 'panel', plugin, panel })}
@@ -121,6 +126,13 @@ export default function App() {
               always mount (gated by `open`), same pattern as RolesPage. */}
           <MemoryPage
             open={route.kind === 'memory'}
+            onClose={() => setRoute({ kind: 'list' })}
+          />
+
+          {/* BoardPage overlay — durable task board (Kanban). Desktop-only,
+              read-only for the web surface (Phase 4). */}
+          <BoardPage
+            open={route.kind === 'board'}
             onClose={() => setRoute({ kind: 'list' })}
           />
 

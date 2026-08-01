@@ -73,6 +73,8 @@ export interface SwarmControllerProps {
   onOpenRoles?: () => void;
   /** TopBar/Dock MEMORY → route `#/memory`. */
   onOpenMemory?: () => void;
+  /** TopBar BOARD → route `#/board`. */
+  onOpenBoard?: () => void;
   /** TopBar/Dock PLUGINS → route `#/plugins`. */
   onOpenPlugins?: () => void;
   /** TopBar/Dock IDE → route `#/ide`. */
@@ -146,6 +148,9 @@ export interface SwarmControllerValue {
   pluginsRev: number;
   /** Revision counter bumped on each memory.* WS event (live graph refresh). */
   memoryRev: number;
+  /** Revision counter bumped on each taskboard.* WS event (live board refresh). */
+  boardRev: number;
+  onOpenBoard: () => void;
   // shell-mode override (escape hatch from auto breakpoint)
   shellMode: ShellMode;
   setShellMode: (m: ShellMode) => void;
@@ -195,6 +200,7 @@ export function SwarmControllerProvider({
   onCloseRightPanel,
   onOpenRoles,
   onOpenMemory,
+  onOpenBoard,
   onOpenPlugins,
   onOpenIde,
   onOpenPanel,
@@ -458,6 +464,13 @@ export function SwarmControllerProvider({
     setMemoryRev((v) => v + 1);
   }, []);
 
+  // Taskboard — bump a revision on each taskboard.* frame so BoardPage
+  // (via useBoard) re-fetches live on top of its poll.
+  const [boardRev, setBoardRev] = useState(0);
+  const handleBoardEvent = useCallback(() => {
+    setBoardRev((v) => v + 1);
+  }, []);
+
   // ── THE single useEvents() — waiting + connected + pulses pipeline ─────
   const {
     connected: eventsConnected,
@@ -469,6 +482,7 @@ export function SwarmControllerProvider({
     onOrchestratorCreated: handleOrchestratorCreated,
     onPluginHostChanged: handlePluginHostChanged,
     onMemoryEvent: handleMemoryEvent,
+    onBoardEvent: handleBoardEvent,
   });
 
   useEffect(() => {
@@ -816,6 +830,7 @@ export function SwarmControllerProvider({
   const setAuthMissing = useCallback(() => setAuthState('missing'), []);
   const onOpenRolesResolved = useCallback(() => { onOpenRoles?.(); }, [onOpenRoles]);
   const onOpenMemoryResolved = useCallback(() => { onOpenMemory?.(); }, [onOpenMemory]);
+  const onOpenBoardResolved = useCallback(() => { onOpenBoard?.(); }, [onOpenBoard]);
   const onOpenPluginsResolved = useCallback(() => { onOpenPlugins?.(); }, [onOpenPlugins]);
   const onOpenIdeResolved = useCallback(() => { onOpenIde?.(); }, [onOpenIde]);
   const onOpenPanelResolved = useCallback(
@@ -861,11 +876,13 @@ export function SwarmControllerProvider({
     setEditConfigFor,
     onOpenRoles: onOpenRolesResolved,
     onOpenMemory: onOpenMemoryResolved,
+    onOpenBoard: onOpenBoardResolved,
     onOpenPlugins: onOpenPluginsResolved,
     onOpenIde: onOpenIdeResolved,
     onOpenPanel: onOpenPanelResolved,
     pluginsRev,
     memoryRev,
+    boardRev,
     shellMode,
     setShellMode,
     selectAgent,
