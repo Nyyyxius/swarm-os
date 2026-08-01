@@ -135,6 +135,31 @@ describe('listPending / listBySession', () => {
   });
 });
 
+describe('listByOrchestrator (P2 REST list)', () => {
+  it('returns a team approvals newest-first, filtered by status', () => {
+    const a = store.createRequest(baseInput({ orchestratorId: ORCH_A }));
+    const b = store.createRequest(baseInput({ orchestratorId: ORCH_A }));
+    store.createRequest(baseInput({ orchestratorId: ORCH_B }));
+    store.resolveRequest(a!.id, { decision: 'denied', by: 'web' });
+
+    const all = store.listByOrchestrator(ORCH_A);
+    expect(all).toHaveLength(2);
+    expect(all[0].id).toBe(b!.id); // newest first
+
+    const denied = store.listByOrchestrator(ORCH_A, 'denied');
+    expect(denied.map((r) => r.id)).toEqual([a!.id]);
+
+    const pending = store.listByOrchestrator(ORCH_A, 'pending');
+    expect(pending.map((r) => r.id)).toEqual([b!.id]);
+  });
+
+  it('returns [] for an unknown status or empty orch', () => {
+    store.createRequest(baseInput({ orchestratorId: ORCH_A }));
+    expect(store.listByOrchestrator(ORCH_A, 'bogus')).toEqual([]);
+    expect(store.listByOrchestrator('')).toEqual([]);
+  });
+});
+
 describe('resolveRequest (P2 path, implemented)', () => {
   it('stamps status/resolvedAt/resolvedBy/decision + emits approval.resolved', () => {
     const req = store.createRequest(baseInput());

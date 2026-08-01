@@ -151,6 +151,13 @@ export interface ResolveApprovalInput {
   decision: ApprovalResolution;
   /** Who resolved it (operator id, `'web'`, `'discord'`, `'console'`, …). */
   by: string | null;
+  /**
+   * P2, additive: the operator chose "approve AND don't ask again" (claude's 2nd
+   * prompt option). Recorded in the audit journal / event for provenance — the
+   * `decision` itself stays `approved` (the "don't ask again" scope is a
+   * keystroke-level concern handled by the route, not a distinct store status).
+   */
+  dontAskAgain?: boolean;
 }
 
 const MAX_TEXT_LEN = 8000;
@@ -181,6 +188,7 @@ export class ApprovalStore {
   private readonly updateRequestStmt;
   private readonly listPendingAllStmt;
   private readonly listPendingByOrchStmt;
+  private readonly listByOrchStmt;
   private readonly listBySessionStmt;
   private readonly insertEventStmt;
   private readonly tailEventsStmt;
@@ -253,6 +261,11 @@ export class ApprovalStore {
     );
     this.listPendingByOrchStmt = this.db.prepare<[string], RequestRow>(
       "SELECT * FROM approval_requests WHERE status = 'pending' AND orchestrator_id = ? ORDER BY created_at ASC, rowid ASC",
+    );
+    // All of one team's approvals (any status), newest first — backs the P2 REST
+    // list (P3 web + P4 Discord). Status filtering is applied in JS (low volume).
+    this.listByOrchStmt = this.db.prepare<[string], RequestRow>(
+      'SELECT * FROM approval_requests WHERE orchestrator_id = ? ORDER BY created_at DESC, rowid DESC',
     );
     // rowid (insertion order) breaks a same-millisecond created_at tie, not the
     // random UUID id: newest-created must read back first, deterministically.
@@ -470,18 +483,19 @@ export class ApprovalStore {
         decision: input.decision,
       };
 
+      const auditExtra = input.dontAskAgain ? { dontAskAgain: true } : {};
       this.db.transaction(() => {
         this.updateRequestStmt.run(this.requestToRow(next));
         this.insertEventStmt.run(
           this.makeEvent(
             { approvalId: next.id, orchestratorId: next.orchestratorId, sessionId: next.sessionId },
             'resolved',
-            { decision: next.decision, by: next.resolvedBy, status: next.status },
+            { decision: next.decision, by: next.resolvedBy, status: next.status, ...auditExtra },
           ),
         );
       })();
 
-      this.emit('resolved', next, { decision: next.decision, by: next.resolvedBy });
+      this.emit('resolved', next, { decision: next.decision, by: next.resolvedBy, ...auditExtra });
       return next;
     } catch (err) {
       log.warn({ event: 'approvals.resolve_failed', id, error: String(err) });
@@ -558,6 +572,23 @@ export class ApprovalStore {
       return rows.map((r) => this.rowToRequest(r));
     } catch (err) {
       log.warn({ event: 'approvals.list_pending_failed', error: String(err) });
+      return [];
+    }
+  }
+
+  /**
+   * All approvals for one team, newest first, optionally filtered by status
+   * (P2 REST list — backs P3 web + P4 Discord). An unknown status yields `[]`
+   * rather than an error. `[]` on any failure.
+   */
+  listByOrchestrator(orchestratorId: string, status?: string | null): ApprovalRequest[] {
+    try {
+      if (typeof orchestratorId !== 'string' || orchestratorId.length === 0) return [];
+      const rows = this.listByOrchStmt.all(orchestratorId);
+      const filtered = status ? rows.filter((r) => r.status === status) : rows;
+      return filtered.map((r) => this.rowToRequest(r));
+    } catch (err) {
+      log.warn({ event: 'approvals.list_by_orch_failed', error: String(err) });
       return [];
     }
   }

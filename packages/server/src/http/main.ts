@@ -25,6 +25,7 @@ import { createPluginsRouter } from './routes/plugins.js';
 import { createUpdatesRouter } from './routes/updates.js';
 import { createMemoryRouter } from './routes/memory.js';
 import { createTaskboardRouter } from './routes/taskboard.js';
+import { createApprovalsRouter } from './routes/approvals.js';
 import type { MemoryStore } from '../modules/memory/store.js';
 import type { TaskboardStore } from '../modules/taskboard/store.js';
 import type { ApprovalStore } from '../modules/approvals/store.js';
@@ -340,6 +341,13 @@ export function createApp(
   // every other subsystem unaffected — the `board.*` MCP tools answer
   // TASKBOARD_UNAVAILABLE and this router is simply absent).
   if (taskboard) app.use(createTaskboardRouter(taskboard));
+  // Human-in-the-loop approval queue (docs/garde-fous-approbation.md) —
+  // `/api/approvals/*`, list + resolve (keystroke back to the PTY). Behind the
+  // X-Auth-Token gate like the board router (§9.4: anyone with the global token
+  // may approve). Needs the spawner to reach the blocked session. Mounted only
+  // when the store came up; a boot where it failed leaves every other subsystem
+  // unaffected and this router simply absent.
+  if (approvals) app.use(createApprovalsRouter(spawner, approvals));
   // `GET /ide-info` — VS Code web connection details for the authenticated
   // client. Mounted after the auth gate so it 401s without X-Auth-Token
   // (parity with the other business routes). The IDE itself runs on its own
