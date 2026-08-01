@@ -25,6 +25,7 @@ import { DEFAULT_PROVIDER_ID } from '../providers/ids.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { resolveAgentDefaults } from '../providers/resolve.js';
 import type { AgentProvider } from '../providers/types.js';
+import type { TaskboardStore } from '../taskboard/store.js';
 
 const log = withModule('orchestrator');
 
@@ -153,6 +154,13 @@ export interface OrchestratorDeps {
    * Omitted (every unit test, every embedder) ⇒ no plugin section.
    */
   pluginTools?: () => readonly PluginToolSummary[];
+  /**
+   * Durable task-board store (docs/tableau-de-taches.md). When present, each
+   * NEWLY-spawned worker (not a resumed one) auto-gets a `todo` card assigned to
+   * it (Phase 3 §11 — "so the operator always sees the tasks in flight").
+   * Omitted in unit tests that don't exercise the board ⇒ no auto-cards.
+   */
+  taskboard?: TaskboardStore;
 }
 
 export interface StartOptions {
@@ -234,6 +242,32 @@ export class SessionActionError extends Error {
   }
 }
 
+/** Max length of an auto-generated task-board card title (Phase 3). */
+const AUTO_CARD_TITLE_MAX = 120;
+
+/**
+ * Derive a task-board card title for a freshly-spawned worker from its
+ * name/prompt/role. The worker name anchors it; the first non-empty line of the
+ * prompt (or, failing that, the role) describes the task. Truncated cleanly with
+ * an ellipsis. Never empty — `title` is a required, non-blank store field.
+ */
+export function deriveAutoCardTitle(spec: {
+  name: string;
+  role: string;
+  prompt: string;
+}): string {
+  const promptLine = (spec.prompt ?? '')
+    .split('\n')
+    .map((l) => l.trim())
+    .find((l) => l.length > 0);
+  const descriptor = promptLine || spec.role?.trim() || 'worker task';
+  const name = spec.name?.trim() || 'worker';
+  const title = `${name}: ${descriptor}`;
+  return title.length > AUTO_CARD_TITLE_MAX
+    ? title.slice(0, AUTO_CARD_TITLE_MAX - 1).trimEnd() + '…'
+    : title;
+}
+
 /**
  * Owns one team: 1 lead session + 0..N worker sessions, plus the in-memory
  * mailbox shared across them (plan §11).
@@ -280,6 +314,7 @@ export class Orchestrator {
   readonly persistence: Persistence;
   private readonly _onHideRequested: ((orchestratorId: string) => void) | null;
   private readonly _pluginTools: (() => readonly PluginToolSummary[]) | null;
+  private readonly _taskboard: TaskboardStore | null;
 
   /** All sessions, including terminated ones, indexed by id. */
   private readonly sessions = new Map<string, Session>();
@@ -332,6 +367,7 @@ export class Orchestrator {
     this.persistence = deps.persistence ?? new NoOpPersistence();
     this._onHideRequested = deps.onHideRequested ?? null;
     this._pluginTools = deps.pluginTools ?? null;
+    this._taskboard = deps.taskboard ?? null;
     // Phase 8 — write-through mailbox: every push/markDelivered routes to
     // SQLite via the hook below. Constructed AFTER persistence is set.
     // The hook impl is provided by mailbox-persistence.ts to keep the DB
@@ -825,6 +861,29 @@ export class Orchestrator {
     // Worker exit handling — distinct from lead exit. Abnormal exit fires
     // a synthetic mailbox message + signal to the lead.
     worker.once('exit', () => this._onWorkerExit(worker));
+
+    // Phase 3 auto-card: a brand-new worker (NOT a resumed one — resumes reuse
+    // `existingId`, and its card already lives in SQLite) gets a `todo` card
+    // auto-assigned to it, so the operator always sees the task in flight.
+    // Best-effort: a board failure must NEVER fail a spawn (24/7 safety).
+    if (this._taskboard && spec.existingId == null) {
+      try {
+        this._taskboard.createAutoCardForWorker({
+          orchestratorId: this.id,
+          assigneeSessionId: worker.id,
+          title: deriveAutoCardTitle(spec),
+          body: spec.prompt ?? '',
+          createdBy: this._leadSessionId ?? 'system',
+        });
+      } catch (err) {
+        log.warn({
+          event: 'taskboard.auto_card_failed',
+          orchId: this.id,
+          workerId: worker.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
 
     return worker;
   }

@@ -25,6 +25,11 @@ import { IdeSupervisor } from './modules/ide/index.js';
 import { PluginStore } from './modules/plugins/store.js';
 import { MemoryStore } from './modules/memory/store.js';
 import { TaskboardStore } from './modules/taskboard/store.js';
+import {
+  markOrphanedCardsAtBoot,
+  startTaskboardJanitor,
+  type TaskboardJanitorHandle,
+} from './modules/taskboard/lifecycle.js';
 import { createEmbeddingProvider } from './modules/memory/embeddings.js';
 import { PluginHost } from './modules/plugins/host.js';
 import { PluginToolRegistry } from './modules/plugins/mcp-registry.js';
@@ -330,6 +335,18 @@ const backup = new BackupScheduler({
 });
 backup.start();
 
+// ---- Task board TTL janitor ------------------------------------------------
+// Periodically purges (soft-deletes) orphaned cards past their TTL. In-process,
+// unref'd interval, every tick guarded — a sweep can never crash the boot or
+// the 24/7 loop. No-op when the board store failed to open.
+let taskboardJanitor: TaskboardJanitorHandle | null = null;
+if (taskboardStore) {
+  taskboardJanitor = startTaskboardJanitor(taskboardStore, {
+    ttlMs: config.taskboardOrphanTtlMs,
+    intervalMs: config.taskboardJanitorIntervalMs,
+  });
+}
+
 // ---- Per-role cron scheduler ----------------------------------------------
 // In-process; for each role carrying a `schedule` cron, delivers its
 // `scheduleMessage` to the lead inbox of every live instance at each tick.
@@ -573,6 +590,7 @@ const handle = startServer(
   connectorRegistry,
   updates,
   memoryStore ?? undefined,
+  taskboardStore ?? undefined,
 );
 
 // Start MCP HTTP listener on its own port (loopback only, plan §14).
@@ -657,6 +675,12 @@ mcp
   // reboot off an image nobody verified. It never rejects.
   .then(() => updatesReady)
   .then(() => runAutoResume())
+  // Phase 3 crash-resume pass — AFTER auto-resume rebuilt the live teams, flag
+  // as orphaned every open card whose assignee session didn't come back. Fully
+  // defensive (never throws), so it can't trip the fatal .catch below.
+  .then(() => {
+    if (taskboardStore) markOrphanedCardsAtBoot(spawner, taskboardStore);
+  })
   .catch(async (err) => {
     log.error({ event: 'mcp.start_failed', error: err instanceof Error ? err.message : String(err) });
     try {
@@ -686,6 +710,9 @@ async function shutdown(signal: string): Promise<void> {
     busMetrics.stop();
     // Stop the backup timer before db.close() so no snapshot races teardown.
     backup.stop();
+    // Disarm the task-board TTL janitor (unref'd, but stop it explicitly so no
+    // sweep fires into a half-closed DB during shutdown).
+    taskboardJanitor?.stop();
     // Disarm per-role crons so no tick fires into a half-torn-down spawner.
     scheduler.stop();
     // The update RUNNER does own timers, and this is early on purpose: a

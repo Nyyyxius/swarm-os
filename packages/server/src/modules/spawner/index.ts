@@ -448,6 +448,7 @@ export class Spawner {
         this.hideOrchestrator(id);
       },
       ...(this.pluginTools ? { pluginTools: this.pluginTools } : {}),
+      ...(this.taskboard ? { taskboard: this.taskboard } : {}),
     });
     this.orchestrators.set(orch.id, orch);
     eventBus.emitEvent({
@@ -996,6 +997,7 @@ export class Spawner {
         providerRegistry: this.providerRegistry,
         onHideRequested: (id) => this.hideOrchestrator(id),
         ...(this.pluginTools ? { pluginTools: this.pluginTools } : {}),
+        ...(this.taskboard ? { taskboard: this.taskboard } : {}),
       });
       this.orchestrators.set(orch.id, orch);
 

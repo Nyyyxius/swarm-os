@@ -158,6 +158,21 @@ interface EventRow {
   ts: number;
 }
 
+interface TeamRow {
+  orchestratorId: string;
+  total: number;
+  open: number;
+}
+
+/** One entry of the web board's team selector (docs §7 — read-only web). */
+export interface TaskboardTeam {
+  orchestratorId: string;
+  /** Non-hidden cards on this team's board. */
+  total: number;
+  /** Of those, the ones that are not closed. */
+  open: number;
+}
+
 // --- id / order-key helpers -------------------------------------------------
 
 const ID_RE = /^[A-Za-z0-9][A-Za-z0-9._-]*$/;
@@ -282,6 +297,8 @@ export class TaskboardStore {
   private readonly deleteDepStmt;
   private readonly hasDepStmt;
   private readonly listOrphanedStmt;
+  private readonly listTeamsStmt;
+  private readonly expiredOrphansStmt;
 
   constructor(swarmDb: SwarmDb, opts: { eventBus?: SwarmEventBus } = {}) {
     this.db = swarmDb.db;
@@ -387,6 +404,22 @@ export class TaskboardStore {
     );
     this.listOrphanedStmt = this.db.prepare<[string], CardRow>(
       'SELECT * FROM taskboard_cards WHERE orchestrator_id = ? AND orphaned_at IS NOT NULL AND hidden_at IS NULL ORDER BY orphaned_at ASC',
+    );
+    // Teams (orchestrators) that own at least one non-hidden card — powers the
+    // web board's team selector. `open` excludes closed cards (Phase 3 REST).
+    this.listTeamsStmt = this.db.prepare<[], TeamRow>(`
+      SELECT orchestrator_id AS orchestratorId,
+             COUNT(*) AS total,
+             SUM(CASE WHEN closed_at IS NULL THEN 1 ELSE 0 END) AS open
+      FROM taskboard_cards
+      WHERE hidden_at IS NULL
+      GROUP BY orchestrator_id
+      ORDER BY orchestrator_id ASC
+    `);
+    // Orphaned, still-visible cards whose `orphaned_at` predates a cutoff — the
+    // Phase 3 TTL janitor soft-deletes each via `deleteCard`.
+    this.expiredOrphansStmt = this.db.prepare<[number], { id: string }>(
+      'SELECT id FROM taskboard_cards WHERE orphaned_at IS NOT NULL AND orphaned_at < ? AND hidden_at IS NULL ORDER BY orphaned_at ASC',
     );
   }
 
@@ -608,6 +641,23 @@ export class TaskboardStore {
       return this.listOrphanedStmt.all(orchestratorId).map((r) => this.rowToCard(r));
     } catch (err) {
       log.warn({ event: 'taskboard.list_orphaned_failed', error: String(err) });
+      return [];
+    }
+  }
+
+  /**
+   * Orchestrators that own at least one non-hidden card, with card counts.
+   * Backs the read-only web board's team selector (Phase 3 REST). Never throws.
+   */
+  listTeams(): TaskboardTeam[] {
+    try {
+      return this.listTeamsStmt.all().map((r) => ({
+        orchestratorId: r.orchestratorId,
+        total: r.total,
+        open: r.open,
+      }));
+    } catch (err) {
+      log.warn({ event: 'taskboard.list_teams_failed', error: String(err) });
       return [];
     }
   }
@@ -954,6 +1004,30 @@ export class TaskboardStore {
       log.warn({ event: 'taskboard.mark_orphaned_failed', id, error: String(err) });
       return false;
     }
+  }
+
+  /**
+   * TTL janitor (Phase 3): soft-delete every orphaned, still-visible card whose
+   * `orphaned_at` is older than `cutoffMs`. Reuses `deleteCard` so each purge is
+   * audited (`deleted` journal + `taskboard.card_deleted` event) exactly like an
+   * operator delete. Never throws — a bad row must not abort the whole sweep;
+   * returns how many were actually purged.
+   */
+  purgeOrphanedBefore(cutoffMs: number): number {
+    let purged = 0;
+    try {
+      const ids = this.expiredOrphansStmt.all(cutoffMs).map((r) => r.id);
+      for (const id of ids) {
+        try {
+          if (this.deleteCard({ id, actorSessionId: null })) purged++;
+        } catch (err) {
+          log.warn({ event: 'taskboard.purge_card_failed', id, error: String(err) });
+        }
+      }
+    } catch (err) {
+      log.warn({ event: 'taskboard.purge_orphaned_failed', error: String(err) });
+    }
+    return purged;
   }
 
   /**

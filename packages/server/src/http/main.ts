@@ -24,7 +24,9 @@ import { createIdeRouter } from './routes/ide.js';
 import { createPluginsRouter } from './routes/plugins.js';
 import { createUpdatesRouter } from './routes/updates.js';
 import { createMemoryRouter } from './routes/memory.js';
+import { createTaskboardRouter } from './routes/taskboard.js';
 import type { MemoryStore } from '../modules/memory/store.js';
+import type { TaskboardStore } from '../modules/taskboard/store.js';
 import type { UpdateService, InfoUpdateProjection } from '../modules/updates/index.js';
 import type { PluginHost } from '../modules/plugins/host.js';
 import type { PluginHttpRegistry } from '../modules/plugins/http-registry.js';
@@ -126,6 +128,7 @@ export function createApp(
   connectorRegistry?: ConnectorRegistry,
   updates?: UpdateService,
   memory?: MemoryStore,
+  taskboard?: TaskboardStore,
 ): { app: express.Express; ideProxy: ProxyHandler | null } {
   const app = express();
   app.disable('x-powered-by');
@@ -323,6 +326,12 @@ export function createApp(
   // the X-Auth-Token gate like the other business routes. Mounted only when the
   // store came up (a boot where it failed is unaffected everywhere else).
   if (memory) app.use(createMemoryRouter(memory));
+  // Durable task board (docs/tableau-de-taches.md) — `/api/board/*`, READ-ONLY
+  // plus one operator DELETE. Behind the X-Auth-Token gate like the memory
+  // router. Mounted only when the store came up (a boot where it failed leaves
+  // every other subsystem unaffected — the `board.*` MCP tools answer
+  // TASKBOARD_UNAVAILABLE and this router is simply absent).
+  if (taskboard) app.use(createTaskboardRouter(taskboard));
   // `GET /ide-info` — VS Code web connection details for the authenticated
   // client. Mounted after the auth gate so it 401s without X-Auth-Token
   // (parity with the other business routes). The IDE itself runs on its own
@@ -413,6 +422,7 @@ export function startServer(
   connectorRegistry?: ConnectorRegistry,
   updates?: UpdateService,
   memory?: MemoryStore,
+  taskboard?: TaskboardStore,
 ): ServerHandle {
   const { app, ideProxy } = createApp(
     config,
@@ -430,6 +440,7 @@ export function startServer(
     connectorRegistry,
     updates,
     memory,
+    taskboard,
   );
   const http = createServer(app);
 
