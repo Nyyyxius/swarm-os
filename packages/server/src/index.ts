@@ -27,6 +27,10 @@ import { MemoryStore } from './modules/memory/store.js';
 import { TaskboardStore } from './modules/taskboard/store.js';
 import { ApprovalStore } from './modules/approvals/store.js';
 import {
+  startApprovalJanitor,
+  type ApprovalJanitorHandle,
+} from './modules/approvals/lifecycle.js';
+import {
   markOrphanedCardsAtBoot,
   startTaskboardJanitor,
   type TaskboardJanitorHandle,
@@ -371,6 +375,26 @@ if (taskboardStore) {
     ttlMs: config.taskboardOrphanTtlMs,
     intervalMs: config.taskboardJanitorIntervalMs,
   });
+}
+
+// ---- Approval-gate TTL janitor --------------------------------------------
+// Periodically flags still-`pending` approvals past their TTL as `expired` — a
+// cleanup flag only, NEVER an auto-deny (timeout policy = "leave pending").
+// In-process, unref'd interval, every tick guarded. No-op when the approval
+// store failed to open at boot.
+let approvalJanitor: ApprovalJanitorHandle | null = null;
+if (approvalStore) {
+  try {
+    approvalJanitor = startApprovalJanitor(approvalStore, {
+      ttlMs: config.approvalOrphanTtlMs,
+      intervalMs: config.approvalJanitorIntervalMs,
+    });
+  } catch (err) {
+    log.warn({
+      event: 'approvals.janitor_start_failed',
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
 }
 
 // ---- Per-role cron scheduler ----------------------------------------------
@@ -740,6 +764,8 @@ async function shutdown(signal: string): Promise<void> {
     // Disarm the task-board TTL janitor (unref'd, but stop it explicitly so no
     // sweep fires into a half-closed DB during shutdown).
     taskboardJanitor?.stop();
+    // Disarm the approval-gate TTL janitor for the same reason.
+    approvalJanitor?.stop();
     // Disarm per-role crons so no tick fires into a half-torn-down spawner.
     scheduler.stop();
     // The update RUNNER does own timers, and this is early on purpose: a

@@ -182,6 +182,20 @@ export interface Config {
    */
   taskboardJanitorIntervalMs: number;
   /**
+   * Approval gate (docs/garde-fous-approbation.md, P5) — how long (ms) a
+   * still-`pending` approval is kept before the TTL janitor flags it `expired`
+   * (a cleanup flag ONLY — never an auto-decision; the timeout policy is "leave
+   * pending"). `0` disables the janitor. Default 7 days. Env:
+   * `SWARM_OS_APPROVAL_ORPHAN_TTL_MS`.
+   */
+  approvalOrphanTtlMs: number;
+  /**
+   * Approval gate — how often (ms) the pending-approval TTL janitor sweeps. `0`
+   * disables it. Default 6h (same cadence as the taskboard janitor). Env:
+   * `SWARM_OS_APPROVAL_JANITOR_INTERVAL_MS`.
+   */
+  approvalJanitorIntervalMs: number;
+  /**
    * Per-role cron scheduler (modules/schedule): master switch. When `true`
    * (default), a role carrying a `schedule` gets an in-process cron that
    * delivers its `scheduleMessage` to the lead inbox of every live instance.
@@ -632,6 +646,15 @@ export function loadConfig(): Config {
     6 * 60 * 60 * 1000,
   );
 
+  // Approval-gate TTL janitor (in-process; modules/approvals/lifecycle). Pending
+  // approvals whose prompt was never answered are flagged `expired` after 7 days
+  // by default (cleanup flag ONLY — never an auto-deny), swept every 6h.
+  const approvalOrphanTtlMs = intEnv('SWARM_OS_APPROVAL_ORPHAN_TTL_MS', 7 * 24 * 60 * 60 * 1000);
+  const approvalJanitorIntervalMs = intEnv(
+    'SWARM_OS_APPROVAL_JANITOR_INTERVAL_MS',
+    6 * 60 * 60 * 1000,
+  );
+
   // Per-role cron scheduler (in-process; modules/schedule).
   const scheduleEnabled = boolEnv('SWARM_OS_SCHEDULE_ENABLED', true);
   const scheduleTimezone = process.env.SWARM_OS_SCHEDULE_TZ ?? 'UTC';
@@ -850,6 +873,8 @@ export function loadConfig(): Config {
     backupKeep,
     taskboardOrphanTtlMs,
     taskboardJanitorIntervalMs,
+    approvalOrphanTtlMs,
+    approvalJanitorIntervalMs,
     scheduleEnabled,
     scheduleTimezone,
     token,

@@ -230,8 +230,32 @@ export interface RoleView {
   /** Message template delivered at each cron tick ({{fire}}, {{now}},
    * {{window:Nh}}). Required when `schedule` is set. */
   scheduleMessage: string | null;
+  /**
+   * Approval gate (docs/garde-fous-approbation.md, P5) — OPTIONAL per-role
+   * override of the human-in-the-loop guard. `null`/absent = no override: the
+   * role uses the built-in default arming and Discord notification ON. Optional
+   * so older servers that never sent the field keep type-checking.
+   */
+  approval?: RoleApprovalSettings | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * Per-role approval override. Every field is independently optional; an absent
+ * field inherits the default (default arming, Discord ON). Mirrors the server's
+ * `RoleApprovalSettings`.
+ */
+export interface RoleApprovalSettings {
+  /** Master switch. `false` = the guard never arms for this role. */
+  enabled?: boolean;
+  /**
+   * Explicit allowlist of permission modes that ARM the guard, overriding the
+   * default. `undefined` = inherit the default arming set.
+   */
+  armingModes?: string[];
+  /** Whether the Discord approval embed is posted. `undefined`/`true` = ON. */
+  discordNotify?: boolean;
 }
 
 export type RoleInput = Omit<RoleView, 'id' | 'createdAt' | 'updatedAt'>;

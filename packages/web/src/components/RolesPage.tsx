@@ -38,6 +38,7 @@ import {
   type ConnectorSchema,
   type RoleView,
   type RoleInput,
+  type RoleApprovalSettings,
 } from '../api/client';
 import { DiscordOnboarding } from './DiscordOnboarding';
 import { useShellMode } from '../hooks/useShellMode';
@@ -79,7 +80,8 @@ type SectionId =
   | 'leadPreamble'
   | 'workerPreamble'
   | 'connectors'
-  | 'cadence';
+  | 'cadence'
+  | 'approvals';
 
 export function RolesPage({ open, onClose }: Props) {
   const { roles, loading, error, create, update, destroy } = useRoles();
@@ -193,6 +195,7 @@ export function RolesPage({ open, onClose }: Props) {
         connectors: role.connectors,
         schedule: role.schedule,
         scheduleMessage: role.scheduleMessage,
+        approval: role.approval ?? null,
       });
       setSelectedRoleId(r.id);
       setEditingSection(null);
@@ -374,6 +377,14 @@ export function RolesPage({ open, onClose }: Props) {
               role={role}
               editing={editingSection === 'cadence'}
               onEdit={() => setEditingSection('cadence')}
+              onCancel={() => setEditingSection(null)}
+              onSave={(body) => patchSelected(body)}
+            />
+
+            <ApprovalsSection
+              role={role}
+              editing={editingSection === 'approvals'}
+              onEdit={() => setEditingSection('approvals')}
               onCancel={() => setEditingSection(null)}
               onSave={(body) => patchSelected(body)}
             />
@@ -927,6 +938,197 @@ function CadenceSection({
           />
           <div className="field-help" style={{ marginTop: 8 }}>
             Déposé dans l’inbox du lead de chaque instance vivante de ce rôle à chaque tic.
+          </div>
+          {error && (
+            <div
+              className="field-warn"
+              style={{ color: 'var(--bad)', borderLeftColor: 'var(--bad)' }}
+            >
+              {error}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ───────────────────────────── APPROVALS ────────────────────────────────────
+/**
+ * Per-role override of the human-in-the-loop approval gate (P5). Every control
+ * defaults to the built-in behaviour, and a role that changes nothing here
+ * persists `approval: null` (strict retro-compat — it behaves exactly as before
+ * this section existed). Three independent levers:
+ *   - guard on/off for the role (`enabled`),
+ *   - which permission modes ARM the guard (`armingModes`; unset = default),
+ *   - whether the Discord approval embed is posted (`discordNotify`).
+ */
+const APPROVAL_MODES = [
+  'default',
+  'plan',
+  'acceptEdits',
+  'auto',
+  'dontAsk',
+  'bypassPermissions',
+] as const;
+
+function approvalSummary(a: RoleApprovalSettings | null | undefined): string {
+  if (!a) return '— (défaut : arme selon le mode qui prompte, Discord activé) —';
+  const parts: string[] = [];
+  if (a.enabled === false) {
+    parts.push('🚫 garde-fou DÉSACTIVÉ pour ce rôle');
+  } else if (Array.isArray(a.armingModes)) {
+    parts.push(
+      a.armingModes.length ? `arme sur : ${a.armingModes.join(', ')}` : 'arme sur : aucun mode',
+    );
+  } else {
+    parts.push('arme sur : modes par défaut');
+  }
+  parts.push(a.discordNotify === false ? 'Discord : off' : 'Discord : on');
+  return parts.join('  ·  ');
+}
+
+function ApprovalsSection({
+  role,
+  editing,
+  onEdit,
+  onCancel,
+  onSave,
+}: {
+  role: RoleView;
+  editing: boolean;
+  onEdit: () => void;
+  onCancel: () => void;
+  onSave: (body: Partial<RoleInput>) => Promise<void>;
+}) {
+  const [guardEnabled, setGuardEnabled] = useState(true);
+  const [customModes, setCustomModes] = useState(false);
+  const [modes, setModes] = useState<string[]>([]);
+  const [discordNotify, setDiscordNotify] = useState(true);
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    const a = role.approval ?? null;
+    setGuardEnabled(a?.enabled !== false);
+    setCustomModes(Array.isArray(a?.armingModes));
+    setModes(Array.isArray(a?.armingModes) ? [...a!.armingModes!] : []);
+    setDiscordNotify(a?.discordNotify !== false);
+    setError(null);
+  }, [role.id, editing]);
+
+  function toggleMode(m: string) {
+    setModes((prev) => (prev.includes(m) ? prev.filter((x) => x !== m) : [...prev, m]));
+  }
+
+  async function save() {
+    setError(null);
+    // Build the minimal override: only carry a field when it DIFFERS from the
+    // default, so "changed nothing" collapses to `null` (no override).
+    const appr: RoleApprovalSettings = {};
+    if (!guardEnabled) appr.enabled = false;
+    if (customModes) appr.armingModes = [...modes];
+    if (!discordNotify) appr.discordNotify = false;
+    const value = Object.keys(appr).length ? appr : null;
+    try {
+      await onSave({ approval: value });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  return (
+    <div className="role-section">
+      <h3>
+        <span>APPROBATIONS</span>
+        {editing ? (
+          <span style={{ display: 'flex', gap: 6 }}>
+            <button className="h-edit" onClick={onCancel}>
+              CANCEL
+            </button>
+            <button className="h-edit" onClick={() => void save()} style={{ color: 'var(--amber)' }}>
+              SAVE
+            </button>
+          </span>
+        ) : (
+          <button className="h-edit" onClick={onEdit}>
+            EDIT
+          </button>
+        )}
+      </h3>
+
+      {!editing ? (
+        <div className="cfg-pre">{approvalSummary(role.approval)}</div>
+      ) : (
+        <>
+          <label style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+            <input
+              type="checkbox"
+              checked={guardEnabled}
+              onChange={(e) => setGuardEnabled(e.target.checked)}
+            />
+            <span>Garde-fou d’approbation activé pour ce rôle</span>
+          </label>
+
+          <label
+            style={{
+              display: 'flex',
+              gap: 8,
+              alignItems: 'center',
+              marginBottom: 6,
+              opacity: guardEnabled ? 1 : 0.5,
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={customModes}
+              disabled={!guardEnabled}
+              onChange={(e) => setCustomModes(e.target.checked)}
+            />
+            <span>Personnaliser les modes qui arment le garde-fou</span>
+          </label>
+          {guardEnabled && customModes && (
+            <div style={{ display: 'flex', flexWrap: 'wrap', gap: 10, margin: '4px 0 10px 24px' }}>
+              {APPROVAL_MODES.map((m) => (
+                <label key={m} style={{ display: 'flex', gap: 5, alignItems: 'center' }}>
+                  <input
+                    type="checkbox"
+                    checked={modes.includes(m)}
+                    onChange={() => toggleMode(m)}
+                  />
+                  <span className="tag-pill">{m}</span>
+                </label>
+              ))}
+            </div>
+          )}
+          {guardEnabled && !customModes && (
+            <div className="field-help" style={{ margin: '0 0 10px 24px' }}>
+              Défaut : arme pour les modes qui sollicitent l’humain (claude
+              default / plan / acceptEdits).
+            </div>
+          )}
+
+          <label
+            style={{
+              display: 'flex',
+              gap: 8,
+              alignItems: 'center',
+              marginBottom: 8,
+              opacity: guardEnabled ? 1 : 0.5,
+            }}
+          >
+            <input
+              type="checkbox"
+              checked={discordNotify}
+              disabled={!guardEnabled}
+              onChange={(e) => setDiscordNotify(e.target.checked)}
+            />
+            <span>Notifier l’approbation sur Discord (embed / message du bot)</span>
+          </label>
+
+          <div className="field-help">
+            Absent de réglage → comportement par défaut inchangé. Une approbation
+            expirée par le janitor TTL n’est jamais un refus (elle reste un simple
+            nettoyage).
           </div>
           {error && (
             <div

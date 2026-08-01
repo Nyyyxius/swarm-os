@@ -124,6 +124,12 @@ export interface RoleRow {
   connectors_json: string | null;
   schedule: string | null;
   schedule_message: string | null;
+  /**
+   * Approval-gate per-role override (docs/garde-fous-approbation.md, P5),
+   * JSON-serialized. NULL = no override (default arming + Discord notify ON).
+   * See modules/roles for the parsed `RoleApprovalSettings` shape.
+   */
+  approval_json: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -433,12 +439,12 @@ export class SwarmDb {
       INSERT INTO roles (
         id, label, lead_prompt, lead_preamble, worker_preamble, worker_count,
         default_model, default_effort, default_permission_mode, default_provider,
-        connectors_json, schedule, schedule_message,
+        connectors_json, schedule, schedule_message, approval_json,
         created_at, updated_at
       ) VALUES (
         @id, @label, @lead_prompt, @lead_preamble, @worker_preamble, @worker_count,
         @default_model, @default_effort, @default_permission_mode, @default_provider,
-        @connectors_json, @schedule, @schedule_message,
+        @connectors_json, @schedule, @schedule_message, @approval_json,
         @created_at, @updated_at
       )
     `);
@@ -456,6 +462,7 @@ export class SwarmDb {
         connectors_json = @connectors_json,
         schedule = @schedule,
         schedule_message = @schedule_message,
+        approval_json = @approval_json,
         updated_at = @updated_at
       WHERE id = @id
     `);
@@ -539,6 +546,12 @@ export class SwarmDb {
       { table: 'orchestrators', column: 'default_provider', ddl: "ALTER TABLE orchestrators ADD COLUMN default_provider TEXT NOT NULL DEFAULT 'claude'" },
       { table: 'roles',         column: 'default_provider', ddl: 'ALTER TABLE roles ADD COLUMN default_provider TEXT' },
       { table: 'sessions',      column: 'provider',         ddl: "ALTER TABLE sessions ADD COLUMN provider TEXT NOT NULL DEFAULT 'claude'" },
+      // Approval gate (docs/garde-fous-approbation.md, P5) — OPTIONAL per-role
+      // override of the human-in-the-loop guard, JSON-serialized to stay
+      // future-proof (same convention as connectors_json). NULL = no override:
+      // the role behaves EXACTLY as before (default `isPromptingMode` arming,
+      // Discord notification ON). Every pre-existing role reads NULL.
+      { table: 'roles',         column: 'approval_json',    ddl: 'ALTER TABLE roles ADD COLUMN approval_json TEXT' },
     ];
     for (const a of additions) {
       try {

@@ -70,6 +70,77 @@ export interface GenericConnector {
 
 export type Connector = DiscordConnector | GenericConnector;
 
+/**
+ * OPTIONAL per-role override of the approval gate (human-in-the-loop guard,
+ * docs/garde-fous-approbation.md §9, P5). Absent (`null`) on a role → the guard
+ * behaves EXACTLY as the built-in default: it arms for the modes
+ * `isPromptingMode` selects (claude default/plan/acceptEdits), and the Discord
+ * approval notification is ON. Every field is independently optional, so a role
+ * can override one aspect and inherit the rest.
+ */
+export interface RoleApprovalSettings {
+  /**
+   * Master switch for the guard on teams of this role. `false` = never create
+   * an approval — the session runs as if the gate did not exist (identical to a
+   * bypass session for this purpose). `true`/`undefined` = the guard is active
+   * (which modes arm it is still governed by `armingModes` / the default).
+   */
+  enabled?: boolean;
+  /**
+   * Explicit allowlist of permission modes that ARM the guard, overriding the
+   * built-in per-provider default (`isPromptingMode`). Matched verbatim against
+   * `session.permissionMode`. An empty array arms for NO mode. `undefined` =
+   * inherit the default.
+   */
+  armingModes?: string[];
+  /**
+   * Whether the Discord approval embed/message is posted for this role. `false`
+   * = suppress it (the web toast/page, REST API and console remain the actionable
+   * controls). `undefined`/`true` = ON.
+   */
+  discordNotify?: boolean;
+}
+
+/**
+ * Defensively parse the persisted `approval_json`. Any malformed / unexpected
+ * shape degrades to `null` (no override) rather than throwing — this is read on
+ * the hook path indirectly and must never break arming. Only recognised,
+ * correctly-typed fields survive.
+ */
+export function parseApprovalSettings(json: string | null | undefined): RoleApprovalSettings | null {
+  if (!json) return null;
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) return null;
+    const obj = parsed as Record<string, unknown>;
+    const out: RoleApprovalSettings = {};
+    if (typeof obj.enabled === 'boolean') out.enabled = obj.enabled;
+    if (Array.isArray(obj.armingModes)) {
+      out.armingModes = obj.armingModes.filter((m): m is string => typeof m === 'string');
+    }
+    if (typeof obj.discordNotify === 'boolean') out.discordNotify = obj.discordNotify;
+    return Object.keys(out).length > 0 ? out : null;
+  } catch (err) {
+    log.warn({
+      event: 'roles.approval_parse_failed',
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return null;
+  }
+}
+
+/** Serialize approval settings for storage. `null`/empty → `null` (no override). */
+function serializeApprovalSettings(approval: RoleApprovalSettings | null | undefined): string | null {
+  if (!approval) return null;
+  const out: RoleApprovalSettings = {};
+  if (typeof approval.enabled === 'boolean') out.enabled = approval.enabled;
+  if (Array.isArray(approval.armingModes)) {
+    out.armingModes = approval.armingModes.filter((m): m is string => typeof m === 'string');
+  }
+  if (typeof approval.discordNotify === 'boolean') out.discordNotify = approval.discordNotify;
+  return Object.keys(out).length > 0 ? JSON.stringify(out) : null;
+}
+
 /** Narrow a connector to the flat built-in Discord shape. */
 export function isDiscordConnector(c: Connector): c is DiscordConnector {
   return c.type === 'discord';
@@ -121,6 +192,11 @@ export interface Role {
    * `schedule` is set (route-enforced).
    */
   scheduleMessage: string | null;
+  /**
+   * OPTIONAL approval-gate override (P5). NULL = no override → the built-in
+   * default arming (`isPromptingMode`) and Discord notification ON.
+   */
+  approval: RoleApprovalSettings | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -138,6 +214,7 @@ export interface RoleInit {
   connectors?: Connector[];
   schedule?: string | null;
   scheduleMessage?: string | null;
+  approval?: RoleApprovalSettings | null;
 }
 
 export type RolePatch = Partial<RoleInit>;
@@ -170,6 +247,7 @@ function rowToRole(row: RoleRow): Role {
     connectors,
     schedule: row.schedule,
     scheduleMessage: row.schedule_message,
+    approval: parseApprovalSettings(row.approval_json),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -190,6 +268,7 @@ function roleToRow(r: Role): RoleRow {
     connectors_json: r.connectors.length ? JSON.stringify(r.connectors) : null,
     schedule: r.schedule,
     schedule_message: r.scheduleMessage,
+    approval_json: serializeApprovalSettings(r.approval),
     created_at: r.createdAt,
     updated_at: r.updatedAt,
   };
@@ -214,6 +293,7 @@ export class RoleStore {
       connectors: init.connectors ?? [],
       schedule: init.schedule ?? null,
       scheduleMessage: init.scheduleMessage ?? null,
+      approval: init.approval ?? null,
       createdAt: now,
       updatedAt: now,
     };
@@ -252,6 +332,7 @@ export class RoleStore {
       schedule: patch.schedule !== undefined ? patch.schedule : existing.schedule,
       scheduleMessage:
         patch.scheduleMessage !== undefined ? patch.scheduleMessage : existing.scheduleMessage,
+      approval: patch.approval !== undefined ? patch.approval : existing.approval,
       updatedAt: new Date().toISOString(),
     };
     this.db.updateRole(roleToRow(updated));

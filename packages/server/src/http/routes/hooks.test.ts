@@ -103,7 +103,13 @@ interface FakeSession {
  */
 function fakeStack(
   semantics: NotificationHookSemantics,
-  opts: { provider?: string; permissionMode?: string } = {},
+  opts: {
+    provider?: string;
+    permissionMode?: string;
+    // P5: when present (even null), the orch is given a role carrying this
+    // approval override, reachable via `spawner.roleStore.get`.
+    roleApproval?: Record<string, unknown> | null;
+  } = {},
 ): {
   spawner: Spawner;
   session: FakeSession;
@@ -111,6 +117,7 @@ function fakeStack(
 } {
   const provider = opts.provider ?? 'under-test';
   const permissionMode = opts.permissionMode ?? 'bypassPermissions';
+  const hasRole = 'roleApproval' in opts;
   const resets: Array<{ cmd: string; idleMs: number }> = [];
   const session = {
     id: 'sess-1',
@@ -147,10 +154,15 @@ function fakeStack(
     role: 'coordinator',
     status: 'running',
     notifier: orchNotifier,
+    roleId: hasRole ? 'role-1' : null,
     getSession: (id: string) => (id === 'sess-1' ? session : null),
   };
+  const roleStore = hasRole
+    ? { get: (id: string) => (id === 'role-1' ? { id: 'role-1', approval: opts.roleApproval } : null) }
+    : undefined;
   const spawner = {
     get: (id: string) => (id === 'orch-1' ? orch : null),
+    ...(roleStore ? { roleStore } : {}),
   } as unknown as Spawner;
   return { spawner, session: session as unknown as FakeSession, orchNotifier };
 }
@@ -192,6 +204,7 @@ async function fire(
     permissionMode?: string;
     approvals?: RecordingApprovals;
     message?: string;
+    roleApproval?: Record<string, unknown> | null;
   } = {},
 ): Promise<{
   res: Response;
@@ -205,6 +218,7 @@ async function fire(
   const { spawner, session, orchNotifier } = fakeStack(semantics, {
     provider: opts.provider,
     permissionMode: opts.permissionMode,
+    ...('roleApproval' in opts ? { roleApproval: opts.roleApproval } : {}),
   });
   const notifier = new RecordingNotifier();
   const base = await serve(spawner, notifier, opts.compactOnWaiting ?? false, opts.approvals);
@@ -353,6 +367,88 @@ describe('POST /hooks/notification — approval gate (P1)', () => {
     expect(res.status).toBe(200);
     expect(events.filter((e) => e.kind === 'session.status_changed')).toHaveLength(1);
     expect(notifier.events).toHaveLength(1);
+  });
+});
+
+describe('POST /hooks/notification — per-role override (P5)', () => {
+  it('a role WITHOUT approval settings behaves exactly like the default', async () => {
+    const approvals = new RecordingApprovals();
+    const { approvals: seen } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'default',
+      approvals,
+      roleApproval: null, // role exists, no override
+      message: 'Claude needs your permission to use Bash',
+    });
+    expect(seen!.created).toHaveLength(1); // same as no-role default
+  });
+
+  it('enabled:false disables the guard even for a normally-arming mode', async () => {
+    const approvals = new RecordingApprovals();
+    const { res, events, notifier, approvals: seen } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'default',
+      approvals,
+      roleApproval: { enabled: false },
+    });
+    expect(res.status).toBe(200);
+    expect(seen!.created).toHaveLength(0); // guard OFF for this role
+    // Legacy waiting path is still untouched.
+    expect(events.filter((e) => e.kind === 'session.status_changed')).toHaveLength(1);
+    expect(notifier.events).toHaveLength(1);
+  });
+
+  it('armingModes can arm a mode the default would NOT (bypassPermissions)', async () => {
+    const approvals = new RecordingApprovals();
+    const { approvals: seen } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'bypassPermissions',
+      approvals,
+      roleApproval: { armingModes: ['bypassPermissions'] },
+    });
+    expect(seen!.created).toHaveLength(1); // override armed a normally-silent mode
+  });
+
+  it('armingModes can DISARM a mode the default would arm (default not listed)', async () => {
+    const approvals = new RecordingApprovals();
+    const { approvals: seen } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'default',
+      approvals,
+      roleApproval: { armingModes: ['plan'] }, // default excluded
+    });
+    expect(seen!.created).toHaveLength(0);
+  });
+
+  it('discordNotify:false suppresses the Discord embed but still records + flips the badge', async () => {
+    const approvals = new RecordingApprovals();
+    const { res, events, notifier, orchNotifier, approvals: seen } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'default',
+      approvals,
+      roleApproval: { discordNotify: false },
+      message: 'Claude needs your permission to use Bash',
+    });
+    expect(res.status).toBe(200);
+    expect(seen!.created).toHaveLength(1); // approval STILL created
+    // The Discord approval embed is suppressed for this role...
+    expect(orchNotifier.events).toHaveLength(0);
+    // ...but the legacy waiting badge + global ping are untouched.
+    expect(events.filter((e) => e.kind === 'session.status_changed')).toHaveLength(1);
+    expect(notifier.events).toHaveLength(1);
+  });
+
+  it('discordNotify defaults ON when the role sets other fields only', async () => {
+    const approvals = new RecordingApprovals();
+    const { orchNotifier, approvals: seen } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'default',
+      approvals,
+      roleApproval: { enabled: true },
+      message: 'Claude needs your permission to use Bash',
+    });
+    expect(seen!.created).toHaveLength(1);
+    expect(orchNotifier.events).toHaveLength(1); // embed still posted (default ON)
   });
 });
 

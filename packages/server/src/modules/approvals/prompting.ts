@@ -12,6 +12,7 @@
  */
 
 import type { ApprovalCategory } from './store.js';
+import type { RoleApprovalSettings } from '../roles/index.js';
 
 /**
  * Does `(provider, mode)` describe a session that asks the human before acting?
@@ -44,6 +45,45 @@ export function isPromptingMode(
     default:
       return false;
   }
+}
+
+/**
+ * Decide whether the approval gate ARMS for `(provider, mode)` given a role's
+ * OPTIONAL override (P5). This is the single arming predicate the hook path
+ * calls; when `settings` is `null`/absent it is exactly `isPromptingMode`, so a
+ * role without any override is byte-identical to pre-P5 behaviour.
+ *
+ * Precedence:
+ *   1. `settings.enabled === false` → the guard is OFF for this role → `false`,
+ *      whatever the mode. (An explicit kill-switch.)
+ *   2. `settings.armingModes` present (an array) → arm iff `mode` is in it. The
+ *      role took full control of the arming set; an empty array arms nothing.
+ *   3. Otherwise → the built-in `isPromptingMode` default.
+ *
+ * Pure and defensive — never throws; the caller still wraps it and falls back to
+ * the default on any error.
+ */
+export function shouldArmApproval(
+  provider: string | null | undefined,
+  mode: string | null | undefined,
+  settings: RoleApprovalSettings | null | undefined,
+): boolean {
+  if (settings) {
+    if (settings.enabled === false) return false;
+    if (Array.isArray(settings.armingModes)) {
+      return typeof mode === 'string' && settings.armingModes.includes(mode);
+    }
+  }
+  return isPromptingMode(provider, mode);
+}
+
+/**
+ * Whether the Discord approval notification should be posted for a role. `false`
+ * only when the role explicitly set `discordNotify: false`; absent/`true` → ON
+ * (retro-compatible default). Web/API/console controls are unaffected either way.
+ */
+export function approvalDiscordEnabled(settings: RoleApprovalSettings | null | undefined): boolean {
+  return settings?.discordNotify !== false;
 }
 
 /**

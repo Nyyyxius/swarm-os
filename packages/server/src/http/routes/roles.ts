@@ -5,6 +5,7 @@ import type {
   Role,
   RoleInit,
   RolePatch,
+  RoleApprovalSettings,
 } from '../../modules/roles/index.js';
 import { isDiscordConnector } from '../../modules/roles/index.js';
 import type { Config, EffortLevel, PermissionMode } from '../../config.js';
@@ -81,6 +82,7 @@ interface RoleBody {
   connectors?: unknown;
   schedule?: unknown;
   scheduleMessage?: unknown;
+  approval?: unknown;
 }
 
 function isNonEmptyString(x: unknown): x is string {
@@ -117,6 +119,55 @@ function parseCron(
     return { ok: false, error: 'schedule must be a valid cron expression (e.g. "0 6,12,20 * * *")' };
   }
   return { ok: true, value: trimmed };
+}
+
+/**
+ * Validate the OPTIONAL per-role approval override (P5). `null`/omitted → clear
+ * the override (= role reverts to the built-in default). An object may carry any
+ * of `enabled` (bool), `armingModes` (array of valid permission modes), and
+ * `discordNotify` (bool). An object that ends up carrying no recognised field
+ * normalizes to `null` (no override). Unknown/mistyped fields are rejected so a
+ * typo surfaces at the form rather than silently doing nothing.
+ */
+function parseApprovalBody(
+  x: unknown,
+): { ok: true; value: RoleApprovalSettings | null } | { ok: false; error: string } {
+  if (x == null) return { ok: true, value: null };
+  if (typeof x !== 'object' || Array.isArray(x)) {
+    return { ok: false, error: 'approval must be an object or null' };
+  }
+  const obj = x as Record<string, unknown>;
+  const out: RoleApprovalSettings = {};
+  if (obj.enabled !== undefined && obj.enabled !== null) {
+    if (typeof obj.enabled !== 'boolean') {
+      return { ok: false, error: 'approval.enabled must be a boolean' };
+    }
+    out.enabled = obj.enabled;
+  }
+  if (obj.armingModes !== undefined && obj.armingModes !== null) {
+    if (!Array.isArray(obj.armingModes)) {
+      return { ok: false, error: 'approval.armingModes must be an array of permission modes' };
+    }
+    const modes: string[] = [];
+    for (const m of obj.armingModes) {
+      if (typeof m !== 'string' || !VALID_PERMS.has(m)) {
+        return {
+          ok: false,
+          error:
+            'approval.armingModes must be permission modes (auto|acceptEdits|bypassPermissions|default|dontAsk|plan)',
+        };
+      }
+      if (!modes.includes(m)) modes.push(m);
+    }
+    out.armingModes = modes;
+  }
+  if (obj.discordNotify !== undefined && obj.discordNotify !== null) {
+    if (typeof obj.discordNotify !== 'boolean') {
+      return { ok: false, error: 'approval.discordNotify must be a boolean' };
+    }
+    out.discordNotify = obj.discordNotify;
+  }
+  return { ok: true, value: Object.keys(out).length > 0 ? out : null };
 }
 
 function parseWorkerCount(
@@ -419,6 +470,8 @@ export function createRolesRouter(
         .status(400)
         .json({ error: 'scheduleMessage is required when schedule is set' });
     }
+    const appr = parseApprovalBody(body.approval);
+    if (!appr.ok) return res.status(400).json({ error: appr.error });
 
     const init: RoleInit = {
       label: body.label,
@@ -433,6 +486,7 @@ export function createRolesRouter(
       connectors: cn.value,
       schedule: sch.value,
       scheduleMessage: smsg.value,
+      approval: appr.value,
     };
     const role = store.create(init);
     onRolesChanged?.();
@@ -542,6 +596,11 @@ export function createRolesRouter(
       const r = parseNullableString(body.scheduleMessage, 'scheduleMessage');
       if (!r.ok) return res.status(400).json({ error: r.error });
       patch.scheduleMessage = r.value;
+    }
+    if (body.approval !== undefined) {
+      const r = parseApprovalBody(body.approval);
+      if (!r.ok) return res.status(400).json({ error: r.error });
+      patch.approval = r.value;
     }
     // Enforce the schedule⇒message invariant against the MERGED role: a patch
     // can set a schedule without a message, or clear the message while the

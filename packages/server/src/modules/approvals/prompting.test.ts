@@ -1,5 +1,11 @@
 import { describe, it, expect } from 'vitest';
-import { classifyCategory, isPromptingMode, summarizeRequest } from './prompting.js';
+import {
+  approvalDiscordEnabled,
+  classifyCategory,
+  isPromptingMode,
+  shouldArmApproval,
+  summarizeRequest,
+} from './prompting.js';
 
 describe('isPromptingMode', () => {
   it('arms for claude default / plan / acceptEdits (modes that prompt)', () => {
@@ -27,6 +33,60 @@ describe('isPromptingMode', () => {
     expect(isPromptingMode('claude', '')).toBe(false);
     expect(isPromptingMode(undefined, 'default')).toBe(false);
     expect(isPromptingMode('mystery', 'default')).toBe(false);
+  });
+});
+
+describe('shouldArmApproval', () => {
+  it('with no role override, is exactly isPromptingMode (retro-compat)', () => {
+    for (const mode of ['default', 'plan', 'acceptEdits', 'bypassPermissions', 'dontAsk', 'auto']) {
+      expect(shouldArmApproval('claude', mode, null)).toBe(isPromptingMode('claude', mode));
+      expect(shouldArmApproval('claude', mode, undefined)).toBe(isPromptingMode('claude', mode));
+    }
+    expect(shouldArmApproval('gemini', 'default', null)).toBe(false);
+  });
+
+  it('an empty-object override still falls through to the default', () => {
+    expect(shouldArmApproval('claude', 'default', {})).toBe(true);
+    expect(shouldArmApproval('claude', 'bypassPermissions', {})).toBe(false);
+  });
+
+  it('enabled:false disables the guard for every mode', () => {
+    expect(shouldArmApproval('claude', 'default', { enabled: false })).toBe(false);
+    expect(shouldArmApproval('claude', 'plan', { enabled: false })).toBe(false);
+    // enabled:false wins even if armingModes would have armed.
+    expect(shouldArmApproval('claude', 'default', { enabled: false, armingModes: ['default'] })).toBe(
+      false,
+    );
+  });
+
+  it('armingModes overrides the default arming set', () => {
+    // Arm ONLY for bypassPermissions (unusual, but the role asked for it).
+    const s = { armingModes: ['bypassPermissions'] };
+    expect(shouldArmApproval('claude', 'bypassPermissions', s)).toBe(true);
+    expect(shouldArmApproval('claude', 'default', s)).toBe(false); // default no longer arms
+  });
+
+  it('an empty armingModes array arms for nothing', () => {
+    expect(shouldArmApproval('claude', 'default', { armingModes: [] })).toBe(false);
+    expect(shouldArmApproval('claude', 'plan', { armingModes: [] })).toBe(false);
+  });
+
+  it('enabled:true without armingModes keeps the default arming', () => {
+    expect(shouldArmApproval('claude', 'default', { enabled: true })).toBe(true);
+    expect(shouldArmApproval('claude', 'bypassPermissions', { enabled: true })).toBe(false);
+  });
+});
+
+describe('approvalDiscordEnabled', () => {
+  it('defaults ON when absent or unset', () => {
+    expect(approvalDiscordEnabled(null)).toBe(true);
+    expect(approvalDiscordEnabled(undefined)).toBe(true);
+    expect(approvalDiscordEnabled({})).toBe(true);
+    expect(approvalDiscordEnabled({ discordNotify: true })).toBe(true);
+  });
+
+  it('is OFF only when discordNotify is explicitly false', () => {
+    expect(approvalDiscordEnabled({ discordNotify: false })).toBe(false);
   });
 });
 

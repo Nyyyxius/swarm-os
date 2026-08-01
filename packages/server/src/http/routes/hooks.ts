@@ -103,7 +103,13 @@ import { eventBus } from '../../events.js';
 import { withModule } from '../../logger.js';
 import type { Notifier } from '../../modules/notify/index.js';
 import type { ApprovalStore } from '../../modules/approvals/store.js';
-import { classifyCategory, isPromptingMode, summarizeRequest } from '../../modules/approvals/prompting.js';
+import {
+  approvalDiscordEnabled,
+  classifyCategory,
+  shouldArmApproval,
+  summarizeRequest,
+} from '../../modules/approvals/prompting.js';
+import type { RoleApprovalSettings } from '../../modules/roles/index.js';
 import { notifyApprovalRequested } from '../../modules/approvals/discord-notify.js';
 
 const log = withModule('hooks');
@@ -127,6 +133,26 @@ export interface HooksRouterOptions {
   compactOnWaiting: boolean;
   /** Idle window the armed /compact waits for before firing. */
   idleThresholdMs: number;
+}
+
+/**
+ * Fail-safe read of a team's OPTIONAL per-role approval override (P5). Returns
+ * `null` (→ built-in default arming + Discord ON) when the team has no role, the
+ * role store is unavailable, the role is gone, or anything throws. The approval
+ * gate runs on the `/hooks/notification` path, so this MUST never throw — a
+ * bad/absent setting silently degrades to the pre-P5 default.
+ */
+function readRoleApprovalSettings(
+  spawner: Spawner,
+  roleId: string | null | undefined,
+): RoleApprovalSettings | null {
+  try {
+    if (!roleId) return null;
+    const role = spawner.roleStore?.get(roleId);
+    return role?.approval ?? null;
+  } catch {
+    return null;
+  }
 }
 
 export function createHooksRouter(
@@ -254,14 +280,18 @@ export function createHooksRouter(
     // ---- Approval gate (P1): record a pending approval, non-bypass only ----
     // The gate arms ONLY for sessions whose permission mode actually PROMPTS the
     // human (docs §9.5). A bypassPermissions/dontAsk/auto session emits no prompt
-    // and MUST never produce an approval — `isPromptingMode` enforces that, so a
-    // bypass team's behaviour is byte-identical to before this branch existed.
+    // and MUST never produce an approval — the default `isPromptingMode` enforces
+    // that, so a bypass team's behaviour is byte-identical to before this branch
+    // existed. P5: a role MAY override the arming set (or disable the guard
+    // entirely) via `RoleApprovalSettings`; absent → the same default. Reading
+    // the role is fail-safe (any error → default, `roleSettings` stays null).
     // Fully best-effort: `createRequest` never throws (it runs in the hook path),
     // and the whole block is guarded so an approval-subsystem hiccup can never
     // turn into a non-2xx that crashes the calling agent (spike H6). The event is
     // emitted by the store (same pattern as memory/taskboard), atomically with
     // the audit journal — nothing else to emit here.
-    if (approvals && isPromptingMode(providerId, session.permissionMode)) {
+    const roleSettings = readRoleApprovalSettings(spawner, orch.roleId);
+    if (approvals && shouldArmApproval(providerId, session.permissionMode, roleSettings)) {
       try {
         const category = classifyCategory(message);
         const requestedSummary = summarizeRequest(
@@ -294,25 +324,30 @@ export function createHooksRouter(
           // back to the P3 per-orch webhook embed when no bot is wired. Both are
           // informational: they name what is requested and point the operator at
           // the reply-text protocol, the web toast/page, or the console.
+          // P5 (Volet 3): a role can suppress this embed (`discordNotify: false`)
+          // — absent/true → ON. The approval itself + web/API/console are
+          // unaffected; only the Discord post is skipped.
           // Fire-and-forget — the helper swallows its own errors and is
           // timeout-bounded; the extra `.catch` is belt-and-braces so nothing on
           // the hook path can ever throw (spike H6).
-          void notifyApprovalRequested({
-            spawner,
-            orch,
-            session,
-            approval,
-            store: approvals,
-          }).catch((err) => {
-            log.warn({
-              event: 'notify.dispatch_failed',
-              kind: 'session.approval_requested',
-              orchId: orch.id,
-              sessionId: session.id,
-              approvalId: approval.id,
-              error: err instanceof Error ? err.message : String(err),
+          if (approvalDiscordEnabled(roleSettings)) {
+            void notifyApprovalRequested({
+              spawner,
+              orch,
+              session,
+              approval,
+              store: approvals,
+            }).catch((err) => {
+              log.warn({
+                event: 'notify.dispatch_failed',
+                kind: 'session.approval_requested',
+                orchId: orch.id,
+                sessionId: session.id,
+                approvalId: approval.id,
+                error: err instanceof Error ? err.message : String(err),
+              });
             });
-          });
+          }
         }
       } catch (err) {
         // Defence in depth — createRequest is already non-throwing, but the hook
