@@ -27,6 +27,7 @@ import { ProviderAvailabilityCache } from '../providers/availability.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import type { PluginOrchSubscription } from '../plugins/api-types.js';
 import type { MemoryStore } from '../memory/store.js';
+import type { TaskboardStore } from '../taskboard/store.js';
 import {
   isIdle,
   SIGNAL_TEXT,
@@ -191,6 +192,13 @@ export interface SpawnerDeps {
    * exercise memory ⇒ the memory MCP tools answer `MEMORY_UNAVAILABLE`.
    */
   memory?: MemoryStore;
+  /**
+   * The durable task-board store, scoped per team. Held on the Spawner like
+   * `memory` (the one long-lived object every surface reaches). Absent in unit
+   * tests that don't exercise the board ⇒ the `board.*` tools answer
+   * `TASKBOARD_UNAVAILABLE`.
+   */
+  taskboard?: TaskboardStore;
 }
 
 export class Spawner {
@@ -243,6 +251,12 @@ export class Spawner {
    */
   readonly memory: MemoryStore | null;
 
+  /**
+   * The durable task-board store (docs/tableau-de-taches.md), or `null` when
+   * none was wired. Threaded into every `ToolContext` by `McpServer`.
+   */
+  readonly taskboard: TaskboardStore | null;
+
   constructor(
     private readonly config: Config,
     deps: SpawnerDeps = {},
@@ -260,6 +274,7 @@ export class Spawner {
     });
     this.modelCatalogue = deps.modelCatalogue ?? null;
     this.memory = deps.memory ?? null;
+    this.taskboard = deps.taskboard ?? null;
     // Retro-wire live orchestrators when a connector provider registers late
     // (a plugin enabled while teams are already running — red-team I1).
     this.connectorRegistry?.setRetroactiveWirer((type) => this.retroWireConnectorType(type));

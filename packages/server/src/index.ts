@@ -24,6 +24,7 @@ import { RoleScheduler } from './modules/schedule/index.js';
 import { IdeSupervisor } from './modules/ide/index.js';
 import { PluginStore } from './modules/plugins/store.js';
 import { MemoryStore } from './modules/memory/store.js';
+import { TaskboardStore } from './modules/taskboard/store.js';
 import { createEmbeddingProvider } from './modules/memory/embeddings.js';
 import { PluginHost } from './modules/plugins/host.js';
 import { PluginToolRegistry } from './modules/plugins/mcp-registry.js';
@@ -161,6 +162,24 @@ try {
   });
 }
 
+// ---- Durable task board / Kanban (docs/tableau-de-taches.md) ---------------
+// PER TEAM (per orchestrator): the operational state of one mission. The store
+// OWNS its own tables on the raw Db handle (like MemoryStore) — no schema.sql /
+// INLINE_SCHEMA touch. Wrapped so a board-subsystem failure never stops the
+// boot: the board.* MCP tools then answer TASKBOARD_UNAVAILABLE while every
+// other subsystem is unaffected.
+let taskboardStore: TaskboardStore | null = null;
+try {
+  taskboardStore = new TaskboardStore(db, { eventBus });
+  log.info({ event: 'boot.taskboard_store' });
+} catch (err) {
+  log.error({
+    event: 'boot.taskboard_store_unavailable',
+    error: err instanceof Error ? err.message : String(err),
+    note: 'the task board could not be opened — board.* tools are DISABLED for this boot; every other subsystem is unaffected.',
+  });
+}
+
 // ---- Phase 8: auto-resume — classify what to bring back up ----------------
 // loadResumableState is the atomic-guard variant of the old recoverFromCrash:
 // it flips every resumable orch row to 'interrupted' synchronously BEFORE
@@ -280,6 +299,9 @@ const spawner = new Spawner(config, {
   // Shared knowledge-graph store — threaded into every ToolContext so the
   // memory.* MCP tools reach it. `undefined` when the store failed to open.
   ...(memoryStore ? { memory: memoryStore } : {}),
+  // Durable task-board store — threaded into every ToolContext so the board.*
+  // MCP tools reach it. `undefined` when the store failed to open.
+  ...(taskboardStore ? { taskboard: taskboardStore } : {}),
 });
 
 // ---- S9: in-memory `/metrics/messages` aggregator -------------------------

@@ -7,6 +7,7 @@ import type { Session } from '../orchestrator/session.js';
 import type { Orchestrator } from '../orchestrator/index.js';
 import { registerTeamCommsTools, type ToolContext } from './tools.js';
 import { registerMemoryTools } from './memory-tools.js';
+import { registerTaskboardTools } from './taskboard-tools.js';
 import type { Config } from '../../config.js';
 import type { MessagingDefaults } from '../orchestrator/messaging.js';
 import type { BusMetricsCollector } from '../metrics/busMetrics.js';
@@ -231,6 +232,9 @@ export class McpServer {
     // Shared knowledge-graph tools (memory.*), registered right after the
     // built-in team-comms set so every agent sees them (docs memoire-partagee.md).
     registerMemoryTools(sdkServer, () => ctx);
+    // Durable task-board tools (board.*), registered right after the memory set
+    // so every agent sees them (docs/tableau-de-taches.md §5).
+    registerTaskboardTools(sdkServer, () => ctx);
     this.pluginTools?.registerAll(sdkServer, () => ctx);
 
     const transport = new StreamableHTTPServerTransport({
@@ -327,6 +331,10 @@ export class McpServer {
       // deployment). Absent in pre-memory test fixtures, in which case the
       // memory.* tools answer MEMORY_UNAVAILABLE rather than crashing.
       ...(this.spawner.memory ? { memory: this.spawner.memory } : {}),
+      // Durable task-board store — lives on the Spawner (per-team boards).
+      // Absent in pre-taskboard test fixtures, in which case the board.* tools
+      // answer TASKBOARD_UNAVAILABLE rather than crashing.
+      ...(this.spawner.taskboard ? { taskboard: this.spawner.taskboard } : {}),
     };
   }
 }

@@ -27,6 +27,25 @@ export type MemorySwarmEventKind =
   | 'memory.edge_created';
 
 /**
+ * Task-board (Kanban) event kinds. Emitted by `TaskboardStore` via the event bus
+ * and rebroadcast on `/ws/events` so the web Board page can patch a column
+ * without a refetch. Per-team: each event carries the recipient team's
+ * `orchestratorId` on the `SwarmEvent` (and in its payload) for client filtering.
+ * Added to the open union below — additive, non-breaking.
+ */
+export type TaskboardSwarmEventKind =
+  | 'taskboard.card_created'
+  | 'taskboard.card_updated'
+  | 'taskboard.card_moved'
+  | 'taskboard.card_assigned'
+  | 'taskboard.comment_added'
+  | 'taskboard.dep_changed'
+  | 'taskboard.card_closed'
+  | 'taskboard.card_reopened'
+  | 'taskboard.card_deleted'
+  | 'taskboard.card_orphaned';
+
+/**
  * Open union: plugins emit `plugin.<name>.<subKind>` via `api.events.emit`
  * (the host forces the prefix, so a plugin can never forge a core kind). The
  * `EventsHub` rebroadcasts everything unfiltered and the web client matches
@@ -35,6 +54,7 @@ export type MemorySwarmEventKind =
 export type SwarmEventKind =
   | BuiltinSwarmEventKind
   | MemorySwarmEventKind
+  | TaskboardSwarmEventKind
   | `plugin.${string}`;
 
 /** Payload of `memory.node_created` / `memory.node_updated` / `memory.node_deleted`. */

@@ -18,6 +18,7 @@ import { validateCwdUnderWorkspace } from '../../http/validation.js';
 import { isDiscordConnector } from '../roles/index.js';
 import type { Config, EffortLevel, PermissionMode } from '../../config.js';
 import type { MemoryStore } from '../memory/store.js';
+import type { TaskboardStore } from '../taskboard/store.js';
 import { withModule } from '../../logger.js';
 
 const log = withModule('mcp.tool');
@@ -67,6 +68,13 @@ export interface ToolContext {
    * context; production `McpServer` always threads it through from the Spawner.
    */
   memory?: MemoryStore;
+  /**
+   * Durable task-board store, scoped PER TEAM (docs/tableau-de-taches.md).
+   * Optional so pre-taskboard test paths still build a context; production
+   * `McpServer` threads it through from the Spawner. When absent the `board.*`
+   * tools answer TASKBOARD_UNAVAILABLE.
+   */
+  taskboard?: TaskboardStore;
 }
 
 /** Active sessions only (plan §10). */
