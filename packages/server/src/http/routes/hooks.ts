@@ -102,6 +102,8 @@ import { Spawner } from '../../modules/spawner/index.js';
 import { eventBus } from '../../events.js';
 import { withModule } from '../../logger.js';
 import type { Notifier } from '../../modules/notify/index.js';
+import type { ApprovalStore } from '../../modules/approvals/store.js';
+import { classifyCategory, isPromptingMode, summarizeRequest } from '../../modules/approvals/prompting.js';
 
 const log = withModule('hooks');
 
@@ -131,6 +133,12 @@ export function createHooksRouter(
   hookToken: string,
   notifier: Notifier,
   options: HooksRouterOptions,
+  /**
+   * Approval-gate queue (docs/garde-fous-approbation.md, Phase 1). Optional so
+   * the route still works when the store failed to open at boot (approvals are
+   * then simply not recorded — the legacy `waiting`/Discord path is untouched).
+   */
+  approvals?: ApprovalStore,
 ): Router {
   const router = Router();
 
@@ -241,6 +249,54 @@ export function createHooksRouter(
       sessionId: session.id,
       payload: { status: 'waiting', reason: 'notification-hook' },
     });
+
+    // ---- Approval gate (P1): record a pending approval, non-bypass only ----
+    // The gate arms ONLY for sessions whose permission mode actually PROMPTS the
+    // human (docs §9.5). A bypassPermissions/dontAsk/auto session emits no prompt
+    // and MUST never produce an approval — `isPromptingMode` enforces that, so a
+    // bypass team's behaviour is byte-identical to before this branch existed.
+    // Fully best-effort: `createRequest` never throws (it runs in the hook path),
+    // and the whole block is guarded so an approval-subsystem hiccup can never
+    // turn into a non-2xx that crashes the calling agent (spike H6). The event is
+    // emitted by the store (same pattern as memory/taskboard), atomically with
+    // the audit journal — nothing else to emit here.
+    if (approvals && isPromptingMode(providerId, session.permissionMode)) {
+      try {
+        const category = classifyCategory(message);
+        const requestedSummary = summarizeRequest(
+          message,
+          `${session.name} needs approval`,
+        );
+        const approval = approvals.createRequest({
+          orchestratorId: orch.id,
+          sessionId: session.id,
+          category,
+          requestedSummary,
+          rawMessage: message,
+          permissionMode: session.permissionMode,
+          provider: providerId,
+        });
+        if (approval) {
+          log.info({
+            event: 'hooks.approval_requested',
+            orchId: orch.id,
+            sessionId: session.id,
+            approvalId: approval.id,
+            category: approval.category,
+            permissionMode: session.permissionMode,
+          });
+        }
+      } catch (err) {
+        // Defence in depth — createRequest is already non-throwing, but the hook
+        // path must survive anything (classification, summary, logging).
+        log.warn({
+          event: 'hooks.approval_failed',
+          orchId: orch.id,
+          sessionId: session.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
 
     // Context-management safety net (opt-in): a "waiting" session is paused
     // on a blocker, so arm a /compact to keep its context from growing while

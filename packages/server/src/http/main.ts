@@ -27,6 +27,7 @@ import { createMemoryRouter } from './routes/memory.js';
 import { createTaskboardRouter } from './routes/taskboard.js';
 import type { MemoryStore } from '../modules/memory/store.js';
 import type { TaskboardStore } from '../modules/taskboard/store.js';
+import type { ApprovalStore } from '../modules/approvals/store.js';
 import type { UpdateService, InfoUpdateProjection } from '../modules/updates/index.js';
 import type { PluginHost } from '../modules/plugins/host.js';
 import type { PluginHttpRegistry } from '../modules/plugins/http-registry.js';
@@ -129,6 +130,7 @@ export function createApp(
   updates?: UpdateService,
   memory?: MemoryStore,
   taskboard?: TaskboardStore,
+  approvals?: ApprovalStore,
 ): { app: express.Express; ideProxy: ProxyHandler | null } {
   const app = express();
   app.disable('x-powered-by');
@@ -209,10 +211,16 @@ export function createApp(
   // Phase 4: hook endpoint — Bearer-auth, NOT X-Auth-Token. Mounted before
   // the X-Auth-Token middleware so the user-facing token never leaks here.
   app.use(
-    createHooksRouter(spawner, config.hookToken, spawner.notifier, {
-      compactOnWaiting: config.contextCompactOnWaiting,
-      idleThresholdMs: config.idleThresholdMs,
-    }),
+    createHooksRouter(
+      spawner,
+      config.hookToken,
+      spawner.notifier,
+      {
+        compactOnWaiting: config.contextCompactOnWaiting,
+        idleThresholdMs: config.idleThresholdMs,
+      },
+      approvals,
+    ),
   );
 
   // Phase 6: serve the built web bundle (PWA shell + JS/CSS + manifest +
@@ -423,6 +431,7 @@ export function startServer(
   updates?: UpdateService,
   memory?: MemoryStore,
   taskboard?: TaskboardStore,
+  approvals?: ApprovalStore,
 ): ServerHandle {
   const { app, ideProxy } = createApp(
     config,
@@ -441,6 +450,7 @@ export function startServer(
     updates,
     memory,
     taskboard,
+    approvals,
   );
   const http = createServer(app);
 

@@ -46,6 +46,15 @@ export type TaskboardSwarmEventKind =
   | 'taskboard.card_orphaned';
 
 /**
+ * Approval-gate (human-in-the-loop) event kinds. Emitted by `ApprovalStore` via
+ * the event bus and rebroadcast on `/ws/events` so the web can surface an
+ * actionable approval toast (P3) without a refetch. Per-team: each event carries
+ * the recipient team's `orchestratorId` (and `sessionId`) on the `SwarmEvent`
+ * for client filtering. Added to the open union below — additive, non-breaking.
+ */
+export type ApprovalSwarmEventKind = 'approval.requested' | 'approval.resolved';
+
+/**
  * Open union: plugins emit `plugin.<name>.<subKind>` via `api.events.emit`
  * (the host forces the prefix, so a plugin can never forge a core kind). The
  * `EventsHub` rebroadcasts everything unfiltered and the web client matches
@@ -55,6 +64,7 @@ export type SwarmEventKind =
   | BuiltinSwarmEventKind
   | MemorySwarmEventKind
   | TaskboardSwarmEventKind
+  | ApprovalSwarmEventKind
   | `plugin.${string}`;
 
 /** Payload of `memory.node_created` / `memory.node_updated` / `memory.node_deleted`. */
@@ -67,6 +77,24 @@ export interface MemoryNodeEventPayload {
 export interface MemoryEdgeEventPayload {
   from: string;
   to: string;
+}
+
+/**
+ * Payload of `approval.requested` / `approval.resolved`. `orchestratorId` and
+ * `sessionId` are duplicated here (they also ride the top-level `SwarmEvent`)
+ * for client autosufficiency. `requestedSummary` is the short human-facing
+ * label; `status` reflects the request AFTER the event (pending on request,
+ * terminal on resolve). `decision` / `resolvedBy` are present only on resolve.
+ */
+export interface ApprovalEventPayload {
+  approvalId: string;
+  orchestratorId: string;
+  sessionId: string;
+  category: 'permission' | 'question';
+  requestedSummary: string;
+  status: string;
+  decision?: string | null;
+  by?: string | null;
 }
 
 export interface SwarmEvent {

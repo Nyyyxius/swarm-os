@@ -33,6 +33,7 @@ import type {
 } from '../../modules/notify/index.js';
 import type { Spawner } from '../../modules/spawner/index.js';
 import type { NotificationHookSemantics } from '../../modules/providers/types.js';
+import type { ApprovalStore, CreateApprovalInput, ApprovalRequest } from '../../modules/approvals/store.js';
 
 /** Local double rather than the integration helper — keeps `src` self-contained. */
 class RecordingNotifier implements Notifier {
@@ -43,6 +44,35 @@ class RecordingNotifier implements Notifier {
   }
   async notifyCustom(input: CustomNotificationInput): Promise<void> {
     this.customEvents.push(input);
+  }
+}
+
+/**
+ * Records `createRequest` calls so a test can assert the approval gate armed (or
+ * did NOT arm, the bypass guarantee) without a live SQLite store. Only the one
+ * method the route calls is implemented; the rest of `ApprovalStore` is unused
+ * here and cast away.
+ */
+class RecordingApprovals {
+  readonly created: CreateApprovalInput[] = [];
+  createRequest(input: CreateApprovalInput): ApprovalRequest | null {
+    this.created.push(input);
+    return {
+      id: 'appr-under-test',
+      orchestratorId: input.orchestratorId,
+      sessionId: input.sessionId,
+      category: input.category,
+      requestedSummary: input.requestedSummary,
+      rawMessage: input.rawMessage,
+      permissionMode: input.permissionMode,
+      provider: input.provider,
+      status: 'pending',
+      createdAt: 0,
+      expiresAt: null,
+      resolvedAt: null,
+      resolvedBy: null,
+      decision: null,
+    };
   }
 }
 
@@ -71,10 +101,15 @@ interface FakeSession {
  * off the session's OWN adapter, so a provider unregistered mid-flight cannot
  * change how a live session's callbacks are interpreted.
  */
-function fakeStack(semantics: NotificationHookSemantics): {
+function fakeStack(
+  semantics: NotificationHookSemantics,
+  opts: { provider?: string; permissionMode?: string } = {},
+): {
   spawner: Spawner;
   session: FakeSession;
 } {
+  const provider = opts.provider ?? 'under-test';
+  const permissionMode = opts.permissionMode ?? 'bypassPermissions';
   const resets: Array<{ cmd: string; idleMs: number }> = [];
   const session = {
     id: 'sess-1',
@@ -84,6 +119,7 @@ function fakeStack(semantics: NotificationHookSemantics): {
     status: 'running',
     exitCode: null,
     stopReason: null,
+    permissionMode,
     resets,
     providerCapabilities: {
       effort: true,
@@ -94,9 +130,9 @@ function fakeStack(semantics: NotificationHookSemantics): {
       durablePreamble: true,
       httpMcp: true,
     },
-    toView: () => ({ provider: 'under-test' }),
-    requestContextReset: (cmd: string, opts: { idleMs: number }) => {
-      resets.push({ cmd, idleMs: opts.idleMs });
+    toView: () => ({ provider }),
+    requestContextReset: (cmd: string, opts2: { idleMs: number }) => {
+      resets.push({ cmd, idleMs: opts2.idleMs });
       return true;
     },
   };
@@ -117,14 +153,21 @@ async function serve(
   spawner: Spawner,
   notifier: RecordingNotifier,
   compactOnWaiting: boolean,
+  approvals?: RecordingApprovals,
 ): Promise<string> {
   const app = express();
   app.use(express.json());
   app.use(
-    createHooksRouter(spawner, HOOK_TOKEN, notifier, {
-      compactOnWaiting,
-      idleThresholdMs: 2_000,
-    }),
+    createHooksRouter(
+      spawner,
+      HOOK_TOKEN,
+      notifier,
+      {
+        compactOnWaiting,
+        idleThresholdMs: 2_000,
+      },
+      approvals as unknown as ApprovalStore | undefined,
+    ),
   );
   const server = createServer(app);
   listening = server;
@@ -137,17 +180,27 @@ async function serve(
 /** Fire one notification callback and collect everything it caused. */
 async function fire(
   semantics: NotificationHookSemantics,
-  opts: { compactOnWaiting?: boolean } = {},
+  opts: {
+    compactOnWaiting?: boolean;
+    provider?: string;
+    permissionMode?: string;
+    approvals?: RecordingApprovals;
+    message?: string;
+  } = {},
 ): Promise<{
   res: Response;
   body: Record<string, unknown>;
   events: SwarmEvent[];
   notifier: RecordingNotifier;
   session: FakeSession;
+  approvals?: RecordingApprovals;
 }> {
-  const { spawner, session } = fakeStack(semantics);
+  const { spawner, session } = fakeStack(semantics, {
+    provider: opts.provider,
+    permissionMode: opts.permissionMode,
+  });
   const notifier = new RecordingNotifier();
-  const base = await serve(spawner, notifier, opts.compactOnWaiting ?? false);
+  const base = await serve(spawner, notifier, opts.compactOnWaiting ?? false, opts.approvals);
   const events: SwarmEvent[] = [];
   unsubscribe = eventBus.onEvent((ev) => events.push(ev));
   const res = await fetch(`${base}/hooks/notification`, {
@@ -157,13 +210,13 @@ async function fire(
       orch_id: 'orch-1',
       session_id: 'sess-1',
       kind: 'session.waiting',
-      message: 'the agent said something',
+      message: opts.message ?? 'the agent said something',
     }),
   });
   const body = (await res.json()) as Record<string, unknown>;
   // The Discord dispatch is fire-and-forget.
   await new Promise((r) => setTimeout(r, 20));
-  return { res, body, events, notifier, session };
+  return { res, body, events, notifier, session, approvals: opts.approvals };
 }
 
 describe('POST /hooks/notification — needs-human (claude)', () => {
@@ -232,5 +285,66 @@ describe('POST /hooks/notification — no consumed callback (opencode)', () => {
     expect(events).toHaveLength(0);
     expect(notifier.events).toHaveLength(0);
     expect(session.resets).toEqual([]);
+  });
+});
+
+describe('POST /hooks/notification — approval gate (P1)', () => {
+  it('records a pending approval when the session prompts (claude/default)', async () => {
+    const approvals = new RecordingApprovals();
+    const { res, approvals: seen } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'default',
+      approvals,
+      message: 'Claude needs your permission to use Bash',
+    });
+    expect(res.status).toBe(200);
+    expect(seen!.created).toHaveLength(1);
+    const input = seen!.created[0];
+    expect(input.orchestratorId).toBe('orch-1');
+    expect(input.sessionId).toBe('sess-1');
+    expect(input.provider).toBe('claude');
+    expect(input.permissionMode).toBe('default');
+    // Classified from the message (permission phrasing + a tool name).
+    expect(input.category).toBe('permission');
+    expect(input.requestedSummary).toBe('Claude needs your permission to use Bash');
+  });
+
+  it('records NOTHING for a bypassPermissions session (the hard guarantee)', async () => {
+    // docs §10 / §1: a bypass team is never slowed by an approval. Even though a
+    // `needs-human` callback fired, the gate must not arm — bypass emits no
+    // prompt, so an approval here would be a phantom.
+    const approvals = new RecordingApprovals();
+    const { res, events, notifier } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'bypassPermissions',
+      approvals,
+    });
+    expect(res.status).toBe(200);
+    expect(approvals.created).toHaveLength(0);
+    // …and the legacy waiting/Discord path is UNTOUCHED (behaviour unchanged).
+    expect(events.filter((e) => e.kind === 'session.status_changed')).toHaveLength(1);
+    expect(notifier.events).toHaveLength(1);
+  });
+
+  it('records nothing for a non-claude provider today (bypass-only providers)', async () => {
+    const approvals = new RecordingApprovals();
+    const { approvals: seen } = await fire('needs-human', {
+      provider: 'gemini',
+      permissionMode: 'default',
+      approvals,
+    });
+    expect(seen!.created).toHaveLength(0);
+  });
+
+  it('still flips the badge + notifies even when no approval store is wired', async () => {
+    // The store is optional (may have failed to open at boot); the legacy path
+    // must keep working regardless.
+    const { res, events, notifier } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'default',
+    });
+    expect(res.status).toBe(200);
+    expect(events.filter((e) => e.kind === 'session.status_changed')).toHaveLength(1);
+    expect(notifier.events).toHaveLength(1);
   });
 });

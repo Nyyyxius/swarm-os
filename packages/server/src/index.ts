@@ -25,6 +25,7 @@ import { IdeSupervisor } from './modules/ide/index.js';
 import { PluginStore } from './modules/plugins/store.js';
 import { MemoryStore } from './modules/memory/store.js';
 import { TaskboardStore } from './modules/taskboard/store.js';
+import { ApprovalStore } from './modules/approvals/store.js';
 import {
   markOrphanedCardsAtBoot,
   startTaskboardJanitor,
@@ -182,6 +183,27 @@ try {
     event: 'boot.taskboard_store_unavailable',
     error: err instanceof Error ? err.message : String(err),
     note: 'the task board could not be opened — board.* tools are DISABLED for this boot; every other subsystem is unaffected.',
+  });
+}
+
+// ---- Human-in-the-loop approval queue (docs/garde-fous-approbation.md P1) ---
+// PER TEAM: the persisted queue of pending permission/question approvals a
+// non-bypass session raised when it blocked on a CLI prompt. Deliberately NOT
+// derived from the ephemeral `waiting` pseudo-status (docs §2.1) so an approval
+// survives a reconnect/crash/resume. The store OWNS its own tables on the raw Db
+// handle (like MemoryStore/TaskboardStore) — no schema.sql / INLINE_SCHEMA
+// touch. Wrapped so an approval-subsystem failure never stops the boot: the
+// `/hooks/notification` route then simply records no approval (the legacy
+// waiting/Discord path is unaffected), and every other subsystem is unaffected.
+let approvalStore: ApprovalStore | null = null;
+try {
+  approvalStore = new ApprovalStore(db, { eventBus });
+  log.info({ event: 'boot.approval_store' });
+} catch (err) {
+  log.error({
+    event: 'boot.approval_store_unavailable',
+    error: err instanceof Error ? err.message : String(err),
+    note: 'the approval queue could not be opened — human-in-the-loop approvals are DISABLED for this boot; the legacy waiting/Discord path and every other subsystem are unaffected.',
   });
 }
 
@@ -591,6 +613,7 @@ const handle = startServer(
   updates,
   memoryStore ?? undefined,
   taskboardStore ?? undefined,
+  approvalStore ?? undefined,
 );
 
 // Start MCP HTTP listener on its own port (loopback only, plan §14).
