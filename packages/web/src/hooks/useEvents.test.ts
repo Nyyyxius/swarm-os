@@ -166,6 +166,147 @@ describe('useEvents — Step 6 callback subscriptions', () => {
     });
   });
 
+  it('surfaces a pending approval on approval.requested, keyed by approvalId', async () => {
+    const onApprovalRequested = vi.fn();
+    const { result } = renderHook(() => useEvents({ onApprovalRequested }));
+    const ws = await waitForSocket();
+
+    act(() => {
+      ws.emit({
+        kind: 'approval.requested',
+        ts: '2026-05-22T10:00:00.000Z',
+        orchestratorId: 'o1',
+        sessionId: 's-appr',
+        payload: {
+          approvalId: 'appr-1',
+          category: 'permission',
+          requestedSummary: 'Claude wants to run Bash',
+          status: 'pending',
+        },
+      });
+    });
+
+    await waitFor(() => {
+      expect(result.current.approvals).toHaveLength(1);
+    });
+    expect(result.current.approvals[0]).toMatchObject({
+      id: 'appr-1',
+      sessionId: 's-appr',
+      orchestratorId: 'o1',
+      category: 'permission',
+      requestedSummary: 'Claude wants to run Bash',
+    });
+    expect(onApprovalRequested).toHaveBeenCalledTimes(1);
+    expect(onApprovalRequested).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'approval.requested', approvalId: 'appr-1' }),
+    );
+  });
+
+  it('removes the pending approval when approval.resolved arrives for it', async () => {
+    const onApprovalResolved = vi.fn();
+    const { result } = renderHook(() => useEvents({ onApprovalResolved }));
+    const ws = await waitForSocket();
+
+    act(() => {
+      ws.emit({
+        kind: 'approval.requested',
+        ts: '2026-05-22T10:00:00.000Z',
+        orchestratorId: 'o1',
+        sessionId: 's-appr',
+        payload: { approvalId: 'appr-2', category: 'permission', status: 'pending' },
+      });
+    });
+    await waitFor(() => {
+      expect(result.current.approvals).toHaveLength(1);
+    });
+
+    act(() => {
+      ws.emit({
+        kind: 'approval.resolved',
+        ts: '2026-05-22T10:00:05.000Z',
+        orchestratorId: 'o1',
+        sessionId: 's-appr',
+        payload: { approvalId: 'appr-2', status: 'approved', decision: 'approved', by: 'web' },
+      });
+    });
+
+    await waitFor(() => {
+      expect(result.current.approvals).toHaveLength(0);
+    });
+    expect(onApprovalResolved).toHaveBeenCalledWith(
+      expect.objectContaining({ kind: 'approval.resolved', approvalId: 'appr-2', status: 'approved' }),
+    );
+  });
+
+  it('dedupes repeated approval.requested for the same approvalId (refresh, not stack)', async () => {
+    const { result } = renderHook(() => useEvents());
+    const ws = await waitForSocket();
+
+    act(() => {
+      ws.emit({
+        kind: 'approval.requested',
+        ts: '2026-05-22T10:00:00.000Z',
+        orchestratorId: 'o1',
+        sessionId: 's-appr',
+        payload: { approvalId: 'dup', status: 'pending' },
+      });
+      ws.emit({
+        kind: 'approval.requested',
+        ts: '2026-05-22T10:00:02.000Z',
+        orchestratorId: 'o1',
+        sessionId: 's-appr',
+        payload: { approvalId: 'dup', status: 'pending' },
+      });
+    });
+
+    await waitFor(() => {
+      expect(result.current.approvals).toHaveLength(1);
+    });
+    expect(result.current.approvals[0]?.ts).toBe('2026-05-22T10:00:02.000Z');
+  });
+
+  it('dismissApproval drops the toast locally without a resolved frame', async () => {
+    const { result } = renderHook(() => useEvents());
+    const ws = await waitForSocket();
+
+    act(() => {
+      ws.emit({
+        kind: 'approval.requested',
+        ts: '2026-05-22T10:00:00.000Z',
+        orchestratorId: 'o1',
+        sessionId: 's-appr',
+        payload: { approvalId: 'appr-3', status: 'pending' },
+      });
+    });
+    await waitFor(() => {
+      expect(result.current.approvals).toHaveLength(1);
+    });
+
+    act(() => {
+      result.current.dismissApproval('appr-3');
+    });
+    await waitFor(() => {
+      expect(result.current.approvals).toHaveLength(0);
+    });
+  });
+
+  it('ignores an approval frame with no approvalId', async () => {
+    const { result } = renderHook(() => useEvents());
+    const ws = await waitForSocket();
+
+    act(() => {
+      ws.emit({
+        kind: 'approval.requested',
+        ts: '2026-05-22T10:00:00.000Z',
+        orchestratorId: 'o1',
+        sessionId: 's-appr',
+        payload: { category: 'permission' }, // no approvalId
+      });
+    });
+    await Promise.resolve();
+    expect(result.current.approvals).toHaveLength(0);
+  });
+
   it('keeps the WS open when only the callbacks change (no tear-down)', async () => {
     const cb1 = vi.fn();
     const cb2 = vi.fn();

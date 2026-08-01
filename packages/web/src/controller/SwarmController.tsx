@@ -33,7 +33,7 @@ import {
   type RightPanelAgent, type RightPanelTeam, type MessageBubble,
   type RightPanelTab, type AgentAction,
 } from '../components/desktop/RightPanel';
-import { type WaitingToast } from '../components/desktop/Toasts';
+import { type WaitingToast, type ApprovalToast } from '../components/desktop/Toasts';
 import { type AuthState } from '../components/desktop/SettingsDrawer';
 import { type ComposerAudience, type ComposerMode } from '../components/desktop/Composer';
 import { type MapPulse, type MapViewTeam } from '../components/desktop/MapView';
@@ -115,6 +115,8 @@ export interface SwarmControllerValue {
   // events / toasts / auth
   eventsConnected: boolean;
   waitingToasts: readonly WaitingToast[];
+  /** P3 — actionable approval toasts (Approve / Deny / open console). */
+  approvalToasts: readonly ApprovalToast[];
   info: InfoView | null;
   health: HealthView | null;
   authState: AuthState;
@@ -167,6 +169,14 @@ export interface SwarmControllerValue {
   ) => void | Promise<void>;
   handleToastOpen: (t: WaitingToast) => void;
   dismissToast: (id: string) => void;
+  /** P3 — resolve an approval as approved (optionally "don't ask again"). */
+  approveApproval: (t: ApprovalToast, opts?: { dontAskAgain?: boolean }) => void;
+  /** P3 — resolve an approval as denied. */
+  denyApproval: (t: ApprovalToast) => void;
+  /** P3 — open the blocked session's console (fallback; does not resolve). */
+  handleApprovalOpen: (t: ApprovalToast) => void;
+  /** P3 — dismiss an approval toast locally without resolving it. */
+  dismissApprovalToast: (id: string) => void;
   handleSpawnWorker: (team: RightPanelTeam) => void;
   /**
    * Lot 7 — the actual `POST /orchestrators/:id/workers` call behind
@@ -476,6 +486,8 @@ export function SwarmControllerProvider({
     connected: eventsConnected,
     waiting,
     dismiss,
+    approvals,
+    dismissApproval,
   } = useEvents({
     onMailboxMessage: handleMailboxMessage,
     onSessionCreated: handleSessionCreated,
@@ -669,6 +681,34 @@ export function SwarmControllerProvider({
     [waiting, orchestrators],
   );
 
+  // ── approval toasts (hook shape → component shape) ────────────────────
+  // Same enrichment as waitingToasts: resolve the team/agent NAMES off the
+  // live snapshot so the toast reads "team :: agent" rather than raw ids.
+  const approvalToasts = useMemo<ApprovalToast[]>(
+    () => {
+      const reversed = [...approvals].reverse();
+      return reversed.map<ApprovalToast>((n) => {
+        const orch = n.orchestratorId
+          ? orchestrators.find((o) => o.id === n.orchestratorId)
+          : undefined;
+        const session = orch && n.sessionId
+          ? orch.sessions.find((s) => s.id === n.sessionId)
+          : undefined;
+        return {
+          id: n.id,
+          sessionId: n.sessionId ?? n.id,
+          teamId: n.orchestratorId ?? '',
+          teamName: orch?.name ?? '—',
+          agentName: session?.name ?? (n.sessionId ? n.sessionId.slice(0, 8) : '—'),
+          category: n.category,
+          summary: n.requestedSummary,
+          at: n.ts,
+        };
+      });
+    },
+    [approvals, orchestrators],
+  );
+
   // ── handlers ───────────────────────────────────────────────────────────
   const selectAgent = useCallback((id: string | null) => {
     setSelectedSessionId(id);
@@ -684,6 +724,48 @@ export function SwarmControllerProvider({
     if (t.teamId) onOpenOrchestrator(t.teamId);
     dismiss(t.id);
   }, [onOpenOrchestrator, dismiss]);
+
+  // ── approval handlers ─────────────────────────────────────────────────
+  // POST the decision (server replays the keystroke + records it). The
+  // `approval.resolved` WS frame is what normally removes the toast, but we
+  // ALSO dismiss locally on success (and on a 409 = already resolved, which is
+  // terminal) so the toast never lingers if the socket is slow. Any other
+  // error keeps the toast so the operator can retry. `by` defaults to 'web'
+  // server-side (§9.4 — anyone with the token may approve).
+  const resolveApprovalToast = useCallback(
+    async (id: string, decision: 'approve' | 'deny', dontAskAgain?: boolean) => {
+      try {
+        await api.resolveApproval(id, { decision, dontAskAgain });
+        dismissApproval(id);
+      } catch (e) {
+        if (e instanceof HttpError && e.status === 409) {
+          dismissApproval(id); // already resolved elsewhere — terminal, drop it.
+          return;
+        }
+        // Transient/unknown failure — leave the toast up for a retry.
+      }
+    },
+    [dismissApproval],
+  );
+
+  const approveApproval = useCallback(
+    (t: ApprovalToast, opts?: { dontAskAgain?: boolean }) =>
+      resolveApprovalToast(t.id, 'approve', opts?.dontAskAgain),
+    [resolveApprovalToast],
+  );
+
+  const denyApproval = useCallback(
+    (t: ApprovalToast) => resolveApprovalToast(t.id, 'deny'),
+    [resolveApprovalToast],
+  );
+
+  // "Open the console" fallback — select the blocked session + route to it,
+  // reusing the same navigation the waiting toast uses. Does NOT resolve or
+  // dismiss the approval: the operator may want to answer in the PTY directly.
+  const handleApprovalOpen = useCallback((t: ApprovalToast) => {
+    if (t.sessionId) setSelectedSessionId(t.sessionId);
+    if (t.teamId) onOpenOrchestrator(t.teamId);
+  }, [onOpenOrchestrator]);
 
   const closeRightPanel = useCallback(() => {
     setSelectedSessionId(null);
@@ -859,6 +941,7 @@ export function SwarmControllerProvider({
     panelOpen,
     eventsConnected,
     waitingToasts,
+    approvalToasts,
     info,
     health,
     authState,
@@ -894,6 +977,10 @@ export function SwarmControllerProvider({
     onSend,
     handleToastOpen,
     dismissToast: dismiss,
+    approveApproval,
+    denyApproval,
+    handleApprovalOpen,
+    dismissApprovalToast: dismissApproval,
     handleSpawnWorker,
     handleSpawnWorkerSubmit,
     handleEditConfig,

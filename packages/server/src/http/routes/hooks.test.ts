@@ -107,6 +107,7 @@ function fakeStack(
 ): {
   spawner: Spawner;
   session: FakeSession;
+  orchNotifier: RecordingNotifier;
 } {
   const provider = opts.provider ?? 'under-test';
   const permissionMode = opts.permissionMode ?? 'bypassPermissions';
@@ -136,17 +137,22 @@ function fakeStack(
       return true;
     },
   };
+  // The PER-ORCH notifier (docs §2.2) — distinct from the global one passed to
+  // the router. The P3 enriched approval embed goes here, the legacy
+  // `session.waiting` ping to the global one.
+  const orchNotifier = new RecordingNotifier();
   const orch = {
     id: 'orch-1',
     name: 'team',
     role: 'coordinator',
     status: 'running',
+    notifier: orchNotifier,
     getSession: (id: string) => (id === 'sess-1' ? session : null),
   };
   const spawner = {
     get: (id: string) => (id === 'orch-1' ? orch : null),
   } as unknown as Spawner;
-  return { spawner, session: session as unknown as FakeSession };
+  return { spawner, session: session as unknown as FakeSession, orchNotifier };
 }
 
 async function serve(
@@ -192,10 +198,11 @@ async function fire(
   body: Record<string, unknown>;
   events: SwarmEvent[];
   notifier: RecordingNotifier;
+  orchNotifier: RecordingNotifier;
   session: FakeSession;
   approvals?: RecordingApprovals;
 }> {
-  const { spawner, session } = fakeStack(semantics, {
+  const { spawner, session, orchNotifier } = fakeStack(semantics, {
     provider: opts.provider,
     permissionMode: opts.permissionMode,
   });
@@ -216,7 +223,7 @@ async function fire(
   const body = (await res.json()) as Record<string, unknown>;
   // The Discord dispatch is fire-and-forget.
   await new Promise((r) => setTimeout(r, 20));
-  return { res, body, events, notifier, session, approvals: opts.approvals };
+  return { res, body, events, notifier, orchNotifier, session, approvals: opts.approvals };
 }
 
 describe('POST /hooks/notification — needs-human (claude)', () => {
@@ -346,5 +353,47 @@ describe('POST /hooks/notification — approval gate (P1)', () => {
     expect(res.status).toBe(200);
     expect(events.filter((e) => e.kind === 'session.status_changed')).toHaveLength(1);
     expect(notifier.events).toHaveLength(1);
+  });
+});
+
+describe('POST /hooks/notification — enriched approval notification (P3)', () => {
+  it('fires an enriched session.approval_requested to the PER-ORCH notifier', async () => {
+    // Additive to the legacy `session.waiting`: the per-orch notifier gets the
+    // enriched embed naming what is requested + the approvalId; the GLOBAL
+    // notifier still gets exactly the one legacy waiting ping.
+    const approvals = new RecordingApprovals();
+    const { orchNotifier, notifier } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'default',
+      approvals,
+      message: 'Claude needs your permission to use Bash',
+    });
+
+    expect(orchNotifier.events).toHaveLength(1);
+    const enriched = orchNotifier.events[0]!;
+    expect(enriched.kind).toBe('session.approval_requested');
+    expect(enriched.session?.id).toBe('sess-1');
+    expect(enriched.orchestrator.id).toBe('orch-1');
+    expect(enriched.message).toBe('Claude needs your permission to use Bash');
+    expect(enriched.extra?.approvalId).toBe('appr-under-test');
+    expect(enriched.extra?.category).toBe('permission');
+
+    // The legacy global waiting ping is untouched (additive, not a replacement).
+    expect(notifier.events).toHaveLength(1);
+    expect(notifier.events[0]?.kind).toBe('session.waiting');
+  });
+
+  it('sends NO enriched notification for a bypass session (bypass guarantee)', async () => {
+    const approvals = new RecordingApprovals();
+    const { orchNotifier, notifier } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'bypassPermissions',
+      approvals,
+    });
+    // No approval recorded → no enriched embed. Legacy waiting still fires.
+    expect(approvals.created).toHaveLength(0);
+    expect(orchNotifier.events).toHaveLength(0);
+    expect(notifier.events).toHaveLength(1);
+    expect(notifier.events[0]?.kind).toBe('session.waiting');
   });
 });

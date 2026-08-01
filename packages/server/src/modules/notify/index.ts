@@ -7,6 +7,12 @@
  *  - `session.waiting`        — Claude's `Notification` hook fired (the
  *                               session needs a human, e.g. to approve a
  *                               permission, to read a clarifying question).
+ *  - `session.approval_requested` — a non-bypass session recorded a pending
+ *                               approval (docs/garde-fous-approbation.md, P3).
+ *                               ADDITIVE to `session.waiting` (both fire): the
+ *                               enriched, per-orch embed that names WHAT is
+ *                               requested and how to answer (web toast/page, or
+ *                               open the console). Response routing is P4.
  *  - `orchestrator.ended`     — the orchestrator transitioned to `stopped`
  *                               or `failed`. Carries the lead's exit code.
  *  - `session.exit_anomaly`   — a worker exited abnormally (already wired in
@@ -34,6 +40,7 @@ import type { SessionView } from '../orchestrator/session.js';
 
 export type NotificationKind =
   | 'session.waiting'
+  | 'session.approval_requested'
   | 'orchestrator.ended'
   | 'session.exit_anomaly';
 

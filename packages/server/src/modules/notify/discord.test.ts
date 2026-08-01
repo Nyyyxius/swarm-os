@@ -117,6 +117,56 @@ describe('DiscordWebhookNotifier.buildPayload', () => {
     const payload = notifier.buildPayload(makeInput({ message: 'x'.repeat(5000) }));
     expect(payload.embeds[0]?.description?.length).toBeLessThanOrEqual(4000);
   });
+
+  // --- Approval-gate P3 enrichment -----------------------------------------
+  it('uses amber for session.approval_requested', () => {
+    const payload = notifier.buildPayload(makeInput({ kind: 'session.approval_requested' }));
+    expect(payload.embeds[0]?.color).toBe(0xff9900);
+  });
+
+  it('titles the approval embed with the [APPROVE?] glyph', () => {
+    const payload = notifier.buildPayload(makeInput({ kind: 'session.approval_requested' }));
+    expect(payload.embeds[0]?.title).toBe('[APPROVE?] Approval requested');
+  });
+
+  it('adds a Category field and an actionable Action instruction for approvals', () => {
+    const payload = notifier.buildPayload(
+      makeInput({
+        kind: 'session.approval_requested',
+        message: 'Bash(rm -rf build)',
+        extra: { approvalId: 'appr-1', category: 'permission' },
+      }),
+    );
+    const e = payload.embeds[0]!;
+    // What is requested rides the description.
+    expect(e.description).toBe('Bash(rm -rf build)');
+    const fields = e.fields ?? [];
+    const category = fields.find((f) => f.name === 'Category');
+    expect(category?.value).toBe('permission');
+    const action = fields.find((f) => f.name === 'Action');
+    expect(action).toBeDefined();
+    // The instruction names the web + console fallbacks (no Discord buttons in P3).
+    expect(action?.value).toMatch(/web/i);
+    expect(action?.value).toMatch(/console/i);
+    expect(action?.inline).toBe(false);
+  });
+
+  it('omits the Category field when no category is supplied', () => {
+    const payload = notifier.buildPayload(makeInput({ kind: 'session.approval_requested' }));
+    const names = (payload.embeds[0]?.fields ?? []).map((f) => f.name);
+    expect(names).not.toContain('Category');
+    // The Action instruction is always present for an approval embed.
+    expect(names).toContain('Action');
+  });
+
+  it('does NOT add approval fields to a plain waiting embed', () => {
+    const payload = notifier.buildPayload(
+      makeInput({ kind: 'session.waiting', extra: { category: 'permission' } }),
+    );
+    const names = (payload.embeds[0]?.fields ?? []).map((f) => f.name);
+    expect(names).not.toContain('Action');
+    expect(names).not.toContain('Category');
+  });
 });
 
 function makeCustom(over: Partial<CustomNotificationInput> = {}): CustomNotificationInput {

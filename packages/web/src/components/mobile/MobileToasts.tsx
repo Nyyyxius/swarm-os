@@ -13,7 +13,8 @@ const MAX_VISIBLE = 4;
 export default function MobileToasts() {
   const c = useSwarmController();
   const items = c.waitingToasts;
-  if (items.length === 0) return null;
+  const approvals = c.approvalToasts;
+  if (items.length === 0 && approvals.length === 0) return null;
 
   const visible = items.slice(0, MAX_VISIBLE);
   const olderCount = items.length - visible.length;
@@ -21,6 +22,32 @@ export default function MobileToasts() {
 
   return (
     <div className="m-toasts">
+      {/* Approvals first — actionable and time-sensitive (P3). */}
+      {approvals.map((t) => (
+        <div className="m-toast m-toast-approval" key={t.id}>
+          <div className="m-toast-head">
+            <span className="m-toast-title">APPROBATION REQUISE</span>
+            <span className="m-toast-time">{formatRelative(t.at)}</span>
+          </div>
+          <div className="m-toast-id">{t.teamName} :: {t.agentName}</div>
+          {t.summary && <div className="m-toast-reason">{t.summary}</div>}
+          <div className="m-toast-actions" style={{ display: 'flex', gap: 6, flexWrap: 'wrap', marginTop: 6 }}>
+            <button type="button" className="m-toast-open" onClick={() => c.approveApproval(t)}>✓ Approuver</button>
+            <button
+              type="button"
+              className="m-toast-open"
+              onClick={() => c.approveApproval(t, { dontAskAgain: true })}
+            >
+              ✓✓ Ne plus demander
+            </button>
+            <button type="button" className="m-toast-dismiss" onClick={() => c.denyApproval(t)}>✕ Refuser</button>
+          </div>
+          <div className="m-toast-foot">
+            <button type="button" className="m-toast-dismiss" onClick={() => c.dismissApprovalToast(t.id)} aria-label="dismiss">×</button>
+            <button type="button" className="m-toast-open" onClick={() => c.handleApprovalOpen(t)}>→ CONSOLE</button>
+          </div>
+        </div>
+      ))}
       {olderCount > 0 && firstOlder && (
         <button type="button" className="m-toasts-older" onClick={() => c.handleToastOpen(firstOlder)}>
           + {olderCount} older waiting →

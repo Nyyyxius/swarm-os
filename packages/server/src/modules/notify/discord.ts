@@ -56,21 +56,34 @@ interface DiscordPayload {
 
 const COLORS: Record<NotificationKind, number> = {
   'session.waiting': 0xffff00, // yellow
+  'session.approval_requested': 0xff9900, // amber — a human decision is pending
   'orchestrator.ended': 0xff6666, // soft red — overridden to green for clean exits
   'session.exit_anomaly': 0xff0000, // red
 };
 
 const TITLES: Record<NotificationKind, string> = {
   'session.waiting': 'Session waiting for attention',
+  'session.approval_requested': 'Approval requested',
   'orchestrator.ended': 'Orchestrator ended',
   'session.exit_anomaly': 'Session exit anomaly',
 };
 
 const TITLE_GLYPHS: Record<NotificationKind, string> = {
   'session.waiting': '[WAIT]',
+  'session.approval_requested': '[APPROVE?]',
   'orchestrator.ended': '[END]',
   'session.exit_anomaly': '[FAIL]',
 };
+
+/**
+ * Operator instruction rendered on an `session.approval_requested` embed. P3 is
+ * INFORMATIONAL only — a webhook embed cannot carry buttons, and Discord reply
+ * routing is P4. So we tell the operator exactly where the actionable controls
+ * live: the web toast/page (Approve / Deny / open the console), which is the
+ * key P3 deliverable. Kept in French to match the operator-facing Discord copy.
+ */
+const APPROVAL_INSTRUCTION =
+  'Approuve/Refuse depuis le web (page ou toast), ou ouvre la console de la session.';
 
 /**
  * Colors for plugin custom notifications (`notifyCustom`) — same palette as
@@ -151,6 +164,17 @@ export class DiscordWebhookNotifier implements Notifier {
       fields.push({ name: 'Stop reason', value: String(input.extra.stopReason), inline: true });
     } else if (session?.stopReason) {
       fields.push({ name: 'Stop reason', value: session.stopReason, inline: true });
+    }
+
+    // Approval-gate enrichment (P3): name WHAT is being asked and, since this
+    // embed has no buttons, spell out how to answer. `extra.category` is the
+    // best-effort permission/question class from the store; the instruction
+    // field is a NON-inline full-width row so it reads as a call to action.
+    if (kind === 'session.approval_requested') {
+      if (input.extra?.category != null) {
+        fields.push({ name: 'Category', value: String(input.extra.category), inline: true });
+      }
+      fields.push({ name: 'Action', value: APPROVAL_INSTRUCTION, inline: false });
     }
 
     const embed: DiscordEmbed = {

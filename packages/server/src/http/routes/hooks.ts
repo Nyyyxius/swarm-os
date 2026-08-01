@@ -285,6 +285,48 @@ export function createHooksRouter(
             category: approval.category,
             permissionMode: session.permissionMode,
           });
+
+          // ---- P3: enriched, ACTIONABLE-context Discord notification --------
+          // Additive to the legacy `session.waiting` ping below (both fire).
+          // Uses the PER-ORCH notifier (`orch.notifier`, resolved from the
+          // role's Discord connector at create time — docs §2.2) so it lands in
+          // THIS team's channel, not the global one. Informational only: it
+          // names what is requested and points the operator at the web
+          // toast/page (Approve/Deny) or the console. Response ROUTING from a
+          // Discord reply is P4. Fire-and-forget — the notifier swallows its own
+          // errors and is timeout-bounded; the extra `.catch` is belt-and-braces
+          // so nothing on the hook path can ever throw (spike H6).
+          void orch.notifier
+            .notify({
+              kind: 'session.approval_requested',
+              orchestrator: {
+                id: orch.id,
+                name: orch.name,
+                role: orch.role,
+                status: orch.status,
+              },
+              session: {
+                id: session.id,
+                name: session.name,
+                role: session.role,
+                type: session.type,
+                status: session.status,
+                exitCode: session.exitCode,
+                stopReason: session.stopReason,
+              },
+              message: approval.requestedSummary,
+              extra: { approvalId: approval.id, category: approval.category },
+            })
+            .catch((err) => {
+              log.warn({
+                event: 'notify.dispatch_failed',
+                kind: 'session.approval_requested',
+                orchId: orch.id,
+                sessionId: session.id,
+                approvalId: approval.id,
+                error: err instanceof Error ? err.message : String(err),
+              });
+            });
         }
       } catch (err) {
         // Defence in depth — createRequest is already non-throwing, but the hook

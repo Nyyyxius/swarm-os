@@ -37,6 +37,42 @@ export interface WaitingNotice {
 }
 
 /**
+ * P3 — an actionable, human-in-the-loop approval surfaced as a toast (mirrors
+ * `WaitingNotice`, but keyed by `approvalId` so multiple approvals for one
+ * session stay distinct). Kept in the pending list until an `approval.resolved`
+ * frame removes it — deliberately NO auto-dismiss timer: an approval left the
+ * viewport would read as "handled", and the product decision is "leave pending
+ * until decided" (docs §9.3).
+ */
+export interface PendingApproval {
+  id: string;
+  ts: string;
+  orchestratorId?: string;
+  sessionId?: string;
+  category?: string;
+  requestedSummary?: string;
+}
+
+/**
+ * Normalized `approval.requested` / `approval.resolved` frame. The web derives
+ * the toast list internally; these callbacks let other views (e.g. an
+ * approvals page) react without a second WebSocket. `status` is `pending` on
+ * request, terminal on resolve; `decision`/`by` are present only on resolve.
+ */
+export interface ApprovalEvent {
+  kind: 'approval.requested' | 'approval.resolved' | string;
+  ts: string;
+  orchestratorId?: string;
+  sessionId?: string;
+  approvalId: string;
+  category?: string;
+  requestedSummary?: string;
+  status?: string;
+  decision?: string | null;
+  by?: string | null;
+}
+
+/**
  * Normalized `mailbox.message` frame surfaced to MapView for pulse
  * derivation. Only fired when payload is well-formed (has at least
  * `from`, `to`, `sessionId`, `orchestratorId`).
@@ -137,6 +173,10 @@ export interface UseEventsOptions {
   onMemoryEvent?: (ev: MemoryEvent) => void;
   /** Callback fired on every taskboard.* frame (Kanban board). */
   onBoardEvent?: (ev: BoardEvent) => void;
+  /** Callback fired on every approval.requested frame (P3 approval gate). */
+  onApprovalRequested?: (ev: ApprovalEvent) => void;
+  /** Callback fired on every approval.resolved frame (P3 approval gate). */
+  onApprovalResolved?: (ev: ApprovalEvent) => void;
 }
 
 const AUTO_DISMISS_MS = 30_000;
@@ -146,9 +186,13 @@ export function useEvents(opts: UseEventsOptions = {}): {
   waiting: WaitingNotice[];
   dismiss: (id: string) => void;
   clear: () => void;
+  approvals: PendingApproval[];
+  dismissApproval: (id: string) => void;
+  clearApprovals: () => void;
 } {
   const [connected, setConnected] = useState(false);
   const [waiting, setWaiting] = useState<WaitingNotice[]>([]);
+  const [approvals, setApprovals] = useState<PendingApproval[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
   const closedRef = useRef(false);
   const timersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
@@ -161,12 +205,16 @@ export function useEvents(opts: UseEventsOptions = {}): {
   const onPluginRef = useRef<UseEventsOptions['onPluginHostChanged']>(opts.onPluginHostChanged);
   const onMemoryRef = useRef<UseEventsOptions['onMemoryEvent']>(opts.onMemoryEvent);
   const onBoardRef = useRef<UseEventsOptions['onBoardEvent']>(opts.onBoardEvent);
+  const onApprReqRef = useRef<UseEventsOptions['onApprovalRequested']>(opts.onApprovalRequested);
+  const onApprResRef = useRef<UseEventsOptions['onApprovalResolved']>(opts.onApprovalResolved);
   useEffect(() => { onMailRef.current = opts.onMailboxMessage; }, [opts.onMailboxMessage]);
   useEffect(() => { onCreatedRef.current = opts.onSessionCreated; }, [opts.onSessionCreated]);
   useEffect(() => { onOrchCreatedRef.current = opts.onOrchestratorCreated; }, [opts.onOrchestratorCreated]);
   useEffect(() => { onPluginRef.current = opts.onPluginHostChanged; }, [opts.onPluginHostChanged]);
   useEffect(() => { onMemoryRef.current = opts.onMemoryEvent; }, [opts.onMemoryEvent]);
   useEffect(() => { onBoardRef.current = opts.onBoardEvent; }, [opts.onBoardEvent]);
+  useEffect(() => { onApprReqRef.current = opts.onApprovalRequested; }, [opts.onApprovalRequested]);
+  useEffect(() => { onApprResRef.current = opts.onApprovalResolved; }, [opts.onApprovalResolved]);
 
   const cancelTimer = (id: string): void => {
     const t = timersRef.current.get(id);
@@ -185,6 +233,17 @@ export function useEvents(opts: UseEventsOptions = {}): {
     for (const t of timersRef.current.values()) clearTimeout(t);
     timersRef.current.clear();
     setWaiting([]);
+  };
+
+  // Approvals carry NO auto-dismiss timer (they persist until resolved), so
+  // dismissal is a plain state filter. `dismissApproval` only drops the toast
+  // locally — it does NOT resolve the approval (that is an explicit REST call).
+  const dismissApproval = (id: string): void => {
+    setApprovals((a) => a.filter((n) => n.id !== id));
+  };
+
+  const clearApprovals = (): void => {
+    setApprovals([]);
   };
 
   useEffect(() => {
@@ -329,6 +388,61 @@ export function useEvents(opts: UseEventsOptions = {}): {
                   });
                 }
 
+                // P3 approval gate — approval.requested / approval.resolved.
+                // Requested: add/refresh a pending-approval toast keyed by
+                // approvalId. Resolved (approved|denied|expired|
+                // answered_in_console): remove it — whoever/whatever settled it
+                // (this operator, another operator, a Discord reply in P4, or
+                // the prompt vanishing) takes the toast down. Does NOT
+                // early-return; other frames on the same socket still flow.
+                if (ev.kind === 'approval.requested' || ev.kind === 'approval.resolved') {
+                  const p = ev.payload as
+                    | {
+                        approvalId?: string;
+                        category?: string;
+                        requestedSummary?: string;
+                        status?: string;
+                        decision?: string | null;
+                        by?: string | null;
+                      }
+                    | undefined;
+                  const approvalId =
+                    typeof p?.approvalId === 'string' ? p.approvalId : undefined;
+                  if (approvalId) {
+                    const normalized: ApprovalEvent = {
+                      kind: ev.kind,
+                      ts: ev.ts,
+                      orchestratorId: ev.orchestratorId,
+                      sessionId: ev.sessionId,
+                      approvalId,
+                      category: p?.category,
+                      requestedSummary: p?.requestedSummary,
+                      status: p?.status,
+                      decision: p?.decision,
+                      by: p?.by,
+                    };
+                    if (ev.kind === 'approval.requested') {
+                      const notice: PendingApproval = {
+                        id: approvalId,
+                        ts: ev.ts,
+                        orchestratorId: ev.orchestratorId,
+                        sessionId: ev.sessionId,
+                        category: p?.category,
+                        requestedSummary: p?.requestedSummary,
+                      };
+                      setApprovals((a) => {
+                        const filtered = a.filter((n) => n.id !== approvalId);
+                        filtered.push(notice);
+                        return filtered;
+                      });
+                      onApprReqRef.current?.(normalized);
+                    } else {
+                      setApprovals((a) => a.filter((n) => n.id !== approvalId));
+                      onApprResRef.current?.(normalized);
+                    }
+                  }
+                }
+
                 // Phase 4: notification hook fires session.status_changed
                 // with payload.status === 'waiting'. Surface it as a toast.
                 if (
@@ -378,5 +492,5 @@ export function useEvents(opts: UseEventsOptions = {}): {
     };
   }, []);
 
-  return { connected, waiting, dismiss, clear };
+  return { connected, waiting, dismiss, clear, approvals, dismissApproval, clearApprovals };
 }

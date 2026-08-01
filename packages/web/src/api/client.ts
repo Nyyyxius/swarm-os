@@ -909,6 +909,76 @@ export interface BoardTeam {
   open: number;
 }
 
+// ── Approval-gate DTOs (P3) ──────────────────────────────────────────────────
+// Hand-maintained mirror of the server's `ApprovalStore` types
+// (`packages/server/src/modules/approvals/store.ts`). Consumed by the P3
+// actionable toast; response routing from Discord is P4.
+
+export type ApprovalCategory = 'permission' | 'question';
+
+export type ApprovalStatus =
+  | 'pending'
+  | 'approved'
+  | 'denied'
+  | 'expired'
+  | 'answered_in_console';
+
+/** One approval request — mirrors the server's `ApprovalRequest`. */
+export interface ApprovalRequest {
+  id: string;
+  orchestratorId: string;
+  sessionId: string;
+  category: ApprovalCategory;
+  requestedSummary: string;
+  rawMessage: string;
+  permissionMode: string;
+  provider: string;
+  status: ApprovalStatus;
+  createdAt: number;
+  expiresAt: number | null;
+  resolvedAt: number | null;
+  resolvedBy: string | null;
+  decision: string | null;
+}
+
+/** Compact list item — the list endpoint returns the same rows as the detail. */
+export type ApprovalListItem = ApprovalRequest;
+
+/** One audit-journal entry of an approval — mirrors the server's `ApprovalEvent`. */
+export interface ApprovalAuditEvent {
+  id: string;
+  approvalId: string;
+  orchestratorId: string;
+  sessionId: string;
+  kind: string;
+  data: Record<string, unknown> | null;
+  ts: number;
+}
+
+/** Detail with the tail of its audit journal — `GET /api/approvals/:id`. */
+export interface ApprovalDetail extends ApprovalRequest {
+  events: ApprovalAuditEvent[];
+}
+
+/** Body of `POST /api/approvals/:id/resolve`. */
+export interface ResolveApprovalBody {
+  decision: 'approve' | 'deny';
+  dontAskAgain?: boolean;
+  by?: string;
+}
+
+/** Response of `POST /api/approvals/:id/resolve`. */
+export interface ResolveApprovalResult {
+  ok: boolean;
+  delivered: boolean;
+  keystroke?: string | null;
+  reason?: string;
+  decision: string;
+  dontAskAgain?: boolean;
+  status: ApprovalStatus;
+  request: ApprovalRequest;
+}
+
 class HttpError extends Error {
   constructor(
     message: string,
@@ -1421,6 +1491,35 @@ export const api = {
     request<{ ok: boolean; deleted: boolean }>(
       'DELETE',
       `/api/board/card/${encodeURIComponent(id)}`,
+    ),
+
+  // ---- Approval gate (P3 actionable notification) -------------------------
+  // Consumes the P2 REST surface (`http/routes/approvals.ts`). `orch` is
+  // required (the queue is per-team, like the board); `status` is an optional
+  // filter. A 404 on these means a backend predating the approval gate — the
+  // caller degrades gracefully (no approvals surfaced).
+
+  /** List a team's approvals, optionally filtered by status. */
+  listApprovals: (orchId: string, status?: ApprovalStatus) => {
+    const qs = new URLSearchParams({ orch: orchId });
+    if (status) qs.set('status', status);
+    return request<{ approvals: ApprovalListItem[] }>('GET', `/api/approvals?${qs.toString()}`);
+  },
+
+  /** One approval + the tail of its audit journal. 404 when absent. */
+  getApproval: (id: string) =>
+    request<ApprovalDetail>('GET', `/api/approvals/${encodeURIComponent(id)}`),
+
+  /**
+   * Resolve a pending approval: the server replays the operator's keystroke to
+   * the blocked PTY and records the decision. `dontAskAgain` maps claude's
+   * "approve AND don't ask again" option. `by` defaults to `'web'` server-side.
+   */
+  resolveApproval: (id: string, body: ResolveApprovalBody) =>
+    request<ResolveApprovalResult>(
+      'POST',
+      `/api/approvals/${encodeURIComponent(id)}/resolve`,
+      body,
     ),
 };
 

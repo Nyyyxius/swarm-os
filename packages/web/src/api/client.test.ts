@@ -163,3 +163,48 @@ describe('shared memory endpoints', () => {
     expect(last.init?.method).toBe('DELETE');
   });
 });
+
+describe('approval-gate endpoints (P3)', () => {
+  it('lists approvals with a required orch and no status', async () => {
+    setToken('appr-token');
+    await api.listApprovals('orch-9');
+    const last = calls[calls.length - 1]!;
+    expect(last.url).toBe('/api/approvals?orch=orch-9');
+    const headers = (last.init?.headers as Record<string, string>) ?? {};
+    expect(headers['X-Auth-Token']).toBe('appr-token');
+  });
+
+  it('adds the status filter to the query string when provided', async () => {
+    setToken('t');
+    await api.listApprovals('orch-9', 'pending');
+    const url = calls[calls.length - 1]!.url;
+    expect(url).toContain('orch=orch-9');
+    expect(url).toContain('status=pending');
+  });
+
+  it('encodes the approval id on GET', async () => {
+    setToken('t');
+    await api.getApproval('a b/c');
+    expect(calls[calls.length - 1]!.url).toBe('/api/approvals/a%20b%2Fc');
+  });
+
+  it('POSTs the resolve body to /:id/resolve', async () => {
+    setToken('t');
+    await api.resolveApproval('appr-1', { decision: 'approve', dontAskAgain: true });
+    const last = calls[calls.length - 1]!;
+    expect(last.url).toBe('/api/approvals/appr-1/resolve');
+    expect(last.init?.method).toBe('POST');
+    expect(JSON.parse(String(last.init?.body))).toEqual({
+      decision: 'approve',
+      dontAskAgain: true,
+    });
+  });
+
+  it('POSTs a deny decision', async () => {
+    setToken('t');
+    await api.resolveApproval('appr-2', { decision: 'deny' });
+    const last = calls[calls.length - 1]!;
+    expect(last.url).toBe('/api/approvals/appr-2/resolve');
+    expect(JSON.parse(String(last.init?.body))).toEqual({ decision: 'deny' });
+  });
+});

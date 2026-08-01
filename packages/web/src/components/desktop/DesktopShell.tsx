@@ -108,12 +108,17 @@ export default function DesktopShell() {
         onClose={() => c.setEditConfigFor(null)}
       />
 
-      {c.waitingToasts.length > 0 ? (
+      {c.waitingToasts.length > 0 || c.approvalToasts.length > 0 ? (
         <Toasts
           items={c.waitingToasts}
           onOpen={c.handleToastOpen}
           onDismiss={c.dismissToast}
           panelOpen={c.panelOpen}
+          approvals={c.approvalToasts}
+          onApprove={c.approveApproval}
+          onDeny={c.denyApproval}
+          onApprovalOpen={c.handleApprovalOpen}
+          onApprovalDismiss={c.dismissApprovalToast}
         />
       ) : (
         <EventsPip connected={c.eventsConnected} panelOpen={c.panelOpen} />
