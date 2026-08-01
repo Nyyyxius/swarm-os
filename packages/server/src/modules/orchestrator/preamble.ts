@@ -96,6 +96,21 @@ export const TEAM_TOOL_LOGICAL_NAMES: readonly string[] = [
   'memory.link',
   'memory.list',
   'memory.delete',
+  // Durable task-board tools (docs/tableau-de-taches.md §5) — mounted on the
+  // same team-comms server, so they are part of the renamed vocabulary.
+  'board.list',
+  'board.teams',
+  'board.get',
+  'board.create',
+  'board.update',
+  'board.move',
+  'board.assign',
+  'board.comment',
+  'board.link',
+  'board.unlink',
+  'board.close',
+  'board.reopen',
+  'board.delete',
 ];
 
 /** Provider-supplied naming — `AgentProvider.mcpToolName`, narrowed to a fn. */

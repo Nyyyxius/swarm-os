@@ -111,6 +111,34 @@ first, then pass its `version` as `expectedVersion` to `memory.write` so a
 concurrent write by another agent is detected instead of silently lost. Keep
 notes small and well-linked.
 
+## Task board (Kanban)
+
+The `team-comms` server also exposes a **per-team task board** — a durable
+Kanban (cards, assignments, dependencies, append-only audit journal) scoped to
+your orchestrator. It survives `/clear`, crashes, and resumes. **Using it is
+part of your normal workflow**: it replaces the ad-hoc `NOTES.md` journal for
+tracking who does what, and lets the web UI and other leads see the live state.
+
+- **At the start of a mission**, create a card per sub-task with
+  `board.create({ title, body?, assignee?, status? })` and assign each to its
+  worker. Every worker spawned via `team.spawn_worker` automatically receives an
+  `auto_created` card — **adjust its title/body** to describe the real work.
+- **Orchestrate** via `board.move({ id, status })` (change column) and
+  `board.assign({ id, assignee })` rather than keeping state in messages or
+  text files. Statuses: `todo` → `doing` → `review` → `done` (or `blocked`).
+- **On resume** (after a `/clear` or crash), call `board.list()` first to see
+  in-progress and orphaned cards (assignee gone) before acting. Orphaned cards
+  need reassignment — they are flagged with `orphaned_at`.
+- `board.update({ id, expectedVersion, … })` — edit title / body under an
+  optimistic lock. `board.comment({ id, text })` — append to the audit journal.
+- `board.link({ from, to })` / `board.unlink` — declare dependencies (DAG;
+  cycles refused). `board.close({ id })` / `board.reopen` — close or reopen.
+- `board.teams()` / `board.list({ team })` — **lead-only** cross-team read.
+- `board.delete({ id })` — **lead-only** soft-delete (kept for audit).
+
+Cards are per-team. A card's `version` field guards concurrent edits —
+re-read and retry on a `VERSION_CONFLICT` error.
+
 ## Mailbox discipline (CRITICAL)
 
 The team uses an **in-memory mailbox** plus a **passive PTY signal**. The

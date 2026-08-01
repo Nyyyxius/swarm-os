@@ -52,6 +52,28 @@ before you act, and write back what matters as you go.
 pass its `version` as `expectedVersion` to `memory.write`) over creating a
 near-duplicate.
 
+## Task board (Kanban)
+
+The `team-comms` server also exposes a **per-team task board** — a durable
+Kanban that survives `/clear`, crashes, and resumes. **Using it is part of your
+normal workflow**: keep your card up to date so the lead and the web UI always
+reflect the true state.
+
+- **When you receive a task**, call `board.list({ mine: true })` to find your
+  card (one was auto-created at your spawn), then `board.move({ id, status:
+  'doing' })` to claim it. If no card matches, create one with `board.create`.
+- **When you finish**, `board.move({ id, status: 'done' })` (or `'review'` if
+  the lead must validate), then `board.comment({ id, text })` with a short
+  summary of what was done.
+- **If you are blocked**, `board.move({ id, status: 'blocked' })` +
+  `board.comment` explaining why, then message the lead.
+- `board.get({ id })` — read a card plus its dependencies and audit journal.
+- `board.comment({ id, text })` — append a note; does not change the version.
+- `board.link({ from, to })` / `board.unlink` — add/remove a dependency.
+
+You can create cards and comment on any card on your board. Assigning a card
+to **another** session or deleting a card are **lead-only** actions.
+
 ## Mailbox discipline (CRITICAL)
 
 The team uses an **in-memory mailbox** plus a **passive PTY signal**. The
