@@ -21,6 +21,7 @@
 import { Client, GatewayIntentBits, MessageFlags } from 'discord.js';
 import { ensureTeam } from './provision.js';
 import { whisperTranscribe, downloadToBuffer, STT_MAX_BYTES } from './openai.js';
+import { sendText } from './reply.js';
 
 const LOGIN_TIMEOUT_MS = 15_000;
 const DESTROY_TIMEOUT_MS = 3_000;
@@ -369,6 +370,50 @@ async function deliverMessage(rt, msg, threadCtx) {
   try {
     const binding = rt.binding;
     if (!binding) return false;
+
+    // ---- P5: is this a native REPLY that DECIDES a pending approval? --------
+    // Mirrors the built-in bot (discord/bot.ts handleMessageCreate): checked
+    // BEFORE any transcription and BEFORE pushToLeadInbox — a decision needs no
+    // lead, and a consumed reply must NOT also land in the inbox. Only native
+    // replies (`msg.reference.messageId`) correlate; this works for BOTH text
+    // and voice replies and in threads (they all carry `msg.reference`). The
+    // resolver is synchronous; the confirmation post is fire-and-forget (the
+    // store record is authoritative regardless). Consuming counts as a processed
+    // message so the caller advances the cursor (return true).
+    if (msg.reference?.messageId && typeof binding.sub?.tryConsumeApprovalReply === 'function') {
+      try {
+        const result = binding.sub.tryConsumeApprovalReply({
+          referenceMessageId: msg.reference.messageId,
+          content: msg.content ?? '',
+          author: msg.author?.username ?? 'inconnu',
+        });
+        if (result && result.consumed) {
+          if (result.confirmation) {
+            // Reply into the same channel/thread the operator wrote in.
+            void sendText(rt, msg.channelId, result.confirmation, msg.id).catch(() => {
+              /* best-effort — the store record is authoritative regardless */
+            });
+          }
+          rt.log.info(
+            {
+              event: 'discord-agent.approval_resolved_via_reply',
+              orchId: binding.orchId,
+              messageId: msg.id,
+              referenceMessageId: msg.reference.messageId,
+            },
+            'discord-agent approval resolved via native reply (not pushed to inbox)',
+          );
+          return true; // consumed decision — advance cursor, do NOT push inbox
+        }
+      } catch (err) {
+        // A resolver failure must never block normal delivery: fall through.
+        rt.log.warn(
+          { event: 'discord-agent.approval_reply_failed', messageId: msg.id, error: String(err) },
+          'discord-agent approval reply routing failed — delivering to inbox as usual',
+        );
+      }
+    }
+
     const voice = isVoiceMessage(msg);
     const modality = voice ? 'voice' : 'text';
     const header = `[discord] de:@${msg.author?.username ?? 'inconnu'} | msg:${msg.id} | modalite:${

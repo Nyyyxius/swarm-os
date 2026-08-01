@@ -11,6 +11,8 @@
 // @typedef {import('@swarm-os/plugin-sdk').ChannelConnectorProvider} ChannelConnectorProvider
 // @typedef {import('@swarm-os/plugin-sdk').PluginOrchSubscription} PluginOrchSubscription
 
+import { sendText } from './reply.js';
+
 /**
  * @param {import('../index.js').Runtime} rt
  * @returns {ChannelConnectorProvider}
@@ -34,6 +36,41 @@ export function createConnectorProvider(rt) {
       // Deliver anything queued since the cursor (boot backlog, unbound window).
       // Scheduled (not awaited) so we never block the host wiring path.
       if (rt.gateway) rt.gateway.schedulePump();
+    },
+
+    /**
+     * P5 — outbound seam used by the server's approval hook
+     * (modules/approvals/discord-notify.ts) to post the "approval requested"
+     * message THROUGH the plugin's Gateway and return the posted message id, so
+     * a later native reply to it can be routed back to the approval. Additive
+     * and fail-safe: returns null (never throws) when this orch isn't the bound
+     * one, the gateway isn't ready, or the send yields no id — the server then
+     * silently falls back to its bot/webhook path.
+     *
+     * @param {string} orchId
+     * @param {string} text
+     * @returns {Promise<{ messageId: string } | null>}
+     */
+    async sendToOrchChannel(orchId, text) {
+      try {
+        if (!rt.binding || rt.binding.orchId !== orchId) return null;
+        if (!rt.gateway || !rt.gateway.isReady()) return null;
+        if (!rt.cfg.channelId) return null;
+        const res = await sendText(rt, rt.cfg.channelId, text, undefined);
+        const id = res && res.ok && Array.isArray(res.message_ids) ? res.message_ids[0] : undefined;
+        if (!id) return null;
+        rt.log.info(
+          { event: 'discord-agent.approval_posted', orchId, messageId: id },
+          'discord-agent posted approval request to channel',
+        );
+        return { messageId: id };
+      } catch (err) {
+        rt.log.warn(
+          { event: 'discord-agent.approval_post_failed', orchId, error: String(err) },
+          'discord-agent approval post failed (server falls back)',
+        );
+        return null;
+      }
     },
 
     /** @param {string} orchId */

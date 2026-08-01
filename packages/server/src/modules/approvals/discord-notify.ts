@@ -71,7 +71,52 @@ export async function notifyApprovalRequested(args: {
 }): Promise<void> {
   const { spawner, orch, session, approval, store } = args;
 
-  // ---- Preferred: post via the bot to capture the message id ----------------
+  // ---- P5: plugin channel connector (e.g. `discord-agent`) ------------------
+  // When the orch's role carries a NON-builtin connector whose provider exposes
+  // the optional `sendToOrchChannel` seam, post the approval THROUGH the plugin
+  // and capture the returned message id (same reply-routing contract as the
+  // built-in bot). This is the path for deployments that serve Discord via a
+  // plugin instead of the integrated bot — there `orch.notifier` is a no-op and
+  // the bot pool has no bot for this orch, so without this branch nothing is
+  // posted. Tried FIRST; on success we return (never a double post). Absent or
+  // failing → fall through to the built-in bot, then the webhook. Never throws.
+  try {
+    const role = orch.roleId && spawner.roleStore ? spawner.roleStore.get(orch.roleId) : null;
+    const registry = spawner.connectorRegistry;
+    if (role && registry) {
+      for (const connector of role.connectors) {
+        if (connector.type === 'discord') continue; // built-in → handled below
+        const provider = registry.get(connector.type);
+        if (!provider?.sendToOrchChannel) continue;
+        const text = buildApprovalText(orch, session, approval);
+        const res = await provider.sendToOrchChannel(orch.id, text);
+        if (res?.messageId) {
+          const persisted = store.setDiscordMessageId(approval.id, res.messageId);
+          log.info({
+            event: 'approvals.discord_posted_via_plugin',
+            orchId: orch.id,
+            sessionId: session.id,
+            approvalId: approval.id,
+            connectorType: connector.type,
+            discordMessageId: res.messageId,
+            persisted,
+          });
+          return;
+        }
+      }
+    }
+  } catch (err) {
+    // Plugin post failed — fall through to the bot / webhook so the operator
+    // still sees something. The approval hook must never throw (spike H6).
+    log.warn({
+      event: 'approvals.discord_plugin_post_failed',
+      orchId: orch.id,
+      approvalId: approval.id,
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+
+  // ---- Preferred (native): post via the bot to capture the message id -------
   try {
     const bot = spawner.discordBotPool?.botForOrch(orch.id) ?? null;
     const role = orch.roleId && spawner.roleStore ? spawner.roleStore.get(orch.roleId) : null;

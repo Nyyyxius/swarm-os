@@ -680,6 +680,20 @@ export function buildPluginApi(
             Promise.resolve(guard('connector.stopAll', () => provider.stopAll())()).then(
               () => undefined,
             ),
+          // Forward the OPTIONAL P5 outbound seam ONLY when the plugin actually
+          // implements it — otherwise leaving it undefined lets the approval
+          // hook detect its absence and fall back. (If this forward is dropped,
+          // the method compiles + runs but never reaches the plugin.)
+          ...(provider.sendToOrchChannel
+            ? {
+                sendToOrchChannel: (orchId: string, text: string) =>
+                  Promise.resolve(
+                    guard('connector.sendToOrchChannel', () =>
+                      provider.sendToOrchChannel!(orchId, text),
+                    )(),
+                  ) as Promise<{ messageId: string } | null>,
+              }
+            : {}),
         };
         return disposables.add(registry.register(type, guarded, { label, schema }));
       },

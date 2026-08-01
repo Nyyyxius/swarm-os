@@ -151,7 +151,7 @@ async function handleReply(rt, args, ctx) {
  * @param {string|undefined} replyToId
  * @returns {Promise<{ ok: boolean, message_ids: string[], partial?: boolean, error?: string }>}
  */
-async function sendText(rt, target, text, replyToId) {
+export async function sendText(rt, target, text, replyToId) {
   const channel = await fetchSendable(rt, target);
   const chunks = chunkText(text, CHUNK_SIZE);
   const ids = [];

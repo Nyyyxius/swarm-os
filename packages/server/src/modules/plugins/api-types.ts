@@ -262,6 +262,20 @@ export interface ChannelConnectorProvider {
   ): Promise<void>;
   unsubscribeOrch(orchId: string): Promise<void>;
   stopAll(): Promise<void>;
+  /**
+   * P5 (approval gate) — OPTIONAL outbound seam. Post `text` to the channel the
+   * given orch is bound to and return the posted message id, or `null` when this
+   * provider/orch cannot post (not bound, gateway down, no id). The server's
+   * approval hook (`modules/approvals/discord-notify.ts`) calls this to route the
+   * "approval requested" message through a plugin-owned channel (e.g. the
+   * `discord-agent` connector) and persist the returned id so a native *reply*
+   * can later be correlated back to the approval. Additive: providers that omit
+   * it simply fall back to the built-in bot / webhook path.
+   *
+   * ⚠️ The host reconstructs a guarded provider in `plugins/api.ts`; any new
+   * method here MUST be forwarded there or it is silently dropped.
+   */
+  sendToOrchChannel?(orchId: string, text: string): Promise<{ messageId: string } | null>;
 }
 
 export interface PluginOrchSubscription {
