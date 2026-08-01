@@ -4,6 +4,7 @@ import MobileShell from './components/mobile/MobileShell';
 import { RolesPage } from './components/RolesPage';
 import { MemoryPage } from './components/MemoryPage';
 import { BoardPage } from './components/BoardPage';
+import { ApprovalsPage } from './components/ApprovalsPage';
 import { PluginsPage } from './components/PluginsPage';
 import IdeOverlay from './components/desktop/IdeOverlay';
 import PluginPanelHost from './components/desktop/PluginPanelHost';
@@ -16,6 +17,7 @@ type Route =
   | { kind: 'roles' }
   | { kind: 'memory' }
   | { kind: 'board' }
+  | { kind: 'approvals' }
   | { kind: 'plugins' }
   | { kind: 'ide' }
   | { kind: 'panel'; plugin: string; panel: string };
@@ -38,6 +40,7 @@ function parseHash(): Route {
   if (h === '#/roles') return { kind: 'roles' };
   if (h === '#/memory') return { kind: 'memory' };
   if (h === '#/board') return { kind: 'board' };
+  if (h === '#/approvals') return { kind: 'approvals' };
   if (h === '#/plugins') return { kind: 'plugins' };
   if (h === '#/ide') return { kind: 'ide' };
   return { kind: 'list' };
@@ -49,6 +52,7 @@ function setHashRoute(route: Route): void {
   else if (route.kind === 'roles') target = '#/roles';
   else if (route.kind === 'memory') target = '#/memory';
   else if (route.kind === 'board') target = '#/board';
+  else if (route.kind === 'approvals') target = '#/approvals';
   else if (route.kind === 'plugins') target = '#/plugins';
   else if (route.kind === 'ide') target = '#/ide';
   else if (route.kind === 'panel') target = `#/panel/${route.plugin}/${route.panel}`;
@@ -104,6 +108,7 @@ export default function App() {
           onOpenRoles={() => setRoute({ kind: 'roles' })}
           onOpenMemory={() => setRoute({ kind: 'memory' })}
           onOpenBoard={() => setRoute({ kind: 'board' })}
+          onOpenApprovals={() => setRoute({ kind: 'approvals' })}
           onOpenPlugins={() => setRoute({ kind: 'plugins' })}
           onOpenIde={() => setRoute({ kind: 'ide' })}
           onOpenPanel={(plugin, panel) => setRoute({ kind: 'panel', plugin, panel })}
@@ -133,6 +138,13 @@ export default function App() {
               read-only for the web surface (Phase 4). */}
           <BoardPage
             open={route.kind === 'board'}
+            onClose={() => setRoute({ kind: 'list' })}
+          />
+
+          {/* ApprovalsPage overlay — approval-gate queue + history (Phase 5.3).
+              Always-mounted gated by `open`, same pattern as BoardPage. */}
+          <ApprovalsPage
+            open={route.kind === 'approvals'}
             onClose={() => setRoute({ kind: 'list' })}
           />
 

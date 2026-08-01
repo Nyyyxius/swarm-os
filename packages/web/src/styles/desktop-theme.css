@@ -1574,3 +1574,149 @@
     position: absolute; bottom: 20px; right: 20px;
     z-index: 70; min-width: 260px;
   }
+
+  /* ── Approval-gate overlay (Phase 5.3) ────────────────────────────────── */
+  /* Re-uses .board-overlay, .board-side, .board-* utility classes from above.
+     These .appr-* classes cover only approval-specific structure and colours. */
+
+  /* Status dots (sidebar counts) */
+  .appr-dot {
+    width: 7px; height: 7px; border-radius: 50%; flex-shrink: 0;
+    display: inline-block;
+  }
+  .appr-dot.pending  { background: var(--amber); }
+  .appr-dot.approved { background: var(--ok, #22c55e); }
+  .appr-dot.denied   { background: var(--danger, #ef4444); }
+  .appr-dot.expired  { background: var(--text-mute); }
+  .appr-dot.answered { background: var(--info); }
+  .appr-dot.resolved { background: var(--text-mute); }
+
+  /* Main scrollable area */
+  .appr-main {
+    overflow-y: auto; min-width: 0;
+    display: flex; flex-direction: column;
+  }
+
+  /* Sections wrapper */
+  .appr-sections {
+    display: flex; flex-direction: column; gap: 0;
+    padding: 16px; gap: 24px;
+    flex: 1; min-width: 0;
+  }
+
+  /* One section (PENDING / HISTORY) */
+  .appr-section {
+    display: flex; flex-direction: column; gap: 8px;
+  }
+  .appr-section-head {
+    display: flex; align-items: center; gap: 8px;
+    padding-bottom: 6px; border-bottom: 1px solid var(--border);
+    font-family: "Geist Mono", monospace; font-size: 10px;
+    letter-spacing: 0.1em;
+  }
+  .appr-section-title { flex: 1; color: var(--text-dim); }
+
+  /* Empty section hint */
+  .appr-empty-section {
+    font-family: "Geist Mono", monospace; font-size: 11px;
+    color: var(--text-mute); padding: 8px 0;
+  }
+
+  /* Individual approval card */
+  .appr-card {
+    background: var(--panel); border: 1px solid var(--border);
+    border-radius: 3px; padding: 10px 12px;
+    display: flex; flex-direction: column; gap: 7px;
+    max-width: 720px;
+  }
+  .appr-card.pending { border-left: 3px solid var(--amber); }
+  .appr-card.approved { border-left: 3px solid var(--ok, #22c55e); }
+  .appr-card.denied  { border-left: 3px solid var(--danger, #ef4444); }
+  .appr-card.expired { border-left: 3px solid var(--text-mute); }
+  .appr-card.answered_in_console { border-left: 3px solid var(--info); }
+
+  /* Card header row */
+  .appr-card-head {
+    display: flex; align-items: center; gap: 6px; flex-wrap: wrap;
+  }
+
+  /* Category chip */
+  .appr-cat-chip {
+    font-family: "Geist Mono", monospace; font-size: 9px; letter-spacing: 0.1em;
+    padding: 1px 5px; border-radius: 2px; font-weight: 600; flex-shrink: 0;
+    background: rgba(255,255,255,0.06); color: var(--text-dim);
+    border: 1px solid var(--border);
+  }
+  .appr-cat-chip.question {
+    background: rgba(100,160,255,0.10); color: var(--info);
+    border-color: rgba(100,160,255,0.25);
+  }
+
+  /* Status chip */
+  .appr-status-chip {
+    font-family: "Geist Mono", monospace; font-size: 9px; letter-spacing: 0.1em;
+    padding: 1px 5px; border-radius: 2px; font-weight: 600; flex-shrink: 0;
+  }
+  .appr-status-chip.pending  { background: rgba(255,176,96,0.15); color: var(--amber); border: 1px solid rgba(255,176,96,0.35); }
+  .appr-status-chip.approved { background: rgba(34,197,94,0.12);  color: var(--ok, #22c55e); border: 1px solid rgba(34,197,94,0.25); }
+  .appr-status-chip.denied   { background: rgba(239,68,68,0.12);  color: #ef4444; border: 1px solid rgba(239,68,68,0.25); }
+  .appr-status-chip.expired  { background: rgba(255,255,255,0.05); color: var(--text-mute); border: 1px solid var(--border); }
+  .appr-status-chip.answered_in_console { background: rgba(100,160,255,0.10); color: var(--info); border: 1px solid rgba(100,160,255,0.25); }
+
+  /* Age (fmtAge) */
+  .appr-card-age {
+    margin-left: auto;
+    font-family: "Geist Mono", monospace; font-size: 9px; color: var(--text-mute);
+  }
+
+  /* Requested summary */
+  .appr-card-summary {
+    font-family: "Geist", sans-serif; font-size: 12px; color: var(--text);
+    line-height: 1.4; word-break: break-word;
+  }
+  .appr-card-nosummary { color: var(--text-mute); font-style: italic; }
+
+  /* Meta row (TEAM · AGENT / BY · DECISION) */
+  .appr-card-meta {
+    display: flex; align-items: center; flex-wrap: wrap; gap: 4px;
+    font-family: "Geist Mono", monospace; font-size: 10px;
+  }
+  .appr-meta-key {
+    color: var(--text-mute); letter-spacing: 0.1em; font-size: 9px;
+  }
+  .appr-meta-val { color: var(--text-dim); }
+  .appr-meta-sep { color: var(--border-strong); }
+
+  /* Resolve error */
+  .appr-card-error {
+    font-family: "Geist Mono", monospace; font-size: 10px;
+    color: var(--danger, #ef4444);
+  }
+
+  /* Action buttons row (pending cards only) */
+  .appr-card-actions {
+    display: flex; flex-wrap: wrap; gap: 6px;
+    padding-top: 6px; border-top: 1px solid var(--border);
+  }
+  /* Approve button accent */
+  .appr-approve-btn {
+    background: rgba(34,197,94,0.1) !important;
+    border-color: rgba(34,197,94,0.3) !important;
+    color: var(--ok, #22c55e) !important;
+  }
+  .appr-approve-btn:hover:not(:disabled) {
+    background: rgba(34,197,94,0.18) !important;
+    border-color: var(--ok, #22c55e) !important;
+  }
+  /* Don't-ask-again accent */
+  .appr-dontask-btn {
+    background: rgba(34,197,94,0.06) !important;
+    border-color: rgba(34,197,94,0.2) !important;
+    color: var(--ok, #22c55e) !important;
+    opacity: 0.85;
+  }
+  .appr-dontask-btn:hover:not(:disabled) {
+    background: rgba(34,197,94,0.12) !important;
+    border-color: rgba(34,197,94,0.35) !important;
+    opacity: 1;
+  }

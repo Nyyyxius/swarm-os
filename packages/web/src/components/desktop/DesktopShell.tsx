@@ -35,6 +35,7 @@ export default function DesktopShell() {
         onOpenRoles={c.onOpenRoles}
         onOpenMemory={c.onOpenMemory}
         onOpenBoard={c.onOpenBoard}
+        onOpenApprovals={c.onOpenApprovals}
         onOpenPlugins={c.onOpenPlugins}
         onOpenIde={c.onOpenIde}
         onOpenSettings={() => c.setSettingsOpen(true)}
