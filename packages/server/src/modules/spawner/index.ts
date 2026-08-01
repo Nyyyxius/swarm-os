@@ -28,6 +28,8 @@ import type { ProviderRegistry } from '../providers/registry.js';
 import type { PluginOrchSubscription } from '../plugins/api-types.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { TaskboardStore } from '../taskboard/store.js';
+import type { ApprovalStore } from '../approvals/store.js';
+import { buildApprovalReplyResolver } from '../approvals/reply.js';
 import {
   isIdle,
   SIGNAL_TEXT,
@@ -199,6 +201,13 @@ export interface SpawnerDeps {
    * `TASKBOARD_UNAVAILABLE`.
    */
   taskboard?: TaskboardStore;
+  /**
+   * The human-in-the-loop approval queue (docs/garde-fous-approbation.md). Held
+   * on the Spawner so the Discord connector wiring can attach a P4 reply-router
+   * to each orch's subscription. Absent ⇒ no reply routing (approvals still work
+   * via the web/REST path).
+   */
+  approvals?: ApprovalStore;
 }
 
 export class Spawner {
@@ -250,6 +259,7 @@ export class Spawner {
    * none was wired. Threaded into every `ToolContext` by `McpServer`.
    */
   readonly memory: MemoryStore | null;
+  readonly approvals: ApprovalStore | null;
 
   /**
    * The durable task-board store (docs/tableau-de-taches.md), or `null` when
@@ -275,6 +285,7 @@ export class Spawner {
     this.modelCatalogue = deps.modelCatalogue ?? null;
     this.memory = deps.memory ?? null;
     this.taskboard = deps.taskboard ?? null;
+    this.approvals = deps.approvals ?? null;
     // Retro-wire live orchestrators when a connector provider registers late
     // (a plugin enabled while teams are already running — red-team I1).
     this.connectorRegistry?.setRetroactiveWirer((type) => this.retroWireConnectorType(type));
@@ -343,6 +354,18 @@ export class Spawner {
         if (!isIdle(lead, Date.now(), this.config.idleThresholdMs)) return;
         lead.notifySignal(SIGNAL_TEXT);
       },
+      // P4: when the approval store is wired, attach a reply-router so a native
+      // Discord reply on this orch's channel resolves the matching pending
+      // approval (via the shared core) instead of landing in the lead inbox.
+      ...(this.approvals
+        ? {
+            tryConsumeApprovalReply: buildApprovalReplyResolver({
+              spawner: this,
+              store: this.approvals,
+              orchestratorId: orch.id,
+            }),
+          }
+        : {}),
     };
     void Promise.resolve()
       .then(() => provider.subscribeOrch(connectorConfig(connector), sub))

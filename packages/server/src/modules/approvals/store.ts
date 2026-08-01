@@ -91,6 +91,13 @@ export interface ApprovalRequest {
   resolvedBy: string | null;
   /** The resolution outcome, or `null` while pending. */
   decision: string | null;
+  /**
+   * P4: the Discord message id of the approval notification posted for this
+   * request (via the bot), or `null` when none was posted (webhook-only role, or
+   * the bot was unavailable). It is the correlation key for routing a native
+   * Discord *reply* back to THIS approval (docs §8, §6 "routage réponse Discord").
+   */
+  discordMessageId: string | null;
 }
 
 export interface ApprovalEvent {
@@ -120,6 +127,7 @@ interface RequestRow {
   resolved_at: number | null;
   resolved_by: string | null;
   decision: string | null;
+  discord_message_id: string | null;
 }
 
 interface EventRow {
@@ -193,6 +201,8 @@ export class ApprovalStore {
   private readonly insertEventStmt;
   private readonly tailEventsStmt;
   private readonly expiredPendingStmt;
+  private readonly setDiscordMsgIdStmt;
+  private readonly getByDiscordMsgIdStmt;
 
   constructor(swarmDb: SwarmDb, opts: { eventBus?: SwarmEventBus } = {}) {
     this.db = swarmDb.db;
@@ -214,6 +224,7 @@ export class ApprovalStore {
         resolved_at       INTEGER,
         resolved_by       TEXT,
         decision          TEXT,
+        discord_message_id TEXT,
         FOREIGN KEY (orchestrator_id) REFERENCES orchestrators(id) ON DELETE CASCADE
       );
       CREATE INDEX IF NOT EXISTS idx_approvals_orch_status ON approval_requests(orchestrator_id, status);
@@ -232,6 +243,16 @@ export class ApprovalStore {
       CREATE INDEX IF NOT EXISTS idx_approval_events_approval ON approval_events(approval_id, ts);
     `);
 
+    // P4 migration: `discord_message_id` was added after P1/P2 shipped, so a dev
+    // DB created then already has the table WITHOUT the column (CREATE TABLE IF
+    // NOT EXISTS above won't add it). Add it idempotently — guarded because
+    // SQLite's ADD COLUMN throws if the column already exists, and this store
+    // never throws out of its constructor path.
+    this.ensureColumn('approval_requests', 'discord_message_id', 'TEXT');
+    this.db.exec(
+      'CREATE INDEX IF NOT EXISTS idx_approvals_discord_msg ON approval_requests(discord_message_id)',
+    );
+
     this.getRequestStmt = this.db.prepare<[string], RequestRow>(
       'SELECT * FROM approval_requests WHERE id = ?',
     );
@@ -239,11 +260,11 @@ export class ApprovalStore {
       INSERT INTO approval_requests (
         id, orchestrator_id, session_id, category, requested_summary, raw_message,
         permission_mode, provider, status, created_at, expires_at, resolved_at,
-        resolved_by, decision
+        resolved_by, decision, discord_message_id
       ) VALUES (
         @id, @orchestrator_id, @session_id, @category, @requested_summary, @raw_message,
         @permission_mode, @provider, @status, @created_at, @expires_at, @resolved_at,
-        @resolved_by, @decision
+        @resolved_by, @decision, @discord_message_id
       )
     `);
     this.updateRequestStmt = this.db.prepare<RequestRow>(`
@@ -251,7 +272,8 @@ export class ApprovalStore {
         category = @category, requested_summary = @requested_summary,
         raw_message = @raw_message, permission_mode = @permission_mode,
         provider = @provider, status = @status, expires_at = @expires_at,
-        resolved_at = @resolved_at, resolved_by = @resolved_by, decision = @decision
+        resolved_at = @resolved_at, resolved_by = @resolved_by, decision = @decision,
+        discord_message_id = @discord_message_id
       WHERE id = @id
     `);
     // Oldest-first queue order; rowid (insertion order) breaks a same-ms tie
@@ -285,6 +307,32 @@ export class ApprovalStore {
     this.expiredPendingStmt = this.db.prepare<[number], RequestRow>(
       "SELECT * FROM approval_requests WHERE status = 'pending' AND created_at < ? ORDER BY created_at ASC",
     );
+    // P4: correlation key setter + lookup for routing a Discord reply.
+    this.setDiscordMsgIdStmt = this.db.prepare<[string, string]>(
+      'UPDATE approval_requests SET discord_message_id = ? WHERE id = ?',
+    );
+    // Scoped by orch (defense-in-depth — Discord message ids are globally unique,
+    // but the caller always knows which team's channel the reply came from).
+    this.getByDiscordMsgIdStmt = this.db.prepare<[string, string], RequestRow>(
+      'SELECT * FROM approval_requests WHERE orchestrator_id = ? AND discord_message_id = ? ORDER BY created_at DESC, rowid DESC LIMIT 1',
+    );
+  }
+
+  /**
+   * Idempotently add `column` to `table` if it is not already present. Used for
+   * the P4 `discord_message_id` migration. Never throws (constructor path).
+   */
+  private ensureColumn(table: string, column: string, decl: string): void {
+    try {
+      const cols = this.db
+        .prepare<[], { name: string }>(`PRAGMA table_info(${table})`)
+        .all();
+      if (cols.some((c) => c.name === column)) return;
+      this.db.exec(`ALTER TABLE ${table} ADD COLUMN ${column} ${decl}`);
+      log.info({ event: 'approvals.migrate_add_column', table, column });
+    } catch (err) {
+      log.warn({ event: 'approvals.migrate_failed', table, column, error: String(err) });
+    }
   }
 
   // --- helpers --------------------------------------------------------------
@@ -317,6 +365,7 @@ export class ApprovalStore {
       resolvedAt: row.resolved_at,
       resolvedBy: row.resolved_by,
       decision: row.decision,
+      discordMessageId: row.discord_message_id ?? null,
     };
   }
 
@@ -336,6 +385,7 @@ export class ApprovalStore {
       resolved_at: r.resolvedAt,
       resolved_by: r.resolvedBy,
       decision: r.decision,
+      discord_message_id: r.discordMessageId ?? null,
     };
   }
 
@@ -436,6 +486,7 @@ export class ApprovalStore {
         resolvedAt: null,
         resolvedBy: null,
         decision: null,
+        discordMessageId: null,
       };
 
       this.db.transaction(() => {
@@ -558,6 +609,39 @@ export class ApprovalStore {
       return row ? this.rowToRequest(row) : null;
     } catch (err) {
       log.warn({ event: 'approvals.get_failed', id, error: String(err) });
+      return null;
+    }
+  }
+
+  /**
+   * P4: remember the Discord message id of the approval notification we posted,
+   * so a later native *reply* to that message can be routed back to this exact
+   * request (`findByDiscordMessageId`). Best-effort — returns `true` on success,
+   * `false` on unknown id / failure. Never throws.
+   */
+  setDiscordMessageId(id: string, discordMessageId: string): boolean {
+    try {
+      if (!id || !discordMessageId) return false;
+      const res = this.setDiscordMsgIdStmt.run(discordMessageId, id);
+      return res.changes > 0;
+    } catch (err) {
+      log.warn({ event: 'approvals.set_discord_msg_id_failed', id, error: String(err) });
+      return false;
+    }
+  }
+
+  /**
+   * P4: find the approval whose posted notification has `discordMessageId`, in
+   * team `orchestratorId`. Returns it whatever its status (the caller decides
+   * pending vs already-resolved). `null` when none matches / on failure.
+   */
+  findByDiscordMessageId(orchestratorId: string, discordMessageId: string): ApprovalRequest | null {
+    try {
+      if (!orchestratorId || !discordMessageId) return null;
+      const row = this.getByDiscordMsgIdStmt.get(orchestratorId, discordMessageId);
+      return row ? this.rowToRequest(row) : null;
+    } catch (err) {
+      log.warn({ event: 'approvals.find_by_discord_msg_id_failed', error: String(err) });
       return null;
     }
   }

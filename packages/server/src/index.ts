@@ -329,6 +329,10 @@ const spawner = new Spawner(config, {
   // Durable task-board store — threaded into every ToolContext so the board.*
   // MCP tools reach it. `undefined` when the store failed to open.
   ...(taskboardStore ? { taskboard: taskboardStore } : {}),
+  // Human-in-the-loop approval queue — threaded so the Discord connector wiring
+  // can attach the P4 reply-router to each orch subscription. `undefined` when
+  // the store failed to open (approvals then work via web/REST only).
+  ...(approvalStore ? { approvals: approvalStore } : {}),
 });
 
 // ---- S9: in-memory `/metrics/messages` aggregator -------------------------

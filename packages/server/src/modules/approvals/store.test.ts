@@ -237,3 +237,52 @@ describe('persistence', () => {
     expect(reopened.listPending(ORCH_A)).toHaveLength(1);
   });
 });
+
+describe('discord_message_id (P4 correlation)', () => {
+  it('defaults to null on a fresh request', () => {
+    const req = store.createRequest(baseInput());
+    expect(req!.discordMessageId).toBeNull();
+    expect(store.getRequest(req!.id)!.discordMessageId).toBeNull();
+  });
+
+  it('persists a message id and reads it back', () => {
+    const req = store.createRequest(baseInput());
+    expect(store.setDiscordMessageId(req!.id, 'msg-123')).toBe(true);
+    expect(store.getRequest(req!.id)!.discordMessageId).toBe('msg-123');
+  });
+
+  it('returns false when setting on an unknown id', () => {
+    expect(store.setDiscordMessageId('nope', 'msg-123')).toBe(false);
+  });
+
+  it('finds a pending approval by (orch, message id)', () => {
+    const req = store.createRequest(baseInput());
+    store.setDiscordMessageId(req!.id, 'msg-abc');
+    const found = store.findByDiscordMessageId(ORCH_A, 'msg-abc');
+    expect(found?.id).toBe(req!.id);
+  });
+
+  it('does not cross teams when correlating (scoped by orch)', () => {
+    const req = store.createRequest(baseInput({ orchestratorId: ORCH_A }));
+    store.setDiscordMessageId(req!.id, 'msg-x');
+    expect(store.findByDiscordMessageId(ORCH_B, 'msg-x')).toBeNull();
+    expect(store.findByDiscordMessageId(ORCH_A, 'msg-x')?.id).toBe(req!.id);
+  });
+
+  it('returns the message id even after the request is resolved', () => {
+    const req = store.createRequest(baseInput());
+    store.setDiscordMessageId(req!.id, 'msg-r');
+    store.resolveRequest(req!.id, { decision: 'approved', by: 'web' });
+    const found = store.findByDiscordMessageId(ORCH_A, 'msg-r');
+    expect(found?.id).toBe(req!.id);
+    expect(found?.status).toBe('approved');
+  });
+
+  it('survives a store re-open (column migration is idempotent)', () => {
+    const req = store.createRequest(baseInput());
+    store.setDiscordMessageId(req!.id, 'msg-persist');
+    const reopened = new ApprovalStore(db, { eventBus: bus });
+    expect(reopened.getRequest(req!.id)!.discordMessageId).toBe('msg-persist');
+    expect(reopened.findByDiscordMessageId(ORCH_A, 'msg-persist')?.id).toBe(req!.id);
+  });
+});

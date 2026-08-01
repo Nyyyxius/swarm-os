@@ -30,8 +30,8 @@
 
 import { Router, type Request, type Response } from 'express';
 import { Spawner } from '../../modules/spawner/index.js';
-import { APPROVAL_STATUSES, type ApprovalStore, type ApprovalResolution } from '../../modules/approvals/store.js';
-import { keystrokeFor, type ApprovalDecisionInput } from '../../modules/approvals/keystrokes.js';
+import { APPROVAL_STATUSES, type ApprovalStore } from '../../modules/approvals/store.js';
+import { resolveApproval } from '../../modules/approvals/resolve.js';
 import { withModule } from '../../logger.js';
 
 const log = withModule('approvals.route');
@@ -87,96 +87,68 @@ export function createApprovalsRouter(spawner: Spawner, approvals: ApprovalStore
     const dontAskAgain = body.dontAskAgain === true;
     const by = typeof body.by === 'string' && body.by.length > 0 ? body.by : 'web';
 
-    const request = approvals.getRequest(req.params.id);
-    if (!request) {
+    // The keystroke replay + store record + event live in the shared core so the
+    // Discord-reply path (P4) resolves identically. Map its outcomes to HTTP.
+    const result = resolveApproval(spawner, approvals, req.params.id, {
+      decision,
+      dontAskAgain,
+      by,
+    });
+
+    if (result.outcome === 'not_found') {
       res.status(404).json({ error: 'not found', code: 'NOT_FOUND' });
       return;
     }
 
     // Already resolved (by another operator, or answered in the console and
-    // reconciled): do NOT send a keystroke, report the current terminal state.
-    if (request.status !== 'pending') {
+    // reconciled): report the current terminal state, no keystroke sent.
+    if (result.outcome === 'already_resolved') {
       res.status(409).json({
-        error: `approval already resolved (${request.status})`,
+        error: `approval already resolved (${result.request.status})`,
         code: 'ALREADY_RESOLVED',
-        status: request.status,
-        request,
+        status: result.request.status,
+        request: result.request,
       });
       return;
     }
 
-    // The blocked session must still be live to receive the keystroke. If it is
-    // gone, the prompt is gone with it — take the request out of `pending`
-    // cleanly as `answered_in_console` (docs §10) rather than leave a phantom.
-    const found = spawner.findSession(request.sessionId);
-    if (!found) {
-      const resolved = approvals.resolveRequest(req.params.id, {
-        decision: 'answered_in_console',
-        by,
-      });
+    // Session gone (prompt gone with it): recorded as answered_in_console.
+    if (result.outcome === 'session_gone') {
       res.status(200).json({
         ok: true,
         delivered: false,
         reason: 'session_gone',
         decision: 'answered_in_console',
-        status: resolved?.status ?? 'answered_in_console',
-        request: resolved ?? request,
+        status: result.request.status,
+        request: result.request,
       });
       return;
     }
 
-    const provider = found.session.toView().provider;
-    const plan = keystrokeFor(provider, decision as ApprovalDecisionInput, dontAskAgain);
-    const storeDecision: ApprovalResolution = decision === 'approve' ? 'approved' : 'denied';
-
-    // (a) Replay the keystroke (best-effort — never let a PTY write failure 500
-    // the resolve; the store record below is the source of truth regardless).
-    let delivered = false;
-    if (plan) {
-      try {
-        if (plan.submit) found.session.submitInput(plan.data);
-        else found.session.writeInput(plan.data);
-        delivered = true;
-      } catch (err) {
-        log.warn({
-          event: 'approvals.keystroke_failed',
-          approvalId: request.id,
-          sessionId: request.sessionId,
-          error: err instanceof Error ? err.message : String(err),
-        });
-      }
-    }
-
-    // (b) Record the decision (emits `approval.resolved` via the store).
-    const resolved = approvals.resolveRequest(req.params.id, {
-      decision: storeDecision,
-      by,
-      dontAskAgain,
-    });
-
+    const storeDecision = decision === 'approve' ? 'approved' : 'denied';
     log.info({
       event: 'approvals.resolved',
-      approvalId: request.id,
-      orchId: request.orchestratorId,
-      sessionId: request.sessionId,
+      approvalId: result.request.id,
+      orchId: result.request.orchestratorId,
+      sessionId: result.request.sessionId,
       decision: storeDecision,
       dontAskAgain,
-      delivered,
-      keystroke: plan?.label ?? null,
+      delivered: result.delivered,
+      keystroke: result.keystroke,
       by,
     });
 
     res.status(200).json({
       ok: true,
-      delivered,
-      keystroke: plan?.label ?? null,
+      delivered: result.delivered,
+      keystroke: result.keystroke,
       // Non-fatal note when the provider has no keystroke mapping yet (P5): the
       // decision is still recorded, but nothing was typed into the PTY.
-      ...(plan ? {} : { reason: 'no_keystroke_mapping' }),
+      ...(result.noMapping ? { reason: 'no_keystroke_mapping' } : {}),
       decision: storeDecision,
       dontAskAgain,
-      status: resolved?.status ?? storeDecision,
-      request: resolved ?? request,
+      status: result.request.status,
+      request: result.request,
     });
   });
 

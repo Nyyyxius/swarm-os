@@ -104,6 +104,7 @@ import { withModule } from '../../logger.js';
 import type { Notifier } from '../../modules/notify/index.js';
 import type { ApprovalStore } from '../../modules/approvals/store.js';
 import { classifyCategory, isPromptingMode, summarizeRequest } from '../../modules/approvals/prompting.js';
+import { notifyApprovalRequested } from '../../modules/approvals/discord-notify.js';
 
 const log = withModule('hooks');
 
@@ -286,47 +287,32 @@ export function createHooksRouter(
             permissionMode: session.permissionMode,
           });
 
-          // ---- P3: enriched, ACTIONABLE-context Discord notification --------
+          // ---- P3/P4: actionable Discord notification -----------------------
           // Additive to the legacy `session.waiting` ping below (both fire).
-          // Uses the PER-ORCH notifier (`orch.notifier`, resolved from the
-          // role's Discord connector at create time — docs §2.2) so it lands in
-          // THIS team's channel, not the global one. Informational only: it
-          // names what is requested and points the operator at the web
-          // toast/page (Approve/Deny) or the console. Response ROUTING from a
-          // Discord reply is P4. Fire-and-forget — the notifier swallows its own
-          // errors and is timeout-bounded; the extra `.catch` is belt-and-braces
-          // so nothing on the hook path can ever throw (spike H6).
-          void orch.notifier
-            .notify({
+          // Prefers the PER-ORCH BOT (captures the posted message id so a native
+          // Discord *reply* can be routed back to this approval — P4) and falls
+          // back to the P3 per-orch webhook embed when no bot is wired. Both are
+          // informational: they name what is requested and point the operator at
+          // the reply-text protocol, the web toast/page, or the console.
+          // Fire-and-forget — the helper swallows its own errors and is
+          // timeout-bounded; the extra `.catch` is belt-and-braces so nothing on
+          // the hook path can ever throw (spike H6).
+          void notifyApprovalRequested({
+            spawner,
+            orch,
+            session,
+            approval,
+            store: approvals,
+          }).catch((err) => {
+            log.warn({
+              event: 'notify.dispatch_failed',
               kind: 'session.approval_requested',
-              orchestrator: {
-                id: orch.id,
-                name: orch.name,
-                role: orch.role,
-                status: orch.status,
-              },
-              session: {
-                id: session.id,
-                name: session.name,
-                role: session.role,
-                type: session.type,
-                status: session.status,
-                exitCode: session.exitCode,
-                stopReason: session.stopReason,
-              },
-              message: approval.requestedSummary,
-              extra: { approvalId: approval.id, category: approval.category },
-            })
-            .catch((err) => {
-              log.warn({
-                event: 'notify.dispatch_failed',
-                kind: 'session.approval_requested',
-                orchId: orch.id,
-                sessionId: session.id,
-                approvalId: approval.id,
-                error: err instanceof Error ? err.message : String(err),
-              });
+              orchId: orch.id,
+              sessionId: session.id,
+              approvalId: approval.id,
+              error: err instanceof Error ? err.message : String(err),
             });
+          });
         }
       } catch (err) {
         // Defence in depth — createRequest is already non-throwing, but the hook

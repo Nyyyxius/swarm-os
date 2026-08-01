@@ -32,6 +32,7 @@ import {
 } from 'discord.js';
 import { withModule } from '../../logger.js';
 import type { Mailbox } from '../orchestrator/mailbox.js';
+import type { ApprovalReplyResolver } from '../approvals/reply.js';
 
 const log = withModule('discord-bot');
 
@@ -85,6 +86,16 @@ export interface OrchSubscription {
    * write errors. Same pattern as `messaging.ts` for in-process traffic.
    */
   notifyLead: () => void;
+  /**
+   * P4 — optional approval-reply router. When an inbound message is a native
+   * *reply* (`msg.reference.messageId` set), the bot calls this FIRST. If it
+   * returns `consumed: true`, the message was a decision on a pending approval
+   * of this orch — the bot posts the `confirmation` (if any) and does NOT push
+   * the message to the lead inbox. `consumed: false` (or absent resolver) → the
+   * message flows to the inbox exactly as before. Sync by construction (see
+   * `modules/approvals/reply.ts`).
+   */
+  tryConsumeApprovalReply?: ApprovalReplyResolver;
 }
 
 export interface DiscordBotServiceOptions {
@@ -411,6 +422,47 @@ export class DiscordBotService {
     const threadId = isThread ? msg.channelId : undefined;
     const threadName = isThread ? channel.name : undefined;
     for (const sub of subs) {
+      // ---- P4: is this a reply that DECIDES a pending approval? -------------
+      // Checked BEFORE the lead guard + inbox push: a decision needs no lead,
+      // and a consumed reply must NOT also land in the inbox. Only native
+      // replies (`msg.reference.messageId`) can correlate. The resolver is sync;
+      // the confirmation post is fire-and-forget.
+      if (msg.reference?.messageId && sub.tryConsumeApprovalReply) {
+        let consumed = false;
+        try {
+          const result = sub.tryConsumeApprovalReply({
+            referenceMessageId: msg.reference.messageId,
+            content: msg.content ?? '',
+            author: msg.author.username,
+          });
+          consumed = result.consumed;
+          if (result.consumed && result.confirmation) {
+            // Reply into the same channel/thread the operator wrote in.
+            void this.sendMessage(msg.channelId, result.confirmation, {
+              replyToMessageId: msg.id,
+            }).catch(() => {
+              /* best-effort — the store record is authoritative regardless */
+            });
+          }
+        } catch (err) {
+          log.warn({
+            event: 'discord.bot.approval_reply_failed',
+            orchId: sub.orchestratorId,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+        if (consumed) {
+          log.info({
+            event: 'discord.bot.approval_resolved_via_reply',
+            orchId: sub.orchestratorId,
+            channelId: parentChannelId,
+            referenceMessageId: msg.reference.messageId,
+            authorId: msg.author.id,
+          });
+          continue; // do NOT push a consumed decision to the lead inbox
+        }
+      }
+
       const leadSessionId = sub.getLeadSessionId();
       if (!leadSessionId) {
         log.warn({

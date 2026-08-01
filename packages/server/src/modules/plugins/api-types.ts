@@ -18,6 +18,7 @@
 import { z } from 'zod';
 import type { Logger } from 'pino';
 import type { Router } from 'express';
+import type { ApprovalReplyResolver } from '../approvals/reply.js';
 import type { SwarmEvent, SwarmEventKind } from '../../events.js';
 import type { Role, RoleInit, RolePatch } from '../roles/index.js';
 import type {
@@ -278,6 +279,12 @@ export interface PluginOrchSubscription {
   ): void;
   /** Wake the lead's PTY if idle — same path as the Discord bridge. */
   notifyLead(): void;
+  /**
+   * P4 — optional approval-reply router forwarded to the channel bot. When set,
+   * the bot tries it FIRST on native replies; a consumed decision is resolved +
+   * confirmed and NOT pushed to the inbox. See `modules/approvals/reply.ts`.
+   */
+  tryConsumeApprovalReply?: ApprovalReplyResolver;
 }
 
 // ---------------------------------------------------------------------------

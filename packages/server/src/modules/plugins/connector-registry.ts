@@ -204,6 +204,11 @@ export class DiscordConnectorProvider implements ChannelConnectorProvider {
       mailbox: shimMailbox,
       // Wake already handled inside `pushToLeadInbox` — avoid a double signal.
       notifyLead: () => {},
+      // P4: forward the approval-reply router so a native reply on this channel
+      // can be turned into a decision before it reaches the inbox.
+      ...(sub.tryConsumeApprovalReply
+        ? { tryConsumeApprovalReply: sub.tryConsumeApprovalReply }
+        : {}),
     });
   }
 

@@ -216,6 +216,101 @@ describe('DiscordBotService.handleMessageCreate', () => {
   });
 });
 
+describe('DiscordBotService.handleMessageCreate — P4 approval reply routing', () => {
+  let bot: DiscordBotService;
+  beforeEach(() => {
+    bot = makeBot();
+    // The confirmation post goes through sendMessage; stub it (bot isn't ready).
+    vi.spyOn(bot, 'sendMessage').mockResolvedValue({ messageId: 'conf-1', channelId: 'channel-1' });
+  });
+
+  it('consumes a reply that resolves an approval — no inbox push, posts confirmation', () => {
+    const tryConsumeApprovalReply = vi.fn(() => ({ consumed: true, confirmation: 'Approuvé ✅.' }));
+    const sub = makeSubscription({ tryConsumeApprovalReply });
+    bot.subscribeOrchestrator(sub);
+
+    bot.handleMessageCreate(
+      makeMessage({ id: 'reply-1', reference: { messageId: 'appr-msg' }, content: 'oui' }),
+    );
+
+    expect(tryConsumeApprovalReply).toHaveBeenCalledWith({
+      referenceMessageId: 'appr-msg',
+      content: 'oui',
+      author: 'alice',
+    });
+    // NOT pushed to the inbox, lead NOT woken.
+    expect(sub.mailbox.peek('lead-1')).toHaveLength(0);
+    expect(sub.notifyLead).not.toHaveBeenCalled();
+    // Confirmation posted as a reply to the operator's message.
+    expect(bot.sendMessage).toHaveBeenCalledWith('channel-1', 'Approuvé ✅.', {
+      replyToMessageId: 'reply-1',
+    });
+  });
+
+  it('lets an unconsumed reply (consumed:false) flow to the inbox as normal', () => {
+    const tryConsumeApprovalReply = vi.fn(() => ({ consumed: false }));
+    const sub = makeSubscription({ tryConsumeApprovalReply });
+    bot.subscribeOrchestrator(sub);
+
+    bot.handleMessageCreate(
+      makeMessage({ reference: { messageId: 'some-other-msg' }, content: 'a question?' }),
+    );
+
+    expect(tryConsumeApprovalReply).toHaveBeenCalledTimes(1);
+    expect(sub.mailbox.peek('lead-1')).toHaveLength(1);
+    expect(sub.notifyLead).toHaveBeenCalledTimes(1);
+    expect(bot.sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('does NOT call the resolver for a non-reply message (no reference)', () => {
+    const tryConsumeApprovalReply = vi.fn(() => ({ consumed: false }));
+    const sub = makeSubscription({ tryConsumeApprovalReply });
+    bot.subscribeOrchestrator(sub);
+
+    bot.handleMessageCreate(makeMessage({ reference: null, content: 'hello' }));
+
+    expect(tryConsumeApprovalReply).not.toHaveBeenCalled();
+    expect(sub.mailbox.peek('lead-1')).toHaveLength(1);
+  });
+
+  it('consumes even when the orch has no lead session (decision needs no lead)', () => {
+    const tryConsumeApprovalReply = vi.fn(() => ({ consumed: true, confirmation: 'Refusé ❌.' }));
+    const sub = makeSubscription({ getLeadSessionId: () => null, tryConsumeApprovalReply });
+    bot.subscribeOrchestrator(sub);
+
+    bot.handleMessageCreate(makeMessage({ reference: { messageId: 'appr-msg' }, content: 'non' }));
+
+    expect(tryConsumeApprovalReply).toHaveBeenCalledTimes(1);
+    expect(sub.mailbox.totalSize()).toBe(0);
+    expect(bot.sendMessage).toHaveBeenCalled();
+  });
+
+  it('a resolver exception does not break the handler (message still flows to inbox)', () => {
+    const tryConsumeApprovalReply = vi.fn(() => {
+      throw new Error('boom');
+    });
+    const sub = makeSubscription({ tryConsumeApprovalReply });
+    bot.subscribeOrchestrator(sub);
+
+    expect(() =>
+      bot.handleMessageCreate(makeMessage({ reference: { messageId: 'appr-msg' } })),
+    ).not.toThrow();
+    // Not consumed (threw) → falls through to the normal inbox push.
+    expect(sub.mailbox.peek('lead-1')).toHaveLength(1);
+  });
+
+  it('does not post a confirmation when consumed but confirmation is empty', () => {
+    const tryConsumeApprovalReply = vi.fn(() => ({ consumed: true }));
+    const sub = makeSubscription({ tryConsumeApprovalReply });
+    bot.subscribeOrchestrator(sub);
+
+    bot.handleMessageCreate(makeMessage({ reference: { messageId: 'appr-msg' } }));
+
+    expect(sub.mailbox.peek('lead-1')).toHaveLength(0);
+    expect(bot.sendMessage).not.toHaveBeenCalled();
+  });
+});
+
 describe('DiscordBotService subscription management', () => {
   it('unsubscribes an orchestrator and stops fan-out', () => {
     const bot = makeBot();
