@@ -14,6 +14,7 @@ export const ICON: Record<string, ReactElement> = {
   plus:     <svg viewBox="0 0 24 24"><path d="M12 5 V19"/><path d="M5 12 H19"/></svg>,
   cog:      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="3"/><path d="M12 2 V5 M12 19 V22 M2 12 H5 M19 12 H22 M4.5 4.5 L6.5 6.5 M17.5 17.5 L19.5 19.5 M4.5 19.5 L6.5 17.5 M17.5 6.5 L19.5 4.5"/></svg>,
   template: <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="5"/><rect x="3" y="11" width="18" height="5"/><rect x="3" y="18" width="18" height="3"/></svg>,
+  board:    <svg viewBox="0 0 24 24"><rect x="3" y="4" width="18" height="16" rx="1"/><path d="M9 4 V20"/><path d="M15 4 V20"/></svg>,
   pencil:   <svg viewBox="0 0 24 24"><path d="M4 20 L8 19 L20 7 L17 4 L5 16 Z"/><path d="M14 7 L17 10"/></svg>,
   trash:    <svg viewBox="0 0 24 24"><path d="M5 7 H19"/><path d="M9 7 V4 H15 V7"/><path d="M7 7 L8 20 H16 L17 7"/></svg>,
   inbox:    <svg viewBox="0 0 24 24"><path d="M3 13 L7 5 H17 L21 13 V20 H3 Z"/><path d="M3 13 H8 L10 16 H14 L16 13 H21"/></svg>,

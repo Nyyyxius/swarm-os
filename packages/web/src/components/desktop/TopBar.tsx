@@ -176,7 +176,7 @@ export default function TopBar({
           {ICON.fork}<span className="label">MEMORY</span>
         </button>
         <button className="tb-action" onClick={() => onOpenBoard?.()} title="task board (Kanban)">
-          {ICON.template}<span className="label">BOARD</span>
+          {ICON.board}<span className="label">BOARD</span>
         </button>
         <button className="tb-action" onClick={onOpenPlugins} title="manage plugins">
           {ICON.link}<span className="label">PLUGINS</span>
