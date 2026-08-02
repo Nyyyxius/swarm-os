@@ -26,8 +26,10 @@ import { createUpdatesRouter } from './routes/updates.js';
 import { createMemoryRouter } from './routes/memory.js';
 import { createTaskboardRouter } from './routes/taskboard.js';
 import { createApprovalsRouter } from './routes/approvals.js';
+import { createCodegraphRouter } from './routes/codegraph.js';
 import type { MemoryStore } from '../modules/memory/store.js';
 import type { TaskboardStore } from '../modules/taskboard/store.js';
+import type { GraphStore } from '../modules/codegraph/store.js';
 import type { ApprovalStore } from '../modules/approvals/store.js';
 import type { UpdateService, InfoUpdateProjection } from '../modules/updates/index.js';
 import type { PluginHost } from '../modules/plugins/host.js';
@@ -132,6 +134,7 @@ export function createApp(
   memory?: MemoryStore,
   taskboard?: TaskboardStore,
   approvals?: ApprovalStore,
+  graph?: GraphStore,
 ): { app: express.Express; ideProxy: ProxyHandler | null } {
   const app = express();
   app.disable('x-powered-by');
@@ -348,6 +351,11 @@ export function createApp(
   // when the store came up; a boot where it failed leaves every other subsystem
   // unaffected and this router simply absent.
   if (approvals) app.use(createApprovalsRouter(spawner, approvals));
+  // Code graph (docs/graphify-integration.md, P3) — `/api/codegraph/*`,
+  // READ-ONLY. Behind the X-Auth-Token gate like the memory router. Mounted only
+  // when codegraph is enabled/available; otherwise simply absent (every other
+  // subsystem unaffected).
+  if (graph) app.use(createCodegraphRouter(graph));
   // `GET /ide-info` — VS Code web connection details for the authenticated
   // client. Mounted after the auth gate so it 401s without X-Auth-Token
   // (parity with the other business routes). The IDE itself runs on its own
@@ -440,6 +448,7 @@ export function startServer(
   memory?: MemoryStore,
   taskboard?: TaskboardStore,
   approvals?: ApprovalStore,
+  graph?: GraphStore,
 ): ServerHandle {
   const { app, ideProxy } = createApp(
     config,
@@ -459,6 +468,7 @@ export function startServer(
     memory,
     taskboard,
     approvals,
+    graph,
   );
   const http = createServer(app);
 

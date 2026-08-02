@@ -55,6 +55,18 @@ export type TaskboardSwarmEventKind =
 export type ApprovalSwarmEventKind = 'approval.requested' | 'approval.resolved';
 
 /**
+ * Code-graph (Graphify integration) event kinds. Emitted by `GraphStore` via the
+ * event bus and rebroadcast on `/ws/events` so the web code-graph page (P4) can
+ * patch a scope row without a refetch. GLOBAL to the deployment (like memory) —
+ * no per-team `orchestratorId`. Added to the open union below — additive,
+ * non-breaking.
+ */
+export type CodegraphSwarmEventKind =
+  | 'code.graph.indexed'
+  | 'code.graph.scope_enabled'
+  | 'code.graph.scope_disabled';
+
+/**
  * Open union: plugins emit `plugin.<name>.<subKind>` via `api.events.emit`
  * (the host forces the prefix, so a plugin can never forge a core kind). The
  * `EventsHub` rebroadcasts everything unfiltered and the web client matches
@@ -65,6 +77,7 @@ export type SwarmEventKind =
   | MemorySwarmEventKind
   | TaskboardSwarmEventKind
   | ApprovalSwarmEventKind
+  | CodegraphSwarmEventKind
   | `plugin.${string}`;
 
 /** Payload of `memory.node_created` / `memory.node_updated` / `memory.node_deleted`. */
@@ -77,6 +90,17 @@ export interface MemoryNodeEventPayload {
 export interface MemoryEdgeEventPayload {
   from: string;
   to: string;
+}
+
+/**
+ * Payload of the `code.graph.*` events. `scopeId` is always present; `kind`
+ * (project|plugin) and the counts are present when known (indexed / enabled).
+ */
+export interface CodegraphEventPayload {
+  scopeId: string;
+  kind?: string;
+  nodeCount?: number;
+  edgeCount?: number;
 }
 
 /**

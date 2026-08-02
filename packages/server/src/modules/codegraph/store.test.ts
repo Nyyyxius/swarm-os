@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { SwarmDb } from '../db/index.js';
+import { SwarmEventBus, type SwarmEvent } from '../../events.js';
 import { GraphStore } from './store.js';
 
 let dir: string;
@@ -114,5 +115,43 @@ describe('GraphStore', () => {
     db = new SwarmDb(dir);
     const store2 = new GraphStore(db, { dataDir: dir });
     expect(store2.getScope('project__foo')?.nodeCount).toBe(7);
+  });
+});
+
+describe('GraphStore events', () => {
+  let bus: SwarmEventBus;
+  let events: SwarmEvent[];
+  let estore: GraphStore;
+
+  beforeEach(() => {
+    bus = new SwarmEventBus();
+    events = [];
+    bus.onEvent((e) => events.push(e));
+    estore = new GraphStore(db, { dataDir: dir, eventBus: bus });
+  });
+
+  it('emits code.graph.indexed with counts on recordIndexResult', () => {
+    estore.upsertScope({ id: 'project__app', kind: 'project', path: '/ws/app', enabled: true });
+    estore.recordIndexResult('project__app', { nodeCount: 5, edgeCount: 4, sourceHash: 'h' });
+    const ev = events.find((e) => e.kind === 'code.graph.indexed');
+    expect(ev).toBeDefined();
+    expect(ev!.payload).toMatchObject({ scopeId: 'project__app', kind: 'project', nodeCount: 5, edgeCount: 4 });
+  });
+
+  it('emits scope_enabled / scope_disabled on a real transition only', () => {
+    estore.upsertScope({ id: 'project__app', kind: 'project', path: '/ws/app', enabled: false });
+    events.length = 0;
+    estore.setEnabled('project__app', true);
+    estore.setEnabled('project__app', true); // no-op, no second event
+    estore.setEnabled('project__app', false);
+    const kinds = events.map((e) => e.kind);
+    expect(kinds).toEqual(['code.graph.scope_enabled', 'code.graph.scope_disabled']);
+  });
+
+  it('emits scope_disabled on removeScope', () => {
+    estore.upsertScope({ id: 'project__app', kind: 'project', path: '/ws/app', enabled: true });
+    events.length = 0;
+    estore.removeScope('project__app');
+    expect(events.map((e) => e.kind)).toContain('code.graph.scope_disabled');
   });
 });

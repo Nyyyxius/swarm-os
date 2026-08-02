@@ -516,6 +516,9 @@ if (graphStore) {
           graphifyBin: config.codegraphBin,
           engine: config.codegraphEngine,
           runTimeoutMs: config.codegraphTimeoutMs,
+          // Option-A memory integration: auto note per scope + hub note.
+          // Optional — when memory is unavailable, note maintenance is skipped.
+          memory: memoryStore,
         },
         { intervalMs: config.codegraphJanitorIntervalMs },
       );
@@ -713,6 +716,7 @@ const handle = startServer(
   memoryStore ?? undefined,
   taskboardStore ?? undefined,
   approvalStore ?? undefined,
+  graphStore ?? undefined,
 );
 
 // Start MCP HTTP listener on its own port (loopback only, plan §14).

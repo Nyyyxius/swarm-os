@@ -34,8 +34,16 @@ export {
   QUERY_TIMEOUT_MS,
 } from './graphify.js';
 export type { GraphifyAvailability, CodegraphEngine, RunUpdateResult, QueryResult } from './graphify.js';
-export { searchNodes, readGraphJson, parseLine } from './query.js';
-export type { GraphNodeHit, SearchResult } from './query.js';
+export { searchNodes, readGraphJson, parseLine, topHubs } from './query.js';
+export type { GraphNodeHit, SearchResult, GraphHub } from './query.js';
+export {
+  CodegraphMemoryNotes,
+  renderScopeNoteBody,
+  renderHubNoteBody,
+  scopeNoteName,
+  HUB_NOTE_NAME,
+  CODEGRAPH_AUTHOR,
+} from './memory-notes.js';
 export { startCodegraphJanitor } from './lifecycle.js';
 export type { CodegraphJanitorHandle, CodegraphJanitorDeps } from './lifecycle.js';
 export { hasCodeFiles, sourceFingerprint, isCodeExtension } from './scan.js';

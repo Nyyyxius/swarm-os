@@ -40,6 +40,11 @@ interface RawNode {
   community_name?: unknown;
 }
 
+interface RawLink {
+  source?: unknown;
+  target?: unknown;
+}
+
 /** Parse a graphify `source_location` (`"L3"`, `"L3-L9"`) to a 1-based line. */
 export function parseLine(loc: unknown): number | null {
   if (typeof loc !== 'string') return null;
@@ -122,4 +127,44 @@ export function searchNodes(graphPath: string, query: string, limit: number): Se
   });
 
   return { ok: true, results: scored.slice(0, Math.max(1, limit)).map((s) => s.hit) };
+}
+
+export interface GraphHub extends GraphNodeHit {
+  /** Number of edges touching this node (its degree = "how connected"). */
+  degree: number;
+}
+
+/**
+ * The most-connected nodes ("god nodes" / architectural hubs) of a scope,
+ * computed directly from graph.json edge degree — more robust than parsing
+ * GRAPH_REPORT.md and always carries `file:line`. Returns [] on any failure.
+ */
+export function topHubs(graphPath: string, limit = 8): GraphHub[] {
+  const graph = readGraphJson(graphPath);
+  if (!graph) return [];
+  const degree = new Map<string, number>();
+  for (const raw of graph.links as RawLink[]) {
+    const s = str(raw.source);
+    const t = str(raw.target);
+    if (s) degree.set(s, (degree.get(s) ?? 0) + 1);
+    if (t) degree.set(t, (degree.get(t) ?? 0) + 1);
+  }
+  const hubs: GraphHub[] = [];
+  for (const n of graph.nodes) {
+    const id = str(n.id);
+    if (!id) continue;
+    const deg = degree.get(id) ?? 0;
+    if (deg === 0) continue;
+    hubs.push({
+      id,
+      label: str(n.label) ?? id,
+      file: str(n.source_file),
+      line: parseLine(n.source_location),
+      fileType: str(n.file_type),
+      community: str(n.community_name),
+      degree: deg,
+    });
+  }
+  hubs.sort((a, b) => (b.degree !== a.degree ? b.degree - a.degree : a.label < b.label ? -1 : 1));
+  return hubs.slice(0, Math.max(1, limit));
 }

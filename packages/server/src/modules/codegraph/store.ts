@@ -28,7 +28,7 @@ import * as path from 'node:path';
 import type { Database as Db } from 'better-sqlite3';
 import { withModule } from '../../logger.js';
 import type { SwarmDb } from '../db/index.js';
-import type { SwarmEventBus } from '../../events.js';
+import type { SwarmEventBus, CodegraphSwarmEventKind, CodegraphEventPayload } from '../../events.js';
 
 const log = withModule('codegraph.store');
 
@@ -251,6 +251,7 @@ export class GraphStore {
    * Flip a scope on/off. Disabling parks it at `disabled` (janitor skips it);
    * enabling resets it to `pending` ONLY if it was previously disabled, so an
    * already-`indexed` scope re-enabled by a no-op discovery keeps its state.
+   * Emits `code.graph.scope_enabled|disabled` on a real transition.
    */
   setEnabled(id: string, enabled: boolean): void {
     try {
@@ -260,6 +261,10 @@ export class GraphStore {
       if (wasEnabled === enabled) return; // no transition
       const status = enabled ? 'pending' : 'disabled';
       this.setEnabledStmt.run(enabled ? 1 : 0, status, Date.now(), id);
+      this.emit(enabled ? 'code.graph.scope_enabled' : 'code.graph.scope_disabled', {
+        scopeId: id,
+        kind: current.kind,
+      });
     } catch (err) {
       log.warn({ event: 'codegraph.write_failed', op: 'setEnabled', id, error: String(err) });
     }
@@ -288,6 +293,13 @@ export class GraphStore {
         updated_at: now,
         id,
       });
+      const row = this.getStmt.get(id);
+      this.emit('code.graph.indexed', {
+        scopeId: id,
+        kind: row?.kind,
+        nodeCount: result.nodeCount,
+        edgeCount: result.edgeCount,
+      });
     } catch (err) {
       log.warn({ event: 'codegraph.write_failed', op: 'recordResult', id, error: String(err) });
     }
@@ -296,13 +308,25 @@ export class GraphStore {
   /** Remove a scope row (e.g. a project deleted from the workspace). */
   removeScope(id: string): void {
     try {
+      const row = this.getStmt.get(id);
       this.deleteStmt.run(id);
+      if (row) this.emit('code.graph.scope_disabled', { scopeId: id, kind: row.kind });
     } catch (err) {
       log.warn({ event: 'codegraph.write_failed', op: 'remove', id, error: String(err) });
     }
   }
 
-  /** Present for the P3 event-emission hook; unused in P1. */
+  /** Emit a `code.graph.*` event; never throws (a bad emit must not break a write). */
+  private emit(kind: CodegraphSwarmEventKind, payload: CodegraphEventPayload): void {
+    if (!this.eventBus) return;
+    try {
+      this.eventBus.emitEvent({ kind, payload });
+    } catch (err) {
+      log.warn({ event: 'codegraph.emit_failed', kind, error: String(err) });
+    }
+  }
+
+  /** Present for surfaces that need the bus directly. */
   get events(): SwarmEventBus | null {
     return this.eventBus;
   }

@@ -25,11 +25,13 @@
 
 import * as fs from 'node:fs';
 import { withModule } from '../../logger.js';
+import type { MemoryStore } from '../memory/store.js';
 import type { GraphStore } from './store.js';
 import type { PluginLister, DiscoveredScope } from './discovery.js';
 import { discoverScopes } from './discovery.js';
 import { sourceFingerprint } from './scan.js';
 import { runUpdate, type CodegraphEngine } from './graphify.js';
+import { CodegraphMemoryNotes } from './memory-notes.js';
 
 const log = withModule('codegraph.lifecycle');
 
@@ -44,6 +46,12 @@ export interface CodegraphJanitorDeps {
   runTimeoutMs: number;
   /** Enable the debounced recursive fs.watch accelerator (default true). */
   watch?: boolean;
+  /**
+   * Shared memory store, for the Option-A integration (auto note per scope +
+   * hub note). OPTIONAL — when absent (memory off), note maintenance is skipped
+   * and indexing is unaffected.
+   */
+  memory?: MemoryStore | null;
 }
 
 export interface CodegraphJanitorHandle {
@@ -75,6 +83,8 @@ export function startCodegraphJanitor(
   let stopped = false;
   const watchers = new Map<string, fs.FSWatcher>();
   let debounceTimer: NodeJS.Timeout | null = null;
+  // Option-A memory integration (no-op when memory is absent).
+  const notes = new CodegraphMemoryNotes(deps.memory ?? null, deps.store);
 
   /** Index one scope if its source changed. Never throws. */
   async function maybeIndex(discovered: DiscoveredScope): Promise<void> {
@@ -119,6 +129,8 @@ export function startCodegraphJanitor(
           edgeCount: result.edgeCount,
           sourceHash: fp.hash,
         });
+        // Option A: refresh this scope's memory note (best-effort, never throws).
+        notes.syncScope(scopeId);
         log.info({
           event: 'codegraph.indexed',
           scopeId,
@@ -148,15 +160,18 @@ export function startCodegraphJanitor(
       });
       const discoveredIds = new Set(discovered.map((s) => s.id));
 
-      // Reconcile: upsert descriptors, flip the C3 gate.
+      // Reconcile: upsert descriptors, flip the C3 gate. A scope that lost its
+      // code (gate now false) drops its memory note.
       for (const s of discovered) {
         deps.store.upsertScope({ id: s.id, kind: s.kind, path: s.path, enabled: s.hasCode });
         deps.store.setEnabled(s.id, s.hasCode);
+        if (!s.hasCode) notes.removeScope(s.id);
       }
-      // Prune scopes that vanished from the workspace/plugin set.
+      // Prune scopes that vanished from the workspace/plugin set (+ their notes).
       for (const existing of deps.store.listScopes()) {
         if (!discoveredIds.has(existing.id)) {
           deps.store.removeScope(existing.id);
+          notes.removeScope(existing.id);
         }
       }
 
@@ -168,6 +183,9 @@ export function startCodegraphJanitor(
         if (!s.hasCode) continue;
         await maybeIndex(s);
       }
+
+      // Refresh the hub note once per sweep (idempotent — writes only on change).
+      notes.refreshHub();
     } catch (err) {
       log.warn({ event: 'codegraph.sweep_failed', error: err instanceof Error ? err.message : String(err) });
     } finally {
