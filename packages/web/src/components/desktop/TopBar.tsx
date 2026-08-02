@@ -67,6 +67,8 @@ interface Props {
    *  backward compatibility with existing call sites. */
   onOpenGraph?: () => void;
   onOpenPlugins: () => void;
+  /** Open the skills library management overlay (`#/skills`). */
+  onOpenSkills?: () => void;
   /** Open the VS Code web IDE on the deployment workspace (fullscreen overlay). */
   onOpenIde: () => void;
   onOpenSettings: () => void;
@@ -78,7 +80,7 @@ const EMPTY_FLASH_SET: ReadonlySet<string> = new Set();
 
 export default function TopBar({
   teams, selectedTeamId, flashTeamIds, totalAgents, info,
-  onSelectTeam, onNewTeam, onOpenRoles, onOpenMemory, onOpenBoard, onOpenApprovals, onOpenGraph, onOpenPlugins, onOpenIde, onOpenSettings,
+  onSelectTeam, onNewTeam, onOpenRoles, onOpenMemory, onOpenBoard, onOpenApprovals, onOpenGraph, onOpenPlugins, onOpenSkills, onOpenIde, onOpenSettings,
   onOpenUpdates,
 }: Props) {
   const flashSet = flashTeamIds ?? EMPTY_FLASH_SET;
@@ -192,6 +194,9 @@ export default function TopBar({
         </button>
         <button className="tb-action" onClick={onOpenPlugins} title="manage plugins">
           {ICON.link}<span className="label">PLUGINS</span>
+        </button>
+        <button className="tb-action" onClick={() => onOpenSkills?.()} title="manage skills">
+          {ICON.inbox}<span className="label">SKILLS</span>
         </button>
         <button className="tb-action" onClick={onOpenIde} title="open workspace IDE (VS Code)">
           {ICON.code}<span className="label">IDE</span>

@@ -6,6 +6,7 @@ import { MemoryPage } from './components/MemoryPage';
 import { BoardPage } from './components/BoardPage';
 import { ApprovalsPage } from './components/ApprovalsPage';
 import { PluginsPage } from './components/PluginsPage';
+import { SkillsPage } from './components/SkillsPage';
 import { CodeGraphPage } from './components/CodeGraphPage';
 import IdeOverlay from './components/desktop/IdeOverlay';
 import PluginPanelHost from './components/desktop/PluginPanelHost';
@@ -21,6 +22,7 @@ type Route =
   | { kind: 'approvals' }
   | { kind: 'graph' }
   | { kind: 'plugins' }
+  | { kind: 'skills' }
   | { kind: 'ide' }
   | { kind: 'panel'; plugin: string; panel: string };
 
@@ -45,6 +47,7 @@ function parseHash(): Route {
   if (h === '#/approvals') return { kind: 'approvals' };
   if (h === '#/graph') return { kind: 'graph' };
   if (h === '#/plugins') return { kind: 'plugins' };
+  if (h === '#/skills') return { kind: 'skills' };
   if (h === '#/ide') return { kind: 'ide' };
   return { kind: 'list' };
 }
@@ -58,6 +61,7 @@ function setHashRoute(route: Route): void {
   else if (route.kind === 'approvals') target = '#/approvals';
   else if (route.kind === 'graph') target = '#/graph';
   else if (route.kind === 'plugins') target = '#/plugins';
+  else if (route.kind === 'skills') target = '#/skills';
   else if (route.kind === 'ide') target = '#/ide';
   else if (route.kind === 'panel') target = `#/panel/${route.plugin}/${route.panel}`;
   else target = `#/orchestrators/${route.id}`;
@@ -115,6 +119,7 @@ export default function App() {
           onOpenApprovals={() => setRoute({ kind: 'approvals' })}
           onOpenGraph={() => setRoute({ kind: 'graph' })}
           onOpenPlugins={() => setRoute({ kind: 'plugins' })}
+          onOpenSkills={() => setRoute({ kind: 'skills' })}
           onOpenIde={() => setRoute({ kind: 'ide' })}
           onOpenPanel={(plugin, panel) => setRoute({ kind: 'panel', plugin, panel })}
           onCloseRightPanel={() => {
@@ -156,6 +161,13 @@ export default function App() {
           {/* PluginsPage overlay — responsive, safe to always mount (gated by `open`). */}
           <PluginsPage
             open={route.kind === 'plugins'}
+            onClose={() => setRoute({ kind: 'list' })}
+          />
+
+          {/* SkillsPage overlay — skills library management (Lot 1b). Always-
+              mounted gated by `open`, same pattern as PluginsPage. */}
+          <SkillsPage
+            open={route.kind === 'skills'}
             onClose={() => setRoute({ kind: 'list' })}
           />
 

@@ -5,6 +5,8 @@ import {
   isDiscordConnectorView,
   type ConnectorView,
   type RoleView,
+  type SkillView,
+  type SkillActivation,
 } from '../api/client';
 import { DiscordOnboarding } from './DiscordOnboarding';
 import { useProviders } from '../hooks/useProviders';
@@ -35,6 +37,8 @@ interface SubmitBody {
   connectors: ConnectorView[];
   schedule: string | null;
   scheduleMessage: string | null;
+  /** Skills activated for this role (mode 'inject'). */
+  skills: SkillActivation[];
 }
 
 const INHERIT_LABEL = '(inherit global default)';
@@ -81,6 +85,8 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
   const [discordBotToken, setDiscordBotToken] = useState<string>('');
   const [schedule, setSchedule] = useState<string>('');
   const [scheduleMessage, setScheduleMessage] = useState<string>('');
+  const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
+  const [availableSkills, setAvailableSkills] = useState<SkillView[]>([]);
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [defaults, setDefaults] = useState<{ lead: string; worker: string } | null>(null);
@@ -123,6 +129,7 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
       setDiscordBotToken(discord?.botToken ?? '');
       setSchedule(initial.schedule ?? '');
       setScheduleMessage(initial.scheduleMessage ?? '');
+      setSelectedSkills((initial.skills ?? []).map((s) => s.name));
     } else {
       setLabel('');
       setLeadPrompt('');
@@ -138,6 +145,7 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
       setDiscordBotToken('');
       setSchedule('');
       setScheduleMessage('');
+      setSelectedSkills([]);
     }
   }, [open, initial]);
 
@@ -147,6 +155,17 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
     if (!open) return;
     void refreshProviders();
   }, [open, refreshProviders]);
+
+  // Fetch available skills on open (best-effort; empty list is fine).
+  useEffect(() => {
+    if (!open) return;
+    let cancelled = false;
+    void api
+      .listSkills()
+      .then((r) => { if (!cancelled) setAvailableSkills(r.skills); })
+      .catch(() => { /* silent — skills feature may not be deployed yet */ });
+    return () => { cancelled = true; };
+  }, [open]);
 
   // `defaultProvider = null` means "inherit", so the controls below are filtered
   // by the provider that would ACTUALLY be used — the instance default.
@@ -230,6 +249,7 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
         connectors,
         schedule: trimmedSchedule || null,
         scheduleMessage: scheduleMessage.trim() ? scheduleMessage : null,
+        skills: selectedSkills.map((name) => ({ name, mode: 'inject' as const })),
       });
       onClose();
     } catch (err) {
@@ -411,6 +431,45 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
               inputClassName={inputCls}
             />
           </div>
+
+          {/* Skills multiselect — only shown when at least one skill is installed */}
+          {availableSkills.length > 0 && (
+            <div className="col-span-2 mt-2">
+              <span className="block text-xs uppercase tracking-wide text-slate-400 mb-1">
+                skills (active on this role)
+              </span>
+              <div className="flex flex-wrap gap-2">
+                {availableSkills.map((s) => {
+                  const active = selectedSkills.includes(s.name);
+                  return (
+                    <button
+                      key={s.name}
+                      type="button"
+                      className="px-2 py-1 text-xs rounded border transition-colors"
+                      style={
+                        active
+                          ? { borderColor: 'var(--amber, #f59e0b)', color: 'var(--amber, #f59e0b)', background: 'rgba(245,158,11,0.08)' }
+                          : { borderColor: '#475569', color: '#94a3b8', background: 'transparent' }
+                      }
+                      onClick={() => {
+                        setSelectedSkills((prev) =>
+                          active ? prev.filter((n) => n !== s.name) : [...prev, s.name],
+                        );
+                      }}
+                      title={s.description ?? s.name}
+                    >
+                      {s.displayName ?? s.name}
+                      {active ? ' ✓' : ''}
+                    </button>
+                  );
+                })}
+              </div>
+              <p className="mt-1 text-[11px] text-slate-400">
+                Activated skills inject instructions into agent preambles (mode: inject).
+                Hot activation is immediate but <em>lost on /clear</em> — guaranteed at next spawn/resume.
+              </p>
+            </div>
+          )}
         </div>
         {error && <div className="mt-3 text-sm text-red-400 break-words">{error}</div>}
         <div className="mt-5 flex justify-end gap-2">

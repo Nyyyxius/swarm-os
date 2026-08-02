@@ -81,6 +81,8 @@ export interface SwarmControllerProps {
   onOpenGraph?: () => void;
   /** TopBar/Dock PLUGINS → route `#/plugins`. */
   onOpenPlugins?: () => void;
+  /** TopBar SKILLS → route `#/skills`. */
+  onOpenSkills?: () => void;
   /** TopBar/Dock IDE → route `#/ide`. */
   onOpenIde?: () => void;
   /** Plugin panel nav → route `#/panel/<plugin>/<panelId>` (feature B.3). */
@@ -147,6 +149,7 @@ export interface SwarmControllerValue {
   onOpenRoles: () => void;
   onOpenMemory: () => void;
   onOpenPlugins: () => void;
+  onOpenSkills: () => void;
   onOpenIde: () => void;
   /** Open a plugin UI panel overlay (feature B.3). */
   onOpenPanel: (plugin: string, panelId: string) => void;
@@ -224,6 +227,7 @@ export function SwarmControllerProvider({
   onOpenApprovals,
   onOpenGraph,
   onOpenPlugins,
+  onOpenSkills,
   onOpenIde,
   onOpenPanel,
   shellMode,
@@ -945,6 +949,7 @@ export function SwarmControllerProvider({
   const onOpenApprovalsResolved = useCallback(() => { onOpenApprovals?.(); }, [onOpenApprovals]);
   const onOpenGraphResolved = useCallback(() => { onOpenGraph?.(); }, [onOpenGraph]);
   const onOpenPluginsResolved = useCallback(() => { onOpenPlugins?.(); }, [onOpenPlugins]);
+  const onOpenSkillsResolved = useCallback(() => { onOpenSkills?.(); }, [onOpenSkills]);
   const onOpenIdeResolved = useCallback(() => { onOpenIde?.(); }, [onOpenIde]);
   const onOpenPanelResolved = useCallback(
     (plugin: string, panelId: string) => { onOpenPanel?.(plugin, panelId); },
@@ -996,6 +1001,7 @@ export function SwarmControllerProvider({
     graphRev,
     onOpenGraph: onOpenGraphResolved,
     onOpenPlugins: onOpenPluginsResolved,
+    onOpenSkills: onOpenSkillsResolved,
     onOpenIde: onOpenIdeResolved,
     onOpenPanel: onOpenPanelResolved,
     pluginsRev,

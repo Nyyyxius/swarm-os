@@ -38,6 +38,7 @@ export default function DesktopShell() {
         onOpenApprovals={c.onOpenApprovals}
         onOpenGraph={c.onOpenGraph}
         onOpenPlugins={c.onOpenPlugins}
+        onOpenSkills={c.onOpenSkills}
         onOpenIde={c.onOpenIde}
         onOpenSettings={() => c.setSettingsOpen(true)}
         onOpenUpdates={c.openUpdates}

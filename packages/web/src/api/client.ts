@@ -207,6 +207,44 @@ export function isDiscordConnectorView(c: ConnectorView): c is DiscordConnectorV
   return c.type === 'discord';
 }
 
+/** One skill activation entry on a role. */
+export interface SkillActivation {
+  name: string;
+  mode: 'inject';
+}
+
+/**
+ * Mirror of the server-side `SkillView` (modules/skills/store.ts).
+ * All nullable fields match the DB schema — a server that predates the lot
+ * omits the whole skills route; the UI degrades to an empty list.
+ */
+export interface SkillView {
+  name: string;
+  version: string;
+  displayName: string | null;
+  description: string | null;
+  /** 'dir' | 'upload' | 'git' | 'npm' | 'market' */
+  sourceKind: string;
+  sourceRef: string | null;
+  /** 'first-party' | 'verified' | 'community' | 'local' */
+  trust: string;
+  requires: { plugins: string[]; capabilities: string[] };
+  assetsPresent: boolean;
+  triggers: string[];
+  checksum: string | null;
+  installedAt: string;
+  updatedAt: string;
+  lastError: string | null;
+}
+
+/** Body of `POST /skills/install` (dir source only at MVP). */
+export type SkillInstallInput = { source: 'dir'; dir: string };
+
+/** Response shape for install / upload / upgrade. */
+export interface SkillInstallResult {
+  skill: SkillView;
+}
+
 export interface RoleView {
   id: string;
   label: string;
@@ -237,6 +275,8 @@ export interface RoleView {
    * so older servers that never sent the field keep type-checking.
    */
   approval?: RoleApprovalSettings | null;
+  /** Skills activated for this role (Lot 1b). Optional: older servers omit it. */
+  skills?: SkillActivation[];
   createdAt: string;
   updatedAt: string;
 }
@@ -1165,6 +1205,30 @@ export const api = {
   updateRole: (id: string, body: Partial<RoleInput>) =>
     request<{ role: RoleView }>('PATCH', `/roles/${id}`, body),
   deleteRole: (id: string) => request<void>('DELETE', `/roles/${id}`),
+  // ---- Skills (Lot 1b) -------------------------------------------------------
+  listSkills: () => request<{ skills: SkillView[] }>('GET', '/skills'),
+  getSkill: (name: string) => request<{ skill: SkillView; body: string }>('GET', `/skills/${name}`),
+  installSkill: (source: SkillInstallInput) =>
+    request<SkillInstallResult>('POST', '/skills/install', source),
+  /** Upload a `.tgz` (npm pack format) — RAW body, NOT JSON. Max 25 MB. */
+  uploadSkill: async (file: File | Blob, name?: string): Promise<SkillInstallResult> => {
+    const qs = name ? `?name=${encodeURIComponent(name)}` : '';
+    const res = await fetch(`/skills/upload${qs}`, {
+      method: 'POST',
+      headers: { 'X-Auth-Token': getToken(), 'Content-Type': 'application/gzip' },
+      body: file,
+    });
+    const ct = res.headers.get('content-type') ?? '';
+    const parsed: unknown = ct.includes('application/json') ? await res.json() : await res.text();
+    if (!res.ok) {
+      throw new HttpError(`HTTP ${res.status} POST /skills/upload`, res.status, parsed);
+    }
+    return parsed as SkillInstallResult;
+  },
+  upgradeSkill: (name: string) =>
+    request<SkillInstallResult>('POST', `/skills/${name}/upgrade`),
+  deleteSkill: (name: string) => request<void>('DELETE', `/skills/${name}`),
+  // ---- Connector types -------------------------------------------------------
   /** J4 — connector types available for role connectors (built-in + plugins). */
   listConnectorTypes: () =>
     request<{ connectorTypes: ConnectorTypeInfo[] }>('GET', '/connector-types'),

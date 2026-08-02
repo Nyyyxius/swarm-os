@@ -137,6 +137,9 @@ export default function MobileShell() {
         <button type="button" className="m-dock-btn" onClick={() => c.onOpenPlugins()}>
           <span>PLUGINS</span>
         </button>
+        <button type="button" className="m-dock-btn" onClick={() => c.onOpenSkills()}>
+          <span>SKILLS</span>
+        </button>
         {/* Update badge, mirrored from the desktop TopBar: same `/info`-borne
             flag (`topBarInfo.updateAvailable`, same object as the version →
             same render), same destination. The dock has no room for a sixth
