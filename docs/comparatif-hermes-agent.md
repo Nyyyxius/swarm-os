@@ -4,6 +4,14 @@
 > `feat/multi-provider-agents`) et de la doc publique de Hermes Agent
 > (Nous Research, v0.6.0). Les détails Hermes viennent du site officiel et du
 > README GitHub, pas d'une lecture du code.
+>
+> **Mise à jour 2026-08-02** (master `a680300`) : swarm-os a comblé trois des
+> écarts majeurs identifiés ci-dessous, tous **livrés et déployés** — (1) une
+> **mémoire longue partagée** façon Obsidian (graphe markdown + index FTS5,
+> commune à tout le déploiement), (2) un **tableau de tâches Kanban** durable
+> par équipe (SQLite, dépendances, audit, reprise après crash), et (3) des
+> **garde-fous d'approbation humaine** (human-in-the-loop) pour les équipes
+> non-bypass. Les lignes concernées sont annotées **« ✅ ajouté »** ci-dessous.
 
 ---
 
@@ -27,7 +35,7 @@
 | Communication | Mailbox in-memory + signal PTY, via MCP HTTP (`team.send_message`, `read_inbox`, `broadcast`) | Message passing typé, pas de mémoire partagée |
 | Worker ↔ worker | Oui, direct (sans passer par le lead) | Non documenté (passe par l'orchestrateur) |
 | Cross-équipe | `swarm.list_teams` / `send_to_lead` / `broadcast_to_leads` (lead only) | Pas d'équivalent multi-team |
-| Coordination d'état | Mailbox volatile + état SQLite des sessions | **Kanban SQLite** (cartes, assignee, dépendances, audit log, reprise après crash) |
+| Coordination d'état | ✅ **ajouté** — **Kanban SQLite par équipe** (`board.*` MCP) : cartes, assignee = `session.id`, dépendances (DAG), journal d'audit append-only, reprise après crash (cartes orphelines re-flaggées au boot), auto-carte au spawn de worker, janitor TTL, page web Kanban (lecture seule + suppression), vue cross-équipe lead. *Auparavant : mailbox + état SQLite des sessions seulement.* | **Kanban SQLite** (cartes, assignee, dépendances, audit log, reprise après crash) |
 | Sous-équipes imbriquées | Non (roadmap « petits-enfants ») | Hiérarchique par décomposition |
 | Parallélisme | N workers par équipe, N équipes par instance | Concurrency limits configurables, resource-aware scheduling |
 
@@ -37,11 +45,11 @@
 
 | Feature | swarm-os | Hermes Agent |
 |---|---|---|
-| Runtime agent | **CLI réels en PTY** : `claude`, + `codex`, `gemini`, `opencode` (branche en cours) | Boucle d'agent maison appelant des LLM |
+| Runtime agent | **CLI réels en PTY** : `claude`, `codex`, `gemini`, `opencode` (multi-provider mergé sur master) | Boucle d'agent maison appelant des LLM |
 | Backends LLM | Ceux du CLI (auth CLI héritée de l'hôte) | 200–300+ : Nous Portal, OpenRouter, OpenAI, Anthropic, + locaux (Ollama, LM Studio, vLLM, SGLang, llama.cpp), switch `/model` |
 | Modèle par agent | Oui (`model`, `effort`, `permissionMode` par rôle/équipe/worker) | Oui (profils d'agent par modèle) |
 | Outils | MCP `team.*`/`swarm.*` + tous les outils natifs du CLI + outils de plugins | 40+ outils intégrés + client MCP |
-| Mémoire longue | Aucune côté plateforme (déléguée au CLI : `CLAUDE.md`, mémoire Claude Code) | **Mémoire 3 niveaux persistante**, profils Honcho, recherche FTS5 des sessions |
+| Mémoire longue | ✅ **ajouté** — **mémoire partagée façon Obsidian**, commune à tout le déploiement (toutes les équipes) : vault markdown = vérité + index SQLite/FTS5, `[[wikilinks]]` → graphe, **relations typées** (champs Dataview inline), **recherche texte / sémantique / hybride** (embeddings pluggables, fallback local), outils `memory.*` (consultée+maintenue par tous les agents, directive dans le préambule), **page web graphe**. *Auparavant : aucune côté plateforme, déléguée au CLI.* | **Mémoire 3 niveaux persistante**, profils Honcho, recherche FTS5 des sessions |
 | Auto-amélioration | Aucune | Learning loop, création autonome de skills, GEPA, pipeline RL Atropos |
 | Skills / marketplace | Non (rôles + préambules à la place) | Skills `agentskills.io` + marketplace communautaire |
 
@@ -57,7 +65,7 @@
 | Messagerie | Webhook **Discord** (`session.waiting` / `orchestrator.ended` / `session.exit_anomaly`), deep-links | **Gateway multi-plateformes** : Telegram, Discord, Slack, WhatsApp, Signal, email |
 | Voix | Non (un plugin d'exemple `discord-agent` fait STT/TTS OpenAI) | Voice mode natif (STT/TTS), memos |
 | Accès distant | Bind 127.0.0.1 + Tailscale | Gateways + Hermes Cloud |
-| Approbation humaine | Interventions manuelles + hook Notification | Gates d'approbation (Telegram), **Tirith** (permissions, garde-fous) |
+| Approbation humaine | ✅ **ajouté** — **garde-fous d'approbation (human-in-the-loop)** pour les équipes non-bypass : détection d'un prompt de permission → file persistée → notification (**toast web + page `#/approvals` + embed Discord**) → décision par **boutons web / reply Discord / réaction Discord ✅ approuver · ♾️ approuver+ne plus demander · ❌ refuser / REST / console** → frappe PTY → l'agent repart. Réglages par rôle (modes qui arment, toggle Discord), janitor TTL. Claude aujourd'hui (les autres providers sont bypass-only). *Le mode `bypassPermissions` reste inchangé, jamais interrompu.* | Gates d'approbation (Telegram), **Tirith** (permissions, garde-fous) |
 
 ---
 
@@ -84,16 +92,49 @@
   vie industriel (update avec préavis aux agents en cours, backup à chaud,
   recovery), et le fait de piloter de **vrais CLI de code** avec leurs quotas et
   leurs outils.
-- **Hermes gagne** sur : mémoire/apprentissage persistant, agnosticisme modèle
-  (300+ backends dont locaux), surface de contact utilisateur (6 messageries +
-  voix), coordination d'état durable (Kanban), sandboxing pluggable, et
-  l'écosystème ouvert (MIT, skills marketplace).
-- **Complémentaires plus que concurrents** : swarm-os n'a ni mémoire longue ni
-  skills auto-générés (il délègue au CLI) ; Hermes n'a ni console d'attache PTY,
-  ni multi-équipes, ni gestion de flotte containerisée par projet.
+- **Écarts comblés (2026-08)** — ne sont plus des avantages exclusifs de Hermes :
+  **mémoire longue** (désormais partagée, façon Obsidian, commune au déploiement),
+  **coordination d'état durable** (Kanban SQLite par équipe), et **garde-fous
+  d'approbation humaine**. swarm-os a aussi rattrapé l'**agnosticisme modèle**
+  côté CLI (claude/codex/gemini/opencode mergés sur master).
+- **Hermes garde l'avantage** sur : auto-amélioration/apprentissage (learning
+  loop, skills auto-générés, GEPA/RL), amplitude des backends LLM (300+ dont
+  locaux, là où swarm-os dépend des providers des CLI), surface de contact
+  utilisateur (6 messageries + voix native), sandboxing pluggable
+  (Docker/SSH/Modal/Daytona…), et l'écosystème ouvert (MIT, marketplace de skills).
+- **Complémentaires plus que concurrents** : swarm-os n'a pas encore d'agent
+  auto-améliorant ni de skills auto-générés (il délègue au CLI) ; Hermes n'a ni
+  console d'attache PTY, ni multi-équipes, ni gestion de flotte containerisée par
+  projet.
 
 **Réserve** : la doc multi-agent de Hermes ne précise ni l'architecture mémoire
 des subagents, ni leur sandboxing, ni l'API au-delà du spawn.
+
+---
+
+## 7. À faire — pistes d'évolution swarm-os
+
+Pistes suivantes pour continuer à combler l'écart (au-delà des trois déjà livrés
+ci-dessus), demandées par l'opérateur :
+
+1. **Graphify en complémentarité avec la mémoire Obsidian.** Ajouter une couche de
+   **graphe de connaissances structurel** façon *Graphify* : un CLI/outil qui
+   transforme un dossier (code, schémas, docs, PDF, images) en **graphe
+   requêtable**, servi à l'agent en **sous-graphes compressés à la demande**
+   (jusqu'à ~70× moins de tokens injectés). Répartition des rôles : la mémoire
+   partagée façon Obsidian (déjà livrée, §3) reste la **couche wiki lisible**
+   (décisions, contexte, progression) ; Graphify fournit la **carte automatique de
+   la structure du code/infra** en dessous. Les deux se complètent — Obsidian = le
+   « quoi / pourquoi » humain, Graphify = le « où / comment » structurel — pour
+   réduire le contexte tout en gardant la traçabilité.
+
+2. **Bibliothèque de skills importable.** Offrir un **catalogue de skills**
+   activables par rôle/équipe, **importables depuis des sources connues** (ex.
+   marketplaces type `agentskills.io`, dépôts git publics) **ou ajoutés par
+   l'utilisateur**. Comble le gap « Skills / marketplace : Non » (§3) et rapproche
+   de l'écosystème de skills de Hermes, en s'appuyant sur le système de **plugins
+   ESM + rôles/préambules** déjà en place (un skill = préambule/outillage versionné,
+   partageable et activable à la demande).
 
 ---
 
@@ -102,4 +143,7 @@ des subagents, ni leur sandboxing, ni l'API au-delà du spawn.
 - <https://hermes-agent.ai/features>
 - <https://hermes-agent.ai/features/multi-agent>
 - <https://github.com/NousResearch/hermes-agent>
+- Graphify + Obsidian (pattern mémoire pour agents de code) :
+  <https://github.com/lucasrosati/claude-code-memory-setup>,
+  <https://www.charlieautomates.com/blog/claude-code-knowledge-graph-graphify-obsidian/>
 - Ce repo : `README.md`, `plan.md` (§10, §12, §16), `packages/server/src/modules/`
