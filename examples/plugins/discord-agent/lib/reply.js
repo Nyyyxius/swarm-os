@@ -145,16 +145,22 @@ async function handleReply(rt, args, ctx) {
  * already sent, returns `{ ok:false, partial:true, message_ids }` so the lead can
  * resend ONLY the missing tail (never the whole text — see the tool description).
  *
+ * `messages` carries the sent Message OBJECTS (additive, ordered like
+ * `message_ids`) so a caller that needs to act on the posted message — e.g. the
+ * approval pre-seed reacting on it — has it without a re-fetch. Existing callers
+ * that only read `ok` / `message_ids` are unaffected.
+ *
  * @param {import('../index.js').Runtime} rt
  * @param {string} target
  * @param {string} text
  * @param {string|undefined} replyToId
- * @returns {Promise<{ ok: boolean, message_ids: string[], partial?: boolean, error?: string }>}
+ * @returns {Promise<{ ok: boolean, message_ids: string[], messages: any[], partial?: boolean, error?: string }>}
  */
 export async function sendText(rt, target, text, replyToId) {
   const channel = await fetchSendable(rt, target);
   const chunks = chunkText(text, CHUNK_SIZE);
   const ids = [];
+  const messages = [];
   for (let i = 0; i < chunks.length; i++) {
     const payload = {
       content: chunks[i],
@@ -166,7 +172,10 @@ export async function sendText(rt, target, text, replyToId) {
     }
     try {
       const sent = await sendWithTimeout(channel, payload);
-      if (sent && sent.id) ids.push(sent.id);
+      if (sent && sent.id) {
+        ids.push(sent.id);
+        messages.push(sent);
+      }
     } catch (err) {
       rt.log.warn(
         { event: 'discord-agent.reply_text_partial', sent: ids.length, at: i, total: chunks.length, error: String(err) },
@@ -176,12 +185,13 @@ export async function sendText(rt, target, text, replyToId) {
         ok: false,
         partial: ids.length > 0,
         message_ids: ids,
+        messages,
         error: `chunk ${i + 1}/${chunks.length} echoue: ${String(err)}`,
       };
     }
   }
   rt.log.info({ event: 'discord-agent.reply_text', chunks: chunks.length }, 'discord-agent text reply sent');
-  return { ok: true, message_ids: ids };
+  return { ok: true, message_ids: ids, messages };
 }
 
 /** channel.send wrapped in a 5s Promise.race with a finally-cleared timer. */

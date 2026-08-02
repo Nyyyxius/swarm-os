@@ -12,6 +12,10 @@
 // @typedef {import('@swarm-os/plugin-sdk').PluginOrchSubscription} PluginOrchSubscription
 
 import { sendText } from './reply.js';
+import { reactSafe } from './gateway.js';
+
+/** The three approval reactions, pre-seeded in this order: approve, approve+dontAskAgain, deny. */
+const APPROVAL_REACTIONS = ['✅', '♾️', '❌'];
 
 /**
  * @param {import('../index.js').Runtime} rt
@@ -63,6 +67,16 @@ export function createConnectorProvider(rt) {
           { event: 'discord-agent.approval_posted', orchId, messageId: id },
           'discord-agent posted approval request to channel',
         );
+        // P5: pre-seed the three decision reactions under the card so the operator
+        // resolves with a single click. Fail-safe: reactSafe never throws, and the
+        // approval is already posted+correlated regardless of whether these land.
+        // Awaited (not fire-and-forget) so they appear in a deterministic order.
+        const card = res.messages && res.messages.length > 0 ? res.messages[0] : null;
+        if (card) {
+          for (const emoji of APPROVAL_REACTIONS) {
+            await reactSafe(card, emoji);
+          }
+        }
         return { messageId: id };
       } catch (err) {
         rt.log.warn(

@@ -33,6 +33,7 @@ import {
 import { withModule } from '../../logger.js';
 import type { Mailbox } from '../orchestrator/mailbox.js';
 import type { ApprovalReplyResolver } from '../approvals/reply.js';
+import type { ApprovalReactionResolver } from '../approvals/reaction.js';
 
 const log = withModule('discord-bot');
 
@@ -96,6 +97,14 @@ export interface OrchSubscription {
    * `modules/approvals/reply.ts`).
    */
   tryConsumeApprovalReply?: ApprovalReplyResolver;
+  /**
+   * P5 — optional approval-REACTION router, the sibling of the reply router. The
+   * built-in bot does not yet act on reactions (the plugin gateway does), but the
+   * field is forwarded through `connector-registry.ts` for parity so it is
+   * available the day the built-in path grows a `messageReactionAdd` handler.
+   * See `modules/approvals/reaction.ts`.
+   */
+  tryConsumeApprovalReaction?: ApprovalReactionResolver;
 }
 
 export interface DiscordBotServiceOptions {

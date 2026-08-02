@@ -209,6 +209,11 @@ export class DiscordConnectorProvider implements ChannelConnectorProvider {
       ...(sub.tryConsumeApprovalReply
         ? { tryConsumeApprovalReply: sub.tryConsumeApprovalReply }
         : {}),
+      // P5: forward the approval-REACTION router the same way — this sub is
+      // rebuilt field-by-field, so a method not listed here is silently dropped.
+      ...(sub.tryConsumeApprovalReaction
+        ? { tryConsumeApprovalReaction: sub.tryConsumeApprovalReaction }
+        : {}),
     });
   }
 

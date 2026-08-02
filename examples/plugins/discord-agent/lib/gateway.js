@@ -18,7 +18,7 @@
 //   - THREAD messages: delivered directly from the live event (catch-up is main
 //     channel only in v1); no cursor, best-effort.
 
-import { Client, GatewayIntentBits, MessageFlags } from 'discord.js';
+import { Client, GatewayIntentBits, MessageFlags, Partials } from 'discord.js';
 import { ensureTeam } from './provision.js';
 import { whisperTranscribe, downloadToBuffer, STT_MAX_BYTES } from './openai.js';
 import { sendText } from './reply.js';
@@ -43,7 +43,14 @@ export function createGateway(rt) {
       // PRIVILEGED — without it message.content is empty for non-mentions and
       // the inbound flow looks silently broken.
       GatewayIntentBits.MessageContent,
+      // P5 approval-by-reaction: receive `messageReactionAdd` on our channel.
+      GatewayIntentBits.GuildMessageReactions,
     ],
+    // The approval card the operator reacts to predates this session's cache
+    // (it was posted by the server hook, possibly before a reconnect). Without
+    // these partials discord.js would drop reaction events on uncached
+    // messages/channels; we fetch the partial on demand in the handler.
+    partials: [Partials.Message, Partials.Reaction, Partials.Channel],
   });
   rt.client = client;
   let ready = false;
@@ -61,6 +68,26 @@ export function createGateway(rt) {
       rt.log.warn(
         { event: 'discord-agent.handle_error', error: String(err) },
         'discord-agent messageCreate handler threw',
+      );
+    }
+  });
+
+  // P5 — approval-by-reaction. Sibling of messageCreate: a ✅/♾️/❌ reaction on an
+  // approval card resolves the pending approval through the same shared core as a
+  // native reply. Fully guarded (a discord.js callback throw is NOT covered by
+  // the host guard()); a reaction is never inboxed, so a non-decision is a no-op.
+  client.on('messageReactionAdd', (reaction, user) => {
+    try {
+      void handleReactionAdd(rt, reaction, user).catch((err) => {
+        rt.log.warn(
+          { event: 'discord-agent.reaction_error', error: String(err) },
+          'discord-agent messageReactionAdd handler failed',
+        );
+      });
+    } catch (err) {
+      rt.log.warn(
+        { event: 'discord-agent.reaction_error', error: String(err) },
+        'discord-agent messageReactionAdd handler threw',
       );
     }
   });
@@ -265,6 +292,105 @@ async function handleMessage(rt, msg) {
   }
   // Main channel: the cursor pump is the single delivery path.
   await pump(rt);
+}
+
+/**
+ * Live `messageReactionAdd` handler — resolve a pending approval when an operator
+ * clicks ✅ / ♾️ / ❌ on a card the server posted. Mirrors the native-reply path
+ * (`deliverMessage`'s `tryConsumeApprovalReply`) but off a different event: a
+ * reaction is NEVER pushed to the inbox, so anything that is not a decision on one
+ * of our cards is a silent no-op. Never throws (also wrapped by the caller).
+ *
+ * @param {import('../index.js').Runtime} rt
+ * @param {any} reaction — a MessageReaction (possibly partial)
+ * @param {any} user — the User who added it (possibly partial)
+ */
+async function handleReactionAdd(rt, reaction, user) {
+  try {
+    // Ignore bots, and above all our OWN pre-seeded reactions: the card is seeded
+    // with the three emojis by this bot, and that self-add must not self-resolve.
+    if (!user || user.bot) return;
+    if (rt.client && rt.client.user && user.id === rt.client.user.id) return;
+
+    // Fail-closed auth, same posture as the inbound message path (deliverMessage
+    // only ever runs for allowlisted authors). Resolving an approval drives a
+    // bypassPermissions agent, so a non-allowlisted reactor must NOT decide.
+    if (!rt.cfg.allowedUserIds || rt.cfg.allowedUserIds.size === 0) return;
+    if (!rt.cfg.allowedUserIds.has(user.id)) return;
+
+    // Resolve partials on demand — the card predates this session's cache (it was
+    // posted by the server hook, maybe before a reconnect). Each fetch is guarded
+    // independently: a fetch failure must never crash the handler.
+    if (reaction.partial) {
+      try {
+        await reaction.fetch();
+      } catch (err) {
+        rt.log.warn(
+          { event: 'discord-agent.reaction_fetch_failed', error: String(err) },
+          'discord-agent could not fetch partial reaction — ignoring',
+        );
+        return;
+      }
+    }
+    if (reaction.message && reaction.message.partial) {
+      try {
+        await reaction.message.fetch();
+      } catch (err) {
+        rt.log.warn(
+          { event: 'discord-agent.reaction_msg_fetch_failed', error: String(err) },
+          'discord-agent could not fetch partial reaction message — ignoring',
+        );
+        return;
+      }
+    }
+
+    const binding = rt.binding;
+    if (!binding || typeof binding.sub?.tryConsumeApprovalReaction !== 'function') return;
+
+    const emoji = reaction.emoji?.name;
+    const messageId = reaction.message?.id;
+    if (!messageId) return;
+
+    let result;
+    try {
+      result = binding.sub.tryConsumeApprovalReaction({
+        messageId,
+        emoji,
+        reactor: user.username || user.id,
+      });
+    } catch (err) {
+      // A resolver failure must never escape — a reaction is best-effort.
+      rt.log.warn(
+        { event: 'discord-agent.approval_reaction_failed', messageId, error: String(err) },
+        'discord-agent approval reaction routing failed',
+      );
+      return;
+    }
+
+    if (!result || !result.consumed) return; // not a decision on one of our cards
+
+    if (result.confirmation) {
+      // Post the confirmation into the channel the card lives in, as a reply to it.
+      const channelId = reaction.message?.channelId || rt.cfg.channelId;
+      void sendText(rt, channelId, result.confirmation, messageId).catch(() => {
+        /* best-effort — the store record is authoritative regardless */
+      });
+    }
+    rt.log.info(
+      {
+        event: 'discord-agent.approval_resolved_via_reaction',
+        orchId: binding.orchId,
+        messageId,
+        emoji,
+      },
+      'discord-agent approval resolved via reaction (not pushed to inbox)',
+    );
+  } catch (err) {
+    rt.log.warn(
+      { event: 'discord-agent.reaction_error', error: String(err) },
+      'discord-agent reaction handler failed',
+    );
+  }
 }
 
 /** @param {import('../index.js').Runtime} rt — on connect, just pump (doPump
@@ -544,7 +670,7 @@ function truncate(s, maxBytes) {
 }
 
 /** Best-effort reaction — never throws. @param {any} msg */
-async function reactSafe(msg, emoji) {
+export async function reactSafe(msg, emoji) {
   try {
     if (msg && typeof msg.react === 'function') await msg.react(emoji);
   } catch {

@@ -30,6 +30,7 @@ import type { MemoryStore } from '../memory/store.js';
 import type { TaskboardStore } from '../taskboard/store.js';
 import type { ApprovalStore } from '../approvals/store.js';
 import { buildApprovalReplyResolver } from '../approvals/reply.js';
+import { buildApprovalReactionResolver } from '../approvals/reaction.js';
 import {
   isIdle,
   SIGNAL_TEXT,
@@ -360,6 +361,12 @@ export class Spawner {
       ...(this.approvals
         ? {
             tryConsumeApprovalReply: buildApprovalReplyResolver({
+              spawner: this,
+              store: this.approvals,
+              orchestratorId: orch.id,
+            }),
+            // P5: sibling resolver for ✅/♾️/❌ reactions on the approval card.
+            tryConsumeApprovalReaction: buildApprovalReactionResolver({
               spawner: this,
               store: this.approvals,
               orchestratorId: orch.id,

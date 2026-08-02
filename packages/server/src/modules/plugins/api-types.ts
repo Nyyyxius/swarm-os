@@ -19,6 +19,7 @@ import { z } from 'zod';
 import type { Logger } from 'pino';
 import type { Router } from 'express';
 import type { ApprovalReplyResolver } from '../approvals/reply.js';
+import type { ApprovalReactionResolver } from '../approvals/reaction.js';
 import type { SwarmEvent, SwarmEventKind } from '../../events.js';
 import type { Role, RoleInit, RolePatch } from '../roles/index.js';
 import type {
@@ -299,6 +300,18 @@ export interface PluginOrchSubscription {
    * confirmed and NOT pushed to the inbox. See `modules/approvals/reply.ts`.
    */
   tryConsumeApprovalReply?: ApprovalReplyResolver;
+  /**
+   * P5 — optional approval-REACTION router, the sibling of `tryConsumeApprovalReply`.
+   * When set, the bot calls it on `messageReactionAdd`: a ✅/♾️/❌ reaction on an
+   * approval card resolves the matching pending approval through the shared core.
+   * A reaction is NEVER pushed to the inbox, so a non-consumed result is a no-op.
+   * See `modules/approvals/reaction.ts`.
+   *
+   * ⚠️ Like `tryConsumeApprovalReply`, this is forwarded through the sub
+   * reconstruction in `connector-registry.ts` — a new method dropped there never
+   * reaches the built-in bot.
+   */
+  tryConsumeApprovalReaction?: ApprovalReactionResolver;
 }
 
 // ---------------------------------------------------------------------------
