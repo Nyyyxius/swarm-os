@@ -18,7 +18,11 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSwarmController } from '../controller/SwarmController';
 import { useCodeGraph, computeNeighbors, nodeFileLabel, parseLine } from '../hooks/useCodeGraph';
+import { buildEgoSubgraph, FULL_GRAPH_MAX_NODES } from '../lib/codeGraphView';
+import CodeGraphCanvas from './codegraph/CodeGraphCanvas';
 import type { CodegraphHit, CodegraphNode } from '../api/client';
+
+type ViewMode = 'list' | 'graph';
 
 interface Props {
   open: boolean;
@@ -38,6 +42,8 @@ export function CodeGraphPage({ open, onClose }: Props) {
   const [results, setResults] = useState<CodegraphHit[]>([]);
   const [searching, setSearching] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  // Default to the visual graph — the whole point of this page is to SEE it.
+  const [viewMode, setViewMode] = useState<ViewMode>('graph');
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Auto-select first enabled scope when the page opens and scopes load.
@@ -54,6 +60,13 @@ export function CodeGraphPage({ open, onClose }: Props) {
     if (!selectedScopeId || !open) return;
     void loadGraph(selectedScopeId);
   }, [selectedScopeId, open, loadGraph, graphRev]);
+
+  // Entering graph mode must ensure the full graph.json is loaded (the visual
+  // view renders from it directly, not from search hits).
+  useEffect(() => {
+    if (viewMode !== 'graph' || !open || !selectedScopeId || graph) return;
+    void loadGraph(selectedScopeId);
+  }, [viewMode, open, selectedScopeId, graph, loadGraph]);
 
   // Reset selection when scope or query changes.
   useEffect(() => {
@@ -114,6 +127,112 @@ export function CodeGraphPage({ open, onClose }: Props) {
     selectedNodeId && graph ? computeNeighbors(selectedNodeId, graph) : null;
 
   const selectedScope = scopes.find((s) => s.id === selectedScopeId);
+
+  // ── Visual graph mode ────────────────────────────────────────────────────
+  // Renders a BOUNDED subgraph only: the ego-subgraph of the selected node, or
+  // the full scope when it is small enough (≤ FULL_GRAPH_MAX_NODES). Big scopes
+  // with no selection prompt the user to search + click instead of rendering
+  // thousands of nodes into d3-force.
+  function renderGraphMode() {
+    if (unavailable) {
+      return (
+        <div className="cg-empty">
+          <div className="cg-empty-title">GRAPH UNAVAILABLE</div>
+          <div className="cg-empty-sub">
+            The code graph backend is not available on this server.
+          </div>
+        </div>
+      );
+    }
+    if (scopes.length === 0) {
+      return (
+        <div className="cg-empty">
+          <div className="cg-empty-title">NO SCOPES INDEXED</div>
+          <div className="cg-empty-sub">
+            No code scope has been indexed yet. Run graphify on a workspace
+            directory to populate the graph.
+          </div>
+        </div>
+      );
+    }
+
+    // A node is selected → render its ego-subgraph.
+    if (selectedNodeId) {
+      if (!graph) {
+        return (
+          <div className="cg-empty">
+            <div className="cg-empty-title">{graphLoading ? 'LOADING GRAPH…' : 'GRAPH NOT AVAILABLE'}</div>
+            <div className="cg-empty-sub">
+              {graphLoading
+                ? 'Fetching the scope graph…'
+                : 'The graph for this scope could not be loaded.'}
+            </div>
+          </div>
+        );
+      }
+      const ego = buildEgoSubgraph(graph, selectedNodeId);
+      if (ego.nodes.length === 0) {
+        return (
+          <div className="cg-empty">
+            <div className="cg-empty-title">NODE NOT IN GRAPH</div>
+            <div className="cg-empty-sub">
+              This node is not present in the current scope graph.
+            </div>
+          </div>
+        );
+      }
+      const hudNote = ego.truncated
+        ? `${ego.nodes.length - 1}/${ego.totalNeighbors} voisins`
+        : null;
+      return (
+        <div className="cg-canvas-host">
+          <CodeGraphCanvas
+            nodes={ego.nodes}
+            links={ego.links}
+            selectedId={selectedNodeId}
+            onSelect={setSelectedNodeId}
+            hudNote={hudNote}
+          />
+        </div>
+      );
+    }
+
+    // No selection → full scope only if small; else prompt to search + click.
+    if (!graph) {
+      return (
+        <div className="cg-empty">
+          <div className="cg-empty-title">{graphLoading ? 'LOADING GRAPH…' : 'SELECT A NODE'}</div>
+          <div className="cg-empty-sub">
+            {graphLoading
+              ? 'Fetching the scope graph…'
+              : 'Search for a node in the sidebar and click it to see its neighbourhood.'}
+          </div>
+        </div>
+      );
+    }
+    if (graph.nodes.length <= FULL_GRAPH_MAX_NODES) {
+      return (
+        <div className="cg-canvas-host">
+          <CodeGraphCanvas
+            nodes={graph.nodes}
+            links={graph.links}
+            selectedId={null}
+            onSelect={setSelectedNodeId}
+          />
+        </div>
+      );
+    }
+    const total = graph.nodes.length || selectedScope?.nodeCount || 0;
+    return (
+      <div className="cg-empty">
+        <div className="cg-empty-title">SCOPE TROP GRAND</div>
+        <div className="cg-empty-sub">
+          Scope trop grand pour tout afficher ({total} nœuds). Cherche puis
+          clique un nœud pour voir son voisinage.
+        </div>
+      </div>
+    );
+  }
 
   return (
     <div className="cg-overlay" style={{ gridTemplateColumns: '300px 1fr' }}>
@@ -233,7 +352,27 @@ export function CodeGraphPage({ open, onClose }: Props) {
 
       {/* ── main area ── */}
       <div className="cg-main">
-        {!selectedNodeId && (
+        {/* mode toggle — visible as soon as a scope is picked, works in both views */}
+        {selectedScopeId && (
+          <div className="cg-mode-toggle">
+            <button
+              className={`cg-mode-btn ${viewMode === 'list' ? 'active' : ''}`}
+              onClick={() => setViewMode('list')}
+            >
+              LIST
+            </button>
+            <button
+              className={`cg-mode-btn ${viewMode === 'graph' ? 'active' : ''}`}
+              onClick={() => setViewMode('graph')}
+            >
+              GRAPH
+            </button>
+          </div>
+        )}
+
+        {viewMode === 'graph' && renderGraphMode()}
+
+        {viewMode === 'list' && !selectedNodeId && (
           <div className="cg-empty">
             <div className="cg-empty-title">
               {unavailable ? 'GRAPH UNAVAILABLE' : scopes.length === 0 ? 'NO SCOPES INDEXED' : 'SELECT A NODE'}
@@ -248,7 +387,7 @@ export function CodeGraphPage({ open, onClose }: Props) {
           </div>
         )}
 
-        {selectedNodeId && (
+        {viewMode === 'list' && selectedNodeId && (
           <>
             {/* node header */}
             <div className="cg-main-head">
