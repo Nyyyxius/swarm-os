@@ -20,6 +20,7 @@ import type { Config, EffortLevel, PermissionMode } from '../../config.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { TaskboardStore } from '../taskboard/store.js';
 import type { GraphStore } from '../codegraph/store.js';
+import type { SkillsSubsystem } from '../skills/index.js';
 import { withModule } from '../../logger.js';
 
 const log = withModule('mcp.tool');
@@ -83,6 +84,12 @@ export interface ToolContext {
    * tools answer `{ ok:false, reason:'CODEGRAPH_UNAVAILABLE' }`.
    */
   graph?: GraphStore;
+  /**
+   * Skills subsystem (docs/plan-skills-importables.md). Optional so pre-skills
+   * test paths still build a context; production `McpServer` threads it from the
+   * Spawner. When absent the `skills.*` tools answer SKILLS_UNAVAILABLE.
+   */
+  skills?: SkillsSubsystem;
 }
 
 /** Active sessions only (plan §10). */

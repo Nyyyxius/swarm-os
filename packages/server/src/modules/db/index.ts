@@ -130,6 +130,12 @@ export interface RoleRow {
    * See modules/roles for the parsed `RoleApprovalSettings` shape.
    */
   approval_json: string | null;
+  /**
+   * Skills activated on this role (docs/plan-skills-importables.md §3.2),
+   * JSON-serialized. NULL = no active skill. Same convention as connectors_json;
+   * added via applyMigrations only (like approval_json), not in the base schema.
+   */
+  skills_json: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -439,12 +445,12 @@ export class SwarmDb {
       INSERT INTO roles (
         id, label, lead_prompt, lead_preamble, worker_preamble, worker_count,
         default_model, default_effort, default_permission_mode, default_provider,
-        connectors_json, schedule, schedule_message, approval_json,
+        connectors_json, schedule, schedule_message, approval_json, skills_json,
         created_at, updated_at
       ) VALUES (
         @id, @label, @lead_prompt, @lead_preamble, @worker_preamble, @worker_count,
         @default_model, @default_effort, @default_permission_mode, @default_provider,
-        @connectors_json, @schedule, @schedule_message, @approval_json,
+        @connectors_json, @schedule, @schedule_message, @approval_json, @skills_json,
         @created_at, @updated_at
       )
     `);
@@ -463,6 +469,7 @@ export class SwarmDb {
         schedule = @schedule,
         schedule_message = @schedule_message,
         approval_json = @approval_json,
+        skills_json = @skills_json,
         updated_at = @updated_at
       WHERE id = @id
     `);
@@ -552,6 +559,10 @@ export class SwarmDb {
       // the role behaves EXACTLY as before (default `isPromptingMode` arming,
       // Discord notification ON). Every pre-existing role reads NULL.
       { table: 'roles',         column: 'approval_json',    ddl: 'ALTER TABLE roles ADD COLUMN approval_json TEXT' },
+      // Skills library (docs/plan-skills-importables.md §3.2) — OPTIONAL
+      // JSON-serialized list of skills activated on a role. NULL = none. Same
+      // migrations-only convention as approval_json (not in the base schema).
+      { table: 'roles',         column: 'skills_json',      ddl: 'ALTER TABLE roles ADD COLUMN skills_json TEXT' },
     ];
     for (const a of additions) {
       try {

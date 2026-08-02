@@ -30,6 +30,8 @@ import type { MemoryStore } from '../memory/store.js';
 import type { TaskboardStore } from '../taskboard/store.js';
 import type { GraphStore } from '../codegraph/store.js';
 import type { ApprovalStore } from '../approvals/store.js';
+import type { SkillsSubsystem } from '../skills/index.js';
+import type { SkillFragment } from '../orchestrator/preamble.js';
 import { buildApprovalReplyResolver } from '../approvals/reply.js';
 import { buildApprovalReactionResolver } from '../approvals/reaction.js';
 import {
@@ -217,6 +219,13 @@ export interface SpawnerDeps {
    * via the web/REST path).
    */
   approvals?: ApprovalStore;
+  /**
+   * The skills subsystem (docs/plan-skills-importables.md). Held on the Spawner
+   * like `taskboard`: `spawner.skills` feeds the MCP `skills.*` tools and the
+   * per-spawn preamble resolver. Absent ⇒ `skills.*` answer SKILLS_UNAVAILABLE
+   * and no skill is injected.
+   */
+  skills?: SkillsSubsystem;
 }
 
 export class Spawner {
@@ -282,6 +291,13 @@ export class Spawner {
    */
   readonly taskboard: TaskboardStore | null;
 
+  /**
+   * The skills subsystem (docs/plan-skills-importables.md), or `null` when none
+   * was wired. Reached by the MCP `skills.*` tools via `ToolContext` and by the
+   * per-spawn preamble resolver.
+   */
+  readonly skills: SkillsSubsystem | null;
+
   constructor(
     private readonly config: Config,
     deps: SpawnerDeps = {},
@@ -300,6 +316,7 @@ export class Spawner {
     this.modelCatalogue = deps.modelCatalogue ?? null;
     this.memory = deps.memory ?? null;
     this.taskboard = deps.taskboard ?? null;
+    this.skills = deps.skills ?? null;
     this.graph = deps.graph ?? null;
     this.approvals = deps.approvals ?? null;
     // Retro-wire live orchestrators when a connector provider registers late
@@ -494,6 +511,7 @@ export class Spawner {
       },
       ...(this.pluginTools ? { pluginTools: this.pluginTools } : {}),
       ...(this.taskboard ? { taskboard: this.taskboard } : {}),
+      skills: () => this.resolveSkillsFor(spec.roleId ?? null),
     });
     this.orchestrators.set(orch.id, orch);
     eventBus.emitEvent({
@@ -552,6 +570,11 @@ export class Spawner {
     }
 
     return { orchestrator: orch, lead };
+  }
+
+  /** Resolve the skills active for a role — the per-spawn preamble thunk. */
+  private resolveSkillsFor(roleId: string | null): readonly SkillFragment[] {
+    return this.skills ? this.skills.resolveForRole(roleId) : [];
   }
 
   get(id: string): Orchestrator | undefined {
@@ -1043,6 +1066,7 @@ export class Spawner {
         onHideRequested: (id) => this.hideOrchestrator(id),
         ...(this.pluginTools ? { pluginTools: this.pluginTools } : {}),
         ...(this.taskboard ? { taskboard: this.taskboard } : {}),
+        skills: () => this.resolveSkillsFor(init.roleId ?? null),
       });
       this.orchestrators.set(orch.id, orch);
 

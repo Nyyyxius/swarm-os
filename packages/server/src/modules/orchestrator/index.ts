@@ -6,7 +6,7 @@ import {
   type ContextResetCommand,
 } from './session.js';
 import { Mailbox } from './mailbox.js';
-import { buildPreamble, type PluginToolSummary } from './preamble.js';
+import { buildPreamble, type PluginToolSummary, type SkillFragment } from './preamble.js';
 import { emitMailboxMessage, SIGNAL_TEXT } from './messaging.js';
 import { eventBus } from '../../events.js';
 import { withModule } from '../../logger.js';
@@ -154,6 +154,12 @@ export interface OrchestratorDeps {
    * Omitted (every unit test, every embedder) ⇒ no plugin section.
    */
   pluginTools?: () => readonly PluginToolSummary[];
+  /**
+   * Resolver for the skills active on this team's role (docs/plan-skills-
+   * importables.md §2.1, durable channel). Called at EACH spawn so the preamble
+   * reflects the CURRENT activation. Mirrors `pluginTools`. Omitted ⇒ none.
+   */
+  skills?: () => readonly SkillFragment[];
   /**
    * Durable task-board store (docs/tableau-de-taches.md). When present, each
    * NEWLY-spawned worker (not a resumed one) auto-gets a `todo` card assigned to
@@ -315,6 +321,7 @@ export class Orchestrator {
   private readonly _onHideRequested: ((orchestratorId: string) => void) | null;
   private readonly _pluginTools: (() => readonly PluginToolSummary[]) | null;
   private readonly _taskboard: TaskboardStore | null;
+  private readonly _skills: (() => readonly SkillFragment[]) | null;
 
   /** All sessions, including terminated ones, indexed by id. */
   private readonly sessions = new Map<string, Session>();
@@ -327,6 +334,20 @@ export class Orchestrator {
    * discipline, so it must fail loudly), this section is advisory. Losing a
    * capability listing is worth strictly less than losing the team.
    */
+  private _readSkills(): readonly SkillFragment[] {
+    if (!this._skills) return [];
+    try {
+      return this._skills();
+    } catch (err) {
+      log.warn({
+        event: 'orch.skills_unavailable',
+        orchId: this.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return [];
+    }
+  }
+
   private _readPluginTools(): readonly PluginToolSummary[] {
     if (!this._pluginTools) return [];
     try {
@@ -368,6 +389,7 @@ export class Orchestrator {
     this._onHideRequested = deps.onHideRequested ?? null;
     this._pluginTools = deps.pluginTools ?? null;
     this._taskboard = deps.taskboard ?? null;
+    this._skills = deps.skills ?? null;
     // Phase 8 — write-through mailbox: every push/markDelivered routes to
     // SQLite via the hook below. Constructed AFTER persistence is set.
     // The hook impl is provided by mailbox-persistence.ts to keep the DB
@@ -497,6 +519,7 @@ export class Orchestrator {
       customOverride: this.init.lead.preamble ?? this.leadPreamble,
       mcpToolName: (n) => provider.mcpToolName(n),
       pluginTools: this._readPluginTools(),
+      skills: this._readSkills(),
     });
 
     const lead = new Session({
@@ -642,6 +665,7 @@ export class Orchestrator {
       customOverride: this.init.lead.preamble ?? this.leadPreamble,
       mcpToolName: (n) => provider.mcpToolName(n),
       pluginTools: this._readPluginTools(),
+      skills: this._readSkills(),
     });
 
     const lead = new Session({
@@ -811,6 +835,7 @@ export class Orchestrator {
       // necessarily the team default (`team.spawn_worker({ provider })`).
       mcpToolName: (n) => provider.mcpToolName(n),
       pluginTools: this._readPluginTools(),
+      skills: this._readSkills(),
     });
 
     const worker = new Session({

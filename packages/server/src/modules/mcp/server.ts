@@ -9,6 +9,7 @@ import { registerTeamCommsTools, type ToolContext } from './tools.js';
 import { registerMemoryTools } from './memory-tools.js';
 import { registerTaskboardTools } from './taskboard-tools.js';
 import { registerGraphTools } from './codegraph-tools.js';
+import { registerSkillsTools } from './skills-tools.js';
 import type { Config } from '../../config.js';
 import type { MessagingDefaults } from '../orchestrator/messaging.js';
 import type { BusMetricsCollector } from '../metrics/busMetrics.js';
@@ -239,6 +240,9 @@ export class McpServer {
     // Code-knowledge-graph tools (codegraph.*), registered next so every agent
     // can query the live code map (docs/graphify-integration.md, P2).
     registerGraphTools(sdkServer, () => ctx);
+    // Skills library tools (skills.*), registered next so every agent can list
+    // and (lead) activate skills (docs/plan-skills-importables.md §7).
+    registerSkillsTools(sdkServer, () => ctx);
     this.pluginTools?.registerAll(sdkServer, () => ctx);
 
     const transport = new StreamableHTTPServerTransport({
@@ -343,6 +347,9 @@ export class McpServer {
       // deployment). Absent when codegraph is off/unavailable, in which case the
       // codegraph.* tools answer CODEGRAPH_UNAVAILABLE rather than crashing.
       ...(this.spawner.graph ? { graph: this.spawner.graph } : {}),
+      // Skills subsystem — lives on the Spawner (global). Absent ⇒ skills.*
+      // answer SKILLS_UNAVAILABLE rather than crashing.
+      ...(this.spawner.skills ? { skills: this.spawner.skills } : {}),
     };
   }
 }

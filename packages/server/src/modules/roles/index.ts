@@ -162,6 +162,40 @@ export function connectorConfig(c: Connector): Record<string, unknown> {
   return c.config ?? {};
 }
 
+/**
+ * A skill activated on a role (docs/plan-skills-importables.md §3.2). Persisted
+ * JSON-serialized in `roles.skills_json`, same convention as `connectors_json`.
+ */
+export type SkillActivationMode = 'inject';
+export interface RoleSkillRef {
+  /** Installed skill name (`skills.name`). */
+  name: string;
+  /** Injection mode. Only `'inject'` at MVP (native materialization is later). */
+  mode: SkillActivationMode;
+}
+
+/** Defensively parse the persisted `skills_json`; any malformed shape → `[]`. */
+export function parseRoleSkills(json: string | null | undefined): RoleSkillRef[] {
+  if (!json) return [];
+  try {
+    const parsed = JSON.parse(json) as unknown;
+    if (!Array.isArray(parsed)) return [];
+    const out: RoleSkillRef[] = [];
+    for (const e of parsed) {
+      if (e && typeof e === 'object' && typeof (e as { name?: unknown }).name === 'string') {
+        out.push({ name: (e as { name: string }).name, mode: 'inject' });
+      }
+    }
+    return out;
+  } catch (err) {
+    log.warn({
+      event: 'roles.skills_parse_failed',
+      error: err instanceof Error ? err.message : String(err),
+    });
+    return [];
+  }
+}
+
 export interface Role {
   id: string;
   label: string;
@@ -197,6 +231,8 @@ export interface Role {
    * default arming (`isPromptingMode`) and Discord notification ON.
    */
   approval: RoleApprovalSettings | null;
+  /** Skills activated on this role (docs/plan-skills-importables.md §3.2). */
+  skills: RoleSkillRef[];
   createdAt: string;
   updatedAt: string;
 }
@@ -215,6 +251,7 @@ export interface RoleInit {
   schedule?: string | null;
   scheduleMessage?: string | null;
   approval?: RoleApprovalSettings | null;
+  skills?: RoleSkillRef[];
 }
 
 export type RolePatch = Partial<RoleInit>;
@@ -248,6 +285,7 @@ function rowToRole(row: RoleRow): Role {
     schedule: row.schedule,
     scheduleMessage: row.schedule_message,
     approval: parseApprovalSettings(row.approval_json),
+    skills: parseRoleSkills(row.skills_json),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -269,6 +307,7 @@ function roleToRow(r: Role): RoleRow {
     schedule: r.schedule,
     schedule_message: r.scheduleMessage,
     approval_json: serializeApprovalSettings(r.approval),
+    skills_json: r.skills.length ? JSON.stringify(r.skills) : null,
     created_at: r.createdAt,
     updated_at: r.updatedAt,
   };
@@ -294,6 +333,7 @@ export class RoleStore {
       schedule: init.schedule ?? null,
       scheduleMessage: init.scheduleMessage ?? null,
       approval: init.approval ?? null,
+      skills: init.skills ?? [],
       createdAt: now,
       updatedAt: now,
     };
@@ -333,6 +373,7 @@ export class RoleStore {
       scheduleMessage:
         patch.scheduleMessage !== undefined ? patch.scheduleMessage : existing.scheduleMessage,
       approval: patch.approval !== undefined ? patch.approval : existing.approval,
+      skills: patch.skills !== undefined ? patch.skills : existing.skills,
       updatedAt: new Date().toISOString(),
     };
     this.db.updateRole(roleToRow(updated));

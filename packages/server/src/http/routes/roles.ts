@@ -6,6 +6,7 @@ import type {
   RoleInit,
   RolePatch,
   RoleApprovalSettings,
+  RoleSkillRef,
 } from '../../modules/roles/index.js';
 import { isDiscordConnector } from '../../modules/roles/index.js';
 import type { Config, EffortLevel, PermissionMode } from '../../config.js';
@@ -83,6 +84,23 @@ interface RoleBody {
   schedule?: unknown;
   scheduleMessage?: unknown;
   approval?: unknown;
+  skills?: unknown;
+}
+
+/**
+ * Lenient coercion of the `skills` body field into role skill refs. Unknown /
+ * malformed entries are dropped (activation later resolves only installed
+ * skills, so a stale name is harmless).
+ */
+function coerceSkills(v: unknown): RoleSkillRef[] {
+  if (!Array.isArray(v)) return [];
+  const out: RoleSkillRef[] = [];
+  for (const e of v) {
+    if (e && typeof e === 'object' && typeof (e as { name?: unknown }).name === 'string') {
+      out.push({ name: (e as { name: string }).name, mode: 'inject' });
+    }
+  }
+  return out;
 }
 
 function isNonEmptyString(x: unknown): x is string {
@@ -487,6 +505,7 @@ export function createRolesRouter(
       schedule: sch.value,
       scheduleMessage: smsg.value,
       approval: appr.value,
+      skills: coerceSkills(body.skills),
     };
     const role = store.create(init);
     onRolesChanged?.();
@@ -601,6 +620,9 @@ export function createRolesRouter(
       const r = parseApprovalBody(body.approval);
       if (!r.ok) return res.status(400).json({ error: r.error });
       patch.approval = r.value;
+    }
+    if (body.skills !== undefined) {
+      patch.skills = coerceSkills(body.skills);
     }
     // Enforce the schedule⇒message invariant against the MERGED role: a patch
     // can set a schedule without a message, or clear the message while the

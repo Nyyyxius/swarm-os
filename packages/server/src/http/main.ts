@@ -13,6 +13,7 @@ import { createSessionsRouter } from './routes/sessions.js';
 import { createWsTicketRouter } from './routes/ws-ticket.js';
 import { createHooksRouter } from './routes/hooks.js';
 import { createRolesRouter } from './routes/roles.js';
+import { createSkillsRouter } from './routes/skills.js';
 import { createProvidersRouter } from './routes/providers.js';
 import { createMetricsRouter } from './routes/metrics.js';
 import { createBackupRouter } from './routes/backup.js';
@@ -328,6 +329,13 @@ export function createApp(
       spawner.providerRegistry,
     ),
   );
+
+  // Skills control-plane REST (docs/plan-skills-importables.md §8.4). Same
+  // X-Auth-Token gate. Mounted off `spawner.skills` so no extra dep is threaded;
+  // absent ⇒ the routes simply aren't registered and `/skills` 404s.
+  if (spawner.skills) {
+    app.use(createSkillsRouter(spawner.skills));
+  }
   // `GET /providers` — agent-provider catalogue + live availability. Mounted
   // with the other business routes (behind X-Auth-Token): it names the CLIs
   // installed on the deployment host, which is deployment detail, not public

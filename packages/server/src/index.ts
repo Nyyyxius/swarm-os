@@ -31,6 +31,9 @@ import {
   type CodegraphJanitorHandle,
 } from './modules/codegraph/lifecycle.js';
 import { TaskboardStore } from './modules/taskboard/store.js';
+import { SkillStore } from './modules/skills/store.js';
+import { SkillInstaller } from './modules/skills/installer.js';
+import { SkillsSubsystem } from './modules/skills/index.js';
 import { ApprovalStore } from './modules/approvals/store.js';
 import {
   startApprovalJanitor,
@@ -340,6 +343,34 @@ void modelCatalogue.resolve();
 // has no constructor arguments, so the position is free.
 const pluginToolRegistry = new PluginToolRegistry();
 
+// ---- Skills library (docs/plan-skills-importables.md) ----------------------
+// PER INSTANCE registry. The store OWNS its `skills` table on the raw Db handle
+// (like MemoryStore/TaskboardStore/ApprovalStore) — no schema.sql / INLINE_SCHEMA
+// touch. Wrapped so a skills-subsystem failure never stops the boot: the
+// `skills.*` MCP tools then answer SKILLS_UNAVAILABLE and `/skills` 404s, while
+// every other subsystem is unaffected.
+let skillsSubsystem: SkillsSubsystem | null = null;
+try {
+  const skillStore = new SkillStore(db);
+  const skillInstaller = new SkillInstaller({
+    skillsDir: path.join(config.dataDir, 'skills'),
+    store: skillStore,
+  });
+  skillsSubsystem = new SkillsSubsystem({
+    store: skillStore,
+    installer: skillInstaller,
+    roleStore,
+    config,
+  });
+  log.info({ event: 'boot.skills_store' });
+} catch (err) {
+  log.error({
+    event: 'boot.skills_store_unavailable',
+    error: err instanceof Error ? err.message : String(err),
+    note: 'the skills subsystem could not be opened — skills.* tools and /skills are DISABLED for this boot; every other subsystem is unaffected.',
+  });
+}
+
 const spawner = new Spawner(config, {
   notifier,
   persistence,
@@ -368,6 +399,9 @@ const spawner = new Spawner(config, {
   // can attach the P4 reply-router to each orch subscription. `undefined` when
   // the store failed to open (approvals then work via web/REST only).
   ...(approvalStore ? { approvals: approvalStore } : {}),
+  // Skills subsystem — threaded so the skills.* MCP tools reach it and the
+  // per-spawn preamble resolver injects a role's active skills.
+  ...(skillsSubsystem ? { skills: skillsSubsystem } : {}),
 });
 
 // ---- S9: in-memory `/metrics/messages` aggregator -------------------------

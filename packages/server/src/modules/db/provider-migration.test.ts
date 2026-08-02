@@ -301,6 +301,7 @@ describe('provider columns — round-trip through the UPSERT', () => {
         schedule: null,
         schedule_message: null,
         approval_json: null,
+        skills_json: null,
         created_at: now,
         updated_at: now,
       });
@@ -320,6 +321,7 @@ describe('provider columns — round-trip through the UPSERT', () => {
         schedule: null,
         schedule_message: null,
         approval_json: null,
+        skills_json: null,
         created_at: now,
         updated_at: new Date().toISOString(),
       });
@@ -340,6 +342,7 @@ describe('provider columns — round-trip through the UPSERT', () => {
         schedule: null,
         schedule_message: null,
         approval_json: null,
+        skills_json: null,
         created_at: now,
         updated_at: new Date().toISOString(),
       });
