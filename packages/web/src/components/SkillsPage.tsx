@@ -2,8 +2,16 @@ import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSkills } from '../hooks/useSkills';
 import { useShellMode } from '../hooks/useShellMode';
 import { useSwarmController } from '../controller/SwarmController';
-import { api, HttpError, type SkillScopeActivation, type SkillView } from '../api/client';
+import {
+  api,
+  HttpError,
+  type SkillActivateBody,
+  type SkillScopeActivation,
+  type SkillReviewInfo,
+  type SkillView,
+} from '../api/client';
 import { SkillImportModal } from './skills/SkillImportModal';
+import { SkillReviewDialog } from './skills/SkillReviewDialog';
 
 interface Props {
   open: boolean;
@@ -17,13 +25,21 @@ const TRUST_COLOR: Record<string, string> = {
   local: 'var(--amber)',
 };
 
+const TRUST_LABEL: Record<string, string> = {
+  'first-party': 'VÉRIFIÉ',
+  verified: 'VÉRIFIÉ',
+  community: 'COMMUNITY',
+  local: 'LOCAL',
+};
+
 function TrustBadge({ trust }: { trust: string }) {
+  const label = TRUST_LABEL[trust] ?? trust.toUpperCase();
   return (
     <span
       className="tag-pill"
       style={{ color: TRUST_COLOR[trust] ?? 'var(--text-dim)', borderColor: TRUST_COLOR[trust] ?? 'var(--text-dim)' }}
     >
-      {trust.toUpperCase()}
+      {label}
     </span>
   );
 }
@@ -108,6 +124,11 @@ export function SkillsPage({ open, onClose }: Props) {
   const [activationBusy, setActivationBusy] = useState(false);
   const [activationMsg, setActivationMsg] = useState<string | null>(null);
 
+  // Review dialog state (Lot 3b)
+  const [reviewOpen, setReviewOpen] = useState(false);
+  const [reviewInfo, setReviewInfo] = useState<SkillReviewInfo | null>(null);
+  const [pendingActivationBody, setPendingActivationBody] = useState<SkillActivateBody | null>(null);
+
   useEffect(() => {
     if (open) setMobileView('list');
   }, [open]);
@@ -182,26 +203,23 @@ export function SkillsPage({ open, onClose }: Props) {
     setDiffLines(null);
     setUpgrading(true);
     setBusy(true);
-    // Fetch old body for diff
-    let oldBody: string | null = null;
     try {
-      const r = await api.getSkill(s.name);
-      oldBody = r.body;
-    } catch {
-      // proceed without diff if fetch fails
-    }
-    try {
-      await upgrade(s.name);
-      // Fetch new body for diff display
-      if (oldBody !== null) {
-        try {
-          const r = await api.getSkill(s.name);
-          const newBody = r.body;
-          setDiffLines(lineDiff(oldBody, newBody));
-          setViewBody(newBody);
-        } catch {
-          // diff unavailable; still show upgrade succeeded
+      const res = await upgrade(s.name);
+      // drift.previousBody is the old SKILL.md (Lot 3b enriched response)
+      const previousBody = res.drift?.previousBody ?? null;
+      try {
+        const r = await api.getSkill(s.name);
+        setViewBody(r.body);
+        if (previousBody !== null) {
+          setDiffLines(lineDiff(previousBody, r.body));
         }
+      } catch {
+        // diff unavailable; upgrade still succeeded
+      }
+      if (res.drift?.checksumChanged) {
+        setOpError(
+          'Checksum changed (assets modified) — review status was reset. Re-approve this skill before activating to resume gated activation.',
+        );
       }
     } catch (e) {
       setOpError(messageOf(e));
@@ -237,15 +255,27 @@ export function SkillsPage({ open, onClose }: Props) {
     if (!activateOrchId) return;
     setActivationBusy(true);
     setActivationMsg(null);
+    const body: SkillActivateBody = { scope: 'orch', orchestratorId: activateOrchId };
     try {
-      const r = await api.activateSkill(s.name, { scope: 'orch', orchestratorId: activateOrchId });
+      const r = await api.activateSkill(s.name, body);
       setActivationMsg(
         r.injected
-          ? `Activated — injected into ${r.injected ? 'live sessions' : 'no sessions'}.`
+          ? `Activated — injected into live sessions.`
           : 'Persisted — will apply at next spawn/resume.',
       );
       await loadActivations(s.name);
     } catch (e) {
+      // 409 REVIEW_REQUIRED → open review dialog instead of showing an error
+      if (e instanceof HttpError && e.status === 409) {
+        const b = e.body as { code?: string; review?: SkillReviewInfo } | undefined;
+        if (b?.code === 'REVIEW_REQUIRED' && b.review) {
+          setReviewInfo(b.review);
+          setPendingActivationBody(body);
+          setReviewOpen(true);
+          setActivationBusy(false);
+          return;
+        }
+      }
       setActivationMsg(`Error: ${messageOf(e)}`);
     } finally {
       setActivationBusy(false);
@@ -330,6 +360,11 @@ export function SkillsPage({ open, onClose }: Props) {
                     ASSETS
                   </span>
                 )}
+                {s.reviewRequired && (
+                  <span className="tag-pill" style={{ color: 'var(--bad)', borderColor: 'var(--bad)' }}>
+                    REVIEW REQ
+                  </span>
+                )}
                 <span className="tag-pill">{s.sourceKind.toUpperCase()}</span>
               </div>
             </div>
@@ -407,6 +442,22 @@ export function SkillsPage({ open, onClose }: Props) {
                 )}
                 <span className="k">assets</span>
                 <span className="v">{skill.assetsPresent ? 'yes' : 'none'}</span>
+                {skill.reviewRequired !== undefined && (
+                  <>
+                    <span className="k">review</span>
+                    <span className="v">
+                      {skill.reviewRequired ? (
+                        skill.reviewed ? (
+                          <span style={{ color: 'var(--ok)' }}>approved</span>
+                        ) : (
+                          <span style={{ color: 'var(--bad)' }}>required — not yet approved</span>
+                        )
+                      ) : (
+                        <span style={{ color: 'var(--text-dim)' }}>not required</span>
+                      )}
+                    </span>
+                  </>
+                )}
                 <span className="k">installed</span>
                 <span className="v">{fmtDate(skill.installedAt)}</span>
                 <span className="k">updated</span>
@@ -427,16 +478,68 @@ export function SkillsPage({ open, onClose }: Props) {
                 <h3>
                   <span>REQUIRES</span>
                 </h3>
-                <div className="r-tags" style={{ marginBottom: 6 }}>
-                  {skill.requires.plugins.map((p) => (
-                    <span key={p} className="tag-pill">{p} (plugin)</span>
-                  ))}
-                  {skill.requires.capabilities.map((cap) => (
-                    <span key={cap} className="tag-pill" style={{ color: 'var(--amber)', borderColor: 'var(--amber)' }}>
-                      {cap} (cap)
-                    </span>
-                  ))}
-                </div>
+                {skill.requires.plugins.length > 0 && (
+                  <div style={{ marginBottom: 8 }}>
+                    {skill.pluginStatus && skill.pluginStatus.length > 0 ? (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                        {skill.pluginStatus.map((ps) => (
+                          <div key={ps.name} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12 }}>
+                            <span
+                              className="tag-pill"
+                              style={{
+                                color: ps.installed && ps.enabled ? 'var(--ok)' : 'var(--bad)',
+                                borderColor: ps.installed && ps.enabled ? 'var(--ok)' : 'var(--bad)',
+                                minWidth: 64,
+                                textAlign: 'center',
+                              }}
+                            >
+                              {ps.installed ? (ps.enabled ? 'OK' : 'DISABLED') : 'MISSING'}
+                            </span>
+                            <span style={{ fontFamily: 'monospace' }}>{ps.name} (plugin)</span>
+                          </div>
+                        ))}
+                      </div>
+                    ) : (
+                      <div className="r-tags">
+                        {skill.requires.plugins.map((p) => (
+                          <span key={p} className="tag-pill">{p} (plugin)</span>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+                )}
+                {skill.requires.capabilities.length > 0 && (
+                  <div className="r-tags">
+                    {skill.requires.capabilities.map((cap) => (
+                      <span key={cap} className="tag-pill" style={{ color: 'var(--amber)', borderColor: 'var(--amber)' }}>
+                        {cap} (cap)
+                      </span>
+                    ))}
+                  </div>
+                )}
+              </div>
+            )}
+
+            {/* Warnings (Lot 3b) */}
+            {skill.warnings && skill.warnings.length > 0 && (
+              <div className="role-section">
+                <h3>
+                  <span>WARNINGS</span>
+                </h3>
+                {skill.warnings.map((w, i) => (
+                  <div
+                    key={i}
+                    className="field-warn"
+                    style={{
+                      borderLeftColor: 'var(--amber)',
+                      color: 'var(--amber)',
+                      background: 'rgba(255,180,0,0.06)',
+                      marginBottom: 6,
+                    }}
+                  >
+                    {w}
+                  </div>
+                ))}
               </div>
             )}
 
@@ -669,6 +772,26 @@ export function SkillsPage({ open, onClose }: Props) {
                 {upgrading ? 'UPGRADING…' : 'UPGRADE'}
               </button>
 
+              {/* Review button — shown when skill has assets or review is required (Lot 3b) */}
+              {(skill.assetsPresent || skill.reviewRequired) && (
+                <button
+                  className="btn"
+                  style={{
+                    color: skill.reviewRequired && !skill.reviewed ? 'var(--bad)' : 'var(--amber)',
+                    borderColor: skill.reviewRequired && !skill.reviewed ? 'var(--bad)' : undefined,
+                  }}
+                  disabled={busy}
+                  onClick={() => {
+                    setReviewInfo(null);
+                    setPendingActivationBody(null);
+                    setReviewOpen(true);
+                  }}
+                  title="Review skill assets and approve"
+                >
+                  REVIEW
+                </button>
+              )}
+
               <button className="btn danger" onClick={() => void doDelete(skill)} disabled={busy}>
                 DELETE
               </button>
@@ -698,6 +821,34 @@ export function SkillsPage({ open, onClose }: Props) {
             setImportOpen(false);
             setSelectedName(r.skill.name);
             if (isMobile) setMobileView('detail');
+          }}
+        />
+      )}
+
+      {/* Skill review dialog — opened on 409 REVIEW_REQUIRED or from the REVIEW button */}
+      {skill && (
+        <SkillReviewDialog
+          skillName={skill.name}
+          review={reviewInfo}
+          open={reviewOpen}
+          onClose={() => setReviewOpen(false)}
+          pendingActivation={
+            pendingActivationBody
+              ? {
+                  body: pendingActivationBody,
+                  onSuccess: (r) => {
+                    setActivationMsg(
+                      r.injected
+                        ? 'Approved & activated — injected into live sessions.'
+                        : 'Approved & persisted — will apply at next spawn/resume.',
+                    );
+                    void loadActivations(skill.name);
+                  },
+                }
+              : undefined
+          }
+          onApproved={() => {
+            setActivationMsg('Approved — skill is now reviewable for activation.');
           }}
         />
       )}

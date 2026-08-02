@@ -197,3 +197,114 @@ describe('SkillsPage activation panel (Lot 2b)', () => {
     });
   });
 });
+
+describe('SkillsPage Lot 3b — trust badges and review indicators', () => {
+  function makeSkill(overrides: object = {}) {
+    return {
+      name: 'my-skill',
+      version: '1.0.0',
+      displayName: null,
+      description: null,
+      sourceKind: 'dir',
+      sourceRef: null,
+      trust: 'local',
+      requires: { plugins: [], capabilities: [] },
+      assetsPresent: false,
+      triggers: [],
+      checksum: null,
+      installedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      lastError: null,
+      reviewed: false,
+      reviewRequired: false,
+      pluginStatus: [],
+      warnings: [],
+      ...overrides,
+    };
+  }
+
+  it('shows VÉRIFIÉ badge for first-party trust', async () => {
+    const { api } = await import('../api/client');
+    (api.listSkills as ReturnType<typeof vi.fn>).mockResolvedValue({
+      skills: [makeSkill({ trust: 'first-party' })],
+    });
+    render(<SkillsPage open onClose={() => undefined} />);
+    await vi.waitFor(() => {
+      expect(screen.queryAllByText('VÉRIFIÉ').length).toBeGreaterThan(0);
+    });
+  });
+
+  it('shows VÉRIFIÉ badge for verified trust', async () => {
+    const { api } = await import('../api/client');
+    (api.listSkills as ReturnType<typeof vi.fn>).mockResolvedValue({
+      skills: [makeSkill({ trust: 'verified' })],
+    });
+    render(<SkillsPage open onClose={() => undefined} />);
+    await vi.waitFor(() => {
+      expect(screen.queryAllByText('VÉRIFIÉ').length).toBeGreaterThan(0);
+    });
+  });
+
+  it('shows REVIEW REQ badge when reviewRequired=true', async () => {
+    const { api } = await import('../api/client');
+    (api.listSkills as ReturnType<typeof vi.fn>).mockResolvedValue({
+      skills: [makeSkill({ reviewRequired: true, assetsPresent: true })],
+    });
+    render(<SkillsPage open onClose={() => undefined} />);
+    await vi.waitFor(() => {
+      expect(screen.queryByText('REVIEW REQ')).toBeTruthy();
+    });
+  });
+
+  it('shows warnings section when warnings are present', async () => {
+    const { api } = await import('../api/client');
+    (api.listSkills as ReturnType<typeof vi.fn>).mockResolvedValue({
+      skills: [makeSkill({ warnings: ['plugin foo is missing'] })],
+    });
+    render(<SkillsPage open onClose={() => undefined} />);
+    await vi.waitFor(() => {
+      expect(screen.queryByText('WARNINGS')).toBeTruthy();
+      expect(screen.queryByText('plugin foo is missing')).toBeTruthy();
+    });
+  });
+
+  it('shows REVIEW button when assetsPresent=true', async () => {
+    const { api } = await import('../api/client');
+    (api.listSkills as ReturnType<typeof vi.fn>).mockResolvedValue({
+      skills: [makeSkill({ assetsPresent: true })],
+    });
+    render(<SkillsPage open onClose={() => undefined} />);
+    await vi.waitFor(() => {
+      expect(screen.queryByText('REVIEW')).toBeTruthy();
+    });
+  });
+
+  it('shows review status "required — not yet approved" when reviewRequired and not reviewed', async () => {
+    const { api } = await import('../api/client');
+    (api.listSkills as ReturnType<typeof vi.fn>).mockResolvedValue({
+      skills: [makeSkill({ reviewRequired: true, reviewed: false, assetsPresent: true })],
+    });
+    render(<SkillsPage open onClose={() => undefined} />);
+    await vi.waitFor(() => {
+      expect(screen.queryByText(/required — not yet approved/)).toBeTruthy();
+    });
+  });
+
+  it('shows plugin status with OK when plugin installed and enabled', async () => {
+    const { api } = await import('../api/client');
+    (api.listSkills as ReturnType<typeof vi.fn>).mockResolvedValue({
+      skills: [
+        makeSkill({
+          requires: { plugins: ['my-plugin'], capabilities: [] },
+          pluginStatus: [{ name: 'my-plugin', installed: true, enabled: true }],
+        }),
+      ],
+    });
+    render(<SkillsPage open onClose={() => undefined} />);
+    await vi.waitFor(() => {
+      expect(screen.queryByText('REQUIRES')).toBeTruthy();
+      expect(screen.queryByText('OK')).toBeTruthy();
+      expect(screen.queryByText('my-plugin (plugin)')).toBeTruthy();
+    });
+  });
+});

@@ -302,6 +302,7 @@ export default function SpawnWorkerDialog({ open, team, roles, onClose, onSpawn 
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
                 {availableSkills.map((s) => {
                   const active = selectedSkills.includes(s.name);
+                  const needsReview = s.reviewRequired && !s.reviewed;
                   return (
                     <button
                       key={s.name}
@@ -309,24 +310,35 @@ export default function SpawnWorkerDialog({ open, team, roles, onClose, onSpawn 
                       className="tag-pill"
                       style={{
                         cursor: 'pointer',
-                        color: active ? 'var(--amber)' : 'var(--text-dim)',
-                        borderColor: active ? 'var(--amber)' : 'var(--border)',
+                        color: active
+                          ? 'var(--amber)'
+                          : needsReview
+                          ? 'var(--bad)'
+                          : 'var(--text-dim)',
+                        borderColor: active
+                          ? 'var(--amber)'
+                          : needsReview
+                          ? 'var(--bad)'
+                          : 'var(--border)',
                         background: active ? 'rgba(255,180,0,0.08)' : 'transparent',
                         padding: '2px 8px',
+                        opacity: needsReview && !active ? 0.75 : 1,
                       }}
                       onClick={() =>
                         setSelectedSkills((prev) =>
                           prev.includes(s.name) ? prev.filter((n) => n !== s.name) : [...prev, s.name],
                         )
                       }
+                      title={needsReview ? `${s.displayName ?? s.name} — review required; assets staged only after approval` : undefined}
                     >
-                      {active ? '✓ ' : ''}{s.displayName ?? s.name}
+                      {active ? '✓ ' : ''}{s.displayName ?? s.name}{needsReview ? ' ⚠' : ''}
                     </button>
                   );
                 })}
               </div>
               <div className="field-help">
-                selected skills are injected into the worker&apos;s preamble at session scope — lost on /clear
+                selected skills are injected into the worker&apos;s preamble at session scope — lost on /clear.
+                Skills marked ⚠ require review; their executable assets are not staged until approved.
               </div>
             </div>
           )}

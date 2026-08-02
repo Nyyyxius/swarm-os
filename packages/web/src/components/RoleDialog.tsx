@@ -441,6 +441,7 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
               <div className="flex flex-wrap gap-2">
                 {availableSkills.map((s) => {
                   const active = selectedSkills.includes(s.name);
+                  const needsReview = s.reviewRequired && !s.reviewed;
                   return (
                     <button
                       key={s.name}
@@ -449,6 +450,8 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
                       style={
                         active
                           ? { borderColor: 'var(--amber, #f59e0b)', color: 'var(--amber, #f59e0b)', background: 'rgba(245,158,11,0.08)' }
+                          : needsReview
+                          ? { borderColor: 'var(--bad, #e0654a)', color: 'var(--bad, #e0654a)', background: 'transparent', opacity: 0.75 }
                           : { borderColor: '#475569', color: '#94a3b8', background: 'transparent' }
                       }
                       onClick={() => {
@@ -456,10 +459,15 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
                           active ? prev.filter((n) => n !== s.name) : [...prev, s.name],
                         );
                       }}
-                      title={s.description ?? s.name}
+                      title={
+                        needsReview
+                          ? `${s.description ?? s.name} — review required before assets are staged`
+                          : (s.description ?? s.name)
+                      }
                     >
                       {s.displayName ?? s.name}
                       {active ? ' ✓' : ''}
+                      {needsReview ? ' ⚠' : ''}
                     </button>
                   );
                 })}
@@ -467,6 +475,7 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
               <p className="mt-1 text-[11px] text-slate-400">
                 Activated skills inject instructions into agent preambles (mode: inject).
                 Hot activation is immediate but <em>lost on /clear</em> — guaranteed at next spawn/resume.
+                Skills marked ⚠ require review before their executable assets are staged at spawn.
               </p>
             </div>
           )}

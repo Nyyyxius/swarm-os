@@ -237,6 +237,40 @@ export interface SkillView {
   lastError: string | null;
   /** Commit SHA or tag captured at import time (Lot 2b). Optional on older servers. */
   sourceCommit?: string | null;
+  /** Lot 3b — operator has explicitly reviewed this skill's assets. */
+  reviewed?: boolean;
+  /** Lot 3b — activation is gated until reviewed (risqué + community/local). */
+  reviewRequired?: boolean;
+  /** Lot 3b — live install status for each plugin listed in requires.plugins. */
+  pluginStatus?: Array<{ name: string; installed: boolean; enabled: boolean }>;
+  /** Lot 3b — non-fatal warnings (missing plugin, review required, …). */
+  warnings?: string[];
+}
+
+/** Lot 3b — full review information returned by GET /skills/:name/review and in 409 bodies. */
+export interface SkillReviewInfo {
+  name: string;
+  version: string;
+  trust: string;
+  checksum: string | null;
+  reviewed: boolean;
+  reviewRequired: boolean;
+  requires: { plugins: string[]; capabilities: string[] };
+  pluginStatus: Array<{ name: string; installed: boolean; enabled: boolean }>;
+  warnings: string[];
+  assets: Array<{ path: string; size: number; executable: boolean; isText: boolean }>;
+}
+
+/** Lot 3b — content of a single asset file fetched via GET /skills/:name/asset?path=. */
+export interface SkillAssetContent {
+  path: string;
+  size: number;
+  executable: boolean;
+  isText: boolean;
+  /** UTF-8 text content, capped at 256 KiB. Empty if binary. */
+  content: string;
+  truncated: boolean;
+  binary: boolean;
 }
 
 /** Body of `POST /skills/install` (dir source only at MVP). */
@@ -245,6 +279,12 @@ export type SkillInstallInput = { source: 'dir'; dir: string };
 /** Response shape for install / upload / upgrade. */
 export interface SkillInstallResult {
   skill: SkillView;
+  /** Lot 3b — only present on upgrade responses. */
+  drift?: {
+    checksumChanged: boolean;
+    previousChecksum: string | null;
+    previousBody: string | null;
+  };
 }
 
 /** One scope-level activation row returned by GET /skills/:name/activations (Lot 2b). */
@@ -260,6 +300,8 @@ export interface SkillActivateBody {
   scope?: 'role' | 'orch' | 'session';
   orchestratorId: string;
   sessionId?: string;
+  /** Lot 3b — pass true to register a review and activate in one call (409 gate bypass). */
+  reviewed?: boolean;
 }
 
 /** Response of POST /skills/:name/activate|deactivate (Lot 2b). */
@@ -1260,6 +1302,13 @@ export const api = {
     request<SkillActivateResult>('POST', `/skills/${name}/deactivate`, body),
   getSkillActivations: (name: string) =>
     request<{ activations: SkillScopeActivation[] }>('GET', `/skills/${name}/activations`),
+  // Lot 3b — review endpoints
+  getSkillReview: (name: string) =>
+    request<{ review: SkillReviewInfo }>('GET', `/skills/${name}/review`),
+  postSkillReview: (name: string, reviewed: boolean) =>
+    request<{ name: string; reviewed: boolean }>('POST', `/skills/${name}/review`, { reviewed }),
+  getSkillAsset: (name: string, path: string) =>
+    request<{ asset: SkillAssetContent }>('GET', `/skills/${name}/asset?path=${encodeURIComponent(path)}`),
   // ---- Connector types -------------------------------------------------------
   /** J4 — connector types available for role connectors (built-in + plugins). */
   listConnectorTypes: () =>
