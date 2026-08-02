@@ -63,6 +63,9 @@ interface Props {
   /** Open the approval-gate queue + history overlay (`#/approvals`). Optional for
    *  backward compatibility with existing call sites. */
   onOpenApprovals?: () => void;
+  /** Open the code knowledge graph overlay (`#/graph`). Optional for
+   *  backward compatibility with existing call sites. */
+  onOpenGraph?: () => void;
   onOpenPlugins: () => void;
   /** Open the VS Code web IDE on the deployment workspace (fullscreen overlay). */
   onOpenIde: () => void;
@@ -75,7 +78,7 @@ const EMPTY_FLASH_SET: ReadonlySet<string> = new Set();
 
 export default function TopBar({
   teams, selectedTeamId, flashTeamIds, totalAgents, info,
-  onSelectTeam, onNewTeam, onOpenRoles, onOpenMemory, onOpenBoard, onOpenApprovals, onOpenPlugins, onOpenIde, onOpenSettings,
+  onSelectTeam, onNewTeam, onOpenRoles, onOpenMemory, onOpenBoard, onOpenApprovals, onOpenGraph, onOpenPlugins, onOpenIde, onOpenSettings,
   onOpenUpdates,
 }: Props) {
   const flashSet = flashTeamIds ?? EMPTY_FLASH_SET;
@@ -183,6 +186,9 @@ export default function TopBar({
         </button>
         <button className="tb-action" onClick={() => onOpenApprovals?.()} title="approval-gate queue and history">
           {ICON.shield}<span className="label">APPROVALS</span>
+        </button>
+        <button className="tb-action" onClick={() => onOpenGraph?.()} title="code knowledge graph">
+          {ICON.graph}<span className="label">CODE GRAPH</span>
         </button>
         <button className="tb-action" onClick={onOpenPlugins} title="manage plugins">
           {ICON.link}<span className="label">PLUGINS</span>

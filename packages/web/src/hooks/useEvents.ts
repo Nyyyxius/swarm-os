@@ -160,6 +160,22 @@ export interface BoardEvent {
   payload?: Record<string, unknown>;
 }
 
+/**
+ * Normalized `code.graph.*` frame — any event emitted by the GraphStore.
+ * Covers `code.graph.indexed`, `code.graph.scope_enabled`,
+ * `code.graph.scope_disabled`. The web CodeGraphPage only needs to know
+ * *something* changed; it re-fetches via REST rather than patching local state.
+ */
+export interface CodegraphEvent {
+  kind:
+    | 'code.graph.indexed'
+    | 'code.graph.scope_enabled'
+    | 'code.graph.scope_disabled'
+    | string;
+  ts: string;
+  payload?: { scopeId?: string; [k: string]: unknown };
+}
+
 export interface UseEventsOptions {
   /** Callback fired on every well-formed mailbox.message frame. */
   onMailboxMessage?: (ev: MailboxMessageEvent) => void;
@@ -177,6 +193,8 @@ export interface UseEventsOptions {
   onApprovalRequested?: (ev: ApprovalEvent) => void;
   /** Callback fired on every approval.resolved frame (P3 approval gate). */
   onApprovalResolved?: (ev: ApprovalEvent) => void;
+  /** Callback fired on every code.graph.* frame (Graphify P4). */
+  onGraphEvent?: (ev: CodegraphEvent) => void;
 }
 
 const AUTO_DISMISS_MS = 30_000;
@@ -207,6 +225,7 @@ export function useEvents(opts: UseEventsOptions = {}): {
   const onBoardRef = useRef<UseEventsOptions['onBoardEvent']>(opts.onBoardEvent);
   const onApprReqRef = useRef<UseEventsOptions['onApprovalRequested']>(opts.onApprovalRequested);
   const onApprResRef = useRef<UseEventsOptions['onApprovalResolved']>(opts.onApprovalResolved);
+  const onGraphRef = useRef<UseEventsOptions['onGraphEvent']>(opts.onGraphEvent);
   useEffect(() => { onMailRef.current = opts.onMailboxMessage; }, [opts.onMailboxMessage]);
   useEffect(() => { onCreatedRef.current = opts.onSessionCreated; }, [opts.onSessionCreated]);
   useEffect(() => { onOrchCreatedRef.current = opts.onOrchestratorCreated; }, [opts.onOrchestratorCreated]);
@@ -215,6 +234,7 @@ export function useEvents(opts: UseEventsOptions = {}): {
   useEffect(() => { onBoardRef.current = opts.onBoardEvent; }, [opts.onBoardEvent]);
   useEffect(() => { onApprReqRef.current = opts.onApprovalRequested; }, [opts.onApprovalRequested]);
   useEffect(() => { onApprResRef.current = opts.onApprovalResolved; }, [opts.onApprovalResolved]);
+  useEffect(() => { onGraphRef.current = opts.onGraphEvent; }, [opts.onGraphEvent]);
 
   const cancelTimer = (id: string): void => {
     const t = timersRef.current.get(id);
@@ -385,6 +405,17 @@ export function useEvents(opts: UseEventsOptions = {}): {
                     kind: ev.kind,
                     ts: ev.ts,
                     payload: ev.payload as Record<string, unknown> | undefined,
+                  });
+                }
+
+                // Code graph — code.graph.* frames (indexed, scope_enabled,
+                // scope_disabled) drive a live refresh of CodeGraphPage.
+                if (ev.kind.startsWith('code.graph.')) {
+                  const p = ev.payload as { scopeId?: string } | undefined;
+                  onGraphRef.current?.({
+                    kind: ev.kind,
+                    ts: ev.ts,
+                    payload: p,
                   });
                 }
 

@@ -1545,6 +1545,84 @@ export const api = {
       `/api/approvals/${encodeURIComponent(id)}/resolve`,
       body,
     ),
+
+  // ---- Code graph / Graphify (P4 web surface) -----------------------------
+  // Backed by GET /api/codegraph (P3 REST, http/routes/codegraph.ts).
+  // Feature-detect: a 404 on listCodegraphScopes means the backend predates
+  // this surface; the page shows a graceful empty state.
+
+  listCodegraphScopes: () =>
+    request<{ scopes: CodegraphScope[] }>('GET', '/api/codegraph'),
+
+  getCodegraphGraph: (scopeId: string) =>
+    request<CodegraphGraph>('GET', `/api/codegraph/${encodeURIComponent(scopeId)}/graph`),
+
+  searchCodegraph: (scopeId: string, q: string, limit?: number) => {
+    const qs = new URLSearchParams({ q });
+    if (limit != null) qs.set('limit', String(limit));
+    return request<CodegraphSearchResponse>(
+      'GET',
+      `/api/codegraph/${encodeURIComponent(scopeId)}/search?${qs.toString()}`,
+    );
+  },
 };
+
+// ── Codegraph DTOs (P4) ────────────────────────────────────────────────────
+// Hand-maintained mirror of the server's codegraph types. Field names are
+// wire-contractual; do NOT rename them.
+
+/** One scope from `GET /api/codegraph`. */
+export interface CodegraphScope {
+  id: string;
+  kind: string;
+  path: string;
+  enabled: boolean;
+  status: string;
+  nodeCount: number;
+  edgeCount: number;
+  lastIndexedAt: string | null;
+  lastError: string | null;
+}
+
+/** A node in the NetworkX node-link `graph.json`. */
+export interface CodegraphNode {
+  id: string;
+  label?: string | null;
+  source_file?: string | null;
+  source_location?: string | null;
+  file_type?: string | null;
+  community_name?: string | null;
+  norm_label?: string | null;
+}
+
+/** A link in the NetworkX node-link `graph.json`. */
+export interface CodegraphLink {
+  source: string;
+  target: string;
+  relation?: string | null;
+  source_file?: string | null;
+  source_location?: string | null;
+  weight?: number;
+}
+
+/** Full graph from `GET /api/codegraph/:scopeId/graph`. */
+export interface CodegraphGraph {
+  nodes: CodegraphNode[];
+  links: CodegraphLink[];
+}
+
+/** One ranked hit from `GET /api/codegraph/:scopeId/search`. */
+export interface CodegraphHit {
+  id: string;
+  label: string;
+  file: string | null;
+  line: number | null;
+  fileType: string | null;
+  community: string | null;
+}
+
+export type CodegraphSearchResponse =
+  | { ok: true; scope: string; results: CodegraphHit[] }
+  | { ok: false; reason: string };
 
 export { HttpError };

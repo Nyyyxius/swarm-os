@@ -208,3 +208,43 @@ describe('approval-gate endpoints (P3)', () => {
     expect(JSON.parse(String(last.init?.body))).toEqual({ decision: 'deny' });
   });
 });
+
+describe('codegraph endpoints (P4)', () => {
+  it('lists scopes under /api/codegraph (authed)', async () => {
+    setToken('cg-token');
+    await api.listCodegraphScopes();
+    const last = calls[calls.length - 1]!;
+    expect(last.url).toBe('/api/codegraph');
+    const headers = (last.init?.headers as Record<string, string>) ?? {};
+    expect(headers['X-Auth-Token']).toBe('cg-token');
+  });
+
+  it('fetches the graph under /api/codegraph/:scopeId/graph', async () => {
+    setToken('t');
+    await api.getCodegraphGraph('scope-1');
+    expect(calls[calls.length - 1]!.url).toBe('/api/codegraph/scope-1/graph');
+  });
+
+  it('encodes the scope id in the graph path', async () => {
+    setToken('t');
+    await api.getCodegraphGraph('scope/with spaces');
+    expect(calls[calls.length - 1]!.url).toBe('/api/codegraph/scope%2Fwith%20spaces/graph');
+  });
+
+  it('builds the search query string with q and limit', async () => {
+    setToken('t');
+    await api.searchCodegraph('scope-1', 'greet', 10);
+    const url = calls[calls.length - 1]!.url;
+    expect(url).toContain('/api/codegraph/scope-1/search?');
+    expect(url).toContain('q=greet');
+    expect(url).toContain('limit=10');
+  });
+
+  it('omits limit from the query string when not provided', async () => {
+    setToken('t');
+    await api.searchCodegraph('scope-1', 'greet');
+    const url = calls[calls.length - 1]!.url;
+    expect(url).toContain('q=greet');
+    expect(url).not.toContain('limit=');
+  });
+});

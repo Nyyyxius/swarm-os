@@ -77,6 +77,8 @@ export interface SwarmControllerProps {
   onOpenBoard?: () => void;
   /** TopBar APPROVALS → route `#/approvals`. */
   onOpenApprovals?: () => void;
+  /** TopBar CODE GRAPH → route `#/graph`. */
+  onOpenGraph?: () => void;
   /** TopBar/Dock PLUGINS → route `#/plugins`. */
   onOpenPlugins?: () => void;
   /** TopBar/Dock IDE → route `#/ide`. */
@@ -158,6 +160,9 @@ export interface SwarmControllerValue {
   /** Revision counter bumped on each approval.* WS event (live approvals refresh). */
   approvalsRev: number;
   onOpenApprovals: () => void;
+  /** Revision counter bumped on each code.graph.* WS event (live graph refresh). */
+  graphRev: number;
+  onOpenGraph: () => void;
   // shell-mode override (escape hatch from auto breakpoint)
   shellMode: ShellMode;
   setShellMode: (m: ShellMode) => void;
@@ -217,6 +222,7 @@ export function SwarmControllerProvider({
   onOpenMemory,
   onOpenBoard,
   onOpenApprovals,
+  onOpenGraph,
   onOpenPlugins,
   onOpenIde,
   onOpenPanel,
@@ -494,6 +500,13 @@ export function SwarmControllerProvider({
     setApprovalsRev((v) => v + 1);
   }, []);
 
+  // Code graph — bump a revision on each code.graph.* frame so CodeGraphPage
+  // (via useCodeGraph) re-fetches live on top of its poll.
+  const [graphRev, setGraphRev] = useState(0);
+  const handleGraphEvent = useCallback(() => {
+    setGraphRev((v) => v + 1);
+  }, []);
+
   // ── THE single useEvents() — waiting + connected + pulses pipeline ─────
   const {
     connected: eventsConnected,
@@ -510,6 +523,7 @@ export function SwarmControllerProvider({
     onBoardEvent: handleBoardEvent,
     onApprovalRequested: handleApprovalEvent,
     onApprovalResolved: handleApprovalEvent,
+    onGraphEvent: handleGraphEvent,
   });
 
   useEffect(() => {
@@ -929,6 +943,7 @@ export function SwarmControllerProvider({
   const onOpenMemoryResolved = useCallback(() => { onOpenMemory?.(); }, [onOpenMemory]);
   const onOpenBoardResolved = useCallback(() => { onOpenBoard?.(); }, [onOpenBoard]);
   const onOpenApprovalsResolved = useCallback(() => { onOpenApprovals?.(); }, [onOpenApprovals]);
+  const onOpenGraphResolved = useCallback(() => { onOpenGraph?.(); }, [onOpenGraph]);
   const onOpenPluginsResolved = useCallback(() => { onOpenPlugins?.(); }, [onOpenPlugins]);
   const onOpenIdeResolved = useCallback(() => { onOpenIde?.(); }, [onOpenIde]);
   const onOpenPanelResolved = useCallback(
@@ -978,6 +993,8 @@ export function SwarmControllerProvider({
     onOpenBoard: onOpenBoardResolved,
     approvalsRev,
     onOpenApprovals: onOpenApprovalsResolved,
+    graphRev,
+    onOpenGraph: onOpenGraphResolved,
     onOpenPlugins: onOpenPluginsResolved,
     onOpenIde: onOpenIdeResolved,
     onOpenPanel: onOpenPanelResolved,
