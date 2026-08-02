@@ -168,7 +168,7 @@ interface RenderOpts {
 
 function renderDialog(opts: RenderOpts = {}) {
   const onClose = opts.onClose ?? (() => undefined);
-  const onSpawn: Mock = opts.onSpawn ?? vi.fn().mockResolvedValue(undefined);
+  const onSpawn: Mock = opts.onSpawn ?? vi.fn().mockResolvedValue({ sessionId: 'mock-session-id' });
   const props = {
     open: opts.open ?? true,
     team: opts.team === undefined ? mkOrch() : opts.team,
@@ -177,7 +177,7 @@ function renderDialog(opts: RenderOpts = {}) {
     onSpawn: onSpawn as unknown as (
       orchestratorId: string,
       body: { prompt: string },
-    ) => Promise<void>,
+    ) => Promise<{ sessionId: string }>,
   };
   const utils = render(<SpawnWorkerDialog {...props} />);
   return { ...utils, onClose, onSpawn, props };
@@ -489,7 +489,7 @@ describe('SpawnWorkerDialog — server errors are legible', () => {
           code: 'MAX_WORKERS_PER_ORCH',
         }),
       )
-      .mockResolvedValueOnce(undefined);
+      .mockResolvedValueOnce({ sessionId: 'mock-session-id' });
     const onClose = vi.fn();
     renderDialog({ onSpawn, onClose });
     fillRequired();

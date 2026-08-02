@@ -35,7 +35,7 @@
 // explanation.
 
 import { useEffect, useMemo, useState } from 'react';
-import { apiErrorMessage, type OrchestratorView, type RoleView } from '../../api/client';
+import { api, apiErrorMessage, type OrchestratorView, type RoleView, type SkillView } from '../../api/client';
 import { useProviders } from '../../hooks/useProviders';
 import {
   ModelSelect,
@@ -68,7 +68,7 @@ interface Props {
       provider?: string;
       model?: string;
     },
-  ) => Promise<void>;
+  ) => Promise<{ sessionId: string }>;
 }
 
 export default function SpawnWorkerDialog({ open, team, roles, onClose, onSpawn }: Props) {
@@ -87,6 +87,8 @@ export default function SpawnWorkerDialog({ open, team, roles, onClose, onSpawn 
   const [model, setModel] = useState<string>('');
   const [submitting, setSubmitting] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [availableSkills, setAvailableSkills] = useState<SkillView[]>([]);
+  const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
 
   // Reset chaque (ré)ouverture — pas de persistance entre ouvertures
   // (parité proto, cf. spec §11 note 7). A worker inherits the team's
@@ -102,6 +104,8 @@ export default function SpawnWorkerDialog({ open, team, roles, onClose, onSpawn 
       setRoleId(workerRoles[0]?.id ?? '');
       setProvider(team?.defaultProvider ?? '');
       setModel(team?.defaultModel ?? '');
+      setSelectedSkills([]);
+      api.listSkills().then((r) => setAvailableSkills(r.skills)).catch(() => undefined);
     }
   }, [open, workerRoles, team?.defaultProvider, team?.defaultModel]);
 
@@ -140,7 +144,7 @@ export default function SpawnWorkerDialog({ open, team, roles, onClose, onSpawn 
     setError(null);
     setSubmitting(true);
     try {
-      await onSpawn(team.id, {
+      const { sessionId } = await onSpawn(team.id, {
         name: name.trim(),
         ...(role ? { role: role.label } : {}),
         prompt: prompt.trim(),
@@ -151,6 +155,19 @@ export default function SpawnWorkerDialog({ open, team, roles, onClose, onSpawn 
         ...(provider ? { provider } : {}),
         ...(model ? { model } : {}),
       });
+      // Activate selected skills at session scope post-spawn (best-effort — spawn
+      // already succeeded, so we don't fail the whole operation on a skill error).
+      if (selectedSkills.length > 0) {
+        await Promise.allSettled(
+          selectedSkills.map((skillName) =>
+            api.activateSkill(skillName, {
+              scope: 'session',
+              orchestratorId: team.id,
+              sessionId,
+            }),
+          ),
+        );
+      }
       onClose();
     } catch (err) {
       // `HttpError.message` alone reads "HTTP 429 POST /orchestrators/…/workers",
@@ -273,6 +290,44 @@ export default function SpawnWorkerDialog({ open, team, roles, onClose, onSpawn 
           {unavailableNote(selected, transport) && (
             <div className="field-warn">
               ⚠ {unavailableNote(selected, transport)}
+            </div>
+          )}
+
+          {availableSkills.length > 0 && (
+            <div className="field">
+              <label>
+                SKILLS{' '}
+                <span style={{ color: 'var(--text-mute)' }}>{'// optional — activated at session scope post-spawn'}</span>
+              </label>
+              <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginTop: 4 }}>
+                {availableSkills.map((s) => {
+                  const active = selectedSkills.includes(s.name);
+                  return (
+                    <button
+                      key={s.name}
+                      type="button"
+                      className="tag-pill"
+                      style={{
+                        cursor: 'pointer',
+                        color: active ? 'var(--amber)' : 'var(--text-dim)',
+                        borderColor: active ? 'var(--amber)' : 'var(--border)',
+                        background: active ? 'rgba(255,180,0,0.08)' : 'transparent',
+                        padding: '2px 8px',
+                      }}
+                      onClick={() =>
+                        setSelectedSkills((prev) =>
+                          prev.includes(s.name) ? prev.filter((n) => n !== s.name) : [...prev, s.name],
+                        )
+                      }
+                    >
+                      {active ? '✓ ' : ''}{s.displayName ?? s.name}
+                    </button>
+                  );
+                })}
+              </div>
+              <div className="field-help">
+                selected skills are injected into the worker&apos;s preamble at session scope — lost on /clear
+              </div>
             </div>
           )}
 

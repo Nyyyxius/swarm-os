@@ -1,15 +1,9 @@
-import { useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useState } from 'react';
 import { useSkills } from '../hooks/useSkills';
 import { useShellMode } from '../hooks/useShellMode';
-import { api, HttpError, type SkillView } from '../api/client';
+import { useSwarmController } from '../controller/SwarmController';
+import { api, HttpError, type SkillScopeActivation, type SkillView } from '../api/client';
 import { SkillImportModal } from './skills/SkillImportModal';
-
-/**
- * Skills management overlay — modeled on PluginsPage / MemoryPage.
- * Lists installed skills (name, version, source, trust, assets, date),
- * with actions: import, upgrade, view body (SKILL.md), and delete.
- * Surfacing the /clear limit as required by plan §2.3.
- */
 
 interface Props {
   open: boolean;
@@ -50,18 +44,69 @@ function fmtDate(iso: string): string {
   }
 }
 
+/** Simple LCS-based line diff. Returns annotated lines. Capped at 400 lines each. */
+function lineDiff(
+  oldText: string,
+  newText: string,
+): Array<{ kind: '=' | '+' | '-'; line: string }> {
+  const a = oldText.split('\n').slice(0, 400);
+  const b = newText.split('\n').slice(0, 400);
+  const m = a.length, n = b.length;
+  // Flat row-major DP table avoids nested optional-access warnings.
+  const dp = new Int32Array((m + 1) * (n + 1));
+  const idx = (r: number, c: number) => r * (n + 1) + c;
+  for (let i = 1; i <= m; i++) {
+    for (let j = 1; j <= n; j++) {
+      const ai = a[i - 1] ?? '';
+      const bj = b[j - 1] ?? '';
+      dp[idx(i, j)] =
+        ai === bj
+          ? (dp[idx(i - 1, j - 1)] ?? 0) + 1
+          : Math.max(dp[idx(i - 1, j)] ?? 0, dp[idx(i, j - 1)] ?? 0);
+    }
+  }
+  const result: Array<{ kind: '=' | '+' | '-'; line: string }> = [];
+  let i = m, j = n;
+  while (i > 0 || j > 0) {
+    const ai = a[i - 1] ?? '';
+    const bj = b[j - 1] ?? '';
+    if (i > 0 && j > 0 && ai === bj) {
+      result.unshift({ kind: '=', line: ai });
+      i--; j--;
+    } else if (j > 0 && (i === 0 || (dp[idx(i, j - 1)] ?? 0) >= (dp[idx(i - 1, j)] ?? 0))) {
+      result.unshift({ kind: '+', line: bj });
+      j--;
+    } else {
+      result.unshift({ kind: '-', line: ai });
+      i--;
+    }
+  }
+  return result;
+}
+
 export function SkillsPage({ open, onClose }: Props) {
   const { skills, loading, error, install, upload, upgrade, remove } = useSkills();
   const { isMobile } = useShellMode();
+  const c = useSwarmController();
 
   const [selectedName, setSelectedName] = useState<string | null>(null);
   const [mobileView, setMobileView] = useState<'list' | 'detail'>('list');
   const [opError, setOpError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
   const [importOpen, setImportOpen] = useState(false);
-  // Body viewer state: null = closed, string = showing body text
   const [viewBody, setViewBody] = useState<string | null>(null);
   const [bodyLoading, setBodyLoading] = useState(false);
+
+  // Upgrade diff state
+  const [diffLines, setDiffLines] = useState<Array<{ kind: '=' | '+' | '-'; line: string }> | null>(null);
+  const [upgrading, setUpgrading] = useState(false);
+
+  // Activations state
+  const [activations, setActivations] = useState<SkillScopeActivation[]>([]);
+  const [activationsLoading, setActivationsLoading] = useState(false);
+  const [activateOrchId, setActivateOrchId] = useState<string>('');
+  const [activationBusy, setActivationBusy] = useState(false);
+  const [activationMsg, setActivationMsg] = useState<string | null>(null);
 
   useEffect(() => {
     if (open) setMobileView('list');
@@ -82,10 +127,40 @@ export function SkillsPage({ open, onClose }: Props) {
     [skills, selectedName],
   );
 
+  const loadActivations = useCallback(async (name: string) => {
+    setActivationsLoading(true);
+    try {
+      const r = await api.getSkillActivations(name);
+      setActivations(r.activations);
+    } catch {
+      setActivations([]);
+    } finally {
+      setActivationsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (selectedName) {
+      void loadActivations(selectedName);
+    } else {
+      setActivations([]);
+    }
+  }, [selectedName, loadActivations]);
+
+  // Default the activate orch dropdown to the first running orchestrator
+  useEffect(() => {
+    const running = c.orchestrators.filter((o) => o.status === 'running');
+    if (running.length > 0 && !activateOrchId) {
+      setActivateOrchId(running[0]!.id);
+    }
+  }, [c.orchestrators, activateOrchId]);
+
   function trySelect(name: string): void {
     setSelectedName(name);
     setOpError(null);
     setViewBody(null);
+    setDiffLines(null);
+    setActivationMsg(null);
     if (isMobile) setMobileView('detail');
   }
 
@@ -104,13 +179,35 @@ export function SkillsPage({ open, onClose }: Props) {
 
   async function doUpgrade(s: SkillView): Promise<void> {
     setOpError(null);
+    setDiffLines(null);
+    setUpgrading(true);
     setBusy(true);
+    // Fetch old body for diff
+    let oldBody: string | null = null;
+    try {
+      const r = await api.getSkill(s.name);
+      oldBody = r.body;
+    } catch {
+      // proceed without diff if fetch fails
+    }
     try {
       await upgrade(s.name);
+      // Fetch new body for diff display
+      if (oldBody !== null) {
+        try {
+          const r = await api.getSkill(s.name);
+          const newBody = r.body;
+          setDiffLines(lineDiff(oldBody, newBody));
+          setViewBody(newBody);
+        } catch {
+          // diff unavailable; still show upgrade succeeded
+        }
+      }
     } catch (e) {
       setOpError(messageOf(e));
     } finally {
       setBusy(false);
+      setUpgrading(false);
     }
   }
 
@@ -128,12 +225,61 @@ export function SkillsPage({ open, onClose }: Props) {
       await remove(s.name);
       setSelectedName(null);
       setViewBody(null);
+      setDiffLines(null);
     } catch (e) {
       setOpError(messageOf(e));
     } finally {
       setBusy(false);
     }
   }
+
+  async function doActivate(s: SkillView): Promise<void> {
+    if (!activateOrchId) return;
+    setActivationBusy(true);
+    setActivationMsg(null);
+    try {
+      const r = await api.activateSkill(s.name, { scope: 'orch', orchestratorId: activateOrchId });
+      setActivationMsg(
+        r.injected
+          ? `Activated — injected into ${r.injected ? 'live sessions' : 'no sessions'}.`
+          : 'Persisted — will apply at next spawn/resume.',
+      );
+      await loadActivations(s.name);
+    } catch (e) {
+      setActivationMsg(`Error: ${messageOf(e)}`);
+    } finally {
+      setActivationBusy(false);
+    }
+  }
+
+  async function doDeactivate(s: SkillView, act: SkillScopeActivation): Promise<void> {
+    setActivationBusy(true);
+    setActivationMsg(null);
+    try {
+      await api.deactivateSkill(s.name, {
+        scope: act.scope,
+        orchestratorId: act.scope === 'orch' ? act.scopeId : activateOrchId,
+        ...(act.scope === 'session' ? { sessionId: act.scopeId } : {}),
+      });
+      setActivationMsg('Deactivated — override-off persisted.');
+      await loadActivations(s.name);
+    } catch (e) {
+      setActivationMsg(`Error: ${messageOf(e)}`);
+    } finally {
+      setActivationBusy(false);
+    }
+  }
+
+  // Roles that include this skill
+  const roleActivations = useMemo(() => {
+    if (!skill) return [];
+    return c.roles.filter((r) => r.skills?.some((sk) => sk.name === skill.name));
+  }, [skill, c.roles]);
+
+  const runningOrchestrators = useMemo(
+    () => c.orchestrators.filter((o) => o.status === 'running'),
+    [c.orchestrators],
+  );
 
   if (!open) return null;
 
@@ -251,6 +397,14 @@ export function SkillsPage({ open, onClose }: Props) {
                   {skill.sourceKind}
                   {skill.sourceRef ? ` — ${skill.sourceRef}` : ''}
                 </span>
+                {skill.sourceCommit && (
+                  <>
+                    <span className="k">commit</span>
+                    <span className="v" style={{ fontFamily: 'monospace', fontSize: 12 }}>
+                      {skill.sourceCommit.slice(0, 12)}
+                    </span>
+                  </>
+                )}
                 <span className="k">assets</span>
                 <span className="v">{skill.assetsPresent ? 'yes' : 'none'}</span>
                 <span className="k">installed</span>
@@ -277,9 +431,9 @@ export function SkillsPage({ open, onClose }: Props) {
                   {skill.requires.plugins.map((p) => (
                     <span key={p} className="tag-pill">{p} (plugin)</span>
                   ))}
-                  {skill.requires.capabilities.map((c) => (
-                    <span key={c} className="tag-pill" style={{ color: 'var(--amber)', borderColor: 'var(--amber)' }}>
-                      {c} (cap)
+                  {skill.requires.capabilities.map((cap) => (
+                    <span key={cap} className="tag-pill" style={{ color: 'var(--amber)', borderColor: 'var(--amber)' }}>
+                      {cap} (cap)
                     </span>
                   ))}
                 </div>
@@ -299,32 +453,196 @@ export function SkillsPage({ open, onClose }: Props) {
               </div>
             )}
 
+            {/* ── Activations panel (Lot 2b) ────────────────────────── */}
+            <div className="role-section">
+              <h3>
+                <span>ACTIVATIONS</span>
+              </h3>
+
+              {/* Role-level activations (read-only here; managed via RoleDialog) */}
+              {roleActivations.length > 0 && (
+                <div style={{ marginBottom: 10 }}>
+                  <div className="field-help" style={{ marginBottom: 4 }}>
+                    Active on roles (managed via the Roles page):
+                  </div>
+                  <div className="r-tags">
+                    {roleActivations.map((r) => (
+                      <span key={r.id} className="tag-pill" style={{ color: 'var(--ok)', borderColor: 'var(--ok)' }}>
+                        {r.label}
+                      </span>
+                    ))}
+                  </div>
+                </div>
+              )}
+
+              {/* Orch/session activations */}
+              {activationsLoading ? (
+                <div className="field-help">loading activations…</div>
+              ) : activations.length === 0 ? (
+                <div className="field-help">No orch/session activations.</div>
+              ) : (
+                <div style={{ marginBottom: 10 }}>
+                  {activations.map((act) => {
+                    const orch = c.orchestrators.find((o) => o.id === act.scopeId || act.scope === 'session');
+                    const label = act.scope === 'orch'
+                      ? (orch?.name ?? act.scopeId.slice(0, 8))
+                      : act.scopeId.slice(0, 8);
+                    const isNegative = act.enabled === 0;
+                    return (
+                      <div
+                        key={`${act.scope}:${act.scopeId}`}
+                        style={{
+                          display: 'flex',
+                          alignItems: 'center',
+                          gap: 8,
+                          marginBottom: 4,
+                          fontSize: 12,
+                        }}
+                      >
+                        <span
+                          className="tag-pill"
+                          style={{
+                            color: isNegative ? 'var(--bad)' : 'var(--ok)',
+                            borderColor: isNegative ? 'var(--bad)' : 'var(--ok)',
+                          }}
+                        >
+                          {act.scope.toUpperCase()}
+                        </span>
+                        <span style={{ color: 'var(--text-dim)', fontFamily: 'monospace' }}>{label}</span>
+                        {isNegative && (
+                          <span style={{ color: 'var(--bad)', fontSize: 11 }}>override-off</span>
+                        )}
+                        <button
+                          className="h-edit"
+                          style={{ marginLeft: 'auto', color: 'var(--bad)', fontSize: 11 }}
+                          disabled={activationBusy}
+                          onClick={() => void doDeactivate(skill, act)}
+                        >
+                          DEACTIVATE
+                        </button>
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+
+              {/* Activate for a team */}
+              {runningOrchestrators.length > 0 && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 8, flexWrap: 'wrap', marginTop: 8 }}>
+                  <select
+                    value={activateOrchId}
+                    onChange={(e) => setActivateOrchId(e.target.value)}
+                    style={{ fontSize: 12, padding: '2px 6px' }}
+                  >
+                    {runningOrchestrators.map((o) => (
+                      <option key={o.id} value={o.id}>{o.name}</option>
+                    ))}
+                  </select>
+                  <button
+                    className="btn"
+                    style={{ fontSize: 11, padding: '3px 10px', color: 'var(--ok)' }}
+                    disabled={activationBusy || !activateOrchId}
+                    onClick={() => void doActivate(skill)}
+                  >
+                    ACTIVATE FOR TEAM
+                  </button>
+                </div>
+              )}
+
+              {activationMsg && (
+                <div
+                  className="field-help"
+                  style={{
+                    marginTop: 6,
+                    color: activationMsg.startsWith('Error') ? 'var(--bad)' : 'var(--ok)',
+                  }}
+                >
+                  {activationMsg}
+                </div>
+              )}
+            </div>
+
             {/* SKILL.md body viewer */}
             {viewBody !== null && (
               <div className="role-section">
                 <h3>
                   <span>SKILL.MD BODY</span>
-                  <button className="h-edit" onClick={() => setViewBody(null)}>
+                  <button className="h-edit" onClick={() => { setViewBody(null); setDiffLines(null); }}>
                     HIDE
                   </button>
                 </h3>
-                <pre
-                  style={{
-                    background: 'var(--surface, rgba(0,0,0,0.3))',
-                    border: '1px solid var(--border)',
-                    borderRadius: 4,
-                    padding: '10px 12px',
-                    fontSize: 12,
-                    lineHeight: 1.6,
-                    overflowX: 'auto',
-                    whiteSpace: 'pre-wrap',
-                    wordBreak: 'break-word',
-                    maxHeight: 320,
-                    overflowY: 'auto',
-                  }}
-                >
-                  {viewBody}
-                </pre>
+                {/* Upgrade diff display */}
+                {diffLines !== null ? (
+                  <>
+                    <div className="field-help" style={{ marginBottom: 6 }}>
+                      Upgrade diff —{' '}
+                      <span style={{ color: 'var(--ok)' }}>
+                        +{diffLines.filter((l) => l.kind === '+').length}
+                      </span>
+                      {' / '}
+                      <span style={{ color: 'var(--bad)' }}>
+                        -{diffLines.filter((l) => l.kind === '-').length}
+                      </span>
+                    </div>
+                    <pre
+                      style={{
+                        background: 'var(--surface, rgba(0,0,0,0.3))',
+                        border: '1px solid var(--border)',
+                        borderRadius: 4,
+                        padding: '10px 12px',
+                        fontSize: 12,
+                        lineHeight: 1.6,
+                        overflowX: 'auto',
+                        whiteSpace: 'pre-wrap',
+                        wordBreak: 'break-word',
+                        maxHeight: 400,
+                        overflowY: 'auto',
+                      }}
+                    >
+                      {diffLines.map((dl, idx) => (
+                        <span
+                          key={idx}
+                          style={{
+                            display: 'block',
+                            color:
+                              dl.kind === '+'
+                                ? 'var(--ok)'
+                                : dl.kind === '-'
+                                ? 'var(--bad)'
+                                : 'var(--text-dim)',
+                            background:
+                              dl.kind === '+'
+                                ? 'rgba(80,200,80,0.06)'
+                                : dl.kind === '-'
+                                ? 'rgba(224,101,74,0.06)'
+                                : 'transparent',
+                          }}
+                        >
+                          {dl.kind === '=' ? '  ' : dl.kind === '+' ? '+ ' : '- '}
+                          {dl.line}
+                        </span>
+                      ))}
+                    </pre>
+                  </>
+                ) : (
+                  <pre
+                    style={{
+                      background: 'var(--surface, rgba(0,0,0,0.3))',
+                      border: '1px solid var(--border)',
+                      borderRadius: 4,
+                      padding: '10px 12px',
+                      fontSize: 12,
+                      lineHeight: 1.6,
+                      overflowX: 'auto',
+                      whiteSpace: 'pre-wrap',
+                      wordBreak: 'break-word',
+                      maxHeight: 320,
+                      overflowY: 'auto',
+                    }}
+                  >
+                    {viewBody}
+                  </pre>
+                )}
               </div>
             )}
 
@@ -348,7 +666,7 @@ export function SkillsPage({ open, onClose }: Props) {
                     : `Re-import from ${skill.sourceKind} source`
                 }
               >
-                UPGRADE
+                {upgrading ? 'UPGRADING…' : 'UPGRADE'}
               </button>
 
               <button className="btn danger" onClick={() => void doDelete(skill)} disabled={busy}>

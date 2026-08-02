@@ -2,12 +2,18 @@ import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
 import { render, screen } from '@testing-library/react';
 import { SkillsPage } from './SkillsPage';
 
-// SkillsPage reads from SwarmController indirectly (via useShellMode only).
+// SkillsPage reads from SwarmController.
+vi.mock('../controller/SwarmController', () => ({
+  useSwarmController: () => ({
+    orchestrators: [],
+    roles: [],
+  }),
+}));
+
 vi.mock('../hooks/useShellMode', () => ({
   useShellMode: () => ({ isMobile: false }),
 }));
 
-// Stub the api to avoid real fetch calls.
 vi.mock('../api/client', async (importOriginal) => {
   const mod = await importOriginal<typeof import('../api/client')>();
   return {
@@ -16,6 +22,7 @@ vi.mock('../api/client', async (importOriginal) => {
       ...mod.api,
       listSkills: vi.fn().mockResolvedValue({ skills: [] }),
       getSkill: vi.fn().mockResolvedValue({ skill: {}, body: '# skill body' }),
+      getSkillActivations: vi.fn().mockResolvedValue({ activations: [] }),
     },
   };
 });
@@ -61,7 +68,6 @@ describe('SkillsPage render gating', () => {
 
   it('shows empty-state message when no skills loaded', async () => {
     render(<SkillsPage open onClose={() => undefined} />);
-    // The loading state resolves to empty via the mock
     await vi.waitFor(() => {
       expect(screen.queryByText(/No skills yet/)).toBeTruthy();
     });
@@ -99,6 +105,95 @@ describe('SkillsPage activation note', () => {
     render(<SkillsPage open onClose={() => undefined} />);
     await vi.waitFor(() => {
       expect(screen.queryByText(/Activation note/)).toBeTruthy();
+    });
+  });
+});
+
+describe('SkillsPage activation panel (Lot 2b)', () => {
+  it('shows ACTIVATIONS section when skill is selected', async () => {
+    const { api } = await import('../api/client');
+    (api.listSkills as ReturnType<typeof vi.fn>).mockResolvedValue({
+      skills: [
+        {
+          name: 'my-skill',
+          version: '0.1.0',
+          displayName: null,
+          description: null,
+          sourceKind: 'dir',
+          sourceRef: null,
+          trust: 'local',
+          requires: { plugins: [], capabilities: [] },
+          assetsPresent: false,
+          triggers: [],
+          checksum: null,
+          installedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          lastError: null,
+        },
+      ],
+    });
+    render(<SkillsPage open onClose={() => undefined} />);
+    await vi.waitFor(() => {
+      expect(screen.queryByText('ACTIVATIONS')).toBeTruthy();
+    });
+  });
+
+  it('shows "No orch/session activations" when activations list is empty', async () => {
+    const { api } = await import('../api/client');
+    (api.listSkills as ReturnType<typeof vi.fn>).mockResolvedValue({
+      skills: [
+        {
+          name: 'my-skill',
+          version: '0.1.0',
+          displayName: null,
+          description: null,
+          sourceKind: 'dir',
+          sourceRef: null,
+          trust: 'local',
+          requires: { plugins: [], capabilities: [] },
+          assetsPresent: false,
+          triggers: [],
+          checksum: null,
+          installedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          lastError: null,
+        },
+      ],
+    });
+    (api.getSkillActivations as ReturnType<typeof vi.fn>).mockResolvedValue({ activations: [] });
+    render(<SkillsPage open onClose={() => undefined} />);
+    await vi.waitFor(() => {
+      expect(screen.queryByText(/No orch\/session activations/)).toBeTruthy();
+    });
+  });
+
+  it('shows sourceCommit in metadata when present', async () => {
+    const { api } = await import('../api/client');
+    (api.listSkills as ReturnType<typeof vi.fn>).mockResolvedValue({
+      skills: [
+        {
+          name: 'my-skill',
+          version: '0.1.0',
+          displayName: null,
+          description: null,
+          sourceKind: 'git',
+          sourceRef: 'github.com/org/skill',
+          trust: 'community',
+          requires: { plugins: [], capabilities: [] },
+          assetsPresent: false,
+          triggers: [],
+          checksum: null,
+          installedAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+          lastError: null,
+          sourceCommit: 'abc1234567890',
+        },
+      ],
+    });
+    render(<SkillsPage open onClose={() => undefined} />);
+    await vi.waitFor(() => {
+      expect(screen.queryByText('commit')).toBeTruthy();
+      expect(screen.queryByText('abc123456789')).toBeTruthy();
     });
   });
 });

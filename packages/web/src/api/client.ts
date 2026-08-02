@@ -235,6 +235,8 @@ export interface SkillView {
   installedAt: string;
   updatedAt: string;
   lastError: string | null;
+  /** Commit SHA or tag captured at import time (Lot 2b). Optional on older servers. */
+  sourceCommit?: string | null;
 }
 
 /** Body of `POST /skills/install` (dir source only at MVP). */
@@ -243,6 +245,30 @@ export type SkillInstallInput = { source: 'dir'; dir: string };
 /** Response shape for install / upload / upgrade. */
 export interface SkillInstallResult {
   skill: SkillView;
+}
+
+/** One scope-level activation row returned by GET /skills/:name/activations (Lot 2b). */
+export interface SkillScopeActivation {
+  scope: 'orch' | 'session';
+  scopeId: string;
+  /** 1 = explicitly active; 0 = negative override (explicitly deactivated). */
+  enabled: number;
+}
+
+/** Body for POST /skills/:name/activate and /deactivate (Lot 2b). */
+export interface SkillActivateBody {
+  scope?: 'role' | 'orch' | 'session';
+  orchestratorId: string;
+  sessionId?: string;
+}
+
+/** Response of POST /skills/:name/activate|deactivate (Lot 2b). */
+export interface SkillActivateResult {
+  name: string;
+  scope: string;
+  found: boolean;
+  persisted: boolean;
+  injected: boolean;
 }
 
 export interface RoleView {
@@ -1228,6 +1254,12 @@ export const api = {
   upgradeSkill: (name: string) =>
     request<SkillInstallResult>('POST', `/skills/${name}/upgrade`),
   deleteSkill: (name: string) => request<void>('DELETE', `/skills/${name}`),
+  activateSkill: (name: string, body: SkillActivateBody) =>
+    request<SkillActivateResult>('POST', `/skills/${name}/activate`, body),
+  deactivateSkill: (name: string, body: SkillActivateBody) =>
+    request<SkillActivateResult>('POST', `/skills/${name}/deactivate`, body),
+  getSkillActivations: (name: string) =>
+    request<{ activations: SkillScopeActivation[] }>('GET', `/skills/${name}/activations`),
   // ---- Connector types -------------------------------------------------------
   /** J4 — connector types available for role connectors (built-in + plugins). */
   listConnectorTypes: () =>

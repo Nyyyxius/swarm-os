@@ -199,7 +199,7 @@ export interface SwarmControllerValue {
   handleSpawnWorkerSubmit: (
     orchestratorId: string,
     body: Parameters<ReturnType<typeof useOrchestrators>['spawnWorker']>[1],
-  ) => Promise<void>;
+  ) => Promise<{ sessionId: string }>;
   handleEditConfig: (team: RightPanelTeam) => void;
   handleCreateOrchestrator: (body: Parameters<ReturnType<typeof useOrchestrators>['create']>[0]) => Promise<OrchestratorView>;
   onTerminalRoleChange: (r: 'writer' | 'reader') => void;
@@ -856,7 +856,8 @@ export function SwarmControllerProvider({
    */
   const handleSpawnWorkerSubmit = useCallback(
     async (orchestratorId: string, body: Parameters<typeof spawnWorker>[1]) => {
-      await spawnWorker(orchestratorId, body);
+      const session = await spawnWorker(orchestratorId, body);
+      return { sessionId: session.id };
     },
     [spawnWorker],
   );
