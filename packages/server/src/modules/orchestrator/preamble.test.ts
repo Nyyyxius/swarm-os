@@ -18,6 +18,7 @@ import { FakeProvider } from '../providers/fake.js';
 import { registerTeamCommsTools } from '../mcp/tools.js';
 import { registerMemoryTools } from '../mcp/memory-tools.js';
 import { registerTaskboardTools } from '../mcp/taskboard-tools.js';
+import { registerGraphTools } from '../mcp/codegraph-tools.js';
 import type { Config } from '../../config.js';
 
 /**
@@ -360,6 +361,7 @@ describe('TEAM_TOOL_LOGICAL_NAMES', () => {
     registerTeamCommsTools(stub, resolver);
     registerMemoryTools(stub, resolver);
     registerTaskboardTools(stub, resolver);
+    registerGraphTools(stub, resolver);
     expect([...registered].sort()).toEqual([...TEAM_TOOL_LOGICAL_NAMES].sort());
   });
 

@@ -111,6 +111,12 @@ export const TEAM_TOOL_LOGICAL_NAMES: readonly string[] = [
   'board.close',
   'board.reopen',
   'board.delete',
+  // Code-knowledge-graph tools (docs/graphify-integration.md, P2) — mounted on
+  // the same team-comms server, so they are part of the renamed vocabulary.
+  'codegraph.list',
+  'codegraph.search',
+  'codegraph.explain',
+  'codegraph.path',
 ];
 
 /** Provider-supplied naming — `AgentProvider.mcpToolName`, narrowed to a fn. */

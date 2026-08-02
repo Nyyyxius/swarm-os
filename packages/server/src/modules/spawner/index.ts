@@ -28,6 +28,7 @@ import type { ProviderRegistry } from '../providers/registry.js';
 import type { PluginOrchSubscription } from '../plugins/api-types.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { TaskboardStore } from '../taskboard/store.js';
+import type { GraphStore } from '../codegraph/store.js';
 import type { ApprovalStore } from '../approvals/store.js';
 import { buildApprovalReplyResolver } from '../approvals/reply.js';
 import { buildApprovalReactionResolver } from '../approvals/reaction.js';
@@ -203,6 +204,13 @@ export interface SpawnerDeps {
    */
   taskboard?: TaskboardStore;
   /**
+   * The code-knowledge-graph store (Graphify integration). Held on the Spawner
+   * like `memory` so the MCP `codegraph.*` tools reach it via `ToolContext`.
+   * Absent in unit tests that don't exercise codegraph ⇒ the tools answer
+   * `CODEGRAPH_UNAVAILABLE`.
+   */
+  graph?: GraphStore;
+  /**
    * The human-in-the-loop approval queue (docs/garde-fous-approbation.md). Held
    * on the Spawner so the Discord connector wiring can attach a P4 reply-router
    * to each orch's subscription. Absent ⇒ no reply routing (approvals still work
@@ -263,6 +271,12 @@ export class Spawner {
   readonly approvals: ApprovalStore | null;
 
   /**
+   * The code-knowledge-graph store (Graphify integration), or `null` when none
+   * was wired. Threaded into every `ToolContext` by `McpServer`.
+   */
+  readonly graph: GraphStore | null;
+
+  /**
    * The durable task-board store (docs/tableau-de-taches.md), or `null` when
    * none was wired. Threaded into every `ToolContext` by `McpServer`.
    */
@@ -286,6 +300,7 @@ export class Spawner {
     this.modelCatalogue = deps.modelCatalogue ?? null;
     this.memory = deps.memory ?? null;
     this.taskboard = deps.taskboard ?? null;
+    this.graph = deps.graph ?? null;
     this.approvals = deps.approvals ?? null;
     // Retro-wire live orchestrators when a connector provider registers late
     // (a plugin enabled while teams are already running — red-team I1).

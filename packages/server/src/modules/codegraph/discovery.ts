@@ -32,6 +32,14 @@ export interface DiscoveredScope {
   path: string;
   /** C3 gate result: at least one first-party code file present. */
   hasCode: boolean;
+  /**
+   * Directory NAMES this scope must exclude from BOTH its code gate/fingerprint
+   * and its graphify graph, on top of the always-ignored deps/build dirs. Used
+   * by the workspace-ROOT scope to skip its child project-scope dirs, so the
+   * root graph covers only root-level files (no overlap with per-project scopes,
+   * no whole-workspace rebuild on every change). Empty for all other scopes.
+   */
+  extraExcludes: string[];
 }
 
 /** Minimal shape of the plugin registry we consume (keeps discovery testable). */
@@ -89,26 +97,33 @@ export function discoverScopes(input: DiscoverScopesInput): DiscoveredScope[] {
   const scopes: DiscoveredScope[] = [];
   const seen = new Set<string>();
 
-  const push = (id: string, kind: CodegraphScopeKind, dir: string): void => {
+  const push = (
+    id: string,
+    kind: CodegraphScopeKind,
+    dir: string,
+    extraExcludes: string[] = [],
+  ): void => {
     if (seen.has(id)) return;
     seen.add(id);
     let hasCode = false;
     try {
-      hasCode = hasCodeFiles(dir);
+      hasCode = hasCodeFiles(dir, extraExcludes.length ? new Set(extraExcludes) : undefined);
     } catch (err) {
       log.debug({ event: 'codegraph.gate_failed', id, dir, error: String(err) });
     }
-    scopes.push({ id, kind, path: dir, hasCode });
+    scopes.push({ id, kind, path: dir, hasCode, extraExcludes });
   };
 
   // --- Workspace: the root itself + each top-level subdir --------------------
   const workspaceRoot = path.resolve(input.workspaceRoot);
   if (fs.existsSync(workspaceRoot)) {
-    push(WORKSPACE_ROOT_SCOPE_ID, 'project', workspaceRoot);
-    for (const name of safeReaddirDirs(workspaceRoot)) {
-      // Skip dependency/build/VCS dirs sitting at the workspace root — they are
-      // not "projects" (and one may literally be `node_modules`).
-      if (IGNORED_DIR_NAMES.has(name)) continue;
+    // Every non-ignored top-level subdir becomes its OWN project scope, so the
+    // root scope excludes them all — it then covers only root-level files (and
+    // any non-project subdirs, of which there are none by construction). This
+    // kills the overlap + whole-workspace-rebuild problem flagged in P1.
+    const childDirs = safeReaddirDirs(workspaceRoot).filter((n) => !IGNORED_DIR_NAMES.has(n));
+    push(WORKSPACE_ROOT_SCOPE_ID, 'project', workspaceRoot, childDirs);
+    for (const name of childDirs) {
       push(projectScopeId(name), 'project', path.join(workspaceRoot, name));
     }
   } else {

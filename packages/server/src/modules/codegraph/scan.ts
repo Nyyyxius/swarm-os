@@ -29,10 +29,16 @@ interface FileStat {
  * Walk `root` depth-first, invoking `onFile(relPath, stat)` for every regular
  * file under a non-ignored directory. Return `false` from `onFile` to stop the
  * walk early (used by the code gate to bail on the first hit). Symlinks — file
- * or dir — are skipped to avoid escaping the scope or looping. Best-effort:
- * unreadable directories are logged at debug and skipped.
+ * or dir — are skipped to avoid escaping the scope or looping. `extraExcludes`
+ * is an extra set of directory NAMES to skip (e.g. the workspace-root scope
+ * skips its child project-scope dirs so it doesn't re-scan the whole workspace).
+ * Best-effort: unreadable directories are logged at debug and skipped.
  */
-function walk(root: string, onFile: (rel: string, st: fs.Stats) => boolean): void {
+function walk(
+  root: string,
+  onFile: (rel: string, st: fs.Stats) => boolean,
+  extraExcludes?: ReadonlySet<string>,
+): void {
   let visited = 0;
   const stack: string[] = [root];
   while (stack.length > 0) {
@@ -51,6 +57,7 @@ function walk(root: string, onFile: (rel: string, st: fs.Stats) => boolean): voi
       const full = path.join(dir, ent.name);
       if (ent.isDirectory()) {
         if (IGNORED_DIR_NAMES.has(ent.name)) continue;
+        if (extraExcludes?.has(ent.name)) continue;
         stack.push(full);
         continue;
       }
@@ -80,15 +87,19 @@ export function isCodeExtension(ext: string): boolean {
  * dependency / build / VCS dirs)? Stops at the first hit. A docs-only tree
  * (`.md` only) returns `false` → the scope is NOT indexed.
  */
-export function hasCodeFiles(root: string): boolean {
+export function hasCodeFiles(root: string, extraExcludes?: ReadonlySet<string>): boolean {
   let found = false;
-  walk(root, (rel) => {
-    if (isCodeExtension(path.extname(rel))) {
-      found = true;
-      return false; // stop the walk
-    }
-    return true;
-  });
+  walk(
+    root,
+    (rel) => {
+      if (isCodeExtension(path.extname(rel))) {
+        found = true;
+        return false; // stop the walk
+      }
+      return true;
+    },
+    extraExcludes,
+  );
   return found;
 }
 
@@ -109,14 +120,18 @@ export interface SourceFingerprint {
  * ONLY code files count (same extension set as the gate) so a docs edit doesn't
  * trigger a code re-index. Deterministic: entries are sorted before hashing.
  */
-export function sourceFingerprint(root: string): SourceFingerprint {
+export function sourceFingerprint(root: string, extraExcludes?: ReadonlySet<string>): SourceFingerprint {
   const files: FileStat[] = [];
-  walk(root, (rel, st) => {
-    if (isCodeExtension(path.extname(rel))) {
-      files.push({ rel, size: st.size, mtimeMs: Math.floor(st.mtimeMs) });
-    }
-    return true;
-  });
+  walk(
+    root,
+    (rel, st) => {
+      if (isCodeExtension(path.extname(rel))) {
+        files.push({ rel, size: st.size, mtimeMs: Math.floor(st.mtimeMs) });
+      }
+      return true;
+    },
+    extraExcludes,
+  );
   files.sort((a, b) => (a.rel < b.rel ? -1 : a.rel > b.rel ? 1 : 0));
   const h = createHash('sha256');
   for (const f of files) {

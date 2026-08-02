@@ -79,6 +79,12 @@ export interface RunUpdateInput {
   indexDir: string;
   engine: CodegraphEngine;
   timeoutMs: number;
+  /**
+   * Extra directory NAMES to exclude from the graph on top of the default
+   * deps/build set (e.g. the root scope's child project-scope dirs). Turned into
+   * `name/` gitignore patterns in the seeded build config.
+   */
+  extraExcludes?: string[];
 }
 
 export type RunUpdateResult =
@@ -96,7 +102,7 @@ export function runUpdate(input: RunUpdateInput): Promise<RunUpdateResult> {
   const outDir = path.join(input.indexDir, 'graphify-out');
   try {
     fs.mkdirSync(outDir, { recursive: true });
-    seedBuildConfig(outDir);
+    seedBuildConfig(outDir, input.extraExcludes);
   } catch (err) {
     return Promise.resolve({ ok: false, error: `prepare index dir failed: ${String(err)}` });
   }
@@ -141,13 +147,56 @@ export function runUpdate(input: RunUpdateInput): Promise<RunUpdateResult> {
   });
 }
 
+/** Timeout for read-only query verbs (explain/path) — far shorter than a build. */
+export const QUERY_TIMEOUT_MS = 30_000;
+
+/** Absolute path to a scope's NetworkX graph.json under its index dir. */
+export function graphJsonPath(indexDir: string): string {
+  return path.join(indexDir, 'graphify-out', 'graph.json');
+}
+
+export type QueryResult = { ok: true; text: string } | { ok: false; error: string };
+
+/** Run one read-only graphify query verb against a graph.json. Never throws. */
+function runQueryVerb(bin: string, args: string[]): Promise<QueryResult> {
+  const env = withGraphifyPath({ ...process.env, GRAPHIFY_NO_TIPS: '1' });
+  return new Promise<QueryResult>((resolve) => {
+    execFile(
+      bin,
+      args,
+      { env, timeout: QUERY_TIMEOUT_MS, maxBuffer: MAX_BUFFER, windowsHide: true },
+      (err, stdout, stderr) => {
+        if (err) {
+          const detail = (String(stderr) || String(stdout) || err.message).trim().slice(-STDERR_MAX);
+          resolve({ ok: false, error: detail || 'graphify query failed' });
+          return;
+        }
+        resolve({ ok: true, text: String(stdout).trim() });
+      },
+    );
+  });
+}
+
+/**
+ * `graphify explain "<node>" --graph <graph.json>` — a node + its typed edges +
+ * file:line citations (the compressed subgraph). `node` accepts a label or id.
+ */
+export function runExplain(bin: string, graphPath: string, node: string): Promise<QueryResult> {
+  return runQueryVerb(bin, ['explain', node, '--graph', graphPath]);
+}
+
+/** `graphify path "<from>" "<to>" --graph <graph.json>` — shortest path text. */
+export function runPath(bin: string, graphPath: string, from: string, to: string): Promise<QueryResult> {
+  return runQueryVerb(bin, ['path', from, to, '--graph', graphPath]);
+}
+
 // ---- helpers ---------------------------------------------------------------
 
 /**
  * Merge our canonical excludes into `<outDir>/.graphify_build.json`, preserving
  * any other keys graphify itself wrote there (read-modify-write, best-effort).
  */
-function seedBuildConfig(outDir: string): void {
+function seedBuildConfig(outDir: string, extraExcludes?: string[]): void {
   const file = path.join(outDir, '.graphify_build.json');
   let cfg: Record<string, unknown> = {};
   try {
@@ -158,7 +207,9 @@ function seedBuildConfig(outDir: string): void {
   } catch {
     cfg = {};
   }
-  cfg.excludes = [...DEFAULT_GRAPHIFY_EXCLUDES];
+  // Child-scope dir names → `name/` gitignore patterns (deduped against defaults).
+  const extra = (extraExcludes ?? []).map((n) => (n.endsWith('/') ? n : `${n}/`));
+  cfg.excludes = [...new Set([...DEFAULT_GRAPHIFY_EXCLUDES, ...extra])];
   cfg.gitignore = true;
   fs.writeFileSync(file, JSON.stringify(cfg), 'utf8');
 }

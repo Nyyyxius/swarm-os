@@ -127,6 +127,16 @@ describe('runUpdate', () => {
     if (!res.ok) expect(res.timedOut).toBe(true);
   });
 
+  it('adds extraExcludes as name/ patterns in the seeded build config', async () => {
+    execFileMock.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: Function) => cb(null, 'Rebuilt: 0 nodes, 0 edges', ''));
+    const indexDir = path.join(dir, 'idx');
+    await runUpdate({ bin: 'graphify', sourceDir: '/ws', indexDir, engine: 'ast', timeoutMs: 1000, extraExcludes: ['app', 'lib'] });
+    const cfg = JSON.parse(fs.readFileSync(path.join(indexDir, 'graphify-out', '.graphify_build.json'), 'utf8'));
+    expect(cfg.excludes).toContain('app/');
+    expect(cfg.excludes).toContain('lib/');
+    expect(cfg.excludes).toContain('node_modules/'); // defaults still present
+  });
+
   it('merges into an existing build config, preserving graphify-written keys', async () => {
     const outDir = path.join(dir, 'idx', 'graphify-out');
     fs.mkdirSync(outDir, { recursive: true });

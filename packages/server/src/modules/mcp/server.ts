@@ -8,6 +8,7 @@ import type { Orchestrator } from '../orchestrator/index.js';
 import { registerTeamCommsTools, type ToolContext } from './tools.js';
 import { registerMemoryTools } from './memory-tools.js';
 import { registerTaskboardTools } from './taskboard-tools.js';
+import { registerGraphTools } from './codegraph-tools.js';
 import type { Config } from '../../config.js';
 import type { MessagingDefaults } from '../orchestrator/messaging.js';
 import type { BusMetricsCollector } from '../metrics/busMetrics.js';
@@ -235,6 +236,9 @@ export class McpServer {
     // Durable task-board tools (board.*), registered right after the memory set
     // so every agent sees them (docs/tableau-de-taches.md §5).
     registerTaskboardTools(sdkServer, () => ctx);
+    // Code-knowledge-graph tools (codegraph.*), registered next so every agent
+    // can query the live code map (docs/graphify-integration.md, P2).
+    registerGraphTools(sdkServer, () => ctx);
     this.pluginTools?.registerAll(sdkServer, () => ctx);
 
     const transport = new StreamableHTTPServerTransport({
@@ -335,6 +339,10 @@ export class McpServer {
       // Absent in pre-taskboard test fixtures, in which case the board.* tools
       // answer TASKBOARD_UNAVAILABLE rather than crashing.
       ...(this.spawner.taskboard ? { taskboard: this.spawner.taskboard } : {}),
+      // Code-knowledge-graph store — lives on the Spawner (global to the
+      // deployment). Absent when codegraph is off/unavailable, in which case the
+      // codegraph.* tools answer CODEGRAPH_UNAVAILABLE rather than crashing.
+      ...(this.spawner.graph ? { graph: this.spawner.graph } : {}),
     };
   }
 }

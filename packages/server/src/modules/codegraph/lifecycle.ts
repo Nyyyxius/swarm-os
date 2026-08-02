@@ -26,7 +26,7 @@
 import * as fs from 'node:fs';
 import { withModule } from '../../logger.js';
 import type { GraphStore } from './store.js';
-import type { PluginLister } from './discovery.js';
+import type { PluginLister, DiscoveredScope } from './discovery.js';
 import { discoverScopes } from './discovery.js';
 import { sourceFingerprint } from './scan.js';
 import { runUpdate, type CodegraphEngine } from './graphify.js';
@@ -77,14 +77,21 @@ export function startCodegraphJanitor(
   let debounceTimer: NodeJS.Timeout | null = null;
 
   /** Index one scope if its source changed. Never throws. */
-  async function maybeIndex(scopeId: string): Promise<void> {
+  async function maybeIndex(discovered: DiscoveredScope): Promise<void> {
+    const scopeId = discovered.id;
     if (running.has(scopeId)) return;
     const scope = deps.store.getScope(scopeId);
     if (!scope || !scope.enabled) return;
 
+    // The root scope excludes its child project-scope dirs from BOTH the
+    // change-detection fingerprint and the graph (see discovery extraExcludes).
+    const excludes = discovered.extraExcludes.length
+      ? new Set(discovered.extraExcludes)
+      : undefined;
+
     let fp: { fileCount: number; hash: string };
     try {
-      fp = sourceFingerprint(scope.path);
+      fp = sourceFingerprint(scope.path, excludes);
     } catch (err) {
       log.warn({ event: 'codegraph.fingerprint_failed', scopeId, error: String(err) });
       return;
@@ -104,6 +111,7 @@ export function startCodegraphJanitor(
         indexDir: deps.store.indexDirFor(scopeId),
         engine: deps.engine,
         timeoutMs: deps.runTimeoutMs,
+        extraExcludes: discovered.extraExcludes,
       });
       if (result.ok) {
         deps.store.recordIndexResult(scopeId, {
@@ -158,7 +166,7 @@ export function startCodegraphJanitor(
       for (const s of discovered) {
         if (stopped) break;
         if (!s.hasCode) continue;
-        await maybeIndex(s.id);
+        await maybeIndex(s);
       }
     } catch (err) {
       log.warn({ event: 'codegraph.sweep_failed', error: err instanceof Error ? err.message : String(err) });

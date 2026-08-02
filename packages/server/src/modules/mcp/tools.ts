@@ -19,6 +19,7 @@ import { isDiscordConnector } from '../roles/index.js';
 import type { Config, EffortLevel, PermissionMode } from '../../config.js';
 import type { MemoryStore } from '../memory/store.js';
 import type { TaskboardStore } from '../taskboard/store.js';
+import type { GraphStore } from '../codegraph/store.js';
 import { withModule } from '../../logger.js';
 
 const log = withModule('mcp.tool');
@@ -75,6 +76,13 @@ export interface ToolContext {
    * tools answer TASKBOARD_UNAVAILABLE.
    */
   taskboard?: TaskboardStore;
+  /**
+   * Code-knowledge-graph store (Graphify integration, GLOBAL to the deployment).
+   * Optional so pre-codegraph test paths still build a context; production
+   * `McpServer` threads it through from the Spawner. When absent the `codegraph.*`
+   * tools answer `{ ok:false, reason:'CODEGRAPH_UNAVAILABLE' }`.
+   */
+  graph?: GraphStore;
 }
 
 /** Active sessions only (plan §10). */

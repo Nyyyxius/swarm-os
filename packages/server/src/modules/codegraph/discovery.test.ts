@@ -114,6 +114,27 @@ describe('discoverScopes', () => {
     expect(scopes.find((s) => s.id === projectScopeId('node_modules'))).toBeUndefined();
   });
 
+  it('root scope excludes its child project-scope dirs (no whole-workspace overlap)', () => {
+    write(path.join(workspaceRoot, 'app', 'index.ts'), 'export const a = 1;');
+    write(path.join(workspaceRoot, 'lib', 'x.ts'), 'export const x = 1;');
+    const scopes = discoverScopes({ workspaceRoot, dataDir, pluginStore: null });
+    const root = scopes.find((s) => s.id === WORKSPACE_ROOT_SCOPE_ID);
+    expect(root?.extraExcludes.sort()).toEqual(['app', 'lib']);
+    // No root-level code + all subdirs excluded → root has nothing to index.
+    expect(root?.hasCode).toBe(false);
+    // Each subdir is still its own scope with no extra excludes.
+    expect(scopes.find((s) => s.id === projectScopeId('app'))?.extraExcludes).toEqual([]);
+  });
+
+  it('root scope stays enabled when there IS root-level code, still excluding children', () => {
+    write(path.join(workspaceRoot, 'main.ts'), 'export const m = 1;');
+    write(path.join(workspaceRoot, 'app', 'index.ts'), 'export const a = 1;');
+    const scopes = discoverScopes({ workspaceRoot, dataDir, pluginStore: null });
+    const root = scopes.find((s) => s.id === WORKSPACE_ROOT_SCOPE_ID);
+    expect(root?.hasCode).toBe(true); // main.ts at the root
+    expect(root?.extraExcludes).toEqual(['app']);
+  });
+
   it('discovers installed plugins with code, excluding their node_modules', () => {
     const pluginDir = path.join(dataDir, 'plugins', 'discord-agent');
     write(path.join(pluginDir, 'index.js'), 'exports.run = () => 1;');

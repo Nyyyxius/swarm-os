@@ -24,8 +24,18 @@ export {
   WORKSPACE_ROOT_SCOPE_ID,
 } from './discovery.js';
 export type { DiscoveredScope, PluginLister } from './discovery.js';
-export { probeGraphify, runUpdate, parseCounts } from './graphify.js';
-export type { GraphifyAvailability, CodegraphEngine, RunUpdateResult } from './graphify.js';
+export {
+  probeGraphify,
+  runUpdate,
+  parseCounts,
+  runExplain,
+  runPath,
+  graphJsonPath,
+  QUERY_TIMEOUT_MS,
+} from './graphify.js';
+export type { GraphifyAvailability, CodegraphEngine, RunUpdateResult, QueryResult } from './graphify.js';
+export { searchNodes, readGraphJson, parseLine } from './query.js';
+export type { GraphNodeHit, SearchResult } from './query.js';
 export { startCodegraphJanitor } from './lifecycle.js';
 export type { CodegraphJanitorHandle, CodegraphJanitorDeps } from './lifecycle.js';
 export { hasCodeFiles, sourceFingerprint, isCodeExtension } from './scan.js';

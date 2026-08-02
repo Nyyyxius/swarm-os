@@ -74,6 +74,30 @@ reflect the true state.
 You can create cards and comment on any card on your board. Assigning a card
 to **another** session or deleting a card are **lead-only** actions.
 
+## Code graph (Graphify)
+
+swarm-os keeps a **live, auto-maintained map of the code** (functions, classes,
+imports, calls) for each workspace project and installed plugin — built
+on-device by Graphify, refreshed whenever the code changes. It is the
+**structure** layer, complementary to the shared memory (the *wiki* layer).
+
+**Query it BEFORE grepping or reading whole files** — it returns a compressed
+subgraph with `file:line` citations, which is far cheaper (in tokens and time)
+than loading source:
+
+- `codegraph.list()` — the indexed scopes (id, kind, status, node/edge counts).
+  Use a returned `id` as the `scope` argument below.
+- `codegraph.search({ query, scope?, limit? })` — find symbols (files/functions/
+  classes) by name; returns the top matches with their `file:line`. Omit `scope`
+  when only one is indexed.
+- `codegraph.explain({ node, scope? })` — a symbol plus its typed edges (imports,
+  calls, contains…) with citations — the compressed neighbourhood of that node.
+- `codegraph.path({ from, to, scope? })` — the shortest dependency/call path
+  between two symbols ("how does X reach Y?").
+
+These are **read-only** and best-effort: when the graph isn't ready they answer
+`{ ok:false, reason }` (never an error) — fall back to reading files in that case.
+
 ## Mailbox discipline (CRITICAL)
 
 The team uses an **in-memory mailbox** plus a **passive PTY signal**. The
