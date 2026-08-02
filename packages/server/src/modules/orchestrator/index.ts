@@ -159,7 +159,7 @@ export interface OrchestratorDeps {
    * importables.md §2.1, durable channel). Called at EACH spawn so the preamble
    * reflects the CURRENT activation. Mirrors `pluginTools`. Omitted ⇒ none.
    */
-  skills?: () => readonly SkillFragment[];
+  skills?: (orchestratorId: string, sessionId: string) => readonly SkillFragment[];
   /**
    * Durable task-board store (docs/tableau-de-taches.md). When present, each
    * NEWLY-spawned worker (not a resumed one) auto-gets a `todo` card assigned to
@@ -321,7 +321,9 @@ export class Orchestrator {
   private readonly _onHideRequested: ((orchestratorId: string) => void) | null;
   private readonly _pluginTools: (() => readonly PluginToolSummary[]) | null;
   private readonly _taskboard: TaskboardStore | null;
-  private readonly _skills: (() => readonly SkillFragment[]) | null;
+  private readonly _skills:
+    | ((orchestratorId: string, sessionId: string) => readonly SkillFragment[])
+    | null;
 
   /** All sessions, including terminated ones, indexed by id. */
   private readonly sessions = new Map<string, Session>();
@@ -334,10 +336,10 @@ export class Orchestrator {
    * discipline, so it must fail loudly), this section is advisory. Losing a
    * capability listing is worth strictly less than losing the team.
    */
-  private _readSkills(): readonly SkillFragment[] {
+  private _readSkills(sessionId: string): readonly SkillFragment[] {
     if (!this._skills) return [];
     try {
-      return this._skills();
+      return this._skills(this.id, sessionId);
     } catch (err) {
       log.warn({
         event: 'orch.skills_unavailable',
@@ -519,7 +521,7 @@ export class Orchestrator {
       customOverride: this.init.lead.preamble ?? this.leadPreamble,
       mcpToolName: (n) => provider.mcpToolName(n),
       pluginTools: this._readPluginTools(),
-      skills: this._readSkills(),
+      skills: this._readSkills(sessionId),
     });
 
     const lead = new Session({
@@ -665,7 +667,7 @@ export class Orchestrator {
       customOverride: this.init.lead.preamble ?? this.leadPreamble,
       mcpToolName: (n) => provider.mcpToolName(n),
       pluginTools: this._readPluginTools(),
-      skills: this._readSkills(),
+      skills: this._readSkills(leadRow.id),
     });
 
     const lead = new Session({
@@ -835,7 +837,7 @@ export class Orchestrator {
       // necessarily the team default (`team.spawn_worker({ provider })`).
       mcpToolName: (n) => provider.mcpToolName(n),
       pluginTools: this._readPluginTools(),
-      skills: this._readSkills(),
+      skills: this._readSkills(sessionId),
     });
 
     const worker = new Session({

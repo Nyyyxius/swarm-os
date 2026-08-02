@@ -24,10 +24,21 @@
 
 import * as fs from 'node:fs';
 import * as path from 'node:path';
-import { execFile } from 'node:child_process';
 import { randomUUID } from 'node:crypto';
 import { withModule } from '../../logger.js';
 import { PluginStore } from './store.js';
+import {
+  makeRunner,
+  extractTgzFile as coreExtractTgzFile,
+  extractTgzBuffer as coreExtractTgzBuffer,
+  npmPack as coreNpmPack,
+  gitClone as coreGitClone,
+  gitHeadCommit as coreGitHeadCommit,
+  isSafeSubdir,
+  encodeGitRef,
+  decodeGitRef,
+  type Runner,
+} from '../install-core/fetch.js';
 import {
   loadManifest,
   HOST_API_VERSION,
@@ -57,39 +68,10 @@ export type InstallSource =
   | { kind: 'dir'; dir: string }
   | { kind: 'upload'; tgz: Buffer; name?: string };
 
-/**
- * A `subdir` must be a plain relative path INSIDE the clone — reject absolute
- * paths and any `..` traversal (same rigour as `manifest.isSafeMain`). The
- * empty string is invalid (use `undefined` for "whole repo").
- */
-export function isSafeSubdir(subdir: string): boolean {
-  if (subdir.length === 0) return false;
-  if (path.isAbsolute(subdir)) return false;
-  const normalized = path.normalize(subdir);
-  if (normalized.startsWith('..')) return false;
-  if (normalized.split(/[\\/]/).includes('..')) return false;
-  return true;
-}
-
-/**
- * Encode a git source into the `source_ref` column so `upgrade` can re-fetch the
- * SAME url/ref/subdir. Backward-compatible with the pre-subdir `url#ref` form:
- * a subdir adds a third `#`-delimited field (`url#<ref>#<subdir>`, ref possibly
- * empty). git URLs don't carry a `#` fragment, so the split is unambiguous.
- */
-export function encodeGitRef(url: string, ref?: string, subdir?: string): string {
-  if (subdir) return `${url}#${ref ?? ''}#${subdir}`;
-  return ref ? `${url}#${ref}` : url;
-}
-
-/** Inverse of `encodeGitRef` (tolerant of the legacy `url` / `url#ref` forms). */
-export function decodeGitRef(stored: string): { url: string; ref?: string; subdir?: string } {
-  const parts = stored.split('#');
-  const url = parts[0] ?? stored;
-  const ref = parts[1] && parts[1].length > 0 ? parts[1] : undefined;
-  const subdir = parts[2] && parts[2].length > 0 ? parts[2] : undefined;
-  return { url, ref, subdir };
-}
+// `isSafeSubdir` + the git-ref codec live in the shared install-core module now
+// (docs/plan-skills-importables.md §11.4). Re-exported so existing importers
+// (installer.test.ts) keep resolving them from here.
+export { isSafeSubdir, encodeGitRef, decodeGitRef } from '../install-core/fetch.js';
 
 /** Bad manifest / name / apiVersion / path-traversal / reserved name → HTTP 422. */
 export class InstallValidationError extends Error {
@@ -145,6 +127,8 @@ export class PluginInstaller {
   private readonly stagingRoot: string;
   private readonly npmCacheDir: string;
   private readonly execTimeoutMs: number;
+  /** Shared exec runner (install-core). Fetch primitives + `run` delegate to it. */
+  private readonly _runner: Runner;
 
   constructor(deps: PluginInstallerDeps) {
     this.pluginsDir = deps.pluginsDir;
@@ -153,6 +137,11 @@ export class PluginInstaller {
     this.stagingRoot = stagingRoot(deps.pluginsDir);
     this.npmCacheDir = path.join(this.stagingRoot, '.npm-cache');
     this.execTimeoutMs = deps.execTimeoutMs ?? EXEC_TIMEOUT_MS;
+    this._runner = makeRunner({
+      timeoutMs: this.execTimeoutMs,
+      npmCacheDir: this.npmCacheDir,
+      sourceError: (m) => new InstallSourceError(m),
+    });
   }
 
   /**
@@ -378,41 +367,23 @@ export class PluginInstaller {
 
   // ---- fetch primitives --------------------------------------------------
 
-  /** Write the uploaded `.tgz` bytes to a temp file and extract it. */
+  // Fetch primitives now live in the shared install-core module; these thin
+  // methods delegate to it through the plugin's own error-typed runner.
+
   private async extractTgz(tgz: Buffer, dir: string, uuid: string): Promise<void> {
-    const tgzPath = path.join(this.stagingRoot, `${uuid}.tgz`);
-    try {
-      fs.writeFileSync(tgzPath, tgz);
-      await this.extractTgzFile(tgzPath, dir);
-    } finally {
-      this.rmQuiet(tgzPath);
-    }
+    await coreExtractTgzBuffer(this._runner, tgz, dir, path.join(this.stagingRoot, `${uuid}.tgz`));
   }
 
-  /** `tar -xzf <tgz> -C <dir> --strip-components=1` (npm pack nests under `package/`). */
   private async extractTgzFile(tgzPath: string, dir: string): Promise<void> {
-    await this.run('tar', ['-xzf', tgzPath, '-C', dir, '--strip-components=1'], dir);
+    await coreExtractTgzFile(this._runner, tgzPath, dir);
   }
 
-  /** `npm pack <spec>` into `packDir` → returns the produced `.tgz` path. */
   private async npmPack(spec: string, packDir: string): Promise<string> {
-    fs.mkdirSync(packDir, { recursive: true });
-    await this.run(
-      'npm',
-      ['pack', spec, '--pack-destination', packDir, '--no-audit', '--no-fund', '--silent'],
-      packDir,
-    );
-    const tgz = fs.readdirSync(packDir).find((f) => f.endsWith('.tgz'));
-    if (!tgz) throw new InstallSourceError(`npm pack produced no tarball for '${spec}'`);
-    return path.join(packDir, tgz);
+    return coreNpmPack(this._runner, (m) => new InstallSourceError(m), spec, packDir);
   }
 
-  /** `git clone --depth 1 [--branch <ref>] <url> <dir>`. */
   private async gitClone(url: string, ref: string | undefined, dir: string): Promise<void> {
-    const args = ['clone', '--depth', '1'];
-    if (ref) args.push('--branch', ref);
-    args.push('--', url, dir);
-    await this.run('git', args, dir);
+    await coreGitClone(this._runner, url, ref, dir);
   }
 
   /**
@@ -426,19 +397,7 @@ export class PluginInstaller {
    * consumer must already handle for rows installed before this existed.
    */
   private async gitHeadCommit(cloneDir: string): Promise<string | null> {
-    try {
-      const out = (await this.run('git', ['rev-parse', 'HEAD'], cloneDir)).trim();
-      // 40 hex = sha1, 64 = the sha256 object format. Anything else (a detached
-      // "HEAD" echo, a warning line) is not a commit id — don't persist it.
-      if (!/^[0-9a-f]{40}$|^[0-9a-f]{64}$/.test(out)) {
-        log.warn({ event: 'plugins.git_head_unexpected', cloneDir, out: out.slice(0, 80) });
-        return null;
-      }
-      return out;
-    } catch (err) {
-      log.warn({ event: 'plugins.git_head_failed', cloneDir, error: String(err) });
-      return null;
-    }
+    return coreGitHeadCommit(this._runner, cloneDir);
   }
 
   /** `npm install --omit=dev …` in `dir` when its package.json declares deps. */
@@ -467,39 +426,9 @@ export class PluginInstaller {
    * hard timeout. Any non-zero exit / timeout → `InstallSourceError` carrying
    * a truncated stderr for `last_error`.
    */
+  /** Exec delegate — `npmInstallIfDeps` (plugin-only, not in install-core) uses it. */
   private run(bin: string, args: string[], cwd: string): Promise<string> {
-    const env: NodeJS.ProcessEnv = {
-      ...process.env,
-      HOME: process.env.HOME || '/home/node',
-      npm_config_cache: this.npmCacheDir,
-      npm_config_update_notifier: 'false',
-      npm_config_fund: 'false',
-      npm_config_audit: 'false',
-      // Never block on a credential prompt for a private/invalid git URL.
-      GIT_TERMINAL_PROMPT: '0',
-    };
-    return new Promise<string>((resolve, reject) => {
-      execFile(
-        bin,
-        args,
-        { cwd, env, timeout: this.execTimeoutMs, maxBuffer: 32 * 1024 * 1024 },
-        (err, stdout, stderr) => {
-          if (!err) {
-            resolve(String(stdout));
-            return;
-          }
-          const e = err as NodeJS.ErrnoException & { killed?: boolean; signal?: string };
-          const detail = (String(stderr) || String(stdout) || e.message).trim().slice(-STDERR_MAX);
-          const timedOut = e.killed || e.signal === 'SIGTERM';
-          log.warn({ event: 'plugins.exec_failed', bin, cwd, timedOut, error: detail });
-          reject(
-            new InstallSourceError(
-              `${bin} ${args[0] ?? ''} failed${timedOut ? ' (timed out)' : ''}: ${detail}`,
-            ),
-          );
-        },
-      );
-    });
+    return this._runner(bin, args, cwd);
   }
 
   private rmQuiet(target: string): void {

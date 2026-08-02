@@ -1,11 +1,13 @@
 import { describe, it, expect } from 'vitest';
 import {
   resolveFragments,
+  resolveMergedFragments,
   activateHot,
   deactivateHot,
   fragmentOf,
   type HotActivationDeps,
 } from './activation.js';
+import type { SkillActivationRow } from './store.js';
 import type { SkillStore, SkillRow } from './store.js';
 import type { RoleSkillRef } from '../roles/index.js';
 import type { Orchestrator } from '../orchestrator/index.js';
@@ -110,5 +112,63 @@ describe('activateHot / deactivateHot', () => {
     const r = deactivateHot(hotDeps, orch, skillRow({ name: 'hello-skill' }));
     expect(r.injected).toBe(1);
     expect(pushed[0]!.content).toContain('skill deactivated');
+  });
+
+  it('activateHot targets only one session when targetSessionId is given', () => {
+    const a = fakeSession('s1', 'running');
+    const b = fakeSession('s2', 'running');
+    const { orch, pushed } = fakeOrch([a, b]);
+    const r = activateHot(hotDeps, orch, skillRow(), { targetSessionId: 's2' });
+    expect(r.injected).toBe(1);
+    expect(pushed.map((p) => p.to)).toEqual(['s2']);
+    expect(a.signals).toHaveLength(0);
+    expect(b.signals).toHaveLength(1);
+  });
+});
+
+function actRow(over: Partial<SkillActivationRow> = {}): SkillActivationRow {
+  return {
+    id: 'x',
+    skill_name: 'sk',
+    scope_type: 'orch',
+    scope_id: 'o',
+    mode: 'inject',
+    enabled: 1,
+    created_at: '2020',
+    ...over,
+  };
+}
+
+describe('resolveMergedFragments (scope precedence)', () => {
+  const store = fakeStore({
+    a: skillRow({ name: 'a', body_md: 'A' }),
+    b: skillRow({ name: 'b', body_md: 'B' }),
+  });
+
+  it('unions role + orch + session, first-seen order', () => {
+    const frags = resolveMergedFragments(store, {
+      roleRefs: [{ name: 'a', mode: 'inject' }],
+      orchActivations: [actRow({ skill_name: 'b' })],
+      sessionActivations: [],
+    });
+    expect(frags.map((f) => f.name)).toEqual(['a', 'b']);
+  });
+
+  it('a more specific scope with enabled=0 suppresses a broader activation', () => {
+    const frags = resolveMergedFragments(store, {
+      roleRefs: [{ name: 'a', mode: 'inject' }],
+      orchActivations: [],
+      sessionActivations: [actRow({ skill_name: 'a', scope_type: 'session', enabled: 0 })],
+    });
+    expect(frags).toEqual([]);
+  });
+
+  it('skips activations whose skill row is gone', () => {
+    const frags = resolveMergedFragments(store, {
+      roleRefs: [],
+      orchActivations: [actRow({ skill_name: 'ghost' })],
+      sessionActivations: [],
+    });
+    expect(frags).toEqual([]);
   });
 });

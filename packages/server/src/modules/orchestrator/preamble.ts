@@ -120,6 +120,7 @@ export const TEAM_TOOL_LOGICAL_NAMES: readonly string[] = [
   // Skills library tools (docs/plan-skills-importables.md §7) — mounted on the
   // same team-comms server, so they are part of the renamed vocabulary.
   'skills.list',
+  'skills.show',
   'skills.activate',
   'skills.deactivate',
 ];

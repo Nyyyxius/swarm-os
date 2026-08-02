@@ -51,12 +51,32 @@ export interface SkillRow {
   last_error: string | null;
 }
 
+/** Scope of an activation. Role scope lives in `roles.skills_json`, not here. */
+export type SkillScopeType = 'orch' | 'session';
+
+/** Row of the `skill_activations` table (orch/session-scoped activations). */
+export interface SkillActivationRow {
+  id: string;
+  skill_name: string;
+  scope_type: SkillScopeType;
+  scope_id: string;
+  mode: string;
+  enabled: number;
+  created_at: string;
+}
+
 export class SkillStore {
   private readonly db: Db;
   private readonly upsertStmt;
   private readonly getStmt;
   private readonly listStmt;
   private readonly deleteStmt;
+  private readonly upsertActivationStmt;
+  private readonly deleteActivationStmt;
+  private readonly listActivationsStmt;
+  private readonly listActivationsForSkillStmt;
+  private readonly deleteActivationsForSkillStmt;
+  private readonly deleteActivationsForScopeStmt;
 
   constructor(swarmDb: SwarmDb) {
     this.db = swarmDb.db;
@@ -80,6 +100,18 @@ export class SkillStore {
         updated_at       TEXT NOT NULL,
         last_error       TEXT
       );
+      CREATE TABLE IF NOT EXISTS skill_activations (
+        id          TEXT PRIMARY KEY,
+        skill_name  TEXT NOT NULL,
+        scope_type  TEXT NOT NULL,        -- 'orch' | 'session' (role lives in roles.skills_json)
+        scope_id    TEXT NOT NULL,        -- orchestrator.id | session.id
+        mode        TEXT NOT NULL DEFAULT 'inject',
+        enabled     INTEGER NOT NULL DEFAULT 1,
+        created_at  TEXT NOT NULL,
+        UNIQUE(skill_name, scope_type, scope_id)
+      );
+      CREATE INDEX IF NOT EXISTS idx_skill_activations_scope
+        ON skill_activations(scope_type, scope_id);
     `);
 
     // MUST run between the DDL above and the prepares below (a statement naming a
@@ -117,6 +149,29 @@ export class SkillStore {
     this.getStmt = this.db.prepare<[string], SkillRow>('SELECT * FROM skills WHERE name = ?');
     this.listStmt = this.db.prepare<[], SkillRow>('SELECT * FROM skills ORDER BY name ASC');
     this.deleteStmt = this.db.prepare<[string]>('DELETE FROM skills WHERE name = ?');
+
+    this.upsertActivationStmt = this.db.prepare<SkillActivationRow>(`
+      INSERT INTO skill_activations (id, skill_name, scope_type, scope_id, mode, enabled, created_at)
+      VALUES (@id, @skill_name, @scope_type, @scope_id, @mode, @enabled, @created_at)
+      ON CONFLICT(skill_name, scope_type, scope_id) DO UPDATE SET
+        mode = excluded.mode,
+        enabled = excluded.enabled
+    `);
+    this.deleteActivationStmt = this.db.prepare<[string, string, string]>(
+      'DELETE FROM skill_activations WHERE skill_name = ? AND scope_type = ? AND scope_id = ?',
+    );
+    this.listActivationsStmt = this.db.prepare<[string, string], SkillActivationRow>(
+      'SELECT * FROM skill_activations WHERE scope_type = ? AND scope_id = ? ORDER BY created_at ASC',
+    );
+    this.listActivationsForSkillStmt = this.db.prepare<[string], SkillActivationRow>(
+      'SELECT * FROM skill_activations WHERE skill_name = ? ORDER BY scope_type, created_at ASC',
+    );
+    this.deleteActivationsForSkillStmt = this.db.prepare<[string]>(
+      'DELETE FROM skill_activations WHERE skill_name = ?',
+    );
+    this.deleteActivationsForScopeStmt = this.db.prepare<[string, string]>(
+      'DELETE FROM skill_activations WHERE scope_type = ? AND scope_id = ?',
+    );
   }
 
   /** Idempotent additive column migrations — same swallow-if-duplicate pattern. */
@@ -176,5 +231,60 @@ export class SkillStore {
     const next: SkillRow = { ...row, ...patch, updated_at: new Date().toISOString() };
     this.upsert(next);
     return next;
+  }
+
+  // ---- activations (orch/session scopes) --------------------------------
+
+  upsertActivation(row: SkillActivationRow): void {
+    try {
+      this.upsertActivationStmt.run(row);
+    } catch (err) {
+      log.warn({ event: 'skills.activation_write_failed', op: 'upsert', name: row.skill_name, error: String(err) });
+    }
+  }
+
+  deleteActivation(skillName: string, scopeType: SkillScopeType, scopeId: string): void {
+    try {
+      this.deleteActivationStmt.run(skillName, scopeType, scopeId);
+    } catch (err) {
+      log.warn({ event: 'skills.activation_write_failed', op: 'delete', name: skillName, error: String(err) });
+    }
+  }
+
+  listActivations(scopeType: SkillScopeType, scopeId: string): SkillActivationRow[] {
+    try {
+      return this.listActivationsStmt.all(scopeType, scopeId);
+    } catch (err) {
+      log.warn({ event: 'skills.activation_read_failed', scopeType, scopeId, error: String(err) });
+      return [];
+    }
+  }
+
+  /** Every orch/session activation of a skill (provenance for the management UI). */
+  listActivationsForSkill(skillName: string): SkillActivationRow[] {
+    try {
+      return this.listActivationsForSkillStmt.all(skillName);
+    } catch (err) {
+      log.warn({ event: 'skills.activation_read_failed', op: 'for_skill', name: skillName, error: String(err) });
+      return [];
+    }
+  }
+
+  /** Cleanup: drop every activation of a skill (called on uninstall). */
+  deleteActivationsForSkill(skillName: string): void {
+    try {
+      this.deleteActivationsForSkillStmt.run(skillName);
+    } catch (err) {
+      log.warn({ event: 'skills.activation_write_failed', op: 'purge_skill', name: skillName, error: String(err) });
+    }
+  }
+
+  /** Cleanup: drop every activation for a scope (an orch/session that's gone). */
+  deleteActivationsForScope(scopeType: SkillScopeType, scopeId: string): void {
+    try {
+      this.deleteActivationsForScopeStmt.run(scopeType, scopeId);
+    } catch (err) {
+      log.warn({ event: 'skills.activation_write_failed', op: 'purge_scope', scopeType, error: String(err) });
+    }
   }
 }

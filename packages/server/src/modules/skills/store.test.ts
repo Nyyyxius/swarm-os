@@ -74,3 +74,59 @@ describe('SkillStore', () => {
     expect(store.get('hello-skill')).toBeNull();
   });
 });
+
+describe('SkillStore activations', () => {
+  function act(over: Partial<Parameters<SkillStore['upsertActivation']>[0]> = {}) {
+    return {
+      id: `id-${Math.random().toString(36).slice(2)}`,
+      skill_name: 'sk',
+      scope_type: 'orch' as const,
+      scope_id: 'orch1',
+      mode: 'inject',
+      enabled: 1,
+      created_at: new Date().toISOString(),
+      ...over,
+    };
+  }
+
+  it('upserts, lists and updates by (skill, scope_type, scope_id)', () => {
+    store.upsertActivation(act());
+    let rows = store.listActivations('orch', 'orch1');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.enabled).toBe(1);
+    // Same key → UPDATE (not a second row): flip enabled.
+    store.upsertActivation(act({ enabled: 0 }));
+    rows = store.listActivations('orch', 'orch1');
+    expect(rows).toHaveLength(1);
+    expect(rows[0]!.enabled).toBe(0);
+  });
+
+  it('scopes are isolated by type and id', () => {
+    store.upsertActivation(act({ scope_type: 'orch', scope_id: 'orch1' }));
+    store.upsertActivation(act({ scope_type: 'session', scope_id: 'sess1' }));
+    expect(store.listActivations('orch', 'orch1')).toHaveLength(1);
+    expect(store.listActivations('session', 'sess1')).toHaveLength(1);
+    expect(store.listActivations('orch', 'other')).toEqual([]);
+  });
+
+  it('deleteActivation removes a single scope entry', () => {
+    store.upsertActivation(act());
+    store.deleteActivation('sk', 'orch', 'orch1');
+    expect(store.listActivations('orch', 'orch1')).toEqual([]);
+  });
+
+  it('deleteActivationsForSkill purges every scope', () => {
+    store.upsertActivation(act({ scope_type: 'orch', scope_id: 'orch1' }));
+    store.upsertActivation(act({ scope_type: 'session', scope_id: 'sess1' }));
+    store.deleteActivationsForSkill('sk');
+    expect(store.listActivations('orch', 'orch1')).toEqual([]);
+    expect(store.listActivations('session', 'sess1')).toEqual([]);
+  });
+
+  it('deleteActivationsForScope purges a scope', () => {
+    store.upsertActivation(act({ skill_name: 'a' }));
+    store.upsertActivation(act({ skill_name: 'b' }));
+    store.deleteActivationsForScope('orch', 'orch1');
+    expect(store.listActivations('orch', 'orch1')).toEqual([]);
+  });
+});

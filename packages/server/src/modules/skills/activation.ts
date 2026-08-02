@@ -1,11 +1,14 @@
 /**
- * Skill activation — the two channels of docs/plan-skills-importables.md §2.
+ * Skill activation — the two channels of docs/plan-skills-importables.md §2,
+ * generalised to the three scopes (role < orch < session, Lot 2).
  *
- *  - DURABLE: `resolveFragments` turns a role's active skill refs into the
- *    `SkillFragment[]` injected into every FUTURE spawn's preamble.
- *  - HOT: `activateHot` / `deactivateHot` reach the LIVE sessions of a team
- *    right now — staging any assets, then pushing a `from:'system'` mailbox
- *    message + idle PTY signal (the same seam the rehydrate path uses).
+ *  - DURABLE: `resolveMergedFragments` merges the active skills of the role,
+ *    orchestrator and session scopes (more specific scope wins; an `enabled=0`
+ *    entry SUPPRESSES a broader activation) into the `SkillFragment[]` injected
+ *    into every FUTURE spawn's preamble.
+ *  - HOT: `activateHot` / `deactivateHot` reach the LIVE sessions of a team now
+ *    — staging any assets, then pushing a `from:'system'` mailbox message + idle
+ *    PTY signal. A `targetSessionId` narrows the notice to one session.
  */
 
 import * as path from 'node:path';
@@ -15,7 +18,7 @@ import type { Orchestrator } from '../orchestrator/index.js';
 import type { Session } from '../orchestrator/session.js';
 import type { SkillFragment } from '../orchestrator/preamble.js';
 import type { RoleSkillRef } from '../roles/index.js';
-import type { SkillStore, SkillRow } from './store.js';
+import type { SkillStore, SkillRow, SkillActivationRow } from './store.js';
 import { copySkillAssets, removeSkillAssets, skillAssetsBasePath, type SkillAssetsConfig } from './assets.js';
 
 const log = withModule('skills.activation');
@@ -38,7 +41,7 @@ export function fragmentOf(row: SkillRow): SkillFragment {
   return frag;
 }
 
-/** Build the durable-channel fragments for a role's active skill refs. */
+/** Build the durable-channel fragments for a role's active skill refs (role only). */
 export function resolveFragments(
   store: SkillStore,
   refs: readonly RoleSkillRef[],
@@ -56,20 +59,64 @@ export function resolveFragments(
   return out;
 }
 
+export interface ScopeInput {
+  /** Role scope (`roles.skills_json`) — always "active", no per-ref disable. */
+  roleRefs: readonly RoleSkillRef[];
+  /** Orchestrator scope (`skill_activations`), carrying an `enabled` flag. */
+  orchActivations: readonly SkillActivationRow[];
+  /** Session scope (`skill_activations`), carrying an `enabled` flag. */
+  sessionActivations: readonly SkillActivationRow[];
+}
+
+/**
+ * Merge the three scopes into the effective fragment list. PRECEDENCE
+ * role < orch < session: a more specific scope's entry for a skill name replaces
+ * the broader one, so a `session`/`orch` activation with `enabled=0` turns OFF a
+ * role/orch activation. First-seen order is preserved (role skills first).
+ */
+export function resolveMergedFragments(store: SkillStore, input: ScopeInput): SkillFragment[] {
+  const enabled = new Map<string, boolean>();
+  const order: string[] = [];
+  const note = (name: string, on: boolean): void => {
+    if (!enabled.has(name)) order.push(name);
+    enabled.set(name, on);
+  };
+  for (const r of input.roleRefs) if (r.mode === 'inject') note(r.name, true);
+  for (const a of input.orchActivations) if (a.mode === 'inject') note(a.skill_name, a.enabled === 1);
+  for (const a of input.sessionActivations) if (a.mode === 'inject') note(a.skill_name, a.enabled === 1);
+
+  const out: SkillFragment[] = [];
+  for (const name of order) {
+    if (!enabled.get(name)) continue;
+    const row = store.get(name);
+    if (row) out.push(fragmentOf(row));
+  }
+  return out;
+}
+
 export interface HotActivationDeps {
   store: SkillStore;
   skillsDir: string;
   assetsConfig: SkillAssetsConfig;
 }
 
-/** Announce a freshly-activated skill to every LIVE session of a team. */
+/** Stage a skill's assets into the workspace (idempotent). Safe to call per-spawn. */
+export function stageAssets(deps: HotActivationDeps, row: SkillRow): void {
+  if (!row.assets_present) return;
+  const dir = assetsDirOf(row);
+  if (!dir) return;
+  copySkillAssets(deps.assetsConfig.workspaceRoot, path.join(deps.skillsDir, row.name), row.name, dir);
+}
+
+/** Announce a freshly-activated skill to LIVE sessions (all, or one target). */
 export function activateHot(
   deps: HotActivationDeps,
   orch: Orchestrator,
   row: SkillRow,
+  opts: { targetSessionId?: string } = {},
 ): { injected: number } {
-  stageAssetsIfAny(deps, row);
-  return broadcast(orch, renderActivation(deps, row));
+  stageAssets(deps, row);
+  return broadcast(orch, renderActivation(deps, row), opts.targetSessionId);
 }
 
 /** Notice of a de-activated skill; drops any staged assets. */
@@ -77,19 +124,21 @@ export function deactivateHot(
   deps: HotActivationDeps,
   orch: Orchestrator,
   row: SkillRow,
+  opts: { targetSessionId?: string } = {},
 ): { injected: number } {
   removeSkillAssets(deps.assetsConfig.workspaceRoot, row.name);
   const content =
-    `[skill deactivated] « ${row.name} » is no longer active for this team. ` +
-    `Disregard its instructions from here on. (It also drops out of the durable ` +
-    `preamble at your next spawn / context reset.)`;
-  return broadcast(orch, content);
+    `[skill deactivated] « ${row.name} » is no longer active for you. Disregard its ` +
+    `instructions from here on. (It also drops out of the durable preamble at your ` +
+    `next spawn / context reset.)`;
+  return broadcast(orch, content, opts.targetSessionId);
 }
 
-function broadcast(orch: Orchestrator, content: string): { injected: number } {
+function broadcast(orch: Orchestrator, content: string, targetSessionId?: string): { injected: number } {
   let injected = 0;
   for (const s of orch.listSessions()) {
     if (!isLiveSession(s)) continue;
+    if (targetSessionId && s.id !== targetSessionId) continue;
     orch.mailbox.push(s.id, { from: 'system', content });
     try {
       s.notifySignal(SIGNAL_TEXT);
@@ -99,13 +148,6 @@ function broadcast(orch: Orchestrator, content: string): { injected: number } {
     injected++;
   }
   return { injected };
-}
-
-function stageAssetsIfAny(deps: HotActivationDeps, row: SkillRow): void {
-  if (!row.assets_present) return;
-  const dir = assetsDirOf(row);
-  if (!dir) return;
-  copySkillAssets(deps.assetsConfig.workspaceRoot, path.join(deps.skillsDir, row.name), row.name, dir);
 }
 
 function assetsDirOf(row: SkillRow): string | null {
@@ -120,9 +162,9 @@ function assetsDirOf(row: SkillRow): string | null {
 
 function renderActivation(deps: HotActivationDeps, row: SkillRow): string {
   const lines: string[] = [
-    `[skill activated] « ${row.name} »${row.version ? ` (v${row.version})` : ''} is now ACTIVE ` +
-      `for this team. Apply its instructions as part of your role; they augment your ` +
-      `discipline (mailbox, approval, task board…), never replace it.`,
+    `[skill activated] « ${row.name} »${row.version ? ` (v${row.version})` : ''} is now ACTIVE. ` +
+      `Apply its instructions as part of your role; they augment your discipline ` +
+      `(mailbox, approval, task board…), never replace it.`,
   ];
   if (row.assets_present) {
     lines.push(`Its assets are staged under: ${skillAssetsBasePath(deps.assetsConfig, row.name)}`);

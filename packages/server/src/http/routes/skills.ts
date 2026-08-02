@@ -16,7 +16,7 @@
  */
 
 import express, { Router, type Request, type Response } from 'express';
-import type { SkillsSubsystem } from '../../modules/skills/index.js';
+import type { SkillsSubsystem, SkillScope } from '../../modules/skills/index.js';
 import { SkillNotFoundError, UploadRequiresNewUploadError } from '../../modules/skills/installer.js';
 import { SkillValidationError, SkillStageError } from '../../modules/skills/stage.js';
 
@@ -55,6 +55,16 @@ export function createSkillsRouter(skills: SkillsSubsystem): Router {
       return;
     }
     res.json({ skill: view, body: skills.getBody(req.params.name) ?? '' });
+  });
+
+  // Provenance: every orch/session activation of a skill (for the management UI).
+  // Role-scope provenance is read from the roles API.
+  router.get('/skills/:name/activations', (req: Request<{ name: string }>, res: Response) => {
+    if (!skills.getView(req.params.name)) {
+      res.status(404).json({ error: `skill '${req.params.name}' not found` });
+      return;
+    }
+    res.json({ activations: skills.activationsForSkill(req.params.name) });
   });
 
   router.post('/skills/install', (req: Request, res: Response) => {
@@ -111,5 +121,46 @@ export function createSkillsRouter(skills: SkillsSubsystem): Router {
     res.status(204).end();
   });
 
+  // Scope activation. `scope` defaults to 'orch'; 'role' derives the roleId from
+  // the live orchestrator, 'session' requires `sessionId`. The hot channel fires
+  // when the orchestrator is live. Body: { scope?, orchestratorId, sessionId? }.
+  router.post('/skills/:name/activate', (req: Request<{ name: string }>, res: Response) => {
+    handleScope(skills, 'activate', req, res);
+  });
+  router.post('/skills/:name/deactivate', (req: Request<{ name: string }>, res: Response) => {
+    handleScope(skills, 'deactivate', req, res);
+  });
+
   return router;
+}
+
+function handleScope(
+  skills: SkillsSubsystem,
+  action: 'activate' | 'deactivate',
+  req: Request<{ name: string }>,
+  res: Response,
+): void {
+  const body = (req.body ?? {}) as { scope?: unknown; orchestratorId?: unknown; sessionId?: unknown };
+  const scope: SkillScope =
+    body.scope === 'role' || body.scope === 'session' ? body.scope : 'orch';
+  if (typeof body.orchestratorId !== 'string' || body.orchestratorId === '') {
+    res.status(400).json({ error: 'orchestratorId is required' });
+    return;
+  }
+  if (scope === 'session' && (typeof body.sessionId !== 'string' || body.sessionId === '')) {
+    res.status(400).json({ error: "sessionId is required for scope 'session'" });
+    return;
+  }
+  const opts = {
+    name: req.params.name,
+    scope,
+    orchestratorId: body.orchestratorId,
+    ...(typeof body.sessionId === 'string' ? { sessionId: body.sessionId } : {}),
+  };
+  const result = action === 'activate' ? skills.activate(opts) : skills.deactivate(opts);
+  if (!result.found) {
+    res.status(404).json({ error: `skill '${req.params.name}' not found` });
+    return;
+  }
+  res.json({ name: req.params.name, scope, ...result });
 }

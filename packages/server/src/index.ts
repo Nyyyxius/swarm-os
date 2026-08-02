@@ -404,6 +404,10 @@ const spawner = new Spawner(config, {
   ...(skillsSubsystem ? { skills: skillsSubsystem } : {}),
 });
 
+// Give the skills subsystem a live-orchestrator lookup so the REST + MCP scope
+// activation paths can fire the HOT channel (docs/plan-skills-importables.md §2.2).
+skillsSubsystem?.setOrchestratorLookup((id) => spawner.get(id) ?? null);
+
 // ---- S9: in-memory `/metrics/messages` aggregator -------------------------
 // Owns a 60-pt global ring + 8-pt per-orch rings, ticked every 60 s. Lost on
 // restart by design (see docs/update_system/09_metrics_messages.md §7.3).

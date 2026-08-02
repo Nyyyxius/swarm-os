@@ -511,7 +511,8 @@ export class Spawner {
       },
       ...(this.pluginTools ? { pluginTools: this.pluginTools } : {}),
       ...(this.taskboard ? { taskboard: this.taskboard } : {}),
-      skills: () => this.resolveSkillsFor(spec.roleId ?? null),
+      skills: (orchestratorId, sessionId) =>
+        this.resolveSkillsFor(spec.roleId ?? null, orchestratorId, sessionId),
     });
     this.orchestrators.set(orch.id, orch);
     eventBus.emitEvent({
@@ -572,9 +573,13 @@ export class Spawner {
     return { orchestrator: orch, lead };
   }
 
-  /** Resolve the skills active for a role — the per-spawn preamble thunk. */
-  private resolveSkillsFor(roleId: string | null): readonly SkillFragment[] {
-    return this.skills ? this.skills.resolveForRole(roleId) : [];
+  /** Resolve the skills active for a session — the per-spawn preamble thunk. */
+  private resolveSkillsFor(
+    roleId: string | null,
+    orchestratorId: string,
+    sessionId: string,
+  ): readonly SkillFragment[] {
+    return this.skills ? this.skills.resolveForSession(roleId, orchestratorId, sessionId) : [];
   }
 
   get(id: string): Orchestrator | undefined {
@@ -1066,7 +1071,8 @@ export class Spawner {
         onHideRequested: (id) => this.hideOrchestrator(id),
         ...(this.pluginTools ? { pluginTools: this.pluginTools } : {}),
         ...(this.taskboard ? { taskboard: this.taskboard } : {}),
-        skills: () => this.resolveSkillsFor(init.roleId ?? null),
+        skills: (orchestratorId, sessionId) =>
+          this.resolveSkillsFor(init.roleId ?? null, orchestratorId, sessionId),
       });
       this.orchestrators.set(orch.id, orch);
 

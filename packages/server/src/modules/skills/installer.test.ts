@@ -2,6 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import { execFileSync } from 'node:child_process';
 import { SwarmDb } from '../db/index.js';
 import { SkillStore } from './store.js';
 import { SkillInstaller, SkillNotFoundError } from './installer.js';
@@ -87,5 +88,51 @@ describe('SkillInstaller', () => {
     installer.remove('hello-skill');
     expect(store.get('hello-skill')).toBeNull();
     expect(fs.existsSync(path.join(skillsDir, 'hello-skill'))).toBe(false);
+  });
+});
+
+function git(args: string[], cwd: string): void {
+  execFileSync('git', args, { cwd, stdio: 'ignore', env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
+}
+
+describe('SkillInstaller git source', () => {
+  let repo: string;
+
+  beforeEach(() => {
+    repo = path.join(dir, 'repo');
+    fs.mkdirSync(repo, { recursive: true });
+    git(['init', '-q'], repo);
+    git(['config', 'user.email', 't@t.io'], repo);
+    git(['config', 'user.name', 'Tester'], repo);
+    fs.writeFileSync(
+      path.join(repo, 'SKILL.md'),
+      `---\nname: git-skill\nversion: 1.0.0\ndescription: g.\n---\nv1 body\n`,
+      'utf8',
+    );
+    git(['add', '.'], repo);
+    git(['commit', '-qm', 'init'], repo);
+  });
+
+  it('installs from a local git repo (records commit) and re-imports on upgrade', async () => {
+    const r = await installer.install({ kind: 'git', url: `file://${repo}` });
+    expect(r.name).toBe('git-skill');
+    expect(r.source_kind).toBe('git');
+    expect(r.source_commit).toMatch(/^[0-9a-f]{40}$/);
+    expect(r.source_ref).toBe(`file://${repo}`);
+    expect(r.body_md).toContain('v1 body');
+    expect(r.trust).toBe('community'); // not a local dir → community
+    const firstCommit = r.source_commit;
+
+    // Advance the repo, then upgrade re-fetches the recorded source.
+    fs.writeFileSync(
+      path.join(repo, 'SKILL.md'),
+      `---\nname: git-skill\nversion: 2.0.0\ndescription: g.\n---\nv2 body\n`,
+      'utf8',
+    );
+    git(['commit', '-qam', 'v2'], repo);
+    const up = await installer.upgrade('git-skill');
+    expect(up.version).toBe('2.0.0');
+    expect(up.body_md).toContain('v2 body');
+    expect(up.source_commit).not.toBe(firstCommit);
   });
 });

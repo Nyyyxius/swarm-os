@@ -459,6 +459,37 @@ auto-sélection via `triggers`.
 
 ---
 
+## 12. Notes d'implémentation (chantier réel — écarts assumés, validés par le lead)
+
+- **Tables `skills` + `skill_activations` = STORE-OWNED** (`CREATE TABLE IF NOT
+  EXISTS` dans `modules/skills/store.ts` sur le handle brut), **PAS** dans
+  `schema.sql`/`INLINE_SCHEMA` — convention réelle du repo pour les tables de
+  module (plugins, memory, taskboard, approvals ; cf. header `plugins/store.ts`
+  + `src/index.ts:204-208`). Le §11.1 « schéma en 3 endroits » ne vaut donc que
+  pour la colonne **`roles.skills_json`**, elle-même en **migrations-only**
+  (précédent `approval_json`), pas dans le schéma de base.
+- **`skills.activate` défaut = portée `'orch'` (cette équipe)** — Lot 2a, et non
+  `'role'` comme au Lot 1a. Rationale : activer à chaud « pour mon équipe » ne
+  doit pas muter le template de rôle partagé par **toutes** les équipes de ce
+  rôle. La portée `'role'` reste accessible (`scope:'role'` explicite sur l'outil
+  MCP + la route HTTP, et via `PATCH /roles` + le RoleDialog web inchangés).
+  **Changement de sémantique vs Lot 1a, documenté** dans la description de l'outil
+  `skills.activate`.
+- **Précédence des portées `role < orch < session`** avec **override négatif** :
+  une activation orch/session `enabled=0` **supprime** une activation plus large
+  (désactive un skill de rôle pour une seule équipe/session). `skills.list` (MCP)
+  et `GET /skills/:name/activations` (HTTP) remontent la **provenance/portée** de
+  chaque activation pour l'UI (Lot 2b).
+- **`install-core` partagé** : primitives fetch/stage (git clone, npm pack, tar,
+  runner, codec git-ref, garde subdir) dans `modules/install-core/`.
+  `plugins/installer.ts` **délègue** via un runner à **error-factory** (garde son
+  `InstallSourceError`/502) ; `plugins/installer.test.ts` reste vert. Skills
+  restent **data-first** (jamais `npm install`/`import()`).
+- **`market`/agentskills.io** : différé au **Lot 4** (après le modèle de trust du
+  Lot 3).
+
+---
+
 ### Annexe — carte des ancrages (citations réutilisées)
 
 - Préambule / injection : `orchestrator/preamble.ts:74-120, 252-296, 298-337, 365-394` ; consume provider `providers/claude.ts:102`, `session.ts:1329`.

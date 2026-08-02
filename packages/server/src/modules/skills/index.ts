@@ -4,31 +4,51 @@
  * `spawner.skills`, exactly like `memory` / `taskboard` / `graph`.
  *
  * Owns: the registry (`SkillStore`), import/re-import (`SkillInstaller`), the
- * durable resolver (role → `SkillFragment[]` for the preamble) and the hot
- * activation channel (mailbox + signal to live sessions). A skill is DATA (§0);
- * nothing here runs skill code.
+ * durable resolver (role+orch+session → `SkillFragment[]` for the preamble) and
+ * the hot activation channel (mailbox + signal to live sessions). A skill is
+ * DATA (§0); nothing here runs skill code.
+ *
+ * SCOPES (Lot 2, precedence role < orch < session): role activations live in
+ * `roles.skills_json`; orch/session activations live in `skill_activations`. A
+ * more specific scope overrides a broader one — an orch/session entry with
+ * `enabled=0` SUPPRESSES a role/orch activation.
  */
 
 import * as path from 'node:path';
+import { randomUUID } from 'node:crypto';
 import { withModule } from '../../logger.js';
 import type { Config } from '../../config.js';
 import type { RoleStore, RoleSkillRef } from '../roles/index.js';
 import type { Orchestrator } from '../orchestrator/index.js';
 import type { SkillFragment } from '../orchestrator/preamble.js';
-import { SkillStore, type SkillRow } from './store.js';
+import { SkillStore, type SkillRow, type SkillScopeType } from './store.js';
 import { SkillInstaller } from './installer.js';
 import type { SkillInstallSource } from './stage.js';
 import { removeSkillAssets, type SkillAssetsConfig } from './assets.js';
 import {
-  resolveFragments,
+  resolveMergedFragments,
   activateHot,
   deactivateHot,
+  stageAssets,
   type HotActivationDeps,
+  type ScopeInput,
 } from './activation.js';
 
 const log = withModule('skills');
 
-/** API-facing view of a skill (the REST contract shape — Lot 1b builds on it). */
+/** Activation scope. `role` persists on the team's role; `orch`/`session` in `skill_activations`. */
+export type SkillScope = 'role' | 'orch' | 'session';
+
+/** An effectively-active skill + the most specific scope that activated it. */
+export interface ActiveSkillInfo {
+  name: string;
+  scope: SkillScope;
+}
+
+/** Resolve a live orchestrator by id (set by the host after the Spawner exists). */
+export type OrchestratorLookup = (id: string) => Orchestrator | null;
+
+/** API-facing view of a skill (the REST contract shape). */
 export interface SkillView {
   name: string;
   version: string;
@@ -36,6 +56,7 @@ export interface SkillView {
   description: string | null;
   sourceKind: string;
   sourceRef: string | null;
+  sourceCommit: string | null;
   trust: string;
   requires: { plugins: string[]; capabilities: string[] };
   assetsPresent: boolean;
@@ -56,7 +77,7 @@ export interface SkillsSubsystemDeps {
 
 export interface SkillActivationResult {
   found: boolean;
-  /** True when the activation was persisted on the team's role. */
+  /** True when the activation was persisted (role/orch/session). */
   persisted: boolean;
   /** Number of live sessions the hot notice reached. */
   injected: number;
@@ -69,6 +90,7 @@ export class SkillsSubsystem {
   private readonly roleStore: RoleStore;
   private readonly config: Config;
   private readonly skillsDir: string;
+  private orchLookup: OrchestratorLookup | null = null;
 
   constructor(deps: SkillsSubsystemDeps) {
     this.store = deps.store;
@@ -76,6 +98,15 @@ export class SkillsSubsystem {
     this.roleStore = deps.roleStore;
     this.config = deps.config;
     this.skillsDir = path.join(deps.config.dataDir, 'skills');
+  }
+
+  /**
+   * Wire a live-orchestrator lookup (set by `src/index.ts` after the Spawner is
+   * built, since the Spawner and this subsystem are constructed together). Lets
+   * the REST + MCP scope-activation paths fire the HOT channel on a team.
+   */
+  setOrchestratorLookup(fn: OrchestratorLookup): void {
+    this.orchLookup = fn;
   }
 
   // ---- catalogue --------------------------------------------------------
@@ -103,6 +134,7 @@ export class SkillsSubsystem {
 
   remove(name: string): void {
     this.installer.remove(name);
+    this.store.deleteActivationsForSkill(name);
     try {
       removeSkillAssets(this.config.workspaceRoot, name);
     } catch {
@@ -112,14 +144,70 @@ export class SkillsSubsystem {
 
   // ---- durable resolution (preamble) ------------------------------------
 
-  /** Fragments for a role's active skills — injected at every future spawn. */
-  resolveForRole(roleId: string | null): SkillFragment[] {
-    const refs = this.refsForRole(roleId);
-    return refs.length ? resolveFragments(this.store, refs) : [];
+  /**
+   * The effective fragments for a session — merge of role, orch and session
+   * scopes (docs/plan-skills-importables.md §2.1). Called at EACH spawn; also
+   * stages any durable assets into the workspace (idempotent).
+   */
+  resolveForSession(
+    roleId: string | null,
+    orchestratorId: string | null,
+    sessionId: string | null,
+  ): SkillFragment[] {
+    const input: ScopeInput = {
+      roleRefs: this.refsForRole(roleId),
+      orchActivations: orchestratorId ? this.store.listActivations('orch', orchestratorId) : [],
+      sessionActivations: sessionId ? this.store.listActivations('session', sessionId) : [],
+    };
+    const frags = resolveMergedFragments(this.store, input);
+    this.stageDurableAssets(frags);
+    return frags;
   }
 
-  activeNamesForRole(roleId: string | null): string[] {
-    return this.refsForRole(roleId).map((r) => r.name);
+  /**
+   * The skills effectively active for a session, each tagged with the MOST
+   * SPECIFIC scope that activated it (role < orch < session). Provenance for the
+   * management UI + `skills.list`.
+   */
+  activeForSession(
+    roleId: string | null,
+    orchestratorId: string | null,
+    sessionId: string | null,
+  ): ActiveSkillInfo[] {
+    const state = new Map<string, { enabled: boolean; scope: SkillScope }>();
+    for (const r of this.refsForRole(roleId)) {
+      if (r.mode === 'inject') state.set(r.name, { enabled: true, scope: 'role' });
+    }
+    if (orchestratorId) {
+      for (const a of this.store.listActivations('orch', orchestratorId)) {
+        if (a.mode === 'inject') state.set(a.skill_name, { enabled: a.enabled === 1, scope: 'orch' });
+      }
+    }
+    if (sessionId) {
+      for (const a of this.store.listActivations('session', sessionId)) {
+        if (a.mode === 'inject') state.set(a.skill_name, { enabled: a.enabled === 1, scope: 'session' });
+      }
+    }
+    const out: ActiveSkillInfo[] = [];
+    for (const [name, v] of state) if (v.enabled) out.push({ name, scope: v.scope });
+    return out;
+  }
+
+  activeNamesForSession(
+    roleId: string | null,
+    orchestratorId: string | null,
+    sessionId: string | null,
+  ): string[] {
+    return this.activeForSession(roleId, orchestratorId, sessionId).map((i) => i.name);
+  }
+
+  /** Every orch/session activation of a skill (provenance for the Lot 2b UI). */
+  activationsForSkill(name: string): Array<{ scope: SkillScope; scopeId: string; enabled: boolean }> {
+    return this.store.listActivationsForSkill(name).map((a) => ({
+      scope: a.scope_type,
+      scopeId: a.scope_id,
+      enabled: a.enabled === 1,
+    }));
   }
 
   private refsForRole(roleId: string | null): RoleSkillRef[] {
@@ -128,22 +216,77 @@ export class SkillsSubsystem {
     return role?.skills ?? [];
   }
 
+  private stageDurableAssets(frags: readonly SkillFragment[]): void {
+    for (const f of frags) {
+      const row = this.store.get(f.name);
+      if (row?.assets_present) stageAssets(this.hotDeps(), row);
+    }
+  }
+
   // ---- activation (persist + hot) ---------------------------------------
 
-  activate(orch: Orchestrator, name: string): SkillActivationResult {
-    const row = this.store.get(name);
+  activate(opts: {
+    name: string;
+    scope: SkillScope;
+    orchestratorId: string;
+    sessionId?: string;
+  }): SkillActivationResult {
+    return this.setActivation(opts, true);
+  }
+
+  deactivate(opts: {
+    name: string;
+    scope: SkillScope;
+    orchestratorId: string;
+    sessionId?: string;
+  }): SkillActivationResult {
+    return this.setActivation(opts, false);
+  }
+
+  private setActivation(
+    opts: { name: string; scope: SkillScope; orchestratorId: string; sessionId?: string },
+    on: boolean,
+  ): SkillActivationResult {
+    const row = this.store.get(opts.name);
     if (!row) return { found: false, persisted: false, injected: 0 };
-    const persisted = this.setRoleSkill(orch.roleId, name, true);
-    const { injected } = activateHot(this.hotDeps(), orch, row);
+    const orch = this.orchLookup ? this.orchLookup(opts.orchestratorId) : null;
+    const persisted = this.persist(opts, orch, on);
+
+    const target =
+      opts.scope === 'session' && opts.sessionId ? { targetSessionId: opts.sessionId } : {};
+    let injected = 0;
+    if (orch) {
+      injected = on
+        ? activateHot(this.hotDeps(), orch, row, target).injected
+        : deactivateHot(this.hotDeps(), orch, row, target).injected;
+    }
     return { found: true, persisted, injected };
   }
 
-  deactivate(orch: Orchestrator, name: string): SkillActivationResult {
-    const row = this.store.get(name);
-    if (!row) return { found: false, persisted: false, injected: 0 };
-    const persisted = this.setRoleSkill(orch.roleId, name, false);
-    const { injected } = deactivateHot(this.hotDeps(), orch, row);
-    return { found: true, persisted, injected };
+  private persist(
+    opts: { name: string; scope: SkillScope; orchestratorId: string; sessionId?: string },
+    orch: Orchestrator | null,
+    on: boolean,
+  ): boolean {
+    if (opts.scope === 'role') {
+      const roleId = orch?.roleId ?? null;
+      return this.setRoleSkill(roleId, opts.name, on);
+    }
+    const scopeType: SkillScopeType = opts.scope === 'session' ? 'session' : 'orch';
+    const scopeId = scopeType === 'session' ? opts.sessionId : opts.orchestratorId;
+    if (!scopeId) return false;
+    // Deactivate persists an `enabled=0` override so it can suppress a broader
+    // (role/orch) activation, not just clear an own-scope one.
+    this.store.upsertActivation({
+      id: randomUUID(),
+      skill_name: opts.name,
+      scope_type: scopeType,
+      scope_id: scopeId,
+      mode: 'inject',
+      enabled: on ? 1 : 0,
+      created_at: new Date().toISOString(),
+    });
+    return true;
   }
 
   private setRoleSkill(roleId: string | null, name: string, active: boolean): boolean {
@@ -181,6 +324,7 @@ function toView(row: SkillRow): SkillView {
     description: row.description,
     sourceKind: row.source_kind,
     sourceRef: row.source_ref,
+    sourceCommit: row.source_commit,
     trust: row.trust,
     requires: parseRequires(row.requires_json),
     assetsPresent: row.assets_present === 1,
@@ -197,10 +341,7 @@ function parseRequires(json: string | null): { plugins: string[]; capabilities: 
   if (!json) return empty;
   try {
     const r = JSON.parse(json) as { plugins?: unknown; capabilities?: unknown };
-    return {
-      plugins: asStringArray(r.plugins),
-      capabilities: asStringArray(r.capabilities),
-    };
+    return { plugins: asStringArray(r.plugins), capabilities: asStringArray(r.capabilities) };
   } catch (err) {
     log.warn({ event: 'skills.requires_parse_failed', error: String(err) });
     return empty;

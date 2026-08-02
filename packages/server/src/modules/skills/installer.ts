@@ -4,7 +4,8 @@
  * `install(source)` stages a source into `.staging/<uuid>`, validates its
  * `SKILL.md`, computes a checksum, swaps the folder into `<skillsDir>/<name>`
  * and upserts the registry row. `upgrade(name)` re-fetches a skill's recorded
- * source (re-import). NOTHING here executes skill code — a skill is DATA (§0).
+ * source (re-import). Sources: dir / upload / npm / git. NOTHING here executes
+ * skill code — a skill is DATA (§0): fetch → stage → validate, no npm install.
  */
 
 import * as fs from 'node:fs';
@@ -16,10 +17,14 @@ import { SkillStore, type SkillRow } from './store.js';
 import {
   stageDir,
   stageUpload,
+  stageNpm,
+  stageGit,
+  makeSkillRunner,
   checksumSkill,
   SkillValidationError,
   type SkillInstallSource,
 } from './stage.js';
+import { encodeGitRef, decodeGitRef, type Runner } from '../install-core/fetch.js';
 
 const log = withModule('skills.installer');
 
@@ -50,6 +55,7 @@ interface StagedSkill {
   parsed: ParsedSkill;
   sourceKind: string;
   sourceRef: string | null;
+  sourceCommit: string | null;
   checksum: string;
 }
 
@@ -57,11 +63,13 @@ export class SkillInstaller {
   private readonly skillsDir: string;
   private readonly store: SkillStore;
   private readonly stagingRoot: string;
+  private readonly runner: Runner;
 
   constructor(deps: SkillInstallerDeps) {
     this.skillsDir = deps.skillsDir;
     this.store = deps.store;
     this.stagingRoot = path.join(deps.skillsDir, '.staging');
+    this.runner = makeSkillRunner(path.join(this.stagingRoot, '.npm-cache'));
     this.purgeStaging();
   }
 
@@ -98,6 +106,14 @@ export class SkillInstaller {
       case 'dir':
         source = { kind: 'dir', dir: row.source_ref ?? path.join(this.skillsDir, name) };
         break;
+      case 'npm':
+        source = { kind: 'npm', spec: row.source_ref ?? name };
+        break;
+      case 'git': {
+        const { url, ref, subdir } = decodeGitRef(row.source_ref ?? '');
+        source = { kind: 'git', url, ref, subdir };
+        break;
+      }
       case 'upload':
         throw new UploadRequiresNewUploadError(name);
       default:
@@ -133,6 +149,7 @@ export class SkillInstaller {
   ): Promise<StagedSkill> {
     let sourceKind: string;
     let sourceRef: string | null;
+    let sourceCommit: string | null = null;
     switch (source.kind) {
       case 'dir':
         stageDir(source.dir, dir);
@@ -140,9 +157,30 @@ export class SkillInstaller {
         sourceRef = path.resolve(source.dir);
         break;
       case 'upload':
-        await stageUpload(source.tgz, dir, path.join(this.stagingRoot, `${uuid}.tgz`));
+        await stageUpload(this.runner, source.tgz, dir, path.join(this.stagingRoot, `${uuid}.tgz`));
         sourceKind = 'upload';
         sourceRef = null;
+        break;
+      case 'npm': {
+        const packDir = path.join(this.stagingRoot, `${uuid}-pack`);
+        try {
+          await stageNpm(this.runner, source.spec, dir, packDir);
+        } finally {
+          this.rmQuiet(packDir);
+        }
+        sourceKind = 'npm';
+        sourceRef = source.spec;
+        break;
+      }
+      case 'git':
+        sourceCommit = await stageGit(
+          this.runner,
+          source,
+          dir,
+          path.join(this.stagingRoot, `${uuid}-clone`),
+        );
+        sourceKind = 'git';
+        sourceRef = encodeGitRef(source.url, source.ref, source.subdir);
         break;
       default:
         throw new SkillValidationError('unknown source kind');
@@ -156,7 +194,7 @@ export class SkillInstaller {
       throw new SkillValidationError(err instanceof Error ? err.message : String(err));
     }
     const checksum = checksumSkill(dir);
-    return { dir, parsed, sourceKind, sourceRef, checksum };
+    return { dir, parsed, sourceKind, sourceRef, sourceCommit, checksum };
   }
 
   /** Swap the staged folder into place + upsert the row. `existing` on upgrade. */
@@ -176,7 +214,7 @@ export class SkillInstaller {
       description: fm.description ?? null,
       source_kind: staged.sourceKind,
       source_ref: staged.sourceRef,
-      source_commit: null,
+      source_commit: staged.sourceCommit,
       checksum: staged.checksum,
       // A local dir import is the operator's own skill → higher default trust.
       trust: existing?.trust ?? (staged.sourceKind === 'dir' ? 'local' : 'community'),
