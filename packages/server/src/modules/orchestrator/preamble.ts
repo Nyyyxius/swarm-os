@@ -295,6 +295,73 @@ export function buildPluginToolsSection(
   ].join('\n');
 }
 
+/**
+ * What the preamble needs to know about ONE active skill.
+ *
+ * Declared here, in the CONSUMER (like `PluginToolSummary`), and imported as a
+ * type by `modules/skills/`: the skills subsystem depends on `orchestrator/`
+ * and never the reverse, so the arrow points the safe way and adds no runtime
+ * edge.
+ */
+export interface SkillFragment {
+  /** Skill slug (`hello-skill`) — the SKILL.md frontmatter `name`. */
+  name: string;
+  /** Optional version, shown in the header for traceability. */
+  version?: string;
+  /** Optional one-line description from the frontmatter. */
+  description?: string;
+  /** The SKILL.md body — the instructions injected VERBATIM into the preamble. */
+  body: string;
+}
+
+/**
+ * Announce the skills ACTIVE for this session (docs/plan-skills-importables.md).
+ *
+ * Mirrors `buildPluginToolsSection`: appended UNCONDITIONALLY to the default and
+ * BEFORE the operator override, so a role preamble can never hide an activated
+ * skill — and, like every section, it AUGMENTS the mailbox/approval/task-board
+ * discipline rather than replacing it. Tool names inside a skill body are
+ * rendered for the target CLI, exactly like the rest of the preamble.
+ *
+ * Returns `null` when no skill is active, so a session without skills carries
+ * not one extra byte.
+ *
+ * @param opts.isLead reserved for a future lead-only skill distinction; every
+ *                    active skill is shown to both roles today.
+ * @param opts.namer  same rendering the rest of the preamble gets; a namer that
+ *                    returns a non-string/empty leaves the canonical name in place.
+ */
+export function buildSkillsSection(
+  skills: readonly SkillFragment[],
+  opts: { isLead: boolean; namer?: McpToolNamer | null },
+): string | null {
+  if (skills.length === 0) return null;
+  const namer = opts.namer ?? null;
+  const render = (text: string): string => (namer ? renderMcpToolNames(text, namer) : text);
+
+  const blocks = [...skills]
+    .sort((a, b) => a.name.localeCompare(b.name))
+    .map((s) => {
+      const version = s.version ? ` (v${s.version})` : '';
+      const desc = s.description?.trim() ? `\n\n${s.description.trim()}` : '';
+      return `### ${s.name}${version}${desc}\n\n${render(s.body.trim())}`;
+    });
+
+  return [
+    '---',
+    '',
+    '## Active skills',
+    '',
+    'One or more skills have been activated for this session — versioned,',
+    'imported capabilities/procedures the operator turned on for your role or',
+    'team. Treat their instructions as part of your role. They **augment** your',
+    'core discipline (mailbox, approval, task board…); they never replace it.',
+    '',
+    ...blocks,
+    '',
+  ].join('\n');
+}
+
 export interface BuildPreambleInput {
   /** Identity slot — substituted into `{{name}}`/`{{role}}`/`{{sessionId}}`/`{{orchName}}`. */
   identity: {
@@ -334,6 +401,13 @@ export interface BuildPreambleInput {
    * agent. Omitted / empty ⇒ no section at all.
    */
   pluginTools?: readonly PluginToolSummary[] | null;
+  /**
+   * Skills ACTIVE for this session, resolved at spawn from the role/team/session
+   * scopes (docs/plan-skills-importables.md §2.1, durable channel). Appended
+   * UNCONDITIONALLY like `pluginTools`, so an operator override can never hide an
+   * activated skill. Omitted / empty ⇒ no section at all.
+   */
+  skills?: readonly SkillFragment[] | null;
 }
 
 /**
@@ -380,6 +454,16 @@ export function buildPreamble(input: BuildPreambleInput): string {
     namer,
   });
   if (plugins) filled = `${filled}\n${plugins}`;
+
+  // Active skills AFTER plugin tools, still BEFORE the naming note (which asserts
+  // "the names above are already rewritten", so it must cover skill bodies too)
+  // and BEFORE the operator override — a skill augments the role, never replaces
+  // the swarm's own discipline.
+  const skills = buildSkillsSection(input.skills ?? [], {
+    isLead: input.isLead,
+    namer,
+  });
+  if (skills) filled = `${filled}\n${skills}`;
 
   const note = namer ? buildToolNamingNote(namer) : null;
   if (note) filled = `${filled}\n${note}`;

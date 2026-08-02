@@ -6,10 +6,12 @@ import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import {
   buildPreamble,
   buildPluginToolsSection,
+  buildSkillsSection,
   renderMcpToolNames,
   TEAM_TOOL_LOGICAL_NAMES,
   type McpToolNamer,
   type PluginToolSummary,
+  type SkillFragment,
 } from './preamble.js';
 import { SIGNAL_TEXT } from './messaging.js';
 import { Orchestrator } from './index.js';
@@ -407,6 +409,80 @@ const PLUGIN_TOOLS = [
     leadOnly: true,
   },
 ];
+
+describe('buildSkillsSection', () => {
+  const SKILLS: SkillFragment[] = [
+    { name: 'beta-skill', version: '2.0.0', description: 'Second.', body: 'Do beta things.' },
+    { name: 'alpha-skill', version: '1.0.0', body: 'Do alpha things.' },
+  ];
+
+  it('is null when no skill is active', () => {
+    expect(buildSkillsSection([], { isLead: true })).toBeNull();
+  });
+
+  it('lists active skills, sorted by name, with their bodies', () => {
+    const out = buildSkillsSection(SKILLS, { isLead: true }) ?? '';
+    expect(out).toContain('## Active skills');
+    expect(out).toContain('### alpha-skill (v1.0.0)');
+    expect(out).toContain('Do alpha things.');
+    expect(out).toContain('### beta-skill (v2.0.0)');
+    expect(out).toContain('Do beta things.');
+    // Deterministic order — the section rides in a system prompt.
+    expect(out.indexOf('alpha-skill')).toBeLessThan(out.indexOf('beta-skill'));
+  });
+
+  it('renders tool names inside a skill body for the target CLI', () => {
+    const namer: McpToolNamer = (n) => `mcp_team-comms_${n.replace(/\./g, '_')}`;
+    const out =
+      buildSkillsSection([{ name: 'caller', body: 'When done, call team.broadcast to notify.' }], {
+        isLead: true,
+        namer,
+      }) ?? '';
+    expect(out).toContain('mcp_team-comms_team_broadcast');
+    expect(out).not.toContain('team.broadcast');
+  });
+});
+
+describe('buildPreamble — active skills injection', () => {
+  const SKILL: SkillFragment = {
+    name: 'greeter',
+    version: '0.1.0',
+    body: 'Greet in one warm sentence.',
+  };
+
+  it('injects an active-skills section without dropping the default discipline', () => {
+    const baseline = buildPreamble({ identity: ID, isLead: false });
+    const out = buildPreamble({ identity: ID, isLead: false, skills: [SKILL] });
+    expect(out).toContain('## Active skills');
+    expect(out).toContain('Greet in one warm sentence.');
+    // Nothing from the default was substituted away.
+    expect(out.length).toBeGreaterThan(baseline.length);
+    expect(out).toContain('team.read_inbox');
+  });
+
+  it('places skills before the operator override (augment, never replace)', () => {
+    const out = buildPreamble({
+      identity: ID,
+      isLead: false,
+      skills: [SKILL],
+      customOverride: 'Project specific: only touch /workspace/example.',
+    });
+    expect(out).toContain('## Active skills');
+    expect(out).toContain('Project-specific instructions');
+    expect(out).toContain('Project specific: only touch /workspace/example.');
+    expect(out.indexOf('## Active skills')).toBeLessThan(
+      out.indexOf('Project-specific instructions'),
+    );
+    // The default survived in front of both.
+    expect(out).toContain('team.read_inbox');
+  });
+
+  it('adds no section when skills is empty or null', () => {
+    const baseline = buildPreamble({ identity: ID, isLead: true });
+    expect(buildPreamble({ identity: ID, isLead: true, skills: [] })).toBe(baseline);
+    expect(buildPreamble({ identity: ID, isLead: true, skills: null })).toBe(baseline);
+  });
+});
 
 describe('buildPluginToolsSection', () => {
   it('is null when no plugin tool is registered', () => {
