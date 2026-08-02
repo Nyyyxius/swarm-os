@@ -57,10 +57,14 @@ describe('SkillInstaller', () => {
     const first = await installer.install({ kind: 'dir', dir: srcDir });
     writeSkill(srcDir, 'v2 body', { version: '0.2.0' });
     const second = await installer.upgrade('hello-skill');
-    expect(second.version).toBe('0.2.0');
-    expect(second.body_md).toContain('v2 body');
-    expect(second.checksum).not.toBe(first.checksum);
-    expect(second.installed_at).toBe(first.installed_at);
+    expect(second.row.version).toBe('0.2.0');
+    expect(second.row.body_md).toContain('v2 body');
+    expect(second.row.checksum).not.toBe(first.checksum);
+    expect(second.row.installed_at).toBe(first.installed_at);
+    // Drift is reported for the Lot 3b diff.
+    expect(second.drift.checksumChanged).toBe(true);
+    expect(second.drift.previousChecksum).toBe(first.checksum);
+    expect(second.drift.previousBody).toContain('v1 body');
   });
 
   it('rejects a dir without SKILL.md as a validation error', async () => {
@@ -131,8 +135,44 @@ describe('SkillInstaller git source', () => {
     );
     git(['commit', '-qam', 'v2'], repo);
     const up = await installer.upgrade('git-skill');
-    expect(up.version).toBe('2.0.0');
-    expect(up.body_md).toContain('v2 body');
-    expect(up.source_commit).not.toBe(firstCommit);
+    expect(up.row.version).toBe('2.0.0');
+    expect(up.row.body_md).toContain('v2 body');
+    expect(up.row.source_commit).not.toBe(firstCommit);
+  });
+});
+
+describe('SkillInstaller trust + review drift', () => {
+  it('promotes a git source to verified via the injected allowlist', async () => {
+    const inst = new SkillInstaller({
+      skillsDir: path.join(dir, 'skills-v'),
+      store,
+      trust: { verified: ['github.com/acme/'], firstParty: [] },
+    });
+    const src = path.join(dir, 'v-skill');
+    writeSkill(src, 'body', { name: 'v-skill' });
+    // A dir source is always local regardless of the allowlist.
+    const local = await inst.install({ kind: 'dir', dir: src });
+    expect(local.trust).toBe('local');
+  });
+
+  it('resets reviewed when a re-import changes the tree (fail-safe)', async () => {
+    writeSkill(srcDir, 'v1');
+    await installer.install({ kind: 'dir', dir: srcDir });
+    store.patch('hello-skill', { reviewed: 1, reviewed_at: new Date().toISOString() });
+    expect(store.get('hello-skill')?.reviewed).toBe(1);
+
+    writeSkill(srcDir, 'v2 changed', { version: '0.3.0' });
+    const up = await installer.upgrade('hello-skill');
+    expect(up.drift.checksumChanged).toBe(true);
+    expect(up.row.reviewed).toBe(0); // review invalidated by content drift
+  });
+
+  it('preserves reviewed when a re-import is byte-identical', async () => {
+    writeSkill(srcDir, 'stable');
+    await installer.install({ kind: 'dir', dir: srcDir });
+    store.patch('hello-skill', { reviewed: 1, reviewed_at: new Date().toISOString() });
+    const up = await installer.upgrade('hello-skill');
+    expect(up.drift.checksumChanged).toBe(false);
+    expect(up.row.reviewed).toBe(1);
   });
 });

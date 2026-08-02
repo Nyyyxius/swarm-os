@@ -25,8 +25,25 @@ import {
   type SkillInstallSource,
 } from './stage.js';
 import { encodeGitRef, decodeGitRef, type Runner } from '../install-core/fetch.js';
+import { resolveTrust, trustPolicyFromEnv, type TrustPolicy } from './trust.js';
 
 const log = withModule('skills.installer');
+
+/** What changed across a re-import — drives the Lot 3b diff + review reset. */
+export interface ChecksumDrift {
+  /** True when the re-imported tree hash differs from the stored one. */
+  checksumChanged: boolean;
+  /** The checksum BEFORE the re-import (null when it had none). */
+  previousChecksum: string | null;
+  /** The SKILL.md body BEFORE the re-import (for the UI diff). */
+  previousBody: string | null;
+}
+
+/** Result of a re-import: the new row + what drifted from the prior version. */
+export interface UpgradeResult {
+  row: SkillRow;
+  drift: ChecksumDrift;
+}
 
 /** Upgrade/remove of an unknown skill → HTTP 404. */
 export class SkillNotFoundError extends Error {
@@ -48,6 +65,8 @@ export interface SkillInstallerDeps {
   /** `<dataDir>/skills`. */
   skillsDir: string;
   store: SkillStore;
+  /** Allowlists promoting git/npm sources above `community`. Env-derived by default. */
+  trust?: TrustPolicy;
 }
 
 interface StagedSkill {
@@ -64,12 +83,14 @@ export class SkillInstaller {
   private readonly store: SkillStore;
   private readonly stagingRoot: string;
   private readonly runner: Runner;
+  private readonly trustPolicy: TrustPolicy;
 
   constructor(deps: SkillInstallerDeps) {
     this.skillsDir = deps.skillsDir;
     this.store = deps.store;
     this.stagingRoot = path.join(deps.skillsDir, '.staging');
     this.runner = makeSkillRunner(path.join(this.stagingRoot, '.npm-cache'));
+    this.trustPolicy = deps.trust ?? trustPolicyFromEnv();
     this.purgeStaging();
   }
 
@@ -97,7 +118,7 @@ export class SkillInstaller {
   }
 
   /** Re-import an existing skill by re-fetching its recorded source. */
-  async upgrade(name: string): Promise<SkillRow> {
+  async upgrade(name: string): Promise<UpgradeResult> {
     const row = this.store.get(name);
     if (!row) throw new SkillNotFoundError(name);
 
@@ -130,7 +151,15 @@ export class SkillInstaller {
           `upgrade produced skill '${staged.parsed.name}', expected '${name}'`,
         );
       }
-      return this.commit(staged, row);
+      const newRow = this.commit(staged, row);
+      return {
+        row: newRow,
+        drift: {
+          checksumChanged: row.checksum !== newRow.checksum,
+          previousChecksum: row.checksum,
+          previousBody: row.body_md,
+        },
+      };
     } finally {
       this.rmQuiet(dir);
     }
@@ -207,6 +236,15 @@ export class SkillInstaller {
 
     const now = new Date().toISOString();
     const fm = staged.parsed.frontmatter;
+    // Trust is recomputed from the source + policy on every import (so adding a
+    // repo to the verified allowlist promotes it on the next re-import).
+    const trust = resolveTrust(staged.sourceKind, staged.sourceRef, this.trustPolicy);
+    // Review state is FAIL-SAFE across a re-import: a prior review survives only
+    // when the tree hash is byte-identical; any content drift (SKILL.md OR an
+    // assets/ script) resets `reviewed` so the operator must re-approve.
+    const checksumChanged = existing ? existing.checksum !== staged.checksum : false;
+    const reviewed = existing && !checksumChanged ? existing.reviewed : 0;
+    const reviewedAt = reviewed ? existing?.reviewed_at ?? null : null;
     const row: SkillRow = {
       name,
       version: staged.parsed.version,
@@ -216,10 +254,11 @@ export class SkillInstaller {
       source_ref: staged.sourceRef,
       source_commit: staged.sourceCommit,
       checksum: staged.checksum,
-      // A local dir import is the operator's own skill → higher default trust.
-      trust: existing?.trust ?? (staged.sourceKind === 'dir' ? 'local' : 'community'),
+      trust,
       requires_json: fm.requires ? JSON.stringify(fm.requires) : null,
       assets_present: fm.assets ? 1 : 0,
+      reviewed,
+      reviewed_at: reviewedAt,
       body_md: staged.parsed.body,
       frontmatter_json: JSON.stringify(fm),
       installed_at: existing?.installed_at ?? now,
@@ -227,7 +266,14 @@ export class SkillInstaller {
       last_error: null,
     };
     this.store.upsert(row);
-    log.info({ event: 'skills.installed', name, version: row.version, source: row.source_kind });
+    log.info({
+      event: 'skills.installed',
+      name,
+      version: row.version,
+      source: row.source_kind,
+      trust,
+      reviewed: reviewed === 1,
+    });
     return row;
   }
 

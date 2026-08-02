@@ -123,4 +123,97 @@ describe('skills REST router', () => {
     expect((await fetch(`${base}/skills/ghost`)).status).toBe(404);
     expect((await fetch(`${base}/skills/ghost/upgrade`, { method: 'POST' })).status).toBe(404);
   });
+
+  it('reports drift on re-import (upgrade)', async () => {
+    writeSkill(srcDir, 'v1 body');
+    await fetch(`${base}/skills/install`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ source: 'dir', dir: srcDir }),
+    });
+    writeSkill(srcDir, 'v2 body changed');
+    const up = await fetch(`${base}/skills/hello-skill/upgrade`, { method: 'POST' });
+    expect(up.status).toBe(200);
+    const body = (await up.json()) as {
+      skill: SkillView;
+      drift: { checksumChanged: boolean; previousBody: string };
+    };
+    expect(body.drift.checksumChanged).toBe(true);
+    expect(body.drift.previousBody).toContain('v1 body');
+  });
+});
+
+function writeRiskySkill(target: string): void {
+  fs.mkdirSync(path.join(target, 'assets'), { recursive: true });
+  fs.writeFileSync(
+    path.join(target, 'SKILL.md'),
+    `---\nname: risky-skill\nversion: 0.1.0\ndescription: r.\nassets: { dir: assets }\n---\nBody.\n`,
+    'utf8',
+  );
+  fs.writeFileSync(path.join(target, 'assets', 'run.sh'), '#!/bin/sh\necho danger\n', { mode: 0o755 });
+}
+
+async function installRisky(): Promise<void> {
+  writeRiskySkill(srcDir);
+  await fetch(`${base}/skills/install`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify({ source: 'dir', dir: srcDir }),
+  });
+}
+
+async function activate(body: Record<string, unknown>): Promise<Response> {
+  return fetch(`${base}/skills/risky-skill/activate`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+}
+
+describe('skills REST — review gate (Lot 3)', () => {
+  it('blocks activating a risky skill with 409 REVIEW_REQUIRED', async () => {
+    await installRisky();
+    const res = await activate({ orchestratorId: 'orch1' });
+    expect(res.status).toBe(409);
+    const body = (await res.json()) as { code: string; review: { assets: Array<{ path: string }> } };
+    expect(body.code).toBe('REVIEW_REQUIRED');
+    expect(body.review.assets.map((a) => a.path)).toContain('run.sh');
+  });
+
+  it('activates a risky skill with reviewed:true (one-call consent)', async () => {
+    await installRisky();
+    const res = await activate({ orchestratorId: 'orch1', reviewed: true });
+    expect(res.status).toBe(200);
+    const body = (await res.json()) as { persisted: boolean };
+    expect(body.persisted).toBe(true);
+  });
+
+  it('POST /review then activate succeeds (two-step review)', async () => {
+    await installRisky();
+    const rev = await fetch(`${base}/skills/risky-skill/review`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ reviewed: true }),
+    });
+    expect(rev.status).toBe(200);
+    const res = await activate({ orchestratorId: 'orch1' });
+    expect(res.status).toBe(200);
+  });
+
+  it('GET /review lists assets + review state; GET /asset returns content', async () => {
+    await installRisky();
+    const rev = (await (await fetch(`${base}/skills/risky-skill/review`)).json()) as {
+      review: { reviewRequired: boolean; assets: Array<{ path: string; executable: boolean }> };
+    };
+    expect(rev.review.reviewRequired).toBe(true);
+    expect(rev.review.assets.find((a) => a.path === 'run.sh')?.executable).toBe(true);
+
+    const asset = (await (
+      await fetch(`${base}/skills/risky-skill/asset?path=run.sh`)
+    ).json()) as { asset: { content: string } };
+    expect(asset.asset.content).toContain('echo danger');
+
+    // Traversal is refused (404).
+    expect((await fetch(`${base}/skills/risky-skill/asset?path=../SKILL.md`)).status).toBe(404);
+  });
 });

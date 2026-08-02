@@ -131,3 +131,122 @@ describe('SkillsSubsystem scopes', () => {
     expect(acts.some((a) => a.scope === 'session' && a.scopeId === 'sess1' && a.enabled)).toBe(true);
   });
 });
+
+async function installSkillWith(
+  name: string,
+  opts: { capabilities?: string[]; plugins?: string[]; withAssets?: boolean } = {},
+): Promise<void> {
+  const src = path.join(dir, `src-${name}`);
+  fs.mkdirSync(src, { recursive: true });
+  const req: string[] = [];
+  if (opts.plugins?.length) req.push(`plugins: [${opts.plugins.join(', ')}]`);
+  if (opts.capabilities?.length) req.push(`capabilities: [${opts.capabilities.join(', ')}]`);
+  const lines = ['---', `name: ${name}`, 'version: 0.1.0', `description: ${name}.`];
+  if (req.length) lines.push(`requires: { ${req.join(', ')} }`);
+  if (opts.withAssets) lines.push('assets: { dir: assets }');
+  lines.push('---', `Body for ${name}.`, '');
+  fs.writeFileSync(path.join(src, 'SKILL.md'), lines.join('\n'), 'utf8');
+  if (opts.withAssets) {
+    fs.mkdirSync(path.join(src, 'assets'), { recursive: true });
+    fs.writeFileSync(path.join(src, 'assets', 'run.sh'), '#!/bin/sh\necho hi\n', { mode: 0o755 });
+  }
+  await subsystem.import({ kind: 'dir', dir: src });
+}
+
+describe('SkillsSubsystem trust/review gate (Lot 3)', () => {
+  it('activates a plain (non-risky) skill without any review', async () => {
+    await installSkill('plain');
+    const r = subsystem.activate({ name: 'plain', scope: 'orch', orchestratorId: 'orch1' });
+    expect(r.found).toBe(true);
+    expect(r.blocked).toBeUndefined();
+    expect(r.persisted).toBe(true);
+    expect(subsystem.getView('plain')?.reviewRequired).toBe(false);
+  });
+
+  it('BLOCKS activation of a skill that ships assets until reviewed', async () => {
+    await installSkillWith('withassets', { withAssets: true });
+    expect(subsystem.getView('withassets')?.reviewRequired).toBe(true);
+
+    const blocked = subsystem.activate({ name: 'withassets', scope: 'orch', orchestratorId: 'orch1' });
+    expect(blocked.blocked).toBe(true);
+    expect(blocked.reason).toBe('review_required');
+    expect(blocked.persisted).toBe(false);
+    // Not persisted → nothing resolves for the team.
+    expect(subsystem.resolveForSession(null, 'orch1', 'sess1')).toEqual([]);
+  });
+
+  it('activates with reviewed:true (operator consent) and records the review', async () => {
+    await installSkillWith('consent', { withAssets: true });
+    const ok = subsystem.activate({
+      name: 'consent',
+      scope: 'orch',
+      orchestratorId: 'orch1',
+      reviewed: true,
+    });
+    expect(ok.blocked).toBeUndefined();
+    expect(ok.persisted).toBe(true);
+    expect(subsystem.getView('consent')?.reviewed).toBe(true);
+    expect(subsystem.getView('consent')?.reviewRequired).toBe(false);
+    // A later plain activate (no reviewed flag) is no longer gated.
+    expect(subsystem.activate({ name: 'consent', scope: 'orch', orchestratorId: 'orch1' }).blocked).toBeUndefined();
+  });
+
+  it('gates on requires.capabilities even with no assets', async () => {
+    await installSkillWith('needscap', { capabilities: ['fs'] });
+    expect(subsystem.getView('needscap')?.reviewRequired).toBe(true);
+    expect(subsystem.activate({ name: 'needscap', scope: 'orch', orchestratorId: 'orch1' }).blocked).toBe(true);
+  });
+
+  it('setReviewed records the review out-of-band (dedicated endpoint path)', async () => {
+    await installSkillWith('reviewed-flag', { withAssets: true });
+    expect(subsystem.setReviewed('reviewed-flag', true)?.reviewed).toBe(true);
+    expect(subsystem.getView('reviewed-flag')?.reviewRequired).toBe(false);
+    expect(subsystem.setReviewed('ghost', true)).toBeNull();
+  });
+
+  it('resolves requires.plugins to installed+enabled status + warnings', async () => {
+    subsystem.setPluginLookup((n) =>
+      n === 'on'
+        ? { installed: true, enabled: true }
+        : n === 'off'
+          ? { installed: true, enabled: false }
+          : { installed: false, enabled: false },
+    );
+    await installSkillWith('needsplugins', { plugins: ['on', 'off', 'missing'] });
+    const view = subsystem.getView('needsplugins');
+    const byName = Object.fromEntries((view?.pluginStatus ?? []).map((p) => [p.name, p]));
+    expect(byName['on']).toEqual({ name: 'on', installed: true, enabled: true });
+    expect(byName['off']).toEqual({ name: 'off', installed: true, enabled: false });
+    expect(byName['missing']).toEqual({ name: 'missing', installed: false, enabled: false });
+    expect(view?.warnings.some((w) => w.includes("'missing'") && w.includes('not installed'))).toBe(true);
+    expect(view?.warnings.some((w) => w.includes("'off'") && w.includes('disabled'))).toBe(true);
+  });
+
+  it('reviewInfo exposes the assets file list for the dialog', async () => {
+    await installSkillWith('inspectme', { withAssets: true });
+    const info = subsystem.reviewInfo('inspectme');
+    expect(info?.reviewRequired).toBe(true);
+    expect(info?.assets.map((a) => a.path)).toContain('run.sh');
+    expect(info?.assets.find((a) => a.path === 'run.sh')?.executable).toBe(true);
+    const asset = subsystem.assetContent('inspectme', 'run.sh');
+    expect(asset?.content).toContain('echo hi');
+    // Traversal is refused.
+    expect(subsystem.assetContent('inspectme', '../../SKILL.md')).toBeNull();
+  });
+
+  it('does NOT stage a risky un-reviewed skill\'s assets even via a role (fail-safe)', async () => {
+    await installSkillWith('rolerisky', { withAssets: true });
+    const role = roleStore.create({ label: 'R', skills: [{ name: 'rolerisky', mode: 'inject' }] });
+    const stagedDir = path.join(dir, 'ws', '.swarm-skills', 'rolerisky');
+
+    // Body injects (fragment present) but assets are withheld until review.
+    const frags = subsystem.resolveForSession(role.id, 'orch1', 'sess1');
+    expect(frags.map((f) => f.name)).toContain('rolerisky');
+    expect(fs.existsSync(stagedDir)).toBe(false);
+
+    // After review, the next resolution stages them.
+    subsystem.setReviewed('rolerisky', true);
+    subsystem.resolveForSession(role.id, 'orch1', 'sess1');
+    expect(fs.existsSync(stagedDir)).toBe(true);
+  });
+});

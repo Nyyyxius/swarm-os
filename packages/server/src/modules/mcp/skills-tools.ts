@@ -83,31 +83,46 @@ export function registerSkillsTools(server: McpServer, ctxResolver: () => ToolCo
     {
       title: 'Activate a skill',
       description:
-        "Lead-only. Activate an installed skill. `scope` defaults to 'orch' (this team), or 'session' (one worker — `sessionId`, defaults to yours) or 'role' (the team's role template, affecting ALL its teams). It is injected into every FUTURE matching spawn's preamble (durable) AND announced now to the relevant live session(s) (hot).",
-      inputSchema: { name: z.string(), scope: SCOPE_ENUM.optional(), sessionId: z.string().optional() },
+        "Lead-only. Activate an installed skill. `scope` defaults to 'orch' (this team), or 'session' (one worker — `sessionId`, defaults to yours) or 'role' (the team's role template, affecting ALL its teams). It is injected into every FUTURE matching spawn's preamble (durable) AND announced now to the relevant live session(s) (hot). A skill that ships executable assets or requests capabilities is REVIEW-GATED: it refuses to activate until an operator reviews it — pass `reviewed:true` to record that review and activate in one call.",
+      inputSchema: {
+        name: z.string(),
+        scope: SCOPE_ENUM.optional(),
+        sessionId: z.string().optional(),
+        reviewed: z.boolean().optional(),
+      },
       outputSchema: {
         name: z.string(),
         scope: z.string(),
         found: z.boolean(),
         persisted: z.boolean(),
         injected: z.number(),
+        blocked: z.boolean().optional(),
+        reason: z.string().optional(),
       },
     },
     (args) => {
       const ctx = ctxResolver();
       requireLead(ctx, 'skills.activate');
       const skills = skillsOf(ctx, 'skills.activate');
-      const a = args as { name: string; scope?: SkillScope; sessionId?: string };
+      const a = args as { name: string; scope?: SkillScope; sessionId?: string; reviewed?: boolean };
       const scope: SkillScope = a.scope ?? 'orch';
       const r = skills.activate({
         name: a.name,
         scope,
         orchestratorId: ctx.orchestrator.id,
         sessionId: scope === 'session' ? a.sessionId ?? ctx.session.id : undefined,
+        ...(a.reviewed === true ? { reviewed: true } : {}),
       });
       if (!r.found) {
         logCall('skills.activate', ctx, false, 'SKILL_NOT_FOUND');
         throw new McpError(ErrorCode.InvalidParams, `SKILL_NOT_FOUND: no installed skill named '${a.name}'`);
+      }
+      if (r.blocked) {
+        logCall('skills.activate', ctx, false, 'REVIEW_REQUIRED');
+        throw new McpError(
+          ErrorCode.InvalidParams,
+          `REVIEW_REQUIRED: skill '${a.name}' ships executable assets or requests capabilities — an operator must review it (web #/skills), or re-call with reviewed:true to consent and activate.`,
+        );
       }
       logCall('skills.activate', ctx, true);
       return ok({ name: a.name, scope, found: r.found, persisted: r.persisted, injected: r.injected });

@@ -127,12 +127,36 @@ export async function stageGit(
 }
 
 /**
- * Provenance checksum — sha256 of the `SKILL.md` bytes. Detects a changed body
- * across a re-import (which drives the diff/trust UI in a later lot).
+ * Provenance checksum — sha256 over the WHOLE staged skill tree (every file's
+ * relative path + bytes, in a deterministic sorted order), not just `SKILL.md`.
+ * A tree hash means a changed `assets/` script drifts the checksum too, so a
+ * re-import that mutates executable content invalidates a prior review
+ * (installer.ts) — the SKILL.md-only hash would have missed it. Detects drift
+ * across a re-import (which drives the diff/trust UI, Lot 3b).
  */
 export function checksumSkill(dir: string): string {
-  const buf = fs.readFileSync(path.join(dir, SKILL_FILE));
-  return createHash('sha256').update(buf).digest('hex');
+  const root = path.resolve(dir);
+  const files: string[] = [];
+  const walk = (abs: string): void => {
+    for (const ent of fs.readdirSync(abs, { withFileTypes: true }).sort((a, b) =>
+      a.name < b.name ? -1 : a.name > b.name ? 1 : 0,
+    )) {
+      const child = path.join(abs, ent.name);
+      if (ent.isDirectory()) walk(child);
+      else if (ent.isFile()) files.push(child);
+    }
+  };
+  walk(root);
+  files.sort();
+  const hash = createHash('sha256');
+  for (const abs of files) {
+    const rel = path.relative(root, abs).split(path.sep).join('/');
+    hash.update(rel, 'utf8');
+    hash.update('\0');
+    hash.update(fs.readFileSync(abs));
+    hash.update('\0');
+  }
+  return hash.digest('hex');
 }
 
 function rmQuiet(target: string): void {

@@ -1,18 +1,27 @@
 /**
  * Skills control-plane REST (docs/plan-skills-importables.md §8.4).
  *
- * FROZEN CONTRACT (Lot 1b web client builds `web/api/client.ts` on this):
+ * FROZEN CONTRACT (Lot 1b/2b/3b web client builds `web/api/client.ts` on this):
  *   GET    /skills                 → { skills: SkillView[] }
  *   GET    /skills/:name           → { skill: SkillView, body: string }
+ *   GET    /skills/:name/activations → { activations:[{scope,scopeId,enabled}] }
  *   POST   /skills/install         { source:'dir', dir:string } → { skill }
  *   POST   /skills/upload?name=    raw .tgz (application/gzip)  → { skill }
- *   POST   /skills/:name/upgrade   → { skill }
+ *   POST   /skills/:name/upgrade   → { skill, drift:{checksumChanged,previousChecksum,previousBody} }
  *   DELETE /skills/:name           → 204
- * Role-scoped activation is done through the roles router (PATCH /roles/:id
+ *   POST   /skills/:name/activate  { scope?, orchestratorId, sessionId?, reviewed? }
+ *                                  → 200 { name,scope,found,persisted,injected }
+ *                                  | 409 { error, code:'REVIEW_REQUIRED', review } when gated
+ *   POST   /skills/:name/deactivate (same body, no gate) → { name,scope,... }
+ *   GET    /skills/:name/review    → { review: SkillReviewInfo }   (Lot 3b dialog)
+ *   POST   /skills/:name/review    { reviewed:boolean } → { name, reviewed }
+ *   GET    /skills/:name/asset?path=<rel> → { asset: SkillAssetContent } | 404
+ * Role-scoped activation is also done through the roles router (PATCH /roles/:id
  * { skills:[{name,mode}] }); runtime lead activation is the `skills.*` MCP tools.
  *
  * Error mapping: SkillValidationError → 422, SkillStageError → 502,
- * UploadRequiresNewUploadError → 409, SkillNotFoundError → 404.
+ * UploadRequiresNewUploadError → 409, SkillNotFoundError → 404,
+ * review-gated activation → 409 (code REVIEW_REQUIRED).
  */
 
 import express, { Router, type Request, type Response } from 'express';
@@ -109,7 +118,7 @@ export function createSkillsRouter(skills: SkillsSubsystem): Router {
   router.post('/skills/:name/upgrade', (req: Request<{ name: string }>, res: Response) => {
     void skills
       .upgrade(req.params.name)
-      .then((skill) => res.json({ skill }))
+      .then(({ skill, drift }) => res.json({ skill, drift }))
       .catch((err: unknown) => {
         if (sendSkillError(res, err)) return;
         res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
@@ -119,6 +128,52 @@ export function createSkillsRouter(skills: SkillsSubsystem): Router {
   router.delete('/skills/:name', (req: Request<{ name: string }>, res: Response) => {
     skills.remove(req.params.name);
     res.status(204).end();
+  });
+
+  // ---- review surface (Lot 3b SkillReviewDialog) ------------------------
+
+  // Review payload: metadata + requires.plugins status + the assets file list.
+  router.get('/skills/:name/review', (req: Request<{ name: string }>, res: Response) => {
+    const review = skills.reviewInfo(req.params.name);
+    if (!review) {
+      res.status(404).json({ error: `skill '${req.params.name}' not found` });
+      return;
+    }
+    res.json({ review });
+  });
+
+  // Record (or clear) an operator's review of a risky skill.
+  router.post('/skills/:name/review', (req: Request<{ name: string }>, res: Response) => {
+    const body = (req.body ?? {}) as { reviewed?: unknown };
+    if (typeof body.reviewed !== 'boolean') {
+      res.status(400).json({ error: 'body must be { reviewed: boolean }' });
+      return;
+    }
+    const result = skills.setReviewed(req.params.name, body.reviewed);
+    if (!result) {
+      res.status(404).json({ error: `skill '${req.params.name}' not found` });
+      return;
+    }
+    res.json({ name: req.params.name, reviewed: result.reviewed });
+  });
+
+  // One asset file's content (traversal-guarded), so the dialog can show scripts.
+  router.get('/skills/:name/asset', (req: Request<{ name: string }>, res: Response) => {
+    const rel = typeof req.query.path === 'string' ? req.query.path : '';
+    if (rel === '') {
+      res.status(400).json({ error: 'query ?path=<relative asset path> is required' });
+      return;
+    }
+    if (!skills.getView(req.params.name)) {
+      res.status(404).json({ error: `skill '${req.params.name}' not found` });
+      return;
+    }
+    const asset = skills.assetContent(req.params.name, rel);
+    if (!asset) {
+      res.status(404).json({ error: `asset '${rel}' not found in skill '${req.params.name}'` });
+      return;
+    }
+    res.json({ asset });
   });
 
   // Scope activation. `scope` defaults to 'orch'; 'role' derives the roleId from
@@ -140,7 +195,12 @@ function handleScope(
   req: Request<{ name: string }>,
   res: Response,
 ): void {
-  const body = (req.body ?? {}) as { scope?: unknown; orchestratorId?: unknown; sessionId?: unknown };
+  const body = (req.body ?? {}) as {
+    scope?: unknown;
+    orchestratorId?: unknown;
+    sessionId?: unknown;
+    reviewed?: unknown;
+  };
   const scope: SkillScope =
     body.scope === 'role' || body.scope === 'session' ? body.scope : 'orch';
   if (typeof body.orchestratorId !== 'string' || body.orchestratorId === '') {
@@ -156,10 +216,21 @@ function handleScope(
     scope,
     orchestratorId: body.orchestratorId,
     ...(typeof body.sessionId === 'string' ? { sessionId: body.sessionId } : {}),
+    ...(action === 'activate' && body.reviewed === true ? { reviewed: true } : {}),
   };
   const result = action === 'activate' ? skills.activate(opts) : skills.deactivate(opts);
   if (!result.found) {
     res.status(404).json({ error: `skill '${req.params.name}' not found` });
+    return;
+  }
+  // Review-gated activation: refuse with 409 + the review payload so the UI can
+  // open the SkillReviewDialog and retry with { reviewed: true }.
+  if (result.blocked) {
+    res.status(409).json({
+      error: `skill '${req.params.name}' requires an operator review before activation`,
+      code: 'REVIEW_REQUIRED',
+      review: skills.reviewInfo(req.params.name),
+    });
     return;
   }
   res.json({ name: req.params.name, scope, ...result });

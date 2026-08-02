@@ -522,6 +522,15 @@ try {
     note: 'the plugin registry could not be opened — plugins are DISABLED for this boot and /plugins answers 404; every other subsystem is unaffected. Fix the plugins/plugin_kv schema and restart.',
   });
 }
+
+// Give the skills subsystem a plugin-state lookup so `requires.plugins` resolves
+// to installed+enabled + warnings (docs/plan-skills-importables.md §9). Late-
+// bound because PluginStore is built after the skills subsystem. Best-effort:
+// when the plugin registry is absent, every required plugin reads as missing.
+skillsSubsystem?.setPluginLookup((name) => {
+  const row = pluginStore?.get(name) ?? null;
+  return { installed: row != null, enabled: row?.enabled === 1 };
+});
 // J2 — registry consulted per-request (HTTP zones). Never torn down;
 // enable/disable is a Map mutation. Its MCP-tool sibling is declared ABOVE the
 // spawner, which reads it when building preambles.

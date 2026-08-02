@@ -26,6 +26,8 @@ function skillRow(over: Partial<SkillRow> = {}): SkillRow {
     trust: 'local',
     requires_json: null,
     assets_present: 0,
+    reviewed: 0,
+    reviewed_at: null,
     body_md: 'Say hello.',
     frontmatter_json: null,
     installed_at: now,

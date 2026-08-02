@@ -42,6 +42,10 @@ export interface SkillRow {
   requires_json: string | null;
   /** 1 when the skill ships an `assets/` dir (review gate for executables). */
   assets_present: number;
+  /** 1 once an operator has explicitly reviewed a risky skill (Lot 3 gate). */
+  reviewed: number;
+  /** ISO timestamp of the last review; null while never reviewed. */
+  reviewed_at: string | null;
   /** Cached SKILL.md body — read on every spawn, so kept in-row to avoid IO. */
   body_md: string;
   /** JSON of the parsed frontmatter (triggers, etc.). */
@@ -94,6 +98,8 @@ export class SkillStore {
         trust            TEXT NOT NULL DEFAULT 'community',
         requires_json    TEXT,
         assets_present   INTEGER NOT NULL DEFAULT 0,
+        reviewed         INTEGER NOT NULL DEFAULT 0,
+        reviewed_at      TEXT,
         body_md          TEXT NOT NULL DEFAULT '',
         frontmatter_json TEXT,
         installed_at     TEXT NOT NULL,
@@ -121,12 +127,12 @@ export class SkillStore {
     this.upsertStmt = this.db.prepare<SkillRow>(`
       INSERT INTO skills (
         name, version, display_name, description, source_kind, source_ref,
-        source_commit, checksum, trust, requires_json, assets_present, body_md,
-        frontmatter_json, installed_at, updated_at, last_error
+        source_commit, checksum, trust, requires_json, assets_present, reviewed,
+        reviewed_at, body_md, frontmatter_json, installed_at, updated_at, last_error
       ) VALUES (
         @name, @version, @display_name, @description, @source_kind, @source_ref,
-        @source_commit, @checksum, @trust, @requires_json, @assets_present, @body_md,
-        @frontmatter_json, @installed_at, @updated_at, @last_error
+        @source_commit, @checksum, @trust, @requires_json, @assets_present, @reviewed,
+        @reviewed_at, @body_md, @frontmatter_json, @installed_at, @updated_at, @last_error
       )
       ON CONFLICT(name) DO UPDATE SET
         version = excluded.version,
@@ -139,6 +145,8 @@ export class SkillStore {
         trust = excluded.trust,
         requires_json = excluded.requires_json,
         assets_present = excluded.assets_present,
+        reviewed = excluded.reviewed,
+        reviewed_at = excluded.reviewed_at,
         body_md = excluded.body_md,
         frontmatter_json = excluded.frontmatter_json,
         updated_at = excluded.updated_at,
@@ -176,7 +184,13 @@ export class SkillStore {
 
   /** Idempotent additive column migrations — same swallow-if-duplicate pattern. */
   private applyMigrations(): void {
-    const additions: Array<{ column: string; ddl: string }> = [];
+    const additions: Array<{ column: string; ddl: string }> = [
+      // Lot 3 review gate. Existing rows (pre-Lot 3) default to un-reviewed —
+      // fail-safe: a risky skill installed before the gate must be reviewed
+      // before it can be (re)activated.
+      { column: 'reviewed', ddl: `ALTER TABLE skills ADD COLUMN reviewed INTEGER NOT NULL DEFAULT 0` },
+      { column: 'reviewed_at', ddl: `ALTER TABLE skills ADD COLUMN reviewed_at TEXT` },
+    ];
     for (const a of additions) {
       try {
         this.db.exec(a.ddl);
