@@ -146,6 +146,24 @@ ARG CLAUDE_CODE_VERSION=2.1.142
 RUN npm install -g --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
  && claude --version
 
+# graphify — code-knowledge-graph CLI (Graphify integration, modules/codegraph).
+# Baked in so the server's codegraph janitor can run `graphify update` fully
+# offline (tree-sitter grammars ship inside the wheel; AST engine needs no API
+# key / no network at runtime). Installed with uv (static binary copied from the
+# official image — reproducible, no `curl | sh`). `graphifyy` requires Python
+# >=3.10; the runtime already carries Debian 12's python3 (3.11), so we force the
+# system interpreter rather than downloading a managed one (keeps the image lean).
+# UV_TOOL_BIN_DIR is pointed at /usr/local/bin so the launcher lands on PATH for
+# the unprivileged `node` user; the venv lives under /opt/uv (root-owned, world-
+# readable → node can execute but not mutate it). Pinned to the P0-validated
+# version; bump requires re-checking the `update` CLI contract.
+ARG GRAPHIFY_VERSION=0.9.32
+COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
+RUN UV_TOOL_DIR=/opt/uv/tools UV_TOOL_BIN_DIR=/usr/local/bin \
+    uv tool install --no-cache --python-preference only-system \
+      "graphifyy==${GRAPHIFY_VERSION}" \
+ && graphify --version
+
 # Drop privileges. The `node` user is provided by the upstream image
 # (uid 1000). Plan §14: container MUST run as non-root.
 USER node

@@ -24,6 +24,12 @@ import { RoleScheduler } from './modules/schedule/index.js';
 import { IdeSupervisor } from './modules/ide/index.js';
 import { PluginStore } from './modules/plugins/store.js';
 import { MemoryStore } from './modules/memory/store.js';
+import { GraphStore } from './modules/codegraph/store.js';
+import { probeGraphify } from './modules/codegraph/graphify.js';
+import {
+  startCodegraphJanitor,
+  type CodegraphJanitorHandle,
+} from './modules/codegraph/lifecycle.js';
 import { TaskboardStore } from './modules/taskboard/store.js';
 import { ApprovalStore } from './modules/approvals/store.js';
 import {
@@ -169,6 +175,28 @@ try {
     event: 'boot.memory_store_unavailable',
     error: err instanceof Error ? err.message : String(err),
     note: 'the shared memory could not be opened — memory.* tools and /api/memory are DISABLED for this boot; every other subsystem is unaffected.',
+  });
+}
+
+// ---- Code knowledge graph / Graphify indexer (docs/graphify-integration.md) -
+// GLOBAL to the deployment. The store OWNS its own table on the raw Db handle
+// (like MemoryStore) and keeps every graphify artifact under
+// `<dataDir>/codegraph/<scopeId>/` — NEVER inside a user's source dir. Wrapped
+// so a codegraph-subsystem failure never stops the boot (exactly like
+// MEMORY_UNAVAILABLE); the janitor is started later, next to the plugin store.
+let graphStore: GraphStore | null = null;
+try {
+  if (config.codegraphEnabled) {
+    graphStore = new GraphStore(db, { dataDir: config.dataDir, eventBus });
+    log.info({ event: 'boot.codegraph_store' });
+  } else {
+    log.info({ event: 'codegraph.disabled', reason: 'SWARM_OS_CODEGRAPH_ENABLED=false' });
+  }
+} catch (err) {
+  log.error({
+    event: 'codegraph.unavailable',
+    error: err instanceof Error ? err.message : String(err),
+    note: 'the code graph store could not be opened — codegraph is DISABLED for this boot; every other subsystem is unaffected.',
   });
 }
 
@@ -457,6 +485,46 @@ try {
 // enable/disable is a Map mutation. Its MCP-tool sibling is declared ABOVE the
 // spawner, which reads it when building preambles.
 const pluginHttpRegistry = new PluginHttpRegistry();
+
+// ---- Codegraph janitor -----------------------------------------------------
+// Started here (not with the other janitors) because scope discovery needs the
+// plugin registry. Probes graphify first: if the binary is absent the feature
+// auto-disables cleanly (log + skip) and the boot is unaffected. In-process,
+// unref'd interval, every sweep guarded; runs graphify ONLY when a scope's code
+// actually changed. No-op when the store failed to open or the feature is off.
+let codegraphJanitor: CodegraphJanitorHandle | null = null;
+if (graphStore) {
+  const probe = probeGraphify(config.codegraphBin);
+  if (!probe.available) {
+    log.warn({
+      event: 'codegraph.unavailable',
+      reason: probe.reason,
+      note: 'graphify binary not usable — codegraph janitor NOT started; store stays empty. Every other subsystem is unaffected.',
+    });
+  } else {
+    try {
+      log.info({ event: 'codegraph.graphify_probed', version: probe.version });
+      codegraphJanitor = startCodegraphJanitor(
+        {
+          store: graphStore,
+          workspaceRoot: config.workspaceRoot,
+          dataDir: config.dataDir,
+          pluginStore,
+          graphifyBin: config.codegraphBin,
+          engine: config.codegraphEngine,
+          runTimeoutMs: config.codegraphTimeoutMs,
+        },
+        { intervalMs: config.codegraphJanitorIntervalMs },
+      );
+    } catch (err) {
+      log.warn({
+        event: 'codegraph.janitor_start_failed',
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  }
+}
+
 const pluginMessagingDefaults = {
   maxMessageSizeBytes: config.maxMessageSizeBytes,
   idleThresholdMs: config.idleThresholdMs,
@@ -766,6 +834,9 @@ async function shutdown(signal: string): Promise<void> {
     taskboardJanitor?.stop();
     // Disarm the approval-gate TTL janitor for the same reason.
     approvalJanitor?.stop();
+    // Disarm the codegraph janitor (interval + fs watchers) so no sweep/watch
+    // event fires a graphify run into a half-closed DB during shutdown.
+    codegraphJanitor?.stop();
     // Disarm per-role crons so no tick fires into a half-torn-down spawner.
     scheduler.stop();
     // The update RUNNER does own timers, and this is early on purpose: a

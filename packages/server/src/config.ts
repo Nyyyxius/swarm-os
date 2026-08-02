@@ -208,6 +208,27 @@ export interface Config {
    * Env: `SWARM_OS_SCHEDULE_TZ`.
    */
   scheduleTimezone: string;
+  /**
+   * Codegraph (Graphify integration, P1): master switch. When `true` (default)
+   * the server discovers code scopes and keeps a background code-knowledge-graph
+   * per scope. Auto-disables at runtime if the graphify binary is absent — the
+   * boot never fails on it. Env: `SWARM_OS_CODEGRAPH_ENABLED`.
+   */
+  codegraphEnabled: boolean;
+  /** graphify binary name/path (resolved on PATH). Env: `SWARM_OS_CODEGRAPH_BIN`. */
+  codegraphBin: string;
+  /**
+   * Extraction engine: `ast` (default, on-device, 0-token) or `extract`
+   * (LLM-enriched, needs an API key — opt-in). Env: `SWARM_OS_CODEGRAPH_ENGINE`.
+   */
+  codegraphEngine: 'ast' | 'extract';
+  /**
+   * How often (ms) the codegraph janitor sweeps for changed scopes. `0` disables
+   * the janitor. Default 3 min. Env: `SWARM_OS_CODEGRAPH_JANITOR_INTERVAL_MS`.
+   */
+  codegraphJanitorIntervalMs: number;
+  /** Per-run graphify timeout (ms). Env: `SWARM_OS_CODEGRAPH_TIMEOUT_MS`. */
+  codegraphTimeoutMs: number;
   token: string;
   /**
    * Phase 4: separate token used by Claude Code's `Notification` hook to
@@ -659,6 +680,18 @@ export function loadConfig(): Config {
   const scheduleEnabled = boolEnv('SWARM_OS_SCHEDULE_ENABLED', true);
   const scheduleTimezone = process.env.SWARM_OS_SCHEDULE_TZ ?? 'UTC';
 
+  // Codegraph (Graphify integration). Feature is optional and auto-disables at
+  // runtime if the graphify binary is absent (index.ts probes at boot).
+  const codegraphEnabled = boolEnv('SWARM_OS_CODEGRAPH_ENABLED', true);
+  const codegraphBin = process.env.SWARM_OS_CODEGRAPH_BIN ?? 'graphify';
+  const codegraphEngine: 'ast' | 'extract' =
+    process.env.SWARM_OS_CODEGRAPH_ENGINE === 'extract' ? 'extract' : 'ast';
+  const codegraphJanitorIntervalMs = intEnv(
+    'SWARM_OS_CODEGRAPH_JANITOR_INTERVAL_MS',
+    3 * 60 * 1000,
+  );
+  const codegraphTimeoutMs = intEnv('SWARM_OS_CODEGRAPH_TIMEOUT_MS', 5 * 60 * 1000);
+
   const workspaceRoot = path.resolve(process.env.SWARM_OS_WORKSPACE_ROOT ?? '/workspace');
   const dataDir = path.resolve(process.env.SWARM_OS_DATA_DIR ?? '/data');
 
@@ -877,6 +910,11 @@ export function loadConfig(): Config {
     approvalJanitorIntervalMs,
     scheduleEnabled,
     scheduleTimezone,
+    codegraphEnabled,
+    codegraphBin,
+    codegraphEngine,
+    codegraphJanitorIntervalMs,
+    codegraphTimeoutMs,
     token,
     hookToken,
     discordWebhookUrl,
