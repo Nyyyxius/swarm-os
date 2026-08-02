@@ -155,6 +155,15 @@ export function graphJsonPath(indexDir: string): string {
   return path.join(indexDir, 'graphify-out', 'graph.json');
 }
 
+/**
+ * Absolute path to a scope's self-contained interactive `graph.html` — the
+ * whole-graph viz graphify emits next to `graph.json` (sibling in the same
+ * `graphify-out/` dir). MUST mirror {@link graphJsonPath}'s path construction.
+ */
+export function graphHtmlPath(indexDir: string): string {
+  return path.join(indexDir, 'graphify-out', 'graph.html');
+}
+
 export type QueryResult = { ok: true; text: string } | { ok: false; error: string };
 
 /** Run one read-only graphify query verb against a graph.json. Never throws. */

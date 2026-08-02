@@ -1557,6 +1557,26 @@ export const api = {
   getCodegraphGraph: (scopeId: string) =>
     request<CodegraphGraph>('GET', `/api/codegraph/${encodeURIComponent(scopeId)}/graph`),
 
+  /**
+   * Fetch graphify's self-contained interactive `graph.html` (whole-graph viz)
+   * as a Blob, so the caller can open it in a new tab via a blob: URL. This is
+   * an AUTHENTICATED fetch — the same `X-Auth-Token` header + `swarm-os.token`
+   * localStorage source as `request` — because a bare `window.open` of the URL
+   * cannot carry the auth header. Throws `HttpError` on a non-2xx response.
+   */
+  getCodegraphGraphHtml: async (scopeId: string): Promise<Blob> => {
+    const path = `/api/codegraph/${encodeURIComponent(scopeId)}/graph.html`;
+    const res = await fetch(path, { headers: { 'X-Auth-Token': getToken() } });
+    if (!res.ok) {
+      const ct = res.headers.get('content-type') ?? '';
+      const parsed: unknown = ct.includes('application/json')
+        ? await res.json()
+        : await res.text();
+      throw new HttpError(`HTTP ${res.status} GET ${path}`, res.status, parsed);
+    }
+    return res.blob();
+  },
+
   searchCodegraph: (scopeId: string, q: string, limit?: number) => {
     const qs = new URLSearchParams({ q });
     if (limit != null) qs.set('limit', String(limit));

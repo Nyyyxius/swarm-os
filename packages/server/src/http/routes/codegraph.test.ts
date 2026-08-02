@@ -83,6 +83,29 @@ describe('codegraph REST router', () => {
     expect(res.status).toBe(404);
   });
 
+  it('GET /:scopeId/graph.html serves the graph.html when present', async () => {
+    seedScope('project__app');
+    const outDir = path.join(store.indexDirFor('project__app'), 'graphify-out');
+    fs.writeFileSync(path.join(outDir, 'graph.html'), '<!doctype html><title>g</title><body>hi</body>');
+    const res = await fetch(`${base}/api/codegraph/project__app/graph.html`);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-type')).toContain('text/html');
+    const text = await res.text();
+    expect(text).toContain('<body>hi</body>');
+  });
+
+  it('GET /:scopeId/graph.html 404s when the html was never emitted', async () => {
+    // seedScope writes graph.json but NOT graph.html.
+    seedScope('project__app');
+    const res = await fetch(`${base}/api/codegraph/project__app/graph.html`);
+    expect(res.status).toBe(404);
+  });
+
+  it('GET /:scopeId/graph.html 404s for an unknown scope', async () => {
+    const res = await fetch(`${base}/api/codegraph/project__nope/graph.html`);
+    expect(res.status).toBe(404);
+  });
+
   it('GET /:scopeId/search returns ranked hits with file:line', async () => {
     seedScope('project__app');
     const res = await fetch(`${base}/api/codegraph/project__app/search?q=greet`);

@@ -1,7 +1,7 @@
 import * as fs from 'node:fs';
 import { Router, type Request, type Response } from 'express';
 import type { GraphStore } from '../../modules/codegraph/store.js';
-import { graphJsonPath } from '../../modules/codegraph/graphify.js';
+import { graphJsonPath, graphHtmlPath } from '../../modules/codegraph/graphify.js';
 import { searchNodes } from '../../modules/codegraph/query.js';
 
 /**
@@ -54,6 +54,28 @@ export function createCodegraphRouter(graph: GraphStore): Router {
       return;
     }
     res.type('application/json').send(raw);
+  });
+
+  // Serve graphify's self-contained interactive `graph.html` (sibling of
+  // graph.json) so the web can open the WHOLE graph in a new tab for scopes
+  // too big to render into d3-force. 404 when the scope is unknown or the html
+  // was never emitted. Never throws (try/catch around the disk read).
+  router.get('/api/codegraph/:scopeId/graph.html', (req: Request, res: Response) => {
+    const scopeId = String(req.params.scopeId ?? '');
+    const scope = graph.getScope(scopeId);
+    if (!scope) {
+      res.status(404).json({ error: `unknown scope '${scopeId}'` });
+      return;
+    }
+    const file = graphHtmlPath(graph.indexDirFor(scopeId));
+    let raw: string;
+    try {
+      raw = fs.readFileSync(file, 'utf8');
+    } catch {
+      res.status(404).json({ error: 'scope has no graph.html yet' });
+      return;
+    }
+    res.type('text/html').send(raw);
   });
 
   // Node search over the scope's graph.json (reuses the MCP search core).

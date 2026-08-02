@@ -1881,6 +1881,26 @@
   .cg-mode-btn.active {
     color: var(--amber); border-color: var(--amber); background: #1a140e;
   }
+  /* « ◀ RETOUR » — node-navigation back-stack; sits at the far left. */
+  .cg-back-btn { color: var(--text-mute); }
+  .cg-back-btn:hover { color: var(--amber); border-color: var(--amber); }
+  /* "Graphe complet (Graphify)" — pushed to the right of the toggle bar. */
+  .cg-fullgraph-btn { margin-left: auto; color: var(--info); border-color: var(--border-strong); }
+  .cg-fullgraph-btn:hover { color: var(--text); border-color: var(--info); }
+  .cg-fullgraph-error {
+    align-self: center; margin-left: 10px;
+    font-family: "Geist Mono", monospace; font-size: 10px; letter-spacing: 0.08em;
+    color: var(--bad);
+  }
+
+  /* ── main-hub auto-focus banner (big scopes, no selection) ── */
+  .cg-hub-banner {
+    flex-shrink: 0; padding: 8px 22px;
+    border-bottom: 1px solid var(--border);
+    font-family: "Geist Mono", monospace; font-size: 11px; line-height: 1.5;
+    letter-spacing: 0.04em; color: var(--text-mute);
+  }
+  .cg-hub-banner strong { color: var(--amber); font-weight: 600; }
 
   /* ── visual graph canvas host ──
      `.canvas-wrap` has no intrinsic height (it is `position: relative`); give it

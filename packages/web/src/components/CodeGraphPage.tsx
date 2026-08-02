@@ -18,8 +18,14 @@
 import { useCallback, useEffect, useRef, useState } from 'react';
 import { useSwarmController } from '../controller/SwarmController';
 import { useCodeGraph, computeNeighbors, nodeFileLabel, parseLine } from '../hooks/useCodeGraph';
-import { buildEgoSubgraph, FULL_GRAPH_MAX_NODES } from '../lib/codeGraphView';
+import {
+  buildEgoSubgraph,
+  topHubId,
+  FULL_GRAPH_MAX_NODES,
+  GRAPHIFY_HTML_MAX_NODES,
+} from '../lib/codeGraphView';
 import CodeGraphCanvas from './codegraph/CodeGraphCanvas';
+import { api } from '../api/client';
 import type { CodegraphHit, CodegraphNode } from '../api/client';
 
 type ViewMode = 'list' | 'graph';
@@ -42,8 +48,13 @@ export function CodeGraphPage({ open, onClose }: Props) {
   const [results, setResults] = useState<CodegraphHit[]>([]);
   const [searching, setSearching] = useState(false);
   const [selectedNodeId, setSelectedNodeId] = useState<string | null>(null);
+  // Back-stack of previously-visited node ids (oldest → newest). Pushed on every
+  // USER navigation to a new node; popped (never pushed) by « ◀ RETOUR ».
+  const [history, setHistory] = useState<string[]>([]);
   // Default to the visual graph — the whole point of this page is to SEE it.
   const [viewMode, setViewMode] = useState<ViewMode>('graph');
+  // Inline error when the "full graph (Graphify)" html cannot be fetched.
+  const [fullGraphError, setFullGraphError] = useState<string | null>(null);
   const searchTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Auto-select first enabled scope when the page opens and scopes load.
@@ -68,9 +79,12 @@ export function CodeGraphPage({ open, onClose }: Props) {
     void loadGraph(selectedScopeId);
   }, [viewMode, open, selectedScopeId, graph, loadGraph]);
 
-  // Reset selection when scope or query changes.
+  // Reset selection + navigation history when the scope changes (a new scope is
+  // a fresh exploration).
   useEffect(() => {
     setSelectedNodeId(null);
+    setHistory([]);
+    setFullGraphError(null);
   }, [selectedScopeId]);
 
   // Debounced search.
@@ -93,13 +107,36 @@ export function CodeGraphPage({ open, onClose }: Props) {
     };
   }, [query, selectedScopeId, search]);
 
-  // Pick a node: select it and (if graph not loaded yet) trigger load.
+  // USER navigation to a node: push the CURRENT node onto the back-stack (when
+  // both are real and distinct) before switching. Going back must NOT come
+  // through here — it uses `goBack`, which pops without pushing (no loop).
+  const navigateTo = useCallback(
+    (id: string | null) => {
+      if (id === selectedNodeId) return; // clicking the already-selected node
+      if (selectedNodeId !== null && id !== null) {
+        setHistory((h) => [...h, selectedNodeId]);
+      }
+      setSelectedNodeId(id);
+    },
+    [selectedNodeId],
+  );
+
+  // « ◀ RETOUR » — pop the last visited node and re-select it directly, WITHOUT
+  // pushing (otherwise back-then-back would oscillate between two nodes).
+  const goBack = useCallback(() => {
+    if (history.length === 0) return;
+    const prevId = history[history.length - 1]!;
+    setHistory(history.slice(0, -1));
+    setSelectedNodeId(prevId);
+  }, [history]);
+
+  // Pick a node: navigate to it and (if graph not loaded yet) trigger load.
   const selectNode = useCallback(
     (hit: CodegraphHit) => {
-      setSelectedNodeId(hit.id);
+      navigateTo(hit.id);
       if (!graph && selectedScopeId) void loadGraph(selectedScopeId);
     },
-    [graph, selectedScopeId, loadGraph],
+    [navigateTo, graph, selectedScopeId, loadGraph],
   );
 
   const selectNeighborNode = useCallback(
@@ -117,6 +154,23 @@ export function CodeGraphPage({ open, onClose }: Props) {
     },
     [selectNode],
   );
+
+  // Open graphify's whole-graph html in a new tab. Authenticated fetch → blob
+  // URL (the html is self-contained, so no iframe needed). Fails soft: an
+  // inline error, never a crash.
+  const openFullGraph = useCallback(async () => {
+    if (!selectedScopeId) return;
+    setFullGraphError(null);
+    try {
+      const blob = await api.getCodegraphGraphHtml(selectedScopeId);
+      const url = URL.createObjectURL(blob);
+      window.open(url, '_blank', 'noopener');
+      // Give the new tab time to load before releasing the object URL.
+      setTimeout(() => URL.revokeObjectURL(url), 60_000);
+    } catch {
+      setFullGraphError('rendu complet indisponible pour ce scope');
+    }
+  }, [selectedScopeId]);
 
   if (!open) return null;
 
@@ -190,7 +244,7 @@ export function CodeGraphPage({ open, onClose }: Props) {
             nodes={ego.nodes}
             links={ego.links}
             selectedId={selectedNodeId}
-            onSelect={setSelectedNodeId}
+            onSelect={navigateTo}
             hudNote={hudNote}
           />
         </div>
@@ -217,11 +271,45 @@ export function CodeGraphPage({ open, onClose }: Props) {
             nodes={graph.nodes}
             links={graph.links}
             selectedId={null}
-            onSelect={setSelectedNodeId}
+            onSelect={navigateTo}
           />
         </div>
       );
     }
+
+    // Big scope, no selection → auto-focus the MAIN HUB's neighbourhood instead
+    // of dead-ending. `focusId` is a computed focus, NOT a selection: we do not
+    // mutate selectedNodeId, so clicking any node still navigates normally.
+    const focusId = topHubId(graph);
+    if (focusId) {
+      const ego = buildEgoSubgraph(graph, focusId);
+      if (ego.nodes.length > 0) {
+        const hubNode = graph.nodes.find((n) => n.id === focusId);
+        const hubLabel = hubNode?.label ?? focusId;
+        const hudNote = ego.truncated
+          ? `${ego.nodes.length - 1}/${ego.totalNeighbors} voisins`
+          : null;
+        return (
+          <>
+            <div className="cg-hub-banner">
+              Hub principal : <strong>{hubLabel}</strong> — cherche un nœud pour
+              explorer ailleurs.
+            </div>
+            <div className="cg-canvas-host">
+              <CodeGraphCanvas
+                nodes={ego.nodes}
+                links={ego.links}
+                selectedId={focusId}
+                onSelect={navigateTo}
+                hudNote={hudNote}
+              />
+            </div>
+          </>
+        );
+      }
+    }
+
+    // Fallback only when a hub could not be determined (e.g. no valid nodes).
     const total = graph.nodes.length || selectedScope?.nodeCount || 0;
     return (
       <div className="cg-empty">
@@ -355,6 +443,15 @@ export function CodeGraphPage({ open, onClose }: Props) {
         {/* mode toggle — visible as soon as a scope is picked, works in both views */}
         {selectedScopeId && (
           <div className="cg-mode-toggle">
+            {history.length > 0 && (
+              <button
+                className="cg-mode-btn cg-back-btn"
+                onClick={goBack}
+                title="Revenir au nœud précédent"
+              >
+                ◀ RETOUR
+              </button>
+            )}
             <button
               className={`cg-mode-btn ${viewMode === 'list' ? 'active' : ''}`}
               onClick={() => setViewMode('list')}
@@ -367,6 +464,21 @@ export function CodeGraphPage({ open, onClose }: Props) {
             >
               GRAPH
             </button>
+            {viewMode === 'graph' &&
+              selectedScope &&
+              selectedScope.nodeCount > 0 &&
+              selectedScope.nodeCount <= GRAPHIFY_HTML_MAX_NODES && (
+                <button
+                  className="cg-mode-btn cg-fullgraph-btn"
+                  onClick={() => void openFullGraph()}
+                  title="Ouvrir le rendu complet interactif de Graphify dans un nouvel onglet"
+                >
+                  GRAPHE COMPLET (GRAPHIFY)
+                </button>
+              )}
+            {viewMode === 'graph' && fullGraphError && (
+              <span className="cg-fullgraph-error">{fullGraphError}</span>
+            )}
           </div>
         )}
 

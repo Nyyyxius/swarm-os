@@ -34,6 +34,58 @@ export const FULL_GRAPH_MAX_NODES = 200;
 /** Default cap on the number of direct neighbours kept around a selection. */
 export const DEFAULT_MAX_NEIGHBORS = 120;
 
+/**
+ * Node-count ceiling below which graphify's self-contained `graph.html` whole-
+ * graph viz is offered (graphify itself disables its viz above ~5000 nodes, so
+ * gating the button here keeps the offer honest).
+ */
+export const GRAPHIFY_HTML_MAX_NODES = 5000;
+
+/**
+ * The graph's "main hub": the node with the highest TOTAL degree — every link
+ * counts +1 for its `source` node and +1 for its `target` node (a self-loop
+ * counts twice). Ties break on ascending id, so the result is deterministic and
+ * independent of node/link ordering. Returns null for an empty/absent graph.
+ * Never throws — tolerates a null/malformed graph like `buildEgoSubgraph`.
+ *
+ * Used to auto-focus a huge scope on something meaningful (its most-connected
+ * node's neighbourhood) instead of dead-ending on a "scope too big" message.
+ */
+export function topHubId(graph: CodegraphGraph | null | undefined): string | null {
+  if (!graph || !Array.isArray(graph.nodes) || graph.nodes.length === 0) return null;
+
+  // Seed degree 0 for every real node id so an isolated node can still win
+  // (smallest id, degree 0) when the graph has no links at all.
+  const degree = new Map<string, number>();
+  for (const n of graph.nodes) {
+    if (n && typeof n.id === 'string' && !degree.has(n.id)) degree.set(n.id, 0);
+  }
+  if (degree.size === 0) return null;
+
+  if (Array.isArray(graph.links)) {
+    for (const l of graph.links) {
+      if (!l) continue;
+      if (typeof l.source === 'string' && degree.has(l.source)) {
+        degree.set(l.source, degree.get(l.source)! + 1);
+      }
+      if (typeof l.target === 'string' && degree.has(l.target)) {
+        degree.set(l.target, degree.get(l.target)! + 1);
+      }
+    }
+  }
+
+  let best: string | null = null;
+  let bestDeg = -1;
+  for (const [id, deg] of degree) {
+    // Strictly higher degree wins; on a tie the alphabetically-smaller id wins.
+    if (deg > bestDeg || (deg === bestDeg && best !== null && id < best)) {
+      best = id;
+      bestDeg = deg;
+    }
+  }
+  return best;
+}
+
 export interface EgoSubgraph {
   nodes: CodegraphNode[];
   links: CodegraphLink[];

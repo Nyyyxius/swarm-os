@@ -2,8 +2,10 @@ import { describe, it, expect } from 'vitest';
 import {
   buildEgoSubgraph,
   codegraphToGraphModel,
+  topHubId,
   FULL_GRAPH_MAX_NODES,
   DEFAULT_MAX_NEIGHBORS,
+  GRAPHIFY_HTML_MAX_NODES,
 } from './codeGraphView';
 import type { CodegraphGraph, CodegraphNode, CodegraphLink } from '../api/client';
 
@@ -26,6 +28,66 @@ const GRAPH: CodegraphGraph = {
 describe('FULL_GRAPH_MAX_NODES', () => {
   it('is exported as 200', () => {
     expect(FULL_GRAPH_MAX_NODES).toBe(200);
+  });
+});
+
+describe('GRAPHIFY_HTML_MAX_NODES', () => {
+  it('is exported as 5000', () => {
+    expect(GRAPHIFY_HTML_MAX_NODES).toBe(5000);
+  });
+});
+
+describe('topHubId', () => {
+  it('returns the highest total-degree node', () => {
+    // degrees: a=3 (a>b out, c>a in, d>a in), b=2, c=2, d=1 → a.
+    expect(topHubId(GRAPH)).toBe('a');
+  });
+
+  it('counts BOTH source and target endpoints', () => {
+    const g: CodegraphGraph = {
+      nodes: [{ id: 'x' }, { id: 'y' }, { id: 'z' }],
+      // y is the target twice → degree 2; x and z are degree 1 each.
+      links: [
+        { source: 'x', target: 'y' },
+        { source: 'z', target: 'y' },
+      ],
+    };
+    expect(topHubId(g)).toBe('y');
+  });
+
+  it('breaks ties on ascending id', () => {
+    const g: CodegraphGraph = {
+      nodes: [{ id: 'b' }, { id: 'a' }],
+      links: [{ source: 'a', target: 'b' }], // both degree 1
+    };
+    expect(topHubId(g)).toBe('a');
+  });
+
+  it('is deterministic regardless of node/link ordering', () => {
+    const g1: CodegraphGraph = {
+      nodes: [{ id: 'a' }, { id: 'b' }],
+      links: [{ source: 'a', target: 'b' }],
+    };
+    const g2: CodegraphGraph = {
+      nodes: [{ id: 'b' }, { id: 'a' }],
+      links: [{ source: 'a', target: 'b' }],
+    };
+    expect(topHubId(g1)).toBe(topHubId(g2));
+    expect(topHubId(g1)).toBe('a');
+  });
+
+  it('with no links, the smallest id (degree 0) wins', () => {
+    expect(topHubId({ nodes: [{ id: 'zeta' }, { id: 'alpha' }], links: [] })).toBe('alpha');
+  });
+
+  it('returns null for an empty graph', () => {
+    expect(topHubId({ nodes: [], links: [] })).toBeNull();
+  });
+
+  it('never throws on a null/undefined/malformed graph', () => {
+    expect(topHubId(null)).toBeNull();
+    expect(topHubId(undefined)).toBeNull();
+    expect(topHubId({ nodes: [{}], links: [] } as unknown as CodegraphGraph)).toBeNull();
   });
 });
 
