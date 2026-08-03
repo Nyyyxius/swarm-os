@@ -47,14 +47,17 @@ Un `ref` market est **soit** une coordonnée GitHub, **soit** un nom de skill nu
 
 | Var | Défaut | Rôle |
 |---|---|---|
-| `SWARM_OS_SKILLS_MARKET_ENDPOINT` | *(vide)* | Base URL d'un registre `name→git` + `/search`. Vide ⇒ **convention seule**. |
-| `SWARM_OS_SKILLS_MARKET_CATALOG` | `anthropics/skills` | Dépôt(s) catalogue pour la résolution d'un nom nu (`owner/repo` **ou** url git complète). Vide ⇒ désactive la convention. |
+| `SWARM_OS_SKILLS_MARKET_ENDPOINT` | *(vide)* | Base URL d'un registre `name→git` + `/search`. Vide ⇒ **convention seule** (mais le browse reste possible via le catalogue GitHub, voir §4). |
+| `SWARM_OS_SKILLS_MARKET_CATALOG` | `anthropics/skills` | Dépôt(s) catalogue pour la résolution d'un nom nu (`owner/repo` **ou** url git complète). Vide ⇒ désactive la convention **et** le browse catalogue. |
 | `SWARM_OS_SKILLS_MARKET_PREFIX` | `skills` | Préfixe de sous-dossier d'un nom nu dans le dépôt catalogue (`skills/<name>`). Vide ⇒ racine. |
-| `SWARM_OS_SKILLS_MARKET_TIMEOUT_MS` | `8000` | Timeout réseau des appels endpoint. |
+| `SWARM_OS_SKILLS_MARKET_TIMEOUT_MS` | `8000` | Timeout réseau des appels endpoint **et** du browse catalogue GitHub. |
+| `SWARM_OS_SKILLS_MARKET_GITHUB_TOKEN` | *(vide)* | **(Lot 4c)** Token GitHub optionnel envoyé en `Authorization: Bearer` sur le browse catalogue → quota contents-API 5000/h au lieu de 60/h (non authentifié). |
 
 **Le serveur tourne 24/7 et ne crashe JAMAIS** : endpoint absent ⇒ résolution
 par coordonnées + convention ; endpoint injoignable ⇒ **502** propre à l'import,
-et `search` renvoie `{available:true, results:[], error}`.
+et `search` renvoie `{available:true, results:[], error}`. Le browse catalogue
+GitHub (§4) dégrade de la même façon (rate-limit, timeout, JSON invalide →
+`{available:true, results:[], error}`).
 
 ## 3. `POST /skills/install` — **généralisé** à `dir | git | npm | market`
 
@@ -77,7 +80,7 @@ POST /skills/install
 `ref` market = un nom de skill **ou** une coordonnée GitHub (voir §1).
 Exemples : `{source:'market', ref:'pdf'}`, `{source:'market', ref:'anthropics/skills/skills/pdf'}`.
 
-## 4. `GET /skills/market/search?q=<texte>` — browse (nouveau)
+## 4. `GET /skills/market/search?q=<texte>` — browse (nouveau) — **MÀJ Lot 4c**
 
 ```
 GET /skills/market/search?q=pdf
@@ -88,23 +91,44 @@ GET /skills/market/search?q=pdf
 ```ts
 interface MarketSearchEntry {
   name: string;
-  description?: string;
-  ref?: string;   // ré-injectable tel quel dans POST /skills/install {source:'market', ref}
+  description?: string;   // Lot 4c: vide sur le browse catalogue GitHub (best-effort différé)
+  ref?: string;           // ré-injectable tel quel dans POST /skills/install {source:'market', ref}
 }
 ```
 
-- **`available:false`** ⇒ aucun endpoint configuré : le browse n'est pas
-  supporté ; l'UI doit inviter à importer **par coordonnée** (`owner/repo[/subdir]`)
-  ou un nom nu résolu par le catalogue. **Ce n'est pas une erreur.**
-- **`available:true, error:<msg>`** ⇒ endpoint configuré mais injoignable/invalide
-  (non-fatal : afficher un état dégradé, pas une modale d'erreur).
+**Ordre de résolution du browse** (le premier applicable gagne) :
+
+1. **endpoint configuré** → `GET <endpoint>/search?q=` (comportement Lot 4a inchangé).
+2. **(Lot 4c) sinon catalogue GitHub configuré** (défaut `anthropics/skills`) →
+   liste les **sous-dossiers** de `<prefix>/` (défaut `skills/`) via l'API GitHub
+   contents (`GET https://api.github.com/repos/<owner>/<repo>/contents/<prefix>`,
+   en-têtes `Accept: application/vnd.github+json` + `User-Agent`, `Authorization:
+   Bearer` si token). Chaque entrée `type:'dir'` = un skill ; `name` = le dossier ;
+   `ref` = `<owner>/<repo>/<prefix>/<name>` (ré-injectable tel quel). Filtrage par
+   `q` = sous-chaîne insensible à la casse sur le nom (`q` vide ⇒ tous les skills,
+   utile comme sonde de disponibilité). Le listing est **mis en cache mémoire**
+   par `repo+prefix` (TTL ~5 min) pour ménager le quota GitHub.
+3. **sinon** (ni endpoint ni catalogue GitHub browsable) → `{available:false}`.
+
+Sémantique du champ `available` :
+
+- **`available:false`** ⇒ browse **non supporté** : ni endpoint, ni catalogue
+  GitHub (catalogue vide, ou hôte git non-GitHub type gitlab/`file://`). L'UI
+  invite à importer **par coordonnée** (`owner/repo[/subdir]`) ou par nom nu
+  résolu par le catalogue. **Ce n'est pas une erreur.**
+- **`available:true, error:<msg>`** ⇒ browse **supporté** (endpoint ou catalogue)
+  mais l'appel a échoué : endpoint injoignable, **rate-limit GitHub (403)**,
+  chemin absent (404), timeout, JSON invalide. Non-fatal : afficher un état
+  dégradé (« réessayez plus tard »), **pas** une modale d'erreur.
 - **Toujours 200** sauf `q` absente (400). Jamais de 5xx.
 
-**Flux UI recommandé (Lot 4b)** : ajouter une source `market` au modal d'import
-existant (champ `ref` = « skill name or owner/repo »). Un onglet/section
-« Marketplace » n'a de sens que si un endpoint est configuré : conditionner son
-affichage à `available` (par ex. un premier `search` à vide, ou un futur
-`GET /skills/market` de statut — non fourni en 4a).
+**Flux UI (Lot 4b, déjà livré)** : la barre « search marketplace » consomme cet
+endpoint. Depuis Lot 4c elle **fonctionne sans endpoint externe** grâce au
+catalogue GitHub par défaut ; l'UI affiche les résultats dès que `available:true`
+et conserve le repli « import par coordonnée » quand `available:false`. Les
+`ref` renvoyés se réinjectent directement dans le modal d'import
+`{source:'market', ref}` (§3). *(Le web n'a pas besoin de changer : le contrat
+de réponse est identique — seul le peuplement de `results` s'active.)*
 
 ## 5. `SkillView` — champs (inchangés, rappel)
 
@@ -134,6 +158,14 @@ réponse `drift` est inchangée (Lot 3b).
 - `modules/skills/market.ts` : `resolveMarket(ref, policy, deps) → {url,ref?,subdir?}`,
   `searchMarket(q, policy, deps)`, `marketPolicyFromEnv(env)`. `deps.fetchImpl`
   injectable (tests sans réseau).
+- **(Lot 4c)** `searchMarket` : branche browse catalogue GitHub quand aucun
+  endpoint n'est configuré mais qu'un dépôt catalogue GitHub l'est. Helpers privés
+  `catalogGitHubRepo` (1er catalogue → `{owner,repo}` GitHub, sinon `null`),
+  `fetchCatalogDirNames` (contents API + `AbortController` borné, throw → dégradé),
+  `filterCatalog` (filtre `q` + `ref`). Cache mémoire `deps.catalogCache`
+  (défaut module-global, clé `owner/repo#prefix`, TTL 5 min) + horloge
+  `deps.now` injectables pour les tests. `policy.githubToken`
+  (`SWARM_OS_SKILLS_MARKET_GITHUB_TOKEN`) → en-tête `Authorization`.
 - `stage.ts` : variante `{kind:'market', ref}` ajoutée à `SkillInstallSource` ;
   **non stagée ici** — l'installer résout puis appelle `stageGit`.
 - `installer.ts` : `case 'market'` (install + upgrade) ; `SkillInstaller.marketSearch(q)`.

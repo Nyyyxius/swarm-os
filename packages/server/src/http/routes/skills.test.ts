@@ -53,7 +53,13 @@ beforeEach(async () => {
   dir = fs.mkdtempSync(path.join(os.tmpdir(), 'skills-http-'));
   db = new SwarmDb(dir);
   const store = new SkillStore(db);
-  const installer = new SkillInstaller({ skillsDir: path.join(dir, 'skills'), store });
+  // Offline market policy (no endpoint, no catalog) so market search is
+  // deterministically `available:false` — these route tests never hit GitHub.
+  const installer = new SkillInstaller({
+    skillsDir: path.join(dir, 'skills'),
+    store,
+    market: { catalog: [], catalogPrefix: '', timeoutMs: 1000 },
+  });
   const roleStore = new RoleStore(db);
   subsystem = new SkillsSubsystem({ store, installer, roleStore, config: fakeConfig() });
   srcDir = path.join(dir, 'src-skill');
@@ -124,7 +130,7 @@ describe('skills REST router', () => {
     expect(market.status).toBe(400);
   });
 
-  it('market search is unavailable (200) with no endpoint configured, and 400 without a query', async () => {
+  it('market search is unavailable (200) with no endpoint/catalog configured, and 400 without a query', async () => {
     const ok = await fetch(`${base}/skills/market/search?q=pdf`);
     expect(ok.status).toBe(200);
     const body = (await ok.json()) as { available: boolean; results: unknown[] };

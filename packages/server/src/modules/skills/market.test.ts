@@ -14,19 +14,34 @@ function conventionPolicy(over: Partial<MarketPolicy> = {}): MarketPolicy {
   return { catalog: ['anthropics/skills'], catalogPrefix: 'skills', timeoutMs: 1000, ...over };
 }
 
+type FetchInit = { signal?: AbortSignal; headers?: Record<string, string> } | undefined;
+
 /** A fake `fetch` returning `body` as JSON with the given status. Records calls. */
-function fakeFetch(status: number, body: unknown): { fetchImpl: FetchLike; calls: string[] } {
+function fakeFetch(
+  status: number,
+  body: unknown,
+): { fetchImpl: FetchLike; calls: string[]; inits: FetchInit[] } {
   const calls: string[] = [];
-  const fetchImpl: FetchLike = (url) => {
+  const inits: FetchInit[] = [];
+  const fetchImpl: FetchLike = (url, init) => {
     calls.push(url);
+    inits.push(init);
     return Promise.resolve({
       ok: status >= 200 && status < 300,
       status,
       json: () => Promise.resolve(body),
     });
   };
-  return { fetchImpl, calls };
+  return { fetchImpl, calls, inits };
 }
+
+/** A GitHub contents API payload: three skill dirs plus a non-dir entry. */
+const GITHUB_CONTENTS = [
+  { name: 'pdf', path: 'skills/pdf', type: 'dir' },
+  { name: 'docx', path: 'skills/docx', type: 'dir' },
+  { name: 'pptx', path: 'skills/pptx', type: 'dir' },
+  { name: 'README.md', path: 'skills/README.md', type: 'file' },
+];
 
 /** A fake `fetch` that always rejects (endpoint unreachable). */
 const throwingFetch: FetchLike = () => Promise.reject(new Error('ECONNREFUSED'));
@@ -171,12 +186,87 @@ describe('resolveMarket', () => {
   });
 });
 
-describe('searchMarket', () => {
-  it('is unavailable when no endpoint is configured', async () => {
-    const r = await searchMarket('pdf', conventionPolicy());
+describe('searchMarket — GitHub catalog browse (no endpoint)', () => {
+  it('lists <prefix>/ dirs, filters by q, and builds re-injectable refs', async () => {
+    const { fetchImpl, calls, inits } = fakeFetch(200, GITHUB_CONTENTS);
+    const r = await searchMarket('doc', conventionPolicy(), { fetchImpl, catalogCache: new Map() });
+
+    expect(r.available).toBe(true);
+    expect(r.error).toBeUndefined();
+    // only the dir whose name contains "doc"; the file README.md is excluded.
+    expect(r.results).toEqual([{ name: 'docx', ref: 'anthropics/skills/skills/docx' }]);
+    // browses the GitHub contents API at the catalog repo's prefix.
+    expect(calls[0]).toBe('https://api.github.com/repos/anthropics/skills/contents/skills');
+    // sends the required GitHub headers; no Authorization without a token.
+    expect(inits[0]?.headers?.['Accept']).toBe('application/vnd.github+json');
+    expect(inits[0]?.headers?.['User-Agent']).toBeTruthy();
+    expect(inits[0]?.headers?.['Authorization']).toBeUndefined();
+  });
+
+  it('an empty query returns every skill dir (a browsable-catalog probe)', async () => {
+    const { fetchImpl } = fakeFetch(200, GITHUB_CONTENTS);
+    const r = await searchMarket('', conventionPolicy(), { fetchImpl, catalogCache: new Map() });
+    expect(r.available).toBe(true);
+    expect(r.results.map((e) => e.name)).toEqual(['pdf', 'docx', 'pptx']);
+  });
+
+  it('re-resolves each ref back to git coordinates via resolveMarket', async () => {
+    const { fetchImpl } = fakeFetch(200, GITHUB_CONTENTS);
+    const r = await searchMarket('pdf', conventionPolicy(), { fetchImpl, catalogCache: new Map() });
+    const t = await resolveMarket(r.results[0]!.ref!, conventionPolicy());
+    expect(t).toEqual({ url: 'https://github.com/anthropics/skills.git', subdir: 'skills/pdf' });
+  });
+
+  it('sends an Authorization header when a github token is configured', async () => {
+    const { fetchImpl, inits } = fakeFetch(200, GITHUB_CONTENTS);
+    await searchMarket('pdf', conventionPolicy({ githubToken: 'ghp_x' }), {
+      fetchImpl,
+      catalogCache: new Map(),
+    });
+    expect(inits[0]?.headers?.['Authorization']).toBe('Bearer ghp_x');
+  });
+
+  it('caches the listing per repo+prefix (one network call for repeated searches)', async () => {
+    const { fetchImpl, calls } = fakeFetch(200, GITHUB_CONTENTS);
+    const cache = new Map();
+    const deps = { fetchImpl, catalogCache: cache, now: () => 1000 };
+    const a = await searchMarket('pdf', conventionPolicy(), deps);
+    const b = await searchMarket('docx', conventionPolicy(), deps);
+    expect(a.results).toEqual([{ name: 'pdf', ref: 'anthropics/skills/skills/pdf' }]);
+    expect(b.results).toEqual([{ name: 'docx', ref: 'anthropics/skills/skills/docx' }]);
+    expect(calls).toHaveLength(1); // second search served from cache
+  });
+
+  it('degrades gracefully (available:true + error) when GitHub is unreachable', async () => {
+    const r = await searchMarket('pdf', conventionPolicy(), {
+      fetchImpl: throwingFetch,
+      catalogCache: new Map(),
+    });
+    expect(r.available).toBe(true);
+    expect(r.results).toEqual([]);
+    expect(r.error).toBeTruthy();
+  });
+
+  it('degrades gracefully on a GitHub rate-limit (HTTP 403)', async () => {
+    const { fetchImpl } = fakeFetch(403, { message: 'API rate limit exceeded' });
+    const r = await searchMarket('pdf', conventionPolicy(), { fetchImpl, catalogCache: new Map() });
+    expect(r.available).toBe(true);
+    expect(r.results).toEqual([]);
+    expect(r.error).toContain('403');
+  });
+
+  it('is unavailable when neither an endpoint nor a catalog is configured', async () => {
+    const r = await searchMarket('pdf', conventionPolicy({ catalog: [] }));
     expect(r).toEqual({ available: false, results: [] });
   });
 
+  it('is unavailable when the catalog is a non-GitHub git host (browse unsupported)', async () => {
+    const r = await searchMarket('pdf', conventionPolicy({ catalog: ['https://gitlab.com/acme/pack'] }));
+    expect(r).toEqual({ available: false, results: [] });
+  });
+});
+
+describe('searchMarket — endpoint (unchanged)', () => {
   it('normalizes a { results: [...] } payload', async () => {
     const { fetchImpl, calls } = fakeFetch(200, {
       results: [

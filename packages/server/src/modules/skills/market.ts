@@ -28,10 +28,15 @@
  *
  * DEGRADATION (the server runs 24/7): the endpoint is OPTIONAL. Unset ⇒ the
  * resolver works purely from coordinates + the catalog convention. Set but
- * unreachable ⇒ resolution throws a clean {@link SkillStageError} (HTTP 502) and
- * {@link searchMarket} returns `{available:true, results:[], error}`. A missing
- * global `fetch` (very old Node) is treated as "endpoint unavailable", never a
- * crash.
+ * unreachable ⇒ resolution throws a clean {@link SkillStageError} (HTTP 502).
+ *
+ * BROWSE ({@link searchMarket}): with an endpoint it queries `/search`; with no
+ * endpoint but a GitHub catalog repo it lists the catalog's `<prefix>/` dirs via
+ * the GitHub contents API (cached per repo+prefix). Either path degrades to
+ * `{available:true, results:[], error}` on any failure (rate-limit, timeout,
+ * bad JSON); only "no endpoint AND no browsable catalog" yields
+ * `{available:false}`. A missing global `fetch` (very old Node) is treated as a
+ * browse failure, never a crash.
  */
 
 import { SkillValidationError, SkillStageError } from './stage.js';
@@ -40,8 +45,16 @@ import { SkillValidationError, SkillStageError } from './stage.js';
 const DEFAULT_CATALOG = 'anthropics/skills';
 /** Default path prefix a bare name nests under inside a catalog repo. */
 const DEFAULT_PREFIX = 'skills';
-/** Default per-request network timeout for endpoint calls (ms). */
+/** Default per-request network timeout for endpoint / catalog calls (ms). */
 const DEFAULT_TIMEOUT_MS = 8_000;
+/** GitHub contents API base for browsing a catalog repo. */
+const GITHUB_API_BASE = 'https://api.github.com';
+/**
+ * TTL of the in-memory catalog-listing cache. GitHub's unauthenticated rate
+ * limit is 60 req/h; caching the `<prefix>/` listing per repo keeps a burst of
+ * searches (the UI fires one per keystroke) down to one network call.
+ */
+const CATALOG_CACHE_TTL_MS = 5 * 60 * 1_000;
 
 /** How a bare name / coordinate is resolved. */
 export interface MarketPolicy {
@@ -51,8 +64,10 @@ export interface MarketPolicy {
   catalog: string[];
   /** Path prefix inside a catalog repo a bare name nests under (`skills`; '' = root). */
   catalogPrefix: string;
-  /** Per-request network timeout for endpoint calls (ms). */
+  /** Per-request network timeout for endpoint / catalog calls (ms). */
   timeoutMs: number;
+  /** Optional GitHub token → higher contents-API rate limit (5000/h vs 60/h). */
+  githubToken?: string;
 }
 
 /** Git coordinates a market ref resolves to — fed straight into `stageGit`. */
@@ -60,6 +75,12 @@ export interface MarketGitTarget {
   url: string;
   ref?: string;
   subdir?: string;
+}
+
+/** A parsed GitHub `owner/repo` (used to browse a catalog via the contents API). */
+interface GitHubRepo {
+  owner: string;
+  repo: string;
 }
 
 /** One browse hit from a configured registry endpoint. */
@@ -72,23 +93,44 @@ export interface MarketSearchEntry {
 
 /** Result of a market browse — always resolves (never throws) so the UI degrades. */
 export interface MarketSearchResult {
-  /** False when no endpoint is configured (browse unsupported — import by coordinate). */
+  /**
+   * False only when browse is unsupported: no registry endpoint AND no
+   * GitHub-browsable catalog repo configured (import by coordinate/bare name
+   * instead). A configured GitHub catalog makes browse available even offline.
+   */
   available: boolean;
   results: MarketSearchEntry[];
-  /** Set when a configured endpoint was unreachable/invalid (non-fatal). */
+  /** Set when the endpoint / GitHub catalog was unreachable/invalid (non-fatal). */
   error?: string;
 }
 
 /** Minimal fetch shape (so tests inject a stub without a real network). */
 export type FetchLike = (
   url: string,
-  init?: { signal?: AbortSignal },
+  init?: { signal?: AbortSignal; headers?: Record<string, string> },
 ) => Promise<{ ok: boolean; status: number; json(): Promise<unknown> }>;
 
-/** Injectable dependencies (tests supply a fake `fetchImpl`). */
+/** A cached catalog directory listing (the `type:'dir'` names under a prefix). */
+export interface CatalogCacheEntry {
+  /** Epoch-ms after which the entry is stale and must be refetched. */
+  expiresAt: number;
+  names: string[];
+}
+
+/** Injectable dependencies (tests supply a fake `fetchImpl`, clock and cache). */
 export interface MarketDeps {
   fetchImpl?: FetchLike;
+  /** Clock for the catalog-listing cache TTL. Defaults to `Date.now`. */
+  now?: () => number;
+  /**
+   * Store for the catalog-listing cache (key `owner/repo#prefix`). Tests pass a
+   * fresh `Map` for isolation; production shares a module-global.
+   */
+  catalogCache?: Map<string, CatalogCacheEntry>;
 }
+
+/** Process-wide catalog-listing cache used when a caller injects none. */
+const defaultCatalogCache = new Map<string, CatalogCacheEntry>();
 
 /** Split a comma/space/newline separated env list into trimmed, non-empty entries. */
 function splitList(raw: string | undefined): string[] {
@@ -101,13 +143,15 @@ function splitList(raw: string | undefined): string[] {
 
 /**
  * Build a {@link MarketPolicy} from the environment (`env` injectable for tests):
- *   SWARM_OS_SKILLS_MARKET_ENDPOINT    — optional name→git registry + /search
- *   SWARM_OS_SKILLS_MARKET_CATALOG     — bare-name catalog repos (default `anthropics/skills`)
- *   SWARM_OS_SKILLS_MARKET_PREFIX      — subdir prefix inside a catalog repo (default `skills`)
- *   SWARM_OS_SKILLS_MARKET_TIMEOUT_MS  — endpoint network timeout (default 8000)
+ *   SWARM_OS_SKILLS_MARKET_ENDPOINT     — optional name→git registry + /search
+ *   SWARM_OS_SKILLS_MARKET_CATALOG      — bare-name catalog repos (default `anthropics/skills`)
+ *   SWARM_OS_SKILLS_MARKET_PREFIX       — subdir prefix inside a catalog repo (default `skills`)
+ *   SWARM_OS_SKILLS_MARKET_TIMEOUT_MS   — endpoint/catalog network timeout (default 8000)
+ *   SWARM_OS_SKILLS_MARKET_GITHUB_TOKEN — optional token for the contents-API rate limit
  *
  * An operator sets `SWARM_OS_SKILLS_MARKET_CATALOG=` (empty) to disable the
- * built-in convention entirely (bare names then require an endpoint).
+ * built-in convention entirely (bare names then require an endpoint, and browse
+ * reports `available:false`).
  */
 export function marketPolicyFromEnv(env: NodeJS.ProcessEnv = process.env): MarketPolicy {
   const endpoint = trimOrUndefined(env.SWARM_OS_SKILLS_MARKET_ENDPOINT);
@@ -116,7 +160,14 @@ export function marketPolicyFromEnv(env: NodeJS.ProcessEnv = process.env): Marke
   const prefixRaw = env.SWARM_OS_SKILLS_MARKET_PREFIX;
   const catalogPrefix = (prefixRaw === undefined ? DEFAULT_PREFIX : prefixRaw).trim();
   const timeoutMs = parsePositiveInt(env.SWARM_OS_SKILLS_MARKET_TIMEOUT_MS) ?? DEFAULT_TIMEOUT_MS;
-  return { ...(endpoint ? { endpoint } : {}), catalog, catalogPrefix, timeoutMs };
+  const githubToken = trimOrUndefined(env.SWARM_OS_SKILLS_MARKET_GITHUB_TOKEN);
+  return {
+    ...(endpoint ? { endpoint } : {}),
+    catalog,
+    catalogPrefix,
+    timeoutMs,
+    ...(githubToken ? { githubToken } : {}),
+  };
 }
 
 /**
@@ -161,23 +212,159 @@ export async function resolveMarket(
 }
 
 /**
- * Browse a configured registry endpoint. NEVER throws: no endpoint ⇒
- * `{available:false}`; an unreachable/invalid endpoint ⇒
- * `{available:true, results:[], error}`. Lets a browse UI degrade gracefully.
+ * Browse the market for skills matching `query`. NEVER throws; resolution order:
+ *   (a) a configured registry endpoint  → `GET <endpoint>/search?q=` (as before);
+ *   (b) else a GitHub catalog repo       → list `<prefix>/` dirs via the GitHub
+ *       contents API (each dir = a skill, `ref` re-injectable into install);
+ *   (c) else (no endpoint, no catalog)   → `{available:false}` (import by coordinate).
+ *
+ * Any transport/timeout/HTTP/parse failure degrades to
+ * `{available:true, results:[], error}` — `available` stays TRUE whenever browse
+ * is *supported* (an endpoint or catalog exists), so the UI shows a degraded
+ * state, not a "browse unavailable" hint. `fetchImpl` is injectable for tests.
  */
 export async function searchMarket(
   query: string,
   policy: MarketPolicy,
   deps: MarketDeps = {},
 ): Promise<MarketSearchResult> {
-  if (!policy.endpoint) return { available: false, results: [] };
-  const url = `${trimTrailingSlash(policy.endpoint)}/search?q=${encodeURIComponent(query)}`;
-  try {
-    const data = await fetchJson(url, policy.timeoutMs, deps);
-    return { available: true, results: normalizeSearch(data) };
-  } catch (err) {
-    return { available: true, results: [], error: errText(err) };
+  // (a) a configured registry endpoint takes precedence (unchanged behaviour).
+  if (policy.endpoint) {
+    const url = `${trimTrailingSlash(policy.endpoint)}/search?q=${encodeURIComponent(query)}`;
+    try {
+      const data = await fetchJson(url, policy.timeoutMs, deps);
+      return { available: true, results: normalizeSearch(data) };
+    } catch (err) {
+      return { available: true, results: [], error: errText(err) };
+    }
   }
+  // (b) no endpoint but a GitHub catalog repo → browse its `<prefix>/` directory.
+  const repo = catalogGitHubRepo(policy);
+  if (repo) return browseGitHubCatalog(query, repo, policy, deps);
+
+  // (c) neither an endpoint nor a browsable GitHub catalog → browse unsupported.
+  return { available: false, results: [] };
+}
+
+/**
+ * Browse the GitHub catalog repo's `<prefix>/` directory, cached per repo+prefix
+ * (see {@link CATALOG_CACHE_TTL_MS}). Filters dir names by `query` (case-insensitive
+ * substring) and maps each to a re-injectable `ref` (`owner/repo/<prefix>/<name>`).
+ * Never throws — a failure yields `{available:true, results:[], error}`.
+ */
+async function browseGitHubCatalog(
+  query: string,
+  repo: GitHubRepo,
+  policy: MarketPolicy,
+  deps: MarketDeps,
+): Promise<MarketSearchResult> {
+  const prefix = stripSlashes(policy.catalogPrefix);
+  const cache = deps.catalogCache ?? defaultCatalogCache;
+  const now = deps.now ?? Date.now;
+  const key = `${repo.owner}/${repo.repo}#${prefix}`;
+
+  let names: string[];
+  const hit = cache.get(key);
+  if (hit && hit.expiresAt > now()) {
+    names = hit.names;
+  } else {
+    try {
+      names = await fetchCatalogDirNames(repo, prefix, policy, deps);
+    } catch (err) {
+      return { available: true, results: [], error: errText(err) };
+    }
+    cache.set(key, { names, expiresAt: now() + CATALOG_CACHE_TTL_MS });
+  }
+  return { available: true, results: filterCatalog(names, query, repo, prefix) };
+}
+
+/**
+ * GET the `type:'dir'` names under `<owner>/<repo>/<prefix>` from the GitHub
+ * contents API (bounded by an AbortController timeout). Throws a plain Error on
+ * any failure (the caller degrades it to a non-fatal `error`).
+ */
+async function fetchCatalogDirNames(
+  repo: GitHubRepo,
+  prefix: string,
+  policy: MarketPolicy,
+  deps: MarketDeps,
+): Promise<string[]> {
+  const fetchImpl = deps.fetchImpl ?? globalFetch();
+  if (!fetchImpl) throw new Error('no fetch implementation available for the GitHub catalog');
+
+  const path = prefix ? `/${prefix}` : '';
+  const url = `${GITHUB_API_BASE}/repos/${repo.owner}/${repo.repo}/contents${path}`;
+  const headers: Record<string, string> = {
+    Accept: 'application/vnd.github+json',
+    'X-GitHub-Api-Version': '2022-11-28',
+    // GitHub's REST API rejects requests without a User-Agent.
+    'User-Agent': 'swarm-os-skills',
+  };
+  if (policy.githubToken) headers.Authorization = `Bearer ${policy.githubToken}`;
+
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), policy.timeoutMs);
+  let res: { ok: boolean; status: number; json(): Promise<unknown> };
+  try {
+    res = await fetchImpl(url, { signal: controller.signal, headers });
+  } catch (err) {
+    throw new Error(`GitHub catalog ${url} unreachable: ${errText(err)}`);
+  } finally {
+    clearTimeout(timer);
+  }
+
+  if (res.status === 403) throw new Error(`GitHub catalog ${url} rate-limited or forbidden (HTTP 403)`);
+  if (res.status === 404) throw new Error(`GitHub catalog path not found (HTTP 404): ${url}`);
+  if (!res.ok) throw new Error(`GitHub catalog ${url} returned HTTP ${res.status}`);
+
+  let data: unknown;
+  try {
+    data = await res.json();
+  } catch (err) {
+    throw new Error(`GitHub catalog ${url} returned invalid JSON: ${errText(err)}`);
+  }
+  if (!Array.isArray(data)) {
+    throw new Error(`unexpected GitHub contents payload for ${url} (expected an array)`);
+  }
+  const names: string[] = [];
+  for (const item of data) {
+    if (!item || typeof item !== 'object') continue;
+    const r = item as Record<string, unknown>;
+    if (r.type === 'dir' && typeof r.name === 'string' && r.name.length > 0) names.push(r.name);
+  }
+  return names;
+}
+
+/** Filter cached dir names by `query` and map each to a re-injectable market ref. */
+function filterCatalog(
+  names: string[],
+  query: string,
+  repo: GitHubRepo,
+  prefix: string,
+): MarketSearchEntry[] {
+  const q = query.trim().toLowerCase();
+  const out: MarketSearchEntry[] = [];
+  for (const name of names) {
+    if (q && !name.toLowerCase().includes(q)) continue;
+    const subPath = prefix ? `${prefix}/${name}` : name;
+    out.push({ name, ref: `${repo.owner}/${repo.repo}/${subPath}` });
+  }
+  return out;
+}
+
+/** The first catalog entry as a GitHub `{owner,repo}`, or null if it isn't one. */
+function catalogGitHubRepo(policy: MarketPolicy): GitHubRepo | null {
+  const first = policy.catalog[0];
+  if (!first) return null;
+  let coord: MarketGitTarget | null;
+  try {
+    coord = parseGitHubCoordinate(first);
+  } catch {
+    return null; // traversal / malformed — not browsable
+  }
+  if (!coord) return null; // a non-GitHub git url (gitlab, file://, …)
+  const m = coord.url.match(/github\.com\/([^/]+)\/([^/]+?)(?:\.git)?$/i);
+  return m ? { owner: m[1]!, repo: m[2]! } : null;
 }
 
 // ---------------------------------------------------------------------------
@@ -372,6 +559,11 @@ function trimOrUndefined(v: string | undefined): string | undefined {
 
 function trimTrailingSlash(s: string): string {
   return s.replace(/\/+$/, '');
+}
+
+/** Strip leading & trailing slashes (a catalog prefix normalised into a path segment). */
+function stripSlashes(s: string): string {
+  return s.replace(/^\/+|\/+$/g, '');
 }
 
 function parsePositiveInt(v: string | undefined): number | undefined {
