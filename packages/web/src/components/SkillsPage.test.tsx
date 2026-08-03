@@ -23,6 +23,7 @@ vi.mock('../api/client', async (importOriginal) => {
       listSkills: vi.fn().mockResolvedValue({ skills: [] }),
       getSkill: vi.fn().mockResolvedValue({ skill: {}, body: '# skill body' }),
       getSkillActivations: vi.fn().mockResolvedValue({ activations: [] }),
+      marketSearch: vi.fn().mockResolvedValue({ available: false, results: [] }),
     },
   };
 });

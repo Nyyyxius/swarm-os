@@ -816,6 +816,7 @@ export function SkillsPage({ open, onClose }: Props) {
         <SkillImportModal
           install={install}
           upload={upload}
+          marketSearch={api.marketSearch}
           onClose={() => setImportOpen(false)}
           onImported={(r) => {
             setImportOpen(false);

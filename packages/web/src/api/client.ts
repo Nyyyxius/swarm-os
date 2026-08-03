@@ -273,8 +273,27 @@ export interface SkillAssetContent {
   binary: boolean;
 }
 
-/** Body of `POST /skills/install` (dir source only at MVP). */
-export type SkillInstallInput = { source: 'dir'; dir: string };
+/** Body of `POST /skills/install` — all sources (Lot 1b dir/upload + Lot 4b git/npm/market). */
+export type SkillInstallInput =
+  | { source: 'dir'; dir: string }
+  | { source: 'git'; url: string; ref?: string; subdir?: string }
+  | { source: 'npm'; spec: string }
+  | { source: 'market'; ref: string };
+
+/** One entry from `GET /skills/market/search` (Lot 4b). */
+export interface MarketSearchEntry {
+  name: string;
+  description?: string;
+  /** Re-injectable as `ref` in `POST /skills/install { source:'market', ref }`. */
+  ref?: string;
+}
+
+/** Response of `GET /skills/market/search?q=` (Lot 4b). */
+export interface MarketSearchResult {
+  available: boolean;
+  results: MarketSearchEntry[];
+  error?: string;
+}
 
 /** Response shape for install / upload / upgrade. */
 export interface SkillInstallResult {
@@ -1309,6 +1328,9 @@ export const api = {
     request<{ name: string; reviewed: boolean }>('POST', `/skills/${name}/review`, { reviewed }),
   getSkillAsset: (name: string, path: string) =>
     request<{ asset: SkillAssetContent }>('GET', `/skills/${name}/asset?path=${encodeURIComponent(path)}`),
+  /** Browse the marketplace index — always 200 (400 only if q missing). Lot 4b. */
+  marketSearch: (q: string) =>
+    request<MarketSearchResult>('GET', `/skills/market/search?q=${encodeURIComponent(q)}`),
   // ---- Connector types -------------------------------------------------------
   /** J4 — connector types available for role connectors (built-in + plugins). */
   listConnectorTypes: () =>
