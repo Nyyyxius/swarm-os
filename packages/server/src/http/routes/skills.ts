@@ -5,7 +5,7 @@
  *   GET    /skills                 → { skills: SkillView[] }
  *   GET    /skills/:name           → { skill: SkillView, body: string }
  *   GET    /skills/:name/activations → { activations:[{scope,scopeId,enabled}] }
- *   GET    /skills/market/search?q= → { available, results:[{name,description?,ref?}], error? }
+ *   GET    /skills/market/search?q= → { available, results:[{name,description?,ref?,url?}], error? }
  *   POST   /skills/install         { source:'dir'|'git'|'npm'|'market', … } → { skill }
  *                                    dir:{dir} git:{url,ref?,subdir?} npm:{spec} market:{ref}
  *   POST   /skills/upload?name=    raw .tgz (application/gzip)  → { skill }

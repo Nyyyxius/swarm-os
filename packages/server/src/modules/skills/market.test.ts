@@ -194,7 +194,13 @@ describe('searchMarket — GitHub catalog browse (no endpoint)', () => {
     expect(r.available).toBe(true);
     expect(r.error).toBeUndefined();
     // only the dir whose name contains "doc"; the file README.md is excluded.
-    expect(r.results).toEqual([{ name: 'docx', ref: 'anthropics/skills/skills/docx' }]);
+    expect(r.results).toEqual([
+      {
+        name: 'docx',
+        ref: 'anthropics/skills/skills/docx',
+        url: 'https://github.com/anthropics/skills/tree/HEAD/skills/docx',
+      },
+    ]);
     // browses the GitHub contents API at the catalog repo's prefix.
     expect(calls[0]).toBe('https://api.github.com/repos/anthropics/skills/contents/skills');
     // sends the required GitHub headers; no Authorization without a token.
@@ -217,6 +223,12 @@ describe('searchMarket — GitHub catalog browse (no endpoint)', () => {
     expect(t).toEqual({ url: 'https://github.com/anthropics/skills.git', subdir: 'skills/pdf' });
   });
 
+  it('attaches a canonical GitHub tree url to each catalog result', async () => {
+    const { fetchImpl } = fakeFetch(200, GITHUB_CONTENTS);
+    const r = await searchMarket('pdf', conventionPolicy(), { fetchImpl, catalogCache: new Map() });
+    expect(r.results[0]?.url).toBe('https://github.com/anthropics/skills/tree/HEAD/skills/pdf');
+  });
+
   it('sends an Authorization header when a github token is configured', async () => {
     const { fetchImpl, inits } = fakeFetch(200, GITHUB_CONTENTS);
     await searchMarket('pdf', conventionPolicy({ githubToken: 'ghp_x' }), {
@@ -232,8 +244,20 @@ describe('searchMarket — GitHub catalog browse (no endpoint)', () => {
     const deps = { fetchImpl, catalogCache: cache, now: () => 1000 };
     const a = await searchMarket('pdf', conventionPolicy(), deps);
     const b = await searchMarket('docx', conventionPolicy(), deps);
-    expect(a.results).toEqual([{ name: 'pdf', ref: 'anthropics/skills/skills/pdf' }]);
-    expect(b.results).toEqual([{ name: 'docx', ref: 'anthropics/skills/skills/docx' }]);
+    expect(a.results).toEqual([
+      {
+        name: 'pdf',
+        ref: 'anthropics/skills/skills/pdf',
+        url: 'https://github.com/anthropics/skills/tree/HEAD/skills/pdf',
+      },
+    ]);
+    expect(b.results).toEqual([
+      {
+        name: 'docx',
+        ref: 'anthropics/skills/skills/docx',
+        url: 'https://github.com/anthropics/skills/tree/HEAD/skills/docx',
+      },
+    ]);
     expect(calls).toHaveLength(1); // second search served from cache
   });
 
@@ -290,6 +314,35 @@ describe('searchMarket — endpoint (unchanged)', () => {
       fetchImpl,
     });
     expect(r.results).toEqual([{ name: 'docx' }]);
+  });
+
+  it('propagates a canonical url from an endpoint result (url / html_url / homepage)', async () => {
+    const { fetchImpl } = fakeFetch(200, {
+      results: [
+        { name: 'pdf', url: 'https://example.dev/skills/pdf' },
+        { name: 'docx', html_url: 'https://github.com/acme/pack/tree/main/docx' },
+        { name: 'pptx', homepage: 'https://example.dev/pptx' },
+      ],
+    });
+    const r = await searchMarket('x', conventionPolicy({ endpoint: 'https://reg.example' }), {
+      fetchImpl,
+    });
+    expect(r.results).toEqual([
+      { name: 'pdf', url: 'https://example.dev/skills/pdf' },
+      { name: 'docx', url: 'https://github.com/acme/pack/tree/main/docx' },
+      { name: 'pptx', url: 'https://example.dev/pptx' },
+    ]);
+  });
+
+  it('leaves url undefined when an endpoint result carries none (no regression)', async () => {
+    const { fetchImpl } = fakeFetch(200, {
+      results: [{ name: 'pdf', ref: 'anthropics/skills/skills/pdf' }],
+    });
+    const r = await searchMarket('pdf', conventionPolicy({ endpoint: 'https://reg.example' }), {
+      fetchImpl,
+    });
+    expect(r.results).toEqual([{ name: 'pdf', ref: 'anthropics/skills/skills/pdf' }]);
+    expect(r.results[0]).not.toHaveProperty('url');
   });
 
   it('degrades gracefully (no throw) when the endpoint is unreachable', async () => {

@@ -89,6 +89,8 @@ export interface MarketSearchEntry {
   description?: string;
   /** A market ref the operator can install (a bare name or `owner/repo`). */
   ref?: string;
+  /** Canonical web link to the skill's source (e.g. its GitHub tree URL). */
+  url?: string;
 }
 
 /** Result of a market browse — always resolves (never throws) so the UI degrades. */
@@ -347,7 +349,14 @@ function filterCatalog(
   for (const name of names) {
     if (q && !name.toLowerCase().includes(q)) continue;
     const subPath = prefix ? `${prefix}/${name}` : name;
-    out.push({ name, ref: `${repo.owner}/${repo.repo}/${subPath}` });
+    out.push({
+      name,
+      ref: `${repo.owner}/${repo.repo}/${subPath}`,
+      // Canonical web link to the skill's source dir. `tree/HEAD` auto-tracks the
+      // repo's default branch (verified HTTP 200 for anthropics/skills; `tree/main`
+      // also resolves 200 but HEAD avoids hardcoding a branch name).
+      url: `https://github.com/${repo.owner}/${repo.repo}/tree/HEAD/${subPath}`,
+    });
   }
   return out;
 }
@@ -533,10 +542,21 @@ function normalizeSearch(data: unknown): MarketSearchEntry[] {
     if (!name) continue;
     const description = typeof r.description === 'string' ? r.description : undefined;
     const entryRef = typeof r.ref === 'string' ? r.ref : undefined;
+    // Propagate a canonical web link if the endpoint supplies one under any of the
+    // common keys; stays undefined (never throws) when absent or non-string.
+    const entryUrl =
+      typeof r.url === 'string'
+        ? r.url
+        : typeof r.html_url === 'string'
+          ? r.html_url
+          : typeof r.homepage === 'string'
+            ? r.homepage
+            : undefined;
     out.push({
       name,
       ...(description ? { description } : {}),
       ...(entryRef ? { ref: entryRef } : {}),
+      ...(entryUrl ? { url: entryUrl } : {}),
     });
   }
   return out;
