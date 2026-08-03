@@ -114,19 +114,21 @@ des subagents, ni leur sandboxing, ni l'API au-delà du spawn.
 
 ## 7. À faire — pistes d'évolution swarm-os
 
-Pistes suivantes pour continuer à combler l'écart (au-delà des trois déjà livrés
-ci-dessus), demandées par l'opérateur :
+Une de ces pistes est désormais **livrée** ; l'autre reste à faire.
 
-1. **Graphify en complémentarité avec la mémoire Obsidian.** Ajouter une couche de
-   **graphe de connaissances structurel** façon *Graphify* : un CLI/outil qui
-   transforme un dossier (code, schémas, docs, PDF, images) en **graphe
-   requêtable**, servi à l'agent en **sous-graphes compressés à la demande**
-   (jusqu'à ~70× moins de tokens injectés). Répartition des rôles : la mémoire
-   partagée façon Obsidian (déjà livrée, §3) reste la **couche wiki lisible**
-   (décisions, contexte, progression) ; Graphify fournit la **carte automatique de
-   la structure du code/infra** en dessous. Les deux se complètent — Obsidian = le
-   « quoi / pourquoi » humain, Graphify = le « où / comment » structurel — pour
-   réduire le contexte tout en gardant la traçabilité.
+1. ✅ **livré (2026-08-02, déployé en test)** — **Graphify en complémentarité avec la
+   mémoire Obsidian.** Couche de **graphe de connaissances structurel** façon *Graphify*
+   intégrée à swarm-os : indexation automatique en arrière-plan (watcher + janitor) du
+   code de 1re partie du workspace et des plugins (hors deps/`node_modules`), **désactivée
+   si aucun code détecté** ; sous-graphes compressés servis à la demande (~70–90 % de
+   tokens en moins) via les outils MCP `codegraph.list/search/explain/path` (à interroger
+   avant de greper — directive ajoutée au préambule lead+worker) ; **intégration à la
+   mémoire Obsidian (Option A)** = fiche `reference` auto-gérée par scope + hub
+   `[[wikilinks]]` bidirectionnels ; **page web dédiée `#/graph`** (vue force-directed
+   bornée + auto-focus du hub sur gros scope + bouton « graphe complet » servant le
+   `graph.html` natif de Graphify). Répartition des rôles confirmée : Obsidian = couche
+   wiki lisible (le « quoi / pourquoi »), Graphify = carte structurelle du code/infra
+   (le « où / comment »).
 
 2. **Bibliothèque de skills importable.** Offrir un **catalogue de skills**
    activables par rôle/équipe, **importables depuis des sources connues** (ex.
