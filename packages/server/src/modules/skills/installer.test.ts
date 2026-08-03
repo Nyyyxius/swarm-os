@@ -176,3 +176,70 @@ describe('SkillInstaller trust + review drift', () => {
     expect(up.row.reviewed).toBe(1);
   });
 });
+
+describe('SkillInstaller market source', () => {
+  let repo: string;
+  let mktInstaller: SkillInstaller;
+
+  // A catalog repo laid out like agentskills.io / anthropics/skills:
+  // `skills/<name>/SKILL.md`. A bare market name `hello` → subdir `skills/hello`.
+  function writeRepoSkill(body: string, version = '1.0.0'): void {
+    const skillDir = path.join(repo, 'skills', 'hello');
+    fs.mkdirSync(skillDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(skillDir, 'SKILL.md'),
+      `---\nname: hello\nversion: ${version}\ndescription: g.\n---\n${body}\n`,
+      'utf8',
+    );
+  }
+
+  beforeEach(() => {
+    repo = path.join(dir, 'catalog-repo');
+    fs.mkdirSync(repo, { recursive: true });
+    git(['init', '-q'], repo);
+    git(['config', 'user.email', 't@t.io'], repo);
+    git(['config', 'user.name', 'Tester'], repo);
+    writeRepoSkill('v1 market body');
+    git(['add', '.'], repo);
+    git(['commit', '-qm', 'init'], repo);
+    // Catalog points at the LOCAL repo (a full git url is accepted verbatim), so
+    // the market path is exercised end-to-end with NO network.
+    mktInstaller = new SkillInstaller({
+      skillsDir: path.join(dir, 'skills-mkt'),
+      store,
+      market: { catalog: [`file://${repo}`], catalogPrefix: 'skills', timeoutMs: 1000 },
+    });
+  });
+
+  it('installs a bare market name via the catalog convention (delegates to git)', async () => {
+    const r = await mktInstaller.install({ kind: 'market', ref: 'hello' });
+    expect(r.name).toBe('hello');
+    expect(r.source_kind).toBe('market');
+    expect(r.source_ref).toBe('hello'); // ORIGINAL ref stored so upgrade re-resolves
+    expect(r.source_commit).toMatch(/^[0-9a-f]{40}$/);
+    expect(r.trust).toBe('community'); // market is never auto-privileged
+    expect(r.body_md).toContain('v1 market body');
+  });
+
+  it('re-resolves the market ref on upgrade (picks up the repo HEAD)', async () => {
+    const first = await mktInstaller.install({ kind: 'market', ref: 'hello' });
+    writeRepoSkill('v2 market body', '2.0.0');
+    git(['commit', '-qam', 'v2'], repo);
+    const up = await mktInstaller.upgrade('hello');
+    expect(up.row.version).toBe('2.0.0');
+    expect(up.row.body_md).toContain('v2 market body');
+    expect(up.row.source_commit).not.toBe(first.source_commit);
+    expect(up.drift.checksumChanged).toBe(true);
+  });
+
+  it('rejects an unresolvable bare name (no endpoint, empty catalog) as a validation error', async () => {
+    const inst = new SkillInstaller({
+      skillsDir: path.join(dir, 'skills-mkt-empty'),
+      store,
+      market: { catalog: [], catalogPrefix: 'skills', timeoutMs: 1000 },
+    });
+    await expect(inst.install({ kind: 'market', ref: 'ghost' })).rejects.toBeInstanceOf(
+      SkillValidationError,
+    );
+  });
+});

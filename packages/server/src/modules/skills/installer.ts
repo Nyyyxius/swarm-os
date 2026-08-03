@@ -26,6 +26,14 @@ import {
 } from './stage.js';
 import { encodeGitRef, decodeGitRef, type Runner } from '../install-core/fetch.js';
 import { resolveTrust, trustPolicyFromEnv, type TrustPolicy } from './trust.js';
+import {
+  resolveMarket,
+  searchMarket,
+  marketPolicyFromEnv,
+  type MarketPolicy,
+  type MarketDeps,
+  type MarketSearchResult,
+} from './market.js';
 
 const log = withModule('skills.installer');
 
@@ -67,6 +75,10 @@ export interface SkillInstallerDeps {
   store: SkillStore;
   /** Allowlists promoting git/npm sources above `community`. Env-derived by default. */
   trust?: TrustPolicy;
+  /** Market resolution policy (endpoint + catalog). Env-derived by default. */
+  market?: MarketPolicy;
+  /** Injectable network deps for the market endpoint (tests supply a fake fetch). */
+  marketDeps?: MarketDeps;
 }
 
 interface StagedSkill {
@@ -84,6 +96,8 @@ export class SkillInstaller {
   private readonly stagingRoot: string;
   private readonly runner: Runner;
   private readonly trustPolicy: TrustPolicy;
+  private readonly marketPolicy: MarketPolicy;
+  private readonly marketDeps: MarketDeps;
 
   constructor(deps: SkillInstallerDeps) {
     this.skillsDir = deps.skillsDir;
@@ -91,7 +105,14 @@ export class SkillInstaller {
     this.stagingRoot = path.join(deps.skillsDir, '.staging');
     this.runner = makeSkillRunner(path.join(this.stagingRoot, '.npm-cache'));
     this.trustPolicy = deps.trust ?? trustPolicyFromEnv();
+    this.marketPolicy = deps.market ?? marketPolicyFromEnv();
+    this.marketDeps = deps.marketDeps ?? {};
     this.purgeStaging();
+  }
+
+  /** Browse the configured market registry (graceful — never throws). */
+  marketSearch(query: string): Promise<MarketSearchResult> {
+    return searchMarket(query, this.marketPolicy, this.marketDeps);
   }
 
   /** Wipe stale staging (interrupted imports) and recreate the work area. */
@@ -135,6 +156,11 @@ export class SkillInstaller {
         source = { kind: 'git', url, ref, subdir };
         break;
       }
+      case 'market':
+        // Re-resolve the ORIGINAL market ref (`source_ref`) — a re-import picks
+        // up the repo's newer HEAD, and re-classifies trust under the current policy.
+        source = { kind: 'market', ref: row.source_ref ?? name };
+        break;
       case 'upload':
         throw new UploadRequiresNewUploadError(name);
       default:
@@ -211,6 +237,22 @@ export class SkillInstaller {
         sourceKind = 'git';
         sourceRef = encodeGitRef(source.url, source.ref, source.subdir);
         break;
+      case 'market': {
+        // agentskills.io has NO download API — a market ref resolves to git
+        // coordinates (market.ts) and reuses the SAME data-first clone path.
+        // Persist the ORIGINAL ref so `upgrade` re-resolves; trust stays
+        // `community` (resolveTrust), so the Lot 3 review gate still applies.
+        const target = await resolveMarket(source.ref, this.marketPolicy, this.marketDeps);
+        sourceCommit = await stageGit(
+          this.runner,
+          target,
+          dir,
+          path.join(this.stagingRoot, `${uuid}-clone`),
+        );
+        sourceKind = 'market';
+        sourceRef = source.ref;
+        break;
+      }
       default:
         throw new SkillValidationError('unknown source kind');
     }

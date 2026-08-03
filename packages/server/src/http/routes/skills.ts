@@ -5,7 +5,9 @@
  *   GET    /skills                 → { skills: SkillView[] }
  *   GET    /skills/:name           → { skill: SkillView, body: string }
  *   GET    /skills/:name/activations → { activations:[{scope,scopeId,enabled}] }
- *   POST   /skills/install         { source:'dir', dir:string } → { skill }
+ *   GET    /skills/market/search?q= → { available, results:[{name,description?,ref?}], error? }
+ *   POST   /skills/install         { source:'dir'|'git'|'npm'|'market', … } → { skill }
+ *                                    dir:{dir} git:{url,ref?,subdir?} npm:{spec} market:{ref}
  *   POST   /skills/upload?name=    raw .tgz (application/gzip)  → { skill }
  *   POST   /skills/:name/upgrade   → { skill, drift:{checksumChanged,previousChecksum,previousBody} }
  *   DELETE /skills/:name           → 204
@@ -27,7 +29,7 @@
 import express, { Router, type Request, type Response } from 'express';
 import type { SkillsSubsystem, SkillScope } from '../../modules/skills/index.js';
 import { SkillNotFoundError, UploadRequiresNewUploadError } from '../../modules/skills/installer.js';
-import { SkillValidationError, SkillStageError } from '../../modules/skills/stage.js';
+import { SkillValidationError, SkillStageError, type SkillInstallSource } from '../../modules/skills/stage.js';
 
 /** Map a known skill error onto its HTTP status. Returns true when handled. */
 function sendSkillError(res: Response, err: unknown): boolean {
@@ -48,6 +50,55 @@ function sendSkillError(res: Response, err: unknown): boolean {
     return true;
   }
   return false;
+}
+
+/**
+ * Validate + narrow a `POST /skills/install` body to a {@link SkillInstallSource}
+ * (mirrors the plugins route's `parseInstallSource`). `upload` is a separate
+ * raw-body route; `market` resolves to git coordinates in the installer.
+ */
+function parseSkillInstallSource(
+  body: unknown,
+): { ok: true; value: SkillInstallSource } | { ok: false; error: string } {
+  if (body == null || typeof body !== 'object') {
+    return { ok: false, error: 'body must be a JSON object' };
+  }
+  const b = body as Record<string, unknown>;
+  switch (b.source) {
+    case 'dir': {
+      if (typeof b.dir !== 'string' || b.dir.trim() === '') {
+        return { ok: false, error: "dir source requires a non-empty 'dir'" };
+      }
+      return { ok: true, value: { kind: 'dir', dir: b.dir.trim() } };
+    }
+    case 'git': {
+      if (typeof b.url !== 'string' || b.url.trim() === '') {
+        return { ok: false, error: "git source requires a non-empty 'url'" };
+      }
+      const ref = typeof b.ref === 'string' && b.ref.trim() !== '' ? b.ref.trim() : undefined;
+      const subdir =
+        typeof b.subdir === 'string' && b.subdir.trim() !== '' ? b.subdir.trim() : undefined;
+      return { ok: true, value: { kind: 'git', url: b.url.trim(), ...(ref ? { ref } : {}), ...(subdir ? { subdir } : {}) } };
+    }
+    case 'npm': {
+      if (typeof b.spec !== 'string' || b.spec.trim() === '') {
+        return { ok: false, error: "npm source requires a non-empty 'spec'" };
+      }
+      return { ok: true, value: { kind: 'npm', spec: b.spec.trim() } };
+    }
+    case 'market': {
+      // A market ref is a bare skill name or a GitHub 'owner/repo[/subdir][@ref]'.
+      if (typeof b.ref !== 'string' || b.ref.trim() === '') {
+        return {
+          ok: false,
+          error: "market source requires a non-empty 'ref' (a skill name or GitHub 'owner/repo[/subdir]')",
+        };
+      }
+      return { ok: true, value: { kind: 'market', ref: b.ref.trim() } };
+    }
+    default:
+      return { ok: false, error: "source must be one of 'dir' | 'git' | 'npm' | 'market'" };
+  }
 }
 
 export function createSkillsRouter(skills: SkillsSubsystem): Router {
@@ -76,16 +127,35 @@ export function createSkillsRouter(skills: SkillsSubsystem): Router {
     res.json({ activations: skills.activationsForSkill(req.params.name) });
   });
 
-  router.post('/skills/install', (req: Request, res: Response) => {
-    const body = (req.body ?? {}) as { source?: string; dir?: string };
-    if (body.source !== 'dir' || typeof body.dir !== 'string' || body.dir.trim() === '') {
-      res.status(400).json({
-        error: "install expects { source: 'dir', dir: '<path>' } — git/npm/market arrive in a later lot",
-      });
+  // Browse a configured market registry (agentskills.io ecosystem). This
+  // 3-segment path never collides with the 2-segment `/skills/:name` route.
+  // Always 200 (graceful degradation) except a missing query; a
+  // configured-but-unreachable endpoint yields { available:true, results:[],
+  // error } rather than a 5xx.
+  router.get('/skills/market/search', (req: Request, res: Response) => {
+    const q = typeof req.query.q === 'string' ? req.query.q.trim() : '';
+    if (q === '') {
+      res.status(400).json({ error: 'query ?q=<text> is required' });
       return;
     }
     void skills
-      .import({ kind: 'dir', dir: body.dir.trim() })
+      .marketSearch(q)
+      .then((result) => res.json(result))
+      .catch((err: unknown) => {
+        // searchMarket is already fail-safe; this is defence in depth so a browse
+        // never surfaces as a 500.
+        res.json({ available: true, results: [], error: err instanceof Error ? err.message : String(err) });
+      });
+  });
+
+  router.post('/skills/install', (req: Request, res: Response) => {
+    const parsed = parseSkillInstallSource(req.body);
+    if (!parsed.ok) {
+      res.status(400).json({ error: parsed.error });
+      return;
+    }
+    void skills
+      .import(parsed.value)
       .then((skill) => res.json({ skill }))
       .catch((err: unknown) => {
         if (sendSkillError(res, err)) return;

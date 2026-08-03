@@ -24,6 +24,7 @@ import type { SkillFragment } from '../orchestrator/preamble.js';
 import { SkillStore, type SkillRow, type SkillScopeType } from './store.js';
 import { SkillInstaller, type ChecksumDrift } from './installer.js';
 import type { SkillInstallSource } from './stage.js';
+import type { MarketSearchResult } from './market.js';
 import { removeSkillAssets, type SkillAssetsConfig } from './assets.js';
 import { isReviewRequired, skillHasRisk, trustBypassesReview } from './trust.js';
 import { listSkillAssets, readSkillAsset, type SkillAssetEntry, type SkillAssetContent } from './review.js';
@@ -185,6 +186,15 @@ export class SkillsSubsystem {
   async upgrade(name: string): Promise<{ skill: SkillView; drift: ChecksumDrift }> {
     const { row, drift } = await this.installer.upgrade(name);
     return { skill: this.toView(row), drift };
+  }
+
+  /**
+   * Browse the configured market registry (`market.ts`). Graceful: resolves to
+   * `{available:false}` when no endpoint is configured and never throws, so a
+   * browse UI degrades instead of erroring (docs/skills-lot4-contract.md).
+   */
+  marketSearch(query: string): Promise<MarketSearchResult> {
+    return this.installer.marketSearch(query);
   }
 
   // ---- review gate (Lot 3) ----------------------------------------------

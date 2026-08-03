@@ -100,13 +100,39 @@ describe('skills REST router', () => {
     expect(after.skills).toEqual([]);
   });
 
-  it('rejects an unsupported install source with 400', async () => {
+  it('rejects an unknown install source with 400', async () => {
     const res = await fetch(`${base}/skills/install`, {
       method: 'POST',
       headers: { 'content-type': 'application/json' },
-      body: JSON.stringify({ source: 'git', url: 'x' }),
+      body: JSON.stringify({ source: 'bogus' }),
     });
     expect(res.status).toBe(400);
+  });
+
+  it('rejects a git source with a missing url, and a market source with a missing ref (400)', async () => {
+    const git = await fetch(`${base}/skills/install`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ source: 'git' }),
+    });
+    expect(git.status).toBe(400);
+    const market = await fetch(`${base}/skills/install`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ source: 'market' }),
+    });
+    expect(market.status).toBe(400);
+  });
+
+  it('market search is unavailable (200) with no endpoint configured, and 400 without a query', async () => {
+    const ok = await fetch(`${base}/skills/market/search?q=pdf`);
+    expect(ok.status).toBe(200);
+    const body = (await ok.json()) as { available: boolean; results: unknown[] };
+    expect(body.available).toBe(false);
+    expect(body.results).toEqual([]);
+
+    const noQuery = await fetch(`${base}/skills/market/search`);
+    expect(noQuery.status).toBe(400);
   });
 
   it('maps a missing SKILL.md to 422', async () => {
