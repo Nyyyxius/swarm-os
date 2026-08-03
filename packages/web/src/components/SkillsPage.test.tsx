@@ -24,6 +24,9 @@ vi.mock('../api/client', async (importOriginal) => {
       getSkill: vi.fn().mockResolvedValue({ skill: {}, body: '# skill body' }),
       getSkillActivations: vi.fn().mockResolvedValue({ activations: [] }),
       marketSearch: vi.fn().mockResolvedValue({ available: false, results: [] }),
+      exportSkill: vi.fn().mockResolvedValue(undefined),
+      exportPack: vi.fn().mockResolvedValue(undefined),
+      installPack: vi.fn().mockResolvedValue({ installed: [], errors: [] }),
     },
   };
 });
@@ -306,6 +309,127 @@ describe('SkillsPage Lot 3b — trust badges and review indicators', () => {
       expect(screen.queryByText('REQUIRES')).toBeTruthy();
       expect(screen.queryByText('OK')).toBeTruthy();
       expect(screen.queryByText('my-plugin (plugin)')).toBeTruthy();
+    });
+  });
+});
+
+describe('SkillsPage Lot 5b — export / pack UI', () => {
+  function makeSkill(name: string, overrides: object = {}) {
+    return {
+      name,
+      version: '1.0.0',
+      displayName: null,
+      description: null,
+      sourceKind: 'dir',
+      sourceRef: null,
+      trust: 'local',
+      requires: { plugins: [], capabilities: [] },
+      assetsPresent: false,
+      triggers: [],
+      checksum: null,
+      installedAt: new Date().toISOString(),
+      updatedAt: new Date().toISOString(),
+      lastError: null,
+      reviewed: false,
+      reviewRequired: false,
+      pluginStatus: [],
+      warnings: [],
+      ...overrides,
+    };
+  }
+
+  it('renders IMPORT PACK button', () => {
+    render(<SkillsPage open onClose={() => undefined} />);
+    expect(screen.getByText('IMPORT PACK')).toBeTruthy();
+  });
+
+  it('renders EXPORT PACK button (disabled when nothing checked)', () => {
+    render(<SkillsPage open onClose={() => undefined} />);
+    const btn = screen.getByText(/EXPORT PACK/);
+    expect(btn).toBeTruthy();
+    expect((btn as HTMLButtonElement).disabled).toBe(true);
+  });
+
+  it('renders a checkbox per skill row', async () => {
+    const { api } = await import('../api/client');
+    (api.listSkills as ReturnType<typeof vi.fn>).mockResolvedValue({
+      skills: [makeSkill('pdf'), makeSkill('docx')],
+    });
+    render(<SkillsPage open onClose={() => undefined} />);
+    await vi.waitFor(() => {
+      const checkboxes = screen.getAllByRole('checkbox');
+      expect(checkboxes.length).toBeGreaterThanOrEqual(2);
+    });
+  });
+
+  it('renders an export button per skill row', async () => {
+    const { api } = await import('../api/client');
+    (api.listSkills as ReturnType<typeof vi.fn>).mockResolvedValue({
+      skills: [makeSkill('pdf')],
+    });
+    render(<SkillsPage open onClose={() => undefined} />);
+    await vi.waitFor(() => {
+      const exportBtns = screen.getAllByLabelText(/Export pdf/);
+      expect(exportBtns.length).toBeGreaterThanOrEqual(1);
+    });
+  });
+
+  it('enables EXPORT PACK button when a skill is checked', async () => {
+    const { api } = await import('../api/client');
+    (api.listSkills as ReturnType<typeof vi.fn>).mockResolvedValue({
+      skills: [makeSkill('pdf')],
+    });
+    render(<SkillsPage open onClose={() => undefined} />);
+    await vi.waitFor(() => screen.getAllByRole('checkbox').length > 0);
+
+    const [cb] = screen.getAllByRole('checkbox') as HTMLInputElement[];
+    cb!.click();
+    await vi.waitFor(() => {
+      const btn = screen.getByText(/EXPORT PACK/);
+      expect(btn.textContent).toContain('1');
+    });
+  });
+
+  it('shows pack install result after installPack succeeds', async () => {
+    const { api } = await import('../api/client');
+    (api.listSkills as ReturnType<typeof vi.fn>).mockResolvedValue({ skills: [] });
+    (api.installPack as ReturnType<typeof vi.fn>).mockResolvedValue({
+      installed: [makeSkill('pdf')],
+      errors: [],
+    });
+
+    render(<SkillsPage open onClose={() => undefined} />);
+
+    // Simulate the file input change
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    expect(input).toBeTruthy();
+    const file = new File([new Uint8Array([1])], 'pack.tgz', { type: 'application/gzip' });
+    Object.defineProperty(input, 'files', { value: [file], configurable: true });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+
+    await vi.waitFor(() => {
+      expect(screen.queryByText(/Installed: pdf/)).toBeTruthy();
+    });
+  });
+
+  it('shows pack errors when installPack returns partial errors', async () => {
+    const { api } = await import('../api/client');
+    (api.listSkills as ReturnType<typeof vi.fn>).mockResolvedValue({ skills: [] });
+    (api.installPack as ReturnType<typeof vi.fn>).mockResolvedValue({
+      installed: [],
+      errors: [{ name: 'bad-skill', error: 'SKILL.md invalid' }],
+    });
+
+    render(<SkillsPage open onClose={() => undefined} />);
+
+    const input = document.querySelector('input[type="file"]') as HTMLInputElement;
+    const file = new File([new Uint8Array([1])], 'pack.tgz', { type: 'application/gzip' });
+    Object.defineProperty(input, 'files', { value: [file], configurable: true });
+    input.dispatchEvent(new Event('change', { bubbles: true }));
+
+    await vi.waitFor(() => {
+      expect(screen.queryByText(/bad-skill/)).toBeTruthy();
+      expect(screen.queryByText(/SKILL\.md invalid/)).toBeTruthy();
     });
   });
 });

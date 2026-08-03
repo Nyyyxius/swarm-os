@@ -248,3 +248,169 @@ describe('codegraph endpoints (P4)', () => {
     expect(url).not.toContain('limit=');
   });
 });
+
+describe('Lot 5b — export / pack API functions', () => {
+  let originalCreateObjectURL: typeof URL.createObjectURL;
+  let originalRevokeObjectURL: typeof URL.revokeObjectURL;
+  let originalCreateElement: typeof document.createElement;
+  let clickedAnchors: { href: string; download: string }[];
+
+  beforeEach(() => {
+    clickedAnchors = [];
+    originalCreateObjectURL = URL.createObjectURL;
+    originalRevokeObjectURL = URL.revokeObjectURL;
+    originalCreateElement = document.createElement.bind(document);
+    URL.createObjectURL = vi.fn(() => 'blob:mock-url');
+    URL.revokeObjectURL = vi.fn();
+    vi.spyOn(document, 'createElement').mockImplementation((tag: string) => {
+      const el = originalCreateElement(tag);
+      if (tag === 'a') {
+        const anchor = el as HTMLAnchorElement;
+        anchor.click = () => {
+          clickedAnchors.push({ href: anchor.href, download: anchor.download });
+        };
+      }
+      return el;
+    });
+  });
+
+  afterEach(() => {
+    URL.createObjectURL = originalCreateObjectURL;
+    URL.revokeObjectURL = originalRevokeObjectURL;
+    vi.restoreAllMocks();
+  });
+
+  it('exportSkill sends GET with auth and triggers a download', async () => {
+    setToken('sk-token');
+    globalThis.fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response(new Uint8Array([1, 2, 3]), {
+        status: 200,
+        headers: {
+          'content-type': 'application/gzip',
+          'content-disposition': 'attachment; filename="my-skill.tgz"',
+        },
+      });
+    }) as typeof fetch;
+
+    await api.exportSkill('my-skill');
+
+    const last = calls[calls.length - 1]!;
+    expect(last.url).toBe('/skills/my-skill/export');
+    expect((last.init?.headers as Record<string, string>)['X-Auth-Token']).toBe('sk-token');
+    expect(clickedAnchors.length).toBe(1);
+    expect(clickedAnchors[0]!.download).toBe('my-skill.tgz');
+    expect(URL.revokeObjectURL).toHaveBeenCalledWith('blob:mock-url');
+  });
+
+  it('exportSkill falls back to <name>.tgz when no Content-Disposition header', async () => {
+    setToken('t');
+    globalThis.fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response(new Uint8Array([1]), {
+        status: 200,
+        headers: { 'content-type': 'application/gzip' },
+      });
+    }) as typeof fetch;
+
+    await api.exportSkill('some-skill');
+    expect(clickedAnchors[0]!.download).toBe('some-skill.tgz');
+  });
+
+  it('exportSkill throws HttpError on non-2xx', async () => {
+    setToken('t');
+    globalThis.fetch = vi.fn(async () =>
+      new Response('{"error":"not found"}', {
+        status: 404,
+        headers: { 'content-type': 'application/json' },
+      }),
+    ) as typeof fetch;
+
+    let err: unknown;
+    try { await api.exportSkill('nope'); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(HttpError);
+    expect((err as HttpError).status).toBe(404);
+  });
+
+  it('exportPack sends POST with auth and triggers a download', async () => {
+    setToken('pk-token');
+    globalThis.fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response(new Uint8Array([4, 5, 6]), {
+        status: 200,
+        headers: {
+          'content-type': 'application/gzip',
+          'content-disposition': 'attachment; filename="skills-pack-2.tgz"',
+        },
+      });
+    }) as typeof fetch;
+
+    await api.exportPack(['pdf', 'docx']);
+
+    const last = calls[calls.length - 1]!;
+    expect(last.url).toBe('/skills/pack/export');
+    expect(last.init?.method).toBe('POST');
+    expect((last.init?.headers as Record<string, string>)['X-Auth-Token']).toBe('pk-token');
+    const body = JSON.parse(last.init?.body as string) as { names: string[] };
+    expect(body.names).toEqual(['pdf', 'docx']);
+    expect(clickedAnchors[0]!.download).toBe('skills-pack-2.tgz');
+  });
+
+  it('exportPack falls back to skills-pack-<N>.tgz when no Content-Disposition', async () => {
+    setToken('t');
+    globalThis.fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response(new Uint8Array([1]), {
+        status: 200,
+        headers: { 'content-type': 'application/gzip' },
+      });
+    }) as typeof fetch;
+
+    await api.exportPack(['a', 'b', 'c']);
+    expect(clickedAnchors[0]!.download).toBe('skills-pack-3.tgz');
+  });
+
+  it('installPack sends POST application/gzip with auth and returns PackInstallResponse', async () => {
+    setToken('pack-token');
+    const response: unknown = {
+      installed: [{ name: 'pdf', version: '1.0.0' }],
+      errors: [],
+    };
+    globalThis.fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response(JSON.stringify(response), {
+        status: 200,
+        headers: { 'content-type': 'application/json' },
+      });
+    }) as typeof fetch;
+
+    const file = new Blob([new Uint8Array([1, 2, 3])], { type: 'application/gzip' });
+    const result = await api.installPack(file);
+
+    const last = calls[calls.length - 1]!;
+    expect(last.url).toBe('/skills/pack/install');
+    expect(last.init?.method).toBe('POST');
+    const headers = last.init?.headers as Record<string, string>;
+    expect(headers['X-Auth-Token']).toBe('pack-token');
+    expect(headers['Content-Type']).toBe('application/gzip');
+    expect(result.installed).toHaveLength(1);
+    expect(result.installed[0]!.name).toBe('pdf');
+    expect(result.errors).toHaveLength(0);
+  });
+
+  it('installPack throws HttpError on 422', async () => {
+    setToken('t');
+    globalThis.fetch = vi.fn(async () =>
+      new Response('{"error":"corrupted archive"}', {
+        status: 422,
+        headers: { 'content-type': 'application/json' },
+      }),
+    ) as typeof fetch;
+
+    const file = new Blob([new Uint8Array([0])], { type: 'application/gzip' });
+    let err: unknown;
+    try { await api.installPack(file); } catch (e) { err = e; }
+    expect(err).toBeInstanceOf(HttpError);
+    expect((err as HttpError).status).toBe(422);
+  });
+});

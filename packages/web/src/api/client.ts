@@ -306,6 +306,12 @@ export interface SkillInstallResult {
   };
 }
 
+/** Response of POST /skills/pack/install (Lot 5b). */
+export interface PackInstallResponse {
+  installed: SkillView[];
+  errors: { name: string; error: string }[];
+}
+
 /** One scope-level activation row returned by GET /skills/:name/activations (Lot 2b). */
 export interface SkillScopeActivation {
   scope: 'orch' | 'session';
@@ -1331,6 +1337,65 @@ export const api = {
   /** Browse the marketplace index — always 200 (400 only if q missing). Lot 4b. */
   marketSearch: (q: string) =>
     request<MarketSearchResult>('GET', `/skills/market/search?q=${encodeURIComponent(q)}`),
+  // Lot 5b — export / pack -------------------------------------------------------
+  /** Export a single skill as a .tgz — authenticated fetch → triggers browser download. */
+  exportSkill: async (name: string): Promise<void> => {
+    const path = `/skills/${encodeURIComponent(name)}/export`;
+    const res = await fetch(path, { headers: { 'X-Auth-Token': getToken() } });
+    if (!res.ok) {
+      const ct = res.headers.get('content-type') ?? '';
+      const parsed: unknown = ct.includes('application/json') ? await res.json() : await res.text();
+      throw new HttpError(`HTTP ${res.status} GET ${path}`, res.status, parsed);
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get('content-disposition') ?? '';
+    const m = cd.match(/filename="?([^";\r\n]+)"?/);
+    const filename = m?.[1] ?? `${name}.tgz`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  },
+  /** Export a set of skills as a pack .tgz — authenticated fetch → triggers browser download. */
+  exportPack: async (names: string[]): Promise<void> => {
+    const path = '/skills/pack/export';
+    const res = await fetch(path, {
+      method: 'POST',
+      headers: { 'X-Auth-Token': getToken(), 'Content-Type': 'application/json' },
+      body: JSON.stringify({ names }),
+    });
+    if (!res.ok) {
+      const ct = res.headers.get('content-type') ?? '';
+      const parsed: unknown = ct.includes('application/json') ? await res.json() : await res.text();
+      throw new HttpError(`HTTP ${res.status} POST ${path}`, res.status, parsed);
+    }
+    const blob = await res.blob();
+    const cd = res.headers.get('content-disposition') ?? '';
+    const m = cd.match(/filename="?([^";\r\n]+)"?/);
+    const filename = m?.[1] ?? `skills-pack-${names.length}.tgz`;
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = filename;
+    a.click();
+    URL.revokeObjectURL(url);
+  },
+  /** Install a pack .tgz (raw body, like uploadSkill). Lot 5b. */
+  installPack: async (file: File | Blob): Promise<PackInstallResponse> => {
+    const res = await fetch('/skills/pack/install', {
+      method: 'POST',
+      headers: { 'X-Auth-Token': getToken(), 'Content-Type': 'application/gzip' },
+      body: file,
+    });
+    const ct = res.headers.get('content-type') ?? '';
+    const parsed: unknown = ct.includes('application/json') ? await res.json() : await res.text();
+    if (!res.ok) {
+      throw new HttpError(`HTTP ${res.status} POST /skills/pack/install`, res.status, parsed);
+    }
+    return parsed as PackInstallResponse;
+  },
   // ---- Connector types -------------------------------------------------------
   /** J4 — connector types available for role connectors (built-in + plugins). */
   listConnectorTypes: () =>

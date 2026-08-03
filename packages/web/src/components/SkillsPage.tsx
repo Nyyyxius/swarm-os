@@ -1,10 +1,11 @@
-import { useCallback, useEffect, useMemo, useState } from 'react';
+import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import { useSkills } from '../hooks/useSkills';
 import { useShellMode } from '../hooks/useShellMode';
 import { useSwarmController } from '../controller/SwarmController';
 import {
   api,
   HttpError,
+  type PackInstallResponse,
   type SkillActivateBody,
   type SkillScopeActivation,
   type SkillReviewInfo,
@@ -101,7 +102,7 @@ function lineDiff(
 }
 
 export function SkillsPage({ open, onClose }: Props) {
-  const { skills, loading, error, install, upload, upgrade, remove } = useSkills();
+  const { skills, loading, error, install, upload, upgrade, remove, refresh } = useSkills();
   const { isMobile } = useShellMode();
   const c = useSwarmController();
 
@@ -116,6 +117,15 @@ export function SkillsPage({ open, onClose }: Props) {
   // Upgrade diff state
   const [diffLines, setDiffLines] = useState<Array<{ kind: '=' | '+' | '-'; line: string }> | null>(null);
   const [upgrading, setUpgrading] = useState(false);
+
+  // Lot 5b — multi-select for pack export
+  const [checkedNames, setCheckedNames] = useState<Set<string>>(new Set());
+  const [exportBusy, setExportBusy] = useState(false);
+
+  // Lot 5b — import pack
+  const packFileRef = useRef<HTMLInputElement>(null);
+  const [packResult, setPackResult] = useState<PackInstallResponse | null>(null);
+  const [packBusy, setPackBusy] = useState(false);
 
   // Activations state
   const [activations, setActivations] = useState<SkillScopeActivation[]>([]);
@@ -183,6 +193,54 @@ export function SkillsPage({ open, onClose }: Props) {
     setDiffLines(null);
     setActivationMsg(null);
     if (isMobile) setMobileView('detail');
+  }
+
+  function toggleCheck(name: string, checked: boolean): void {
+    setCheckedNames((prev) => {
+      const next = new Set(prev);
+      if (checked) next.add(name);
+      else next.delete(name);
+      return next;
+    });
+  }
+
+  async function doExportSkill(name: string): Promise<void> {
+    setExportBusy(true);
+    try {
+      await api.exportSkill(name);
+    } catch (e) {
+      setOpError(messageOf(e));
+    } finally {
+      setExportBusy(false);
+    }
+  }
+
+  async function doExportPack(): Promise<void> {
+    const names = [...checkedNames];
+    if (names.length === 0) return;
+    setExportBusy(true);
+    try {
+      await api.exportPack(names);
+    } catch (e) {
+      setOpError(messageOf(e));
+    } finally {
+      setExportBusy(false);
+    }
+  }
+
+  async function doInstallPack(file: File): Promise<void> {
+    setPackBusy(true);
+    setPackResult(null);
+    try {
+      const result = await api.installPack(file);
+      setPackResult(result);
+      void refresh();
+    } catch (e) {
+      setOpError(messageOf(e));
+    } finally {
+      setPackBusy(false);
+      if (packFileRef.current) packFileRef.current.value = '';
+    }
   }
 
   async function doViewBody(s: SkillView): Promise<void> {
@@ -349,37 +407,118 @@ export function SkillsPage({ open, onClose }: Props) {
               className={`role-item ${selectedName === s.name ? 'active' : ''}`}
               onClick={() => trySelect(s.name)}
             >
-              <div className="r-name">{(s.displayName ?? s.name).toUpperCase()}</div>
-              <div className="r-id">
-                {s.name} · v{s.version}
-              </div>
-              <div className="r-tags">
-                <TrustBadge trust={s.trust} />
-                {s.assetsPresent && (
-                  <span className="tag-pill" style={{ color: 'var(--amber)', borderColor: 'var(--amber)' }}>
-                    ASSETS
-                  </span>
-                )}
-                {s.reviewRequired && (
-                  <span className="tag-pill" style={{ color: 'var(--bad)', borderColor: 'var(--bad)' }}>
-                    REVIEW REQ
-                  </span>
-                )}
-                <span className="tag-pill">{s.sourceKind.toUpperCase()}</span>
+              <div style={{ display: 'flex', alignItems: 'flex-start', gap: 6 }}>
+                <input
+                  type="checkbox"
+                  checked={checkedNames.has(s.name)}
+                  aria-label={`Select ${s.name} for pack export`}
+                  onClick={(e) => e.stopPropagation()}
+                  onChange={(e) => toggleCheck(s.name, e.target.checked)}
+                  style={{ marginTop: 3, flexShrink: 0, cursor: 'pointer' }}
+                />
+                <div style={{ flex: 1, minWidth: 0 }}>
+                  <div className="r-name">{(s.displayName ?? s.name).toUpperCase()}</div>
+                  <div className="r-id">
+                    {s.name} · v{s.version}
+                  </div>
+                  <div className="r-tags">
+                    <TrustBadge trust={s.trust} />
+                    {s.assetsPresent && (
+                      <span className="tag-pill" style={{ color: 'var(--amber)', borderColor: 'var(--amber)' }}>
+                        ASSETS
+                      </span>
+                    )}
+                    {s.reviewRequired && (
+                      <span className="tag-pill" style={{ color: 'var(--bad)', borderColor: 'var(--bad)' }}>
+                        REVIEW REQ
+                      </span>
+                    )}
+                    <span className="tag-pill">{s.sourceKind.toUpperCase()}</span>
+                  </div>
+                </div>
+                <button
+                  className="h-edit"
+                  title={`Export ${s.name}.tgz`}
+                  aria-label={`Export ${s.name}`}
+                  disabled={exportBusy}
+                  onClick={(e) => { e.stopPropagation(); void doExportSkill(s.name); }}
+                  style={{ flexShrink: 0, fontSize: 10, marginTop: 2 }}
+                >
+                  ↓
+                </button>
               </div>
             </div>
           ))}
         </div>
 
-        <div className="roles-add">
+        <div className="roles-add" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {/* Pack export — active when ≥1 skill is checked */}
           <button
             className="btn"
-            style={{ width: '100%', color: 'var(--amber)' }}
-            onClick={() => setImportOpen(true)}
-            disabled={busy}
+            style={{ width: '100%', color: checkedNames.size > 0 ? 'var(--ok)' : 'var(--text-dim)' }}
+            onClick={() => void doExportPack()}
+            disabled={checkedNames.size === 0 || exportBusy}
+            title={checkedNames.size === 0 ? 'Select skills with checkboxes to export a pack' : `Export pack of ${checkedNames.size} skill(s)`}
           >
-            IMPORT SKILL
+            {exportBusy ? 'EXPORTING…' : `EXPORT PACK${checkedNames.size > 0 ? ` (${checkedNames.size})` : ''}`}
           </button>
+
+          <div style={{ display: 'flex', gap: 6 }}>
+            <button
+              className="btn"
+              style={{ flex: 1, color: 'var(--amber)' }}
+              onClick={() => setImportOpen(true)}
+              disabled={busy}
+            >
+              IMPORT SKILL
+            </button>
+            <button
+              className="btn"
+              style={{ flex: 1 }}
+              onClick={() => packFileRef.current?.click()}
+              disabled={packBusy}
+              title="Install a pack .tgz (multiple skills)"
+            >
+              {packBusy ? 'INSTALLING…' : 'IMPORT PACK'}
+            </button>
+          </div>
+
+          {/* Hidden file input for pack import */}
+          <input
+            ref={packFileRef}
+            type="file"
+            accept=".tgz,.tar.gz,application/gzip,application/x-tar"
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              const f = e.target.files?.[0];
+              if (f) void doInstallPack(f);
+            }}
+          />
+
+          {/* Pack install result */}
+          {packResult && (
+            <div style={{ fontSize: 12, marginTop: 4 }}>
+              {packResult.installed.length > 0 && (
+                <div style={{ color: 'var(--ok)', marginBottom: 4 }}>
+                  ✓ Installed: {packResult.installed.map((s) => s.name).join(', ')}
+                </div>
+              )}
+              {packResult.errors.length > 0 && (
+                <div style={{ color: 'var(--bad)' }}>
+                  {packResult.errors.map((err) => (
+                    <div key={err.name}>✗ {err.name}: {err.error}</div>
+                  ))}
+                </div>
+              )}
+              <button
+                className="h-edit"
+                style={{ fontSize: 10, marginTop: 4 }}
+                onClick={() => setPackResult(null)}
+              >
+                DISMISS
+              </button>
+            </div>
+          )}
         </div>
       </aside>
 
