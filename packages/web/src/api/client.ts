@@ -286,6 +286,8 @@ export interface MarketSearchEntry {
   description?: string;
   /** Re-injectable as `ref` in `POST /skills/install { source:'market', ref }`. */
   ref?: string;
+  /** Lien web vers la source du skill, ex. page GitHub. */
+  url?: string;
 }
 
 /** Response of `GET /skills/market/search?q=` (Lot 4b). */

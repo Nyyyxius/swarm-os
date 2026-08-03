@@ -133,7 +133,21 @@ function MarketSearch({
               }}
             >
               <div style={{ flex: 1, minWidth: 0 }}>
-                <div style={{ fontFamily: 'monospace', fontSize: 12 }}>{entry.name}</div>
+                <div style={{ fontFamily: 'monospace', fontSize: 12 }}>
+                  {entry.url ? (
+                    <a
+                      href={entry.url}
+                      target="_blank"
+                      rel="noopener noreferrer"
+                      aria-label={`Voir ${entry.name} sur GitHub`}
+                      style={{ color: 'inherit', textDecoration: 'underline dotted' }}
+                    >
+                      {entry.name} ↗
+                    </a>
+                  ) : (
+                    entry.name
+                  )}
+                </div>
                 {entry.description && (
                   <div className="field-help" style={{ marginTop: 2 }}>
                     {entry.description}

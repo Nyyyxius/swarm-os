@@ -162,6 +162,46 @@ describe('SkillImportModal — market tab', () => {
     expect(screen.queryByText('USE')).toBeTruthy();
   });
 
+  it('shows a link with correct href and target when entry has url', async () => {
+    const props = makeProps({
+      marketSearch: vi.fn().mockResolvedValue({
+        available: true,
+        results: [{ name: 'pdf', ref: 'pdf', url: 'https://github.com/anthropics/skills/tree/main/pdf' }],
+      } satisfies MarketSearchResult),
+    });
+    render(<SkillImportModal {...props} />);
+    switchToMarket();
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('marketplace search'), {
+        target: { value: 'pdf' },
+      });
+      await new Promise((r) => setTimeout(r, 500));
+    });
+    const link = screen.getByRole('link', { name: /Voir pdf sur GitHub/ }) as HTMLAnchorElement;
+    expect(link.href).toBe('https://github.com/anthropics/skills/tree/main/pdf');
+    expect(link.target).toBe('_blank');
+    expect(link.rel).toContain('noopener');
+    expect(link.rel).toContain('noreferrer');
+  });
+
+  it('shows no link when entry has no url', async () => {
+    const props = makeProps({
+      marketSearch: vi.fn().mockResolvedValue({
+        available: true,
+        results: [{ name: 'pdf', ref: 'pdf' }],
+      } satisfies MarketSearchResult),
+    });
+    render(<SkillImportModal {...props} />);
+    switchToMarket();
+    await act(async () => {
+      fireEvent.change(screen.getByLabelText('marketplace search'), {
+        target: { value: 'pdf' },
+      });
+      await new Promise((r) => setTimeout(r, 500));
+    });
+    expect(screen.queryByRole('link')).toBeNull();
+  });
+
   it('clicking USE populates the ref field', async () => {
     const props = makeProps({
       marketSearch: vi.fn().mockResolvedValue({
