@@ -22,7 +22,12 @@ import type { RoleStore, RoleSkillRef } from '../roles/index.js';
 import type { Orchestrator } from '../orchestrator/index.js';
 import type { SkillFragment } from '../orchestrator/preamble.js';
 import { SkillStore, type SkillRow, type SkillScopeType } from './store.js';
-import { SkillInstaller, type ChecksumDrift } from './installer.js';
+import {
+  SkillInstaller,
+  type ChecksumDrift,
+  type PackExportResult,
+  type PackInstallError,
+} from './installer.js';
 import type { SkillInstallSource } from './stage.js';
 import type { MarketSearchResult } from './market.js';
 import { removeSkillAssets, type SkillAssetsConfig } from './assets.js';
@@ -195,6 +200,26 @@ export class SkillsSubsystem {
    */
   marketSearch(query: string): Promise<MarketSearchResult> {
     return this.installer.marketSearch(query);
+  }
+
+  // ---- export / packs (Lot 5a) ------------------------------------------
+
+  /** One skill as a `.tgz` that re-imports via `POST /skills/upload` (round-trip). */
+  exportSkill(name: string): Promise<Buffer> {
+    return this.installer.exportSkill(name);
+  }
+
+  /** Several skills as a mono-repo pack `.tgz` (+ `pack.json`). Unknown names skipped. */
+  exportPack(names: readonly string[]): Promise<PackExportResult> {
+    return this.installer.exportPack(names);
+  }
+
+  /** Install a `.tgz` pack; per-skill partial success, rows mapped to the view shape. */
+  async installPack(
+    tgz: Buffer,
+  ): Promise<{ installed: SkillView[]; errors: PackInstallError[] }> {
+    const { installed, errors } = await this.installer.installPack(tgz);
+    return { installed: installed.map((r) => this.toView(r)), errors };
   }
 
   // ---- review gate (Lot 3) ----------------------------------------------

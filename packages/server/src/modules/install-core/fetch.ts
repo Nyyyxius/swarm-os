@@ -106,6 +106,59 @@ export async function extractTgzBuffer(
   }
 }
 
+/**
+ * `tar -czf <out> -C <parentDir> <topDir>` — archive a single directory so its
+ * files nest under `<topDir>/`. The inverse of {@link extractTgzFile} (which
+ * strips one leading component): a tarball built this way re-extracts to the
+ * flat layout, which is what makes a skill export round-trip through upload.
+ */
+export async function createTgz(
+  run: Runner,
+  parentDir: string,
+  topDir: string,
+  outPath: string,
+): Promise<void> {
+  await run('tar', ['-czf', outPath, '-C', parentDir, topDir], parentDir);
+}
+
+/**
+ * `tar -czf <out> -C <dir> .` — archive a directory's CONTENTS at the archive
+ * root (multiple top-level entries, e.g. a pack's `pack.json` + `<name>/` dirs).
+ * `outPath` MUST be outside `dir` or tar would try to include the file it writes.
+ */
+export async function createTgzDir(run: Runner, dir: string, outPath: string): Promise<void> {
+  await run('tar', ['-czf', outPath, '-C', dir, '.'], dir);
+}
+
+/** `tar -xzf <tgz> -C <dir>` — extract VERBATIM (no `--strip-components`). */
+export async function extractTgzFlat(run: Runner, tgzPath: string, destDir: string): Promise<void> {
+  await run('tar', ['-xzf', tgzPath, '-C', destDir], destDir);
+}
+
+/** `tar -tzf <tgz>` → the archive's member names (one per line, blanks dropped). */
+export async function listTgzEntries(run: Runner, tgzPath: string): Promise<string[]> {
+  const out = await run('tar', ['-tzf', tgzPath], path.dirname(tgzPath));
+  return out
+    .split('\n')
+    .map((s) => s.trim())
+    .filter((s) => s.length > 0);
+}
+
+/**
+ * Traversal guard: the first archive member that is absolute or escapes the
+ * extraction root via `..`, or null when every entry is safe. Pure (error-type
+ * agnostic) — the caller throws its own error. Belt-and-braces on top of tar's
+ * own refusal, so a hand-crafted pack tarball can never write outside its dir.
+ */
+export function firstUnsafeTarEntry(entries: readonly string[]): string | null {
+  for (const entry of entries) {
+    const norm = entry.replace(/\\/g, '/');
+    if (norm.startsWith('/') || path.isAbsolute(norm)) return entry;
+    if (norm.split('/').some((seg) => seg === '..')) return entry;
+  }
+  return null;
+}
+
 /** `npm pack <spec>` into `packDir` → the produced `.tgz` path. */
 export async function npmPack(
   run: Runner,

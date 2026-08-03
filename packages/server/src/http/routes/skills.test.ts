@@ -249,3 +249,112 @@ describe('skills REST — review gate (Lot 3)', () => {
     expect((await fetch(`${base}/skills/risky-skill/asset?path=../SKILL.md`)).status).toBe(404);
   });
 });
+
+describe('skills REST — export + packs (Lot 5a)', () => {
+  function writeNamedSkill(target: string, name: string, body: string): void {
+    fs.mkdirSync(target, { recursive: true });
+    fs.writeFileSync(
+      path.join(target, 'SKILL.md'),
+      `---\nname: ${name}\nversion: 0.1.0\ndescription: d.\n---\n${body}\n`,
+      'utf8',
+    );
+  }
+  async function installDir(dirPath: string): Promise<void> {
+    const res = await fetch(`${base}/skills/install`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ source: 'dir', dir: dirPath }),
+    });
+    expect(res.status).toBe(200);
+  }
+
+  it('GET /skills/:name/export returns a gzip attachment that re-imports via upload', async () => {
+    writeSkill(srcDir, 'exportable body'); // name: hello-skill
+    await installDir(srcDir);
+
+    const exp = await fetch(`${base}/skills/hello-skill/export`);
+    expect(exp.status).toBe(200);
+    expect(exp.headers.get('content-type')).toContain('application/gzip');
+    expect(exp.headers.get('content-disposition')).toContain('hello-skill.tgz');
+    const buf = Buffer.from(await exp.arrayBuffer());
+    expect(buf.length).toBeGreaterThan(0);
+
+    // Round-trip: the exported bytes re-import cleanly through the upload route.
+    const up = await fetch(`${base}/skills/upload`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/gzip' },
+      body: buf,
+    });
+    expect(up.status).toBe(200);
+    const upBody = (await up.json()) as { skill: SkillView };
+    expect(upBody.skill.name).toBe('hello-skill');
+  });
+
+  it('GET /skills/:name/export 404s an unknown skill', async () => {
+    expect((await fetch(`${base}/skills/ghost/export`)).status).toBe(404);
+  });
+
+  it('POST /skills/pack/export packs valid skills (skipping unknowns) and installs them back', async () => {
+    writeNamedSkill(path.join(dir, 'a'), 'alpha', 'alpha body');
+    writeNamedSkill(path.join(dir, 'b'), 'beta', 'beta body');
+    await installDir(path.join(dir, 'a'));
+    await installDir(path.join(dir, 'b'));
+
+    const exp = await fetch(`${base}/skills/pack/export`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ names: ['alpha', 'beta', 'ghost'] }),
+    });
+    expect(exp.status).toBe(200);
+    expect(exp.headers.get('content-type')).toContain('application/gzip');
+    expect(exp.headers.get('content-disposition')).toContain('skills-pack-2.tgz');
+    expect(exp.headers.get('x-skills-pack-included')).toBe('alpha,beta');
+    expect(exp.headers.get('x-skills-pack-skipped-count')).toBe('1');
+    const buf = Buffer.from(await exp.arrayBuffer());
+
+    const inst = await fetch(`${base}/skills/pack/install`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/gzip' },
+      body: buf,
+    });
+    expect(inst.status).toBe(200);
+    const body = (await inst.json()) as {
+      installed: SkillView[];
+      errors: Array<{ name: string; error: string }>;
+    };
+    expect(body.errors).toEqual([]);
+    expect(body.installed.map((s) => s.name).sort()).toEqual(['alpha', 'beta']);
+  });
+
+  it('POST /skills/pack/export 400s on empty names and on all-unknown names', async () => {
+    const empty = await fetch(`${base}/skills/pack/export`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ names: [] }),
+    });
+    expect(empty.status).toBe(400);
+
+    const unknown = await fetch(`${base}/skills/pack/export`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json' },
+      body: JSON.stringify({ names: ['ghost', 'phantom'] }),
+    });
+    expect(unknown.status).toBe(400);
+  });
+
+  it('POST /skills/pack/install 415s an empty body and 422s a corrupt archive', async () => {
+    const empty = await fetch(`${base}/skills/pack/install`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/gzip' },
+      body: Buffer.alloc(0),
+    });
+    expect(empty.status).toBe(415);
+
+    const corrupt = await fetch(`${base}/skills/pack/install`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/gzip' },
+      body: Buffer.from('definitely not a gzip tarball'),
+    });
+    expect(corrupt.status).toBe(422);
+  });
+});

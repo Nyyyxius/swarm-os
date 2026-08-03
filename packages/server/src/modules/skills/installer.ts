@@ -12,7 +12,7 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { randomUUID } from 'node:crypto';
 import { withModule } from '../../logger.js';
-import { parseSkillMd, type ParsedSkill } from './manifest.js';
+import { parseSkillMd, SKILL_FILE, type ParsedSkill } from './manifest.js';
 import { SkillStore, type SkillRow } from './store.js';
 import {
   stageDir,
@@ -24,7 +24,16 @@ import {
   SkillValidationError,
   type SkillInstallSource,
 } from './stage.js';
-import { encodeGitRef, decodeGitRef, type Runner } from '../install-core/fetch.js';
+import {
+  encodeGitRef,
+  decodeGitRef,
+  createTgz,
+  createTgzDir,
+  extractTgzFlat,
+  listTgzEntries,
+  firstUnsafeTarEntry,
+  type Runner,
+} from '../install-core/fetch.js';
 import { resolveTrust, trustPolicyFromEnv, type TrustPolicy } from './trust.js';
 import {
   resolveMarket,
@@ -67,6 +76,50 @@ export class UploadRequiresNewUploadError extends Error {
     super(`skill '${name}' was installed from an upload — upgrade requires a new upload`);
     this.name = 'UploadRequiresNewUploadError';
   }
+}
+
+/** A pack export that resolved to zero valid skills → HTTP 400. */
+export class EmptyPackError extends Error {
+  constructor(message = 'no valid skill to export (all requested names are unknown)') {
+    super(message);
+    this.name = 'EmptyPackError';
+  }
+}
+
+/** Root manifest file name of a skill pack (`.tgz`), at the archive root. */
+export const PACK_MANIFEST_FILE = 'pack.json';
+
+/** One entry of a pack's `pack.json` manifest (metadata only — advisory). */
+export interface PackManifestEntry {
+  name: string;
+  description?: string;
+  trust?: string;
+}
+
+/** A skill pack's root manifest. `version` is bumped on a breaking layout change. */
+export interface SkillPackManifest {
+  version: 1;
+  skills: PackManifestEntry[];
+}
+
+/** Result of {@link SkillInstaller.exportPack}: the archive + what it did/didn't include. */
+export interface PackExportResult {
+  tgz: Buffer;
+  included: PackManifestEntry[];
+  /** Requested names that were unknown/empty and left out (export still succeeds). */
+  skipped: string[];
+}
+
+/** A per-skill failure during a pack install (partial success is allowed). */
+export interface PackInstallError {
+  name: string;
+  error: string;
+}
+
+/** Result of {@link SkillInstaller.installPack}: installed rows + per-skill errors. */
+export interface PackInstallResult {
+  installed: SkillRow[];
+  errors: PackInstallError[];
 }
 
 export interface SkillInstallerDeps {
@@ -195,6 +248,159 @@ export class SkillInstaller {
   remove(name: string): void {
     this.store.delete(name);
     this.rmQuiet(path.join(this.skillsDir, name));
+  }
+
+  // ---- export / packs (Lot 5a) ------------------------------------------
+
+  /**
+   * Export one skill as a `.tgz` that ROUND-TRIPS through `POST /skills/upload`:
+   * every file nests under `<name>/`, so upload's `--strip-components=1` restores
+   * SKILL.md (+ `assets/`) at the root — the checksum survives the round-trip.
+   * Exporting never runs skill code. Throws {@link SkillNotFoundError} if unknown.
+   */
+  async exportSkill(name: string): Promise<Buffer> {
+    this.requireSkillDir(name);
+    const outPath = path.join(this.stagingRoot, `${randomUUID()}-export.tgz`);
+    try {
+      await createTgz(this.runner, this.skillsDir, name, outPath);
+      return fs.readFileSync(outPath);
+    } finally {
+      this.rmQuiet(outPath);
+    }
+  }
+
+  /**
+   * Export several skills as a mono-repo `.tgz` pack: `<name>/SKILL.md` (+
+   * `<name>/assets/…`) per skill PLUS a root `pack.json` manifest. Unknown names
+   * are skipped (not fatal); throws {@link EmptyPackError} only when NONE resolve.
+   */
+  async exportPack(names: readonly string[]): Promise<PackExportResult> {
+    const uuid = randomUUID();
+    const workDir = path.join(this.stagingRoot, `${uuid}-pack`);
+    const outPath = path.join(this.stagingRoot, `${uuid}-pack.tgz`);
+    fs.mkdirSync(workDir, { recursive: true });
+    try {
+      const included: PackManifestEntry[] = [];
+      const skipped: string[] = [];
+      const seen = new Set<string>();
+      for (const raw of names) {
+        const name = typeof raw === 'string' ? raw.trim() : '';
+        if (name === '' || seen.has(name)) continue;
+        seen.add(name);
+        const row = this.store.get(name);
+        const src = path.join(this.skillsDir, name);
+        if (!row || !fs.existsSync(path.join(src, SKILL_FILE))) {
+          skipped.push(name);
+          continue;
+        }
+        fs.cpSync(src, path.join(workDir, name), { recursive: true });
+        included.push({
+          name,
+          ...(row.description ? { description: row.description } : {}),
+          trust: row.trust,
+        });
+      }
+      if (included.length === 0) throw new EmptyPackError();
+      const manifest: SkillPackManifest = { version: 1, skills: included };
+      fs.writeFileSync(path.join(workDir, PACK_MANIFEST_FILE), `${JSON.stringify(manifest, null, 2)}\n`);
+      await createTgzDir(this.runner, workDir, outPath);
+      return { tgz: fs.readFileSync(outPath), included, skipped };
+    } finally {
+      this.rmQuiet(workDir);
+      this.rmQuiet(outPath);
+    }
+  }
+
+  /**
+   * Install a `.tgz` pack: extract (traversal-guarded), then install EACH
+   * `<name>/SKILL.md` member through the normal upload path (data-first; the Lot
+   * 3 review gate still applies per skill). Partial success is allowed — a
+   * failing member is reported in `errors`, never aborting the others. Never
+   * throws a 5xx: a corrupt/unsafe/non-pack archive raises
+   * {@link SkillValidationError} (→422).
+   */
+  async installPack(tgz: Buffer): Promise<PackInstallResult> {
+    const uuid = randomUUID();
+    const extractDir = path.join(this.stagingRoot, `${uuid}-packin`);
+    const tmpTgz = path.join(this.stagingRoot, `${uuid}-packin.tgz`);
+    fs.mkdirSync(extractDir, { recursive: true });
+    try {
+      fs.writeFileSync(tmpTgz, tgz);
+      let entries: string[];
+      try {
+        entries = await listTgzEntries(this.runner, tmpTgz);
+      } catch (err) {
+        throw new SkillValidationError(
+          `unreadable pack archive: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      const unsafe = firstUnsafeTarEntry(entries);
+      if (unsafe) throw new SkillValidationError(`pack archive contains an unsafe path '${unsafe}'`);
+      try {
+        await extractTgzFlat(this.runner, tmpTgz, extractDir);
+      } catch (err) {
+        throw new SkillValidationError(
+          `corrupt pack archive: ${err instanceof Error ? err.message : String(err)}`,
+        );
+      }
+      const members = this.discoverPackMembers(extractDir);
+      if (members.length === 0) {
+        throw new SkillValidationError('archive is not a skill pack: no <name>/SKILL.md found');
+      }
+      const installed: SkillRow[] = [];
+      const errors: PackInstallError[] = [];
+      for (const member of members) {
+        try {
+          const memberTgz = await this.tarMember(extractDir, member);
+          installed.push(await this.install({ kind: 'upload', tgz: memberTgz }));
+        } catch (err) {
+          errors.push({ name: member, error: err instanceof Error ? err.message : String(err) });
+        }
+      }
+      return { installed, errors };
+    } finally {
+      this.rmQuiet(extractDir);
+      this.rmQuiet(tmpTgz);
+    }
+  }
+
+  /** Resolve a skill's on-disk folder, or throw {@link SkillNotFoundError}. */
+  private requireSkillDir(name: string): string {
+    const row = this.store.get(name);
+    const dir = path.join(this.skillsDir, name);
+    if (!row || !fs.existsSync(path.join(dir, SKILL_FILE))) throw new SkillNotFoundError(name);
+    return dir;
+  }
+
+  /** Top-level dirs of an extracted pack that hold a SKILL.md (each = one skill). */
+  private discoverPackMembers(extractDir: string): string[] {
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(extractDir, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+    const out: string[] = [];
+    for (const ent of entries) {
+      if (!ent.isDirectory()) continue;
+      if (ent.name === '.' || ent.name === '..' || ent.name.includes('/') || ent.name.includes('\\')) {
+        continue;
+      }
+      if (fs.existsSync(path.join(extractDir, ent.name, SKILL_FILE))) out.push(ent.name);
+    }
+    out.sort();
+    return out;
+  }
+
+  /** Re-tar one extracted pack member under `<member>/` → an upload-shaped buffer. */
+  private async tarMember(extractDir: string, member: string): Promise<Buffer> {
+    const outPath = path.join(this.stagingRoot, `${randomUUID()}-member.tgz`);
+    try {
+      await createTgz(this.runner, extractDir, member, outPath);
+      return fs.readFileSync(outPath);
+    } finally {
+      this.rmQuiet(outPath);
+    }
   }
 
   private async stageInto(

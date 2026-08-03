@@ -9,6 +9,9 @@
  *   POST   /skills/install         { source:'dir'|'git'|'npm'|'market', … } → { skill }
  *                                    dir:{dir} git:{url,ref?,subdir?} npm:{spec} market:{ref}
  *   POST   /skills/upload?name=    raw .tgz (application/gzip)  → { skill }
+ *   GET    /skills/:name/export    → 200 application/gzip (.tgz, round-trips via upload) | 404
+ *   POST   /skills/pack/export     { names:string[] } → 200 application/gzip (pack .tgz) | 400
+ *   POST   /skills/pack/install    raw .tgz (application/gzip) → { installed:SkillView[], errors:[{name,error}] }
  *   POST   /skills/:name/upgrade   → { skill, drift:{checksumChanged,previousChecksum,previousBody} }
  *   DELETE /skills/:name           → 204
  *   POST   /skills/:name/activate  { scope?, orchestratorId, sessionId?, reviewed? }
@@ -28,8 +31,18 @@
 
 import express, { Router, type Request, type Response } from 'express';
 import type { SkillsSubsystem, SkillScope } from '../../modules/skills/index.js';
-import { SkillNotFoundError, UploadRequiresNewUploadError } from '../../modules/skills/installer.js';
+import {
+  SkillNotFoundError,
+  UploadRequiresNewUploadError,
+  EmptyPackError,
+} from '../../modules/skills/installer.js';
 import { SkillValidationError, SkillStageError, type SkillInstallSource } from '../../modules/skills/stage.js';
+
+/** A Content-Disposition-safe filename stem (skill names are already this shape). */
+function safeFilename(name: string): string {
+  const cleaned = name.replace(/[^A-Za-z0-9._-]/g, '_');
+  return cleaned.length > 0 ? cleaned : 'skill';
+}
 
 /** Map a known skill error onto its HTTP status. Returns true when handled. */
 function sendSkillError(res: Response, err: unknown): boolean {
@@ -127,6 +140,24 @@ export function createSkillsRouter(skills: SkillsSubsystem): Router {
     res.json({ activations: skills.activationsForSkill(req.params.name) });
   });
 
+  // Export one skill as a round-trippable .tgz (re-imports via POST /skills/upload).
+  // 404 for an unknown skill. Exporting a skill with executable assets is allowed
+  // (export activates nothing). `:name` here never collides with `pack/*` (those
+  // are POST routes registered above).
+  router.get('/skills/:name/export', (req: Request<{ name: string }>, res: Response) => {
+    void skills
+      .exportSkill(req.params.name)
+      .then((tgz) => {
+        res.setHeader('Content-Type', 'application/gzip');
+        res.setHeader('Content-Disposition', `attachment; filename="${safeFilename(req.params.name)}.tgz"`);
+        res.send(tgz);
+      })
+      .catch((err: unknown) => {
+        if (sendSkillError(res, err)) return; // SkillNotFoundError → 404
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      });
+  });
+
   // Browse a configured market registry (agentskills.io ecosystem). This
   // 3-segment path never collides with the 2-segment `/skills/:name` route.
   // Always 200 (graceful degradation) except a missing query; a
@@ -147,6 +178,64 @@ export function createSkillsRouter(skills: SkillsSubsystem): Router {
         res.json({ available: true, results: [], error: err instanceof Error ? err.message : String(err) });
       });
   });
+
+  // Export several skills as one mono-repo pack .tgz (+ pack.json). This
+  // 3-segment literal path is registered before the `/skills/:name/*` param
+  // routes so `:name` never captures 'pack'. Unknown names are skipped; 400 only
+  // when NONE resolve. Included/skipped are surfaced via safe response headers.
+  router.post('/skills/pack/export', (req: Request, res: Response) => {
+    const body = (req.body ?? {}) as { names?: unknown };
+    const names = Array.isArray(body.names)
+      ? body.names.filter((n): n is string => typeof n === 'string' && n.trim() !== '')
+      : null;
+    if (!names || names.length === 0) {
+      res.status(400).json({ error: 'body must be { names: string[] } with at least one name' });
+      return;
+    }
+    void skills
+      .exportPack(names)
+      .then(({ tgz, included, skipped }) => {
+        res.setHeader('Content-Type', 'application/gzip');
+        res.setHeader('Content-Disposition', `attachment; filename="skills-pack-${included.length}.tgz"`);
+        // Included names are validated skill names (header-safe); skipped is a
+        // count only, never echoing untrusted request strings into a header.
+        res.setHeader('X-Skills-Pack-Included', included.map((e) => e.name).join(','));
+        res.setHeader('X-Skills-Pack-Skipped-Count', String(skipped.length));
+        res.send(tgz);
+      })
+      .catch((err: unknown) => {
+        if (err instanceof EmptyPackError) {
+          res.status(400).json({ error: err.message });
+          return;
+        }
+        if (sendSkillError(res, err)) return;
+        res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+      });
+  });
+
+  // Install a .tgz pack (raw application/gzip, like /skills/upload but larger).
+  // Each member is installed via the normal path (Lot 3 gate per skill); partial
+  // success is allowed. A corrupt/unsafe/non-pack archive is a 422, never a 5xx.
+  router.post(
+    '/skills/pack/install',
+    express.raw({ type: ['application/gzip', 'application/octet-stream'], limit: '100mb' }),
+    (req: Request, res: Response) => {
+      if (!Buffer.isBuffer(req.body) || req.body.length === 0) {
+        res.status(415).json({
+          error: 'pack body must be a .tgz sent as application/gzip',
+          code: 'UNSUPPORTED_MEDIA_TYPE',
+        });
+        return;
+      }
+      void skills
+        .installPack(req.body)
+        .then((result) => res.json(result))
+        .catch((err: unknown) => {
+          if (sendSkillError(res, err)) return;
+          res.status(500).json({ error: err instanceof Error ? err.message : String(err) });
+        });
+    },
+  );
 
   router.post('/skills/install', (req: Request, res: Response) => {
     const parsed = parseSkillInstallSource(req.body);

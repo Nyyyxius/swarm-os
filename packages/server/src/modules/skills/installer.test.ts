@@ -5,8 +5,9 @@ import * as path from 'node:path';
 import { execFileSync } from 'node:child_process';
 import { SwarmDb } from '../db/index.js';
 import { SkillStore } from './store.js';
-import { SkillInstaller, SkillNotFoundError } from './installer.js';
+import { SkillInstaller, SkillNotFoundError, EmptyPackError } from './installer.js';
 import { SkillValidationError } from './stage.js';
+import { firstUnsafeTarEntry } from '../install-core/fetch.js';
 
 let dir: string;
 let db: SwarmDb;
@@ -98,6 +99,138 @@ describe('SkillInstaller', () => {
 function git(args: string[], cwd: string): void {
   execFileSync('git', args, { cwd, stdio: 'ignore', env: { ...process.env, GIT_TERMINAL_PROMPT: '0' } });
 }
+
+/** Build a pack .tgz from a layout `{ '<name>/SKILL.md': '<contents>', ... }`. */
+function makePackTgz(files: Record<string, string>): Buffer {
+  const work = fs.mkdtempSync(path.join(os.tmpdir(), 'packmk-'));
+  const out = path.join(work, 'pack.tgz');
+  try {
+    for (const [rel, contents] of Object.entries(files)) {
+      const abs = path.join(work, 'root', rel);
+      fs.mkdirSync(path.dirname(abs), { recursive: true });
+      fs.writeFileSync(abs, contents, 'utf8');
+    }
+    execFileSync('tar', ['-czf', out, '-C', path.join(work, 'root'), '.']);
+    return fs.readFileSync(out);
+  } finally {
+    fs.rmSync(work, { recursive: true, force: true });
+  }
+}
+
+const SKILL_MD = (name: string, body = 'body', version = '0.1.0'): string =>
+  `---\nname: ${name}\nversion: ${version}\ndescription: d.\n---\n${body}\n`;
+
+describe('SkillInstaller export + packs (Lot 5a)', () => {
+  /** A fresh, independent install target (its own db + skillsDir). */
+  function freshTarget(sub: string): { store: SkillStore; installer: SkillInstaller } {
+    const tdb = new SwarmDb(path.join(dir, sub));
+    const tstore = new SkillStore(tdb);
+    return { store: tstore, installer: new SkillInstaller({ skillsDir: path.join(dir, `${sub}-skills`), store: tstore }) };
+  }
+
+  it('exports one skill to a .tgz that round-trips through the upload path (assets + checksum preserved)', async () => {
+    writeSkill(srcDir, 'exportable body');
+    fs.mkdirSync(path.join(srcDir, 'assets'), { recursive: true });
+    fs.writeFileSync(path.join(srcDir, 'assets', 'run.sh'), '#!/bin/sh\necho hi\n', 'utf8');
+    const original = await installer.install({ kind: 'dir', dir: srcDir });
+
+    const tgz = await installer.exportSkill('hello-skill');
+    expect(Buffer.isBuffer(tgz)).toBe(true);
+    expect(tgz.length).toBeGreaterThan(0);
+
+    // Re-import the exported bytes as an UPLOAD into a fresh target.
+    const target = freshTarget('rt');
+    const reimported = await target.installer.install({ kind: 'upload', tgz });
+    expect(reimported.name).toBe('hello-skill');
+    expect(reimported.body_md).toContain('exportable body');
+    expect(reimported.source_kind).toBe('upload');
+    // The tree checksum survives the round-trip (SKILL.md + assets/run.sh identical).
+    expect(reimported.checksum).toBe(original.checksum);
+    expect(
+      fs.existsSync(path.join(dir, 'rt-skills', 'hello-skill', 'assets', 'run.sh')),
+    ).toBe(true);
+  });
+
+  it('exportSkill of an unknown skill throws SkillNotFoundError', async () => {
+    await expect(installer.exportSkill('ghost')).rejects.toBeInstanceOf(SkillNotFoundError);
+  });
+
+  it('exports a pack of several skills that installs back (per-skill)', async () => {
+    writeSkill(path.join(dir, 's-alpha'), 'alpha body', { name: 'alpha' });
+    writeSkill(path.join(dir, 's-beta'), 'beta body', { name: 'beta' });
+    await installer.install({ kind: 'dir', dir: path.join(dir, 's-alpha') });
+    await installer.install({ kind: 'dir', dir: path.join(dir, 's-beta') });
+
+    const { tgz, included, skipped } = await installer.exportPack(['alpha', 'beta']);
+    expect(included.map((e) => e.name).sort()).toEqual(['alpha', 'beta']);
+    expect(skipped).toEqual([]);
+
+    const target = freshTarget('pk');
+    const result = await target.installer.installPack(tgz);
+    expect(result.errors).toEqual([]);
+    expect(result.installed.map((r) => r.name).sort()).toEqual(['alpha', 'beta']);
+    expect(target.store.get('alpha')?.body_md).toContain('alpha body');
+    expect(target.store.get('beta')?.body_md).toContain('beta body');
+    // Pack members install like an upload → trust 'community'.
+    expect(target.store.get('alpha')?.source_kind).toBe('upload');
+    expect(target.store.get('alpha')?.trust).toBe('community');
+  });
+
+  it('exportPack skips unknown names but exports the valid ones', async () => {
+    writeSkill(path.join(dir, 's-only'), 'only body', { name: 'only' });
+    await installer.install({ kind: 'dir', dir: path.join(dir, 's-only') });
+    const { included, skipped } = await installer.exportPack(['only', 'ghost']);
+    expect(included.map((e) => e.name)).toEqual(['only']);
+    expect(skipped).toEqual(['ghost']);
+  });
+
+  it('exportPack with only unknown names throws EmptyPackError', async () => {
+    await expect(installer.exportPack(['ghost', 'phantom'])).rejects.toBeInstanceOf(EmptyPackError);
+  });
+
+  it('installPack reports per-skill errors without aborting the others (partial success)', async () => {
+    const tgz = makePackTgz({
+      'good/SKILL.md': SKILL_MD('good', 'good body'),
+      'bad/SKILL.md': `---\nversion: 0.1.0\n---\nno name here\n`, // missing name → invalid
+      'pack.json': JSON.stringify({ version: 1, skills: [{ name: 'good' }, { name: 'bad' }] }),
+    });
+    const target = freshTarget('partial');
+    const result = await target.installer.installPack(tgz);
+    expect(result.installed.map((r) => r.name)).toEqual(['good']);
+    expect(result.errors.map((e) => e.name)).toEqual(['bad']);
+    expect(target.store.get('good')?.body_md).toContain('good body');
+  });
+
+  it('installPack rejects a corrupt archive gracefully (SkillValidationError, no crash)', async () => {
+    const target = freshTarget('corrupt');
+    await expect(
+      target.installer.installPack(Buffer.from('this is not a gzip tarball')),
+    ).rejects.toBeInstanceOf(SkillValidationError);
+  });
+
+  it('installPack rejects an archive with an unsafe (absolute/traversal) path', async () => {
+    // Build an archive that carries an absolute member path via `tar -P`.
+    const work = fs.mkdtempSync(path.join(os.tmpdir(), 'evil-'));
+    const outside = path.join(work, 'outside.txt');
+    fs.writeFileSync(outside, 'pwned', 'utf8');
+    const evilTgz = path.join(work, 'evil.tgz');
+    execFileSync('tar', ['-cPzf', evilTgz, outside]); // -P keeps the absolute path
+    const buf = fs.readFileSync(evilTgz);
+    fs.rmSync(work, { recursive: true, force: true });
+
+    const target = freshTarget('traversal');
+    // Either the guard trips ("unsafe path") or, if tar normalised it, there is no
+    // <name>/SKILL.md → "not a skill pack". Both are a clean SkillValidationError.
+    await expect(target.installer.installPack(buf)).rejects.toBeInstanceOf(SkillValidationError);
+  });
+
+  it('firstUnsafeTarEntry flags absolute and .. paths, passes clean ones', () => {
+    expect(firstUnsafeTarEntry(['skill/SKILL.md', 'pack.json'])).toBeNull();
+    expect(firstUnsafeTarEntry(['ok/a', '../escape'])).toBe('../escape');
+    expect(firstUnsafeTarEntry(['/etc/passwd'])).toBe('/etc/passwd');
+    expect(firstUnsafeTarEntry(['a/../../b'])).toBe('a/../../b');
+  });
+});
 
 describe('SkillInstaller git source', () => {
   let repo: string;
