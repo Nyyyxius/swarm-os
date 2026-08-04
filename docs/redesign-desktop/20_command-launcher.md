@@ -118,14 +118,25 @@ le font.
 - **Arbitrage des couches** — le point le plus délicat du step, parce que le
   panneau est la première surface de l'app qu'un raccourci clavier peut
   invoquer *par-dessus une autre*. Trois règles :
-  - **z-index 90/91**, choisi entre les overlays console et IDE (80, à égalité
-    sinon — et une égalité se résout par l'ordre DOM, donc *contre* le backdrop
-    du panneau, monté en premier) et les modales (100), qui doivent rester la
-    couche du dessus.
+  - **Portail vers `document.body`, obligatoire.** `.app` est en
+    `position: fixed`, ce qui crée un **contexte d'empilement** de niveau 0 :
+    tout z-index posé à l'intérieur y est enfermé. Or les overlays de route
+    (`.roles-overlay`, `.mem-overlay`, `.board-overlay`, `.cg-overlay` — 60) et
+    l'overlay IDE (80) sont rendus depuis `App.tsx` **en dehors** de `.app`.
+    Monté dans la TopBar sans portail, le panneau disparaissait sous eux
+    quelle que soit sa valeur — 91 enfermé dans 0 perd contre 60. Symptôme
+    trompeur : ça marchait au-dessus du drawer SETTINGS (70), lui rendu
+    *dans* `DesktopShell`, donc dans le même contexte.
+  - **z-index 90/91** — une fois sorti au niveau du body : au-dessus des
+    overlays de route (60), de l'IDE (80), et des overlays console/IDE internes
+    (80, où une égalité se résoudrait par l'ordre DOM *contre* le backdrop du
+    panneau, monté en premier).
   - **`blocked`** — tant qu'une modale est ouverte (`showNew`, `broadcastOpen`,
-    `spawnFor`, `editConfigFor`), ⌘K reste inerte : le panneau plafonne sous
-    elles, il se monterait invisible tout en volant le focus et en permettant
-    de naviguer à l'aveugle. Refermer un panneau déjà ouvert reste possible.
+    `spawnFor`, `editConfigFor`), ⌘K reste inerte. Les modales sont rendues
+    dans `DesktopShell`, donc enfermées dans `.app` : le panneau portalisé
+    passerait *au-dessus* d'elles, et naviguer ailleurs depuis un dialogue
+    engagé le laisserait orphelin derrière soi. Refermer un panneau déjà
+    ouvert reste possible.
   - **Écoute en phase de capture** — huit composants (drawer, overlays,
     modales) posent un handler `Escape` sur `window` en phase de bulle. Sans
     arbitrage, un seul Escape refermerait le panneau *et* la couche en

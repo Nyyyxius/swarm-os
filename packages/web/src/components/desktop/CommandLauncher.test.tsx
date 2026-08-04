@@ -97,6 +97,29 @@ describe('CommandLauncher — clavier', () => {
 });
 
 describe('CommandLauncher — arbitrage des couches', () => {
+  it('sort du contexte d’empilement de `.app` (portail vers body)', () => {
+    // LA régression à ne jamais réintroduire : `.app` est en position fixed,
+    // donc contexte d'empilement de niveau 0. Les overlays de route
+    // (`.roles-overlay`, z-index 60) sont rendus hors de `.app` et le
+    // recouvrent entièrement — un panneau monté DANS `.app` disparaît sous
+    // eux quel que soit son z-index. Rendu ici dans un `.app` pour reproduire
+    // la hiérarchie réelle.
+    const app = document.createElement('div');
+    app.className = 'app';
+    document.body.appendChild(app);
+    try {
+      render(
+        <CommandLauncher open onOpen={vi.fn()} onClose={vi.fn()} onPick={vi.fn()} />,
+        { container: app },
+      );
+      expect(document.querySelector('.launcher')).not.toBeNull();
+      expect(app.querySelector('.launcher')).toBeNull();
+      expect(app.querySelector('.launcher-backdrop')).toBeNull();
+    } finally {
+      document.body.removeChild(app);
+    }
+  });
+
   it('⌘K reste inerte tant qu’une modale est ouverte', () => {
     // Le panneau plafonne à z-index 91, les modales sont à 100 : l'ouvrir
     // sous l'une d'elles donnerait un panneau invisible qui vole le focus.

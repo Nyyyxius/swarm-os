@@ -187,10 +187,12 @@
   .tb-clock .clock { color: var(--text); }
 
   /* ============ Command launcher ============ */
-  /* 90/91 : au-dessus des overlays console et IDE (80, à égalité sinon — et
-     l'égalité se résout par l'ordre DOM, donc CONTRE le backdrop du panneau
-     qui est monté en premier) et du drawer (71), mais sous les modales (100)
-     qui, elles, doivent rester la couche du dessus. */
+  /* Ces valeurs ne comptent QUE parce que le panneau est portalisé vers
+     `document.body` : monté dans `.app` (position fixed = contexte
+     d'empilement de niveau 0), il passait sous les overlays de route rendus
+     hors de `.app` — 60 l'emportait sur n'importe quel z-index interne.
+     Cf. `CommandLauncher.tsx` et `20_command-launcher.md` §5.
+     90/91 : au-dessus des overlays de route (60) et IDE (80). */
   .launcher-backdrop { position: fixed; inset: 0; z-index: 90; }
   .launcher {
     position: fixed; top: 62px; right: 12px; z-index: 91;

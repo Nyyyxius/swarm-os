@@ -6,6 +6,7 @@
 // Cf. `docs/redesign-desktop/20_command-launcher.md`.
 
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
+import { createPortal } from 'react-dom';
 import { ICON, type IconName } from './icons';
 
 /** Identifiants d'action — le contrat entre la table déclarative et le
@@ -70,10 +71,11 @@ interface Props {
   /** version de la release, pour la description de l'item UPDATE. */
   updateLatest?: string | null;
   /**
-   * Neutralise le raccourci d'ouverture. Vrai quand une modale de la couche
-   * z-index 100 (`.modal-backdrop`) est ouverte : le panneau plafonne à 91,
-   * il se monterait DERRIÈRE elle — invisible, mais volant le focus et
-   * capable de naviguer sous le dos de l'opérateur.
+   * Neutralise le raccourci d'ouverture. Vrai quand une modale est ouverte :
+   * le panneau passerait AU-DESSUS d'elle (les modales sont rendues dans
+   * `.app`, donc enfermées dans son contexte d'empilement — cf. le portail
+   * ci-dessous), et naviguer ailleurs depuis un dialogue engagé le laisserait
+   * orphelin derrière soi.
    */
   blocked?: boolean;
 }
@@ -174,7 +176,16 @@ export default function CommandLauncher({
   // Index plat recalculé pendant le rendu : le curseur clavier traverse les
   // groupes, la numérotation doit donc ignorer leurs frontières.
   let idx = -1;
-  return (
+
+  // PORTAIL OBLIGATOIRE, pas une préférence de style. `.app` est en
+  // `position: fixed`, ce qui crée un contexte d'empilement de niveau 0 :
+  // tout z-index posé à l'intérieur y est enfermé. Or les overlays de route
+  // (`.roles-overlay` & co, z-index 60) et l'IDE (80) sont rendus depuis
+  // `App.tsx` EN DEHORS de `.app`, donc frères de celui-ci. Monté dans la
+  // TopBar, le panneau passait sous eux quoi qu'on écrive — 91 enfermé dans 0
+  // perd contre 60. Le portail le sort au niveau du body, où son z-index
+  // compte enfin.
+  return createPortal(
     <>
       <div className="launcher-backdrop" onClick={onClose} />
       <div className="launcher" role="dialog" aria-label="command launcher">
@@ -212,6 +223,7 @@ export default function CommandLauncher({
           ))}
         </div>
       </div>
-    </>
+    </>,
+    document.body,
   );
 }
