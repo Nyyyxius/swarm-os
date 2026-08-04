@@ -1,6 +1,7 @@
 // packages/web/src/components/desktop/TopBar.tsx
-import { useEffect, useState } from 'react';
+import { useCallback, useEffect, useRef, useState } from 'react';
 import { ICON } from './icons';
+import CommandLauncher, { type LauncherActionId } from './CommandLauncher';
 import { formatClock, formatMsgCount, formatUptimeShort } from '../../lib/format';
 import { useInstanceSettings } from '../../hooks/useInstanceSettings';
 
@@ -74,6 +75,11 @@ interface Props {
   onOpenSettings: () => void;
   /** Open SETTINGS on the SYSTEM UPDATE section (update badge). */
   onOpenUpdates: () => void;
+  /** Open SETTINGS scrollé sur la section APPEARANCE (item du launcher). */
+  onOpenAppearance?: () => void;
+  /** Vrai quand une modale (couche z-index 100) est ouverte : ⌘K doit rester
+   *  inerte, sinon le panneau se monte derrière elle. */
+  menuBlocked?: boolean;
 }
 
 const EMPTY_FLASH_SET: ReadonlySet<string> = new Set();
@@ -81,10 +87,23 @@ const EMPTY_FLASH_SET: ReadonlySet<string> = new Set();
 export default function TopBar({
   teams, selectedTeamId, flashTeamIds, totalAgents, info,
   onSelectTeam, onNewTeam, onOpenRoles, onOpenMemory, onOpenBoard, onOpenApprovals, onOpenGraph, onOpenPlugins, onOpenSkills, onOpenIde, onOpenSettings,
-  onOpenUpdates,
+  onOpenUpdates, onOpenAppearance, menuBlocked,
 }: Props) {
   const flashSet = flashTeamIds ?? EMPTY_FLASH_SET;
   const [now, setNow] = useState(new Date());
+  // Step 20 — la rangée de destinations a été remplacée par un panneau ⌘K.
+  const [menuOpen, setMenuOpen] = useState(false);
+  const menuRef = useRef<HTMLButtonElement>(null);
+  // Stabilisés : la TopBar se re-rend chaque seconde (horloge), et ces deux
+  // callbacks sont dans les deps du listener ⌘K du panneau — en version
+  // inline, il serait démonté/remonté à chaque tick.
+  const openMenu = useCallback(() => setMenuOpen(true), []);
+  const closeMenu = useCallback(() => {
+    setMenuOpen(false);
+    // Le panneau démonte l'élément focalisé : sans ça le focus retombe sur
+    // <body> et l'opérateur au clavier repart du haut du document.
+    menuRef.current?.focus();
+  }, []);
   useEffect(() => {
     const i = setInterval(() => setNow(new Date()), 1000);
     return () => clearInterval(i);
@@ -100,7 +119,31 @@ export default function TopBar({
   // dans le `tb-clock` ci-dessous (donc pas "unused").
   const uptime = formatUptimeShort(info.startedAt);
 
+  // Routage du panneau. Le `switch` est exhaustif sur `LauncherActionId` :
+  // un id ajouté à la table du launcher casse la compilation tant qu'il
+  // n'est pas routé ici (idiome maison, cf. `lib/sessionStatus.ts`).
+  function handlePick(id: LauncherActionId) {
+    setMenuOpen(false);
+    switch (id) {
+      case 'new-team':   onNewTeam(); return;
+      case 'roles':      onOpenRoles(); return;
+      case 'memory':     onOpenMemory?.(); return;
+      case 'board':      onOpenBoard?.(); return;
+      case 'approvals':  onOpenApprovals?.(); return;
+      case 'code-graph': onOpenGraph?.(); return;
+      case 'skills':     onOpenSkills?.(); return;
+      case 'plugins':    onOpenPlugins(); return;
+      case 'ide':        onOpenIde(); return;
+      case 'update':     onOpenUpdates(); return;
+      case 'settings':   onOpenSettings(); return;
+      case 'appearance': onOpenAppearance?.(); return;
+    }
+    const _exhaustive: never = id;
+    return _exhaustive;
+  }
+
   return (
+    <>
     <header className="topbar">
       <div className="brand">
         <div className="brand-mark" />
@@ -177,56 +220,33 @@ export default function TopBar({
           title="create new orchestrator">
           {ICON.plus}<span className="label">NEW TEAM</span>
         </button>
-        <button className="tb-action" onClick={onOpenRoles} title="manage roles">
-          {ICON.template}<span className="label">ROLES</span>
-        </button>
-        <button className="tb-action" onClick={() => onOpenMemory?.()} title="shared memory / knowledge graph">
-          {ICON.fork}<span className="label">MEMORY</span>
-        </button>
-        <button className="tb-action" onClick={() => onOpenBoard?.()} title="task board (Kanban)">
-          {ICON.board}<span className="label">BOARD</span>
-        </button>
-        <button className="tb-action" onClick={() => onOpenApprovals?.()} title="approval-gate queue and history">
-          {ICON.shield}<span className="label">APPROVALS</span>
-        </button>
-        <button className="tb-action" onClick={() => onOpenGraph?.()} title="code knowledge graph">
-          {ICON.graph}<span className="label">CODE GRAPH</span>
-        </button>
-        <button className="tb-action" onClick={onOpenPlugins} title="manage plugins">
-          {ICON.link}<span className="label">PLUGINS</span>
-        </button>
-        <button className="tb-action" onClick={() => onOpenSkills?.()} title="manage skills">
-          {ICON.inbox}<span className="label">SKILLS</span>
-        </button>
-        <button className="tb-action" onClick={onOpenIde} title="open workspace IDE (VS Code)">
-          {ICON.code}<span className="label">IDE</span>
-        </button>
-        {/* Update badge — rendered ONLY when there is something to act on
-            (`info.updateAvailable`, same object as `info.version` above, so
-            same render). A permanently mounted button would be one more piece
-            of chrome opening a drawer the cog already opens. */}
-        {info.updateAvailable && (
-          <button
-            className="tb-action"
-            onClick={onOpenUpdates}
-            title={
-              info.updateLatest
-                ? `swarm-os v${info.updateLatest} is available — open SETTINGS`
-                : 'a new swarm-os version is available — open SETTINGS'
-            }
-            aria-label={
-              info.updateLatest
-                ? `Update available: version ${info.updateLatest}`
-                : 'Update available'
-            }
-          >
-            {ICON.reload}
-            <span className="dot warn" />
-            <span className="label">UPDATE</span>
-          </button>
-        )}
-        <button className="tb-action" onClick={onOpenSettings} title="settings / token">
-          {ICON.cog}
+        {/* Toutes les destinations vivent maintenant dans le panneau ⌘K. La
+            pastille update migre ici : le signal doit survivre sans ouvrir le
+            menu, et `info.updateAvailable` vient du MÊME objet que
+            `info.version` peint dans le brand → jamais un render d'écart. */}
+        <button
+          ref={menuRef}
+          type="button"
+          className={`tb-action ${menuOpen ? 'primary' : ''}`}
+          aria-haspopup="dialog"
+          aria-expanded={menuOpen}
+          onClick={() => setMenuOpen((v) => !v)}
+          title={
+            info.updateAvailable
+              ? `open menu (⌘K) — ${info.updateLatest ? `swarm-os v${info.updateLatest} is available` : 'a new version is available'}`
+              : 'open menu (⌘K)'
+          }
+          aria-label={
+            info.updateAvailable
+              ? (info.updateLatest
+                  ? `MENU — update available: version ${info.updateLatest}`
+                  : 'MENU — update available')
+              : 'MENU'
+          }
+        >
+          {ICON.menu}
+          {info.updateAvailable && <span className="dot warn" />}
+          <span className="label">MENU</span>
         </button>
         <div className="tb-clock">
           <span className="agents">{totalAgents} AGENTS</span>
@@ -235,5 +255,16 @@ export default function TopBar({
         </div>
       </div>
     </header>
+
+    <CommandLauncher
+      open={menuOpen}
+      blocked={menuBlocked}
+      onOpen={openMenu}
+      onClose={closeMenu}
+      onPick={handlePick}
+      updateAvailable={info.updateAvailable}
+      updateLatest={info.updateLatest}
+    />
+    </>
   );
 }

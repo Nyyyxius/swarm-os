@@ -10,7 +10,7 @@
  * stay legible against the warm-black background, and a flat list keeps the
  * differentiation obvious at a glance ("which color is DEV again?").
  */
-import { useEffect, useState } from 'react';
+import { useEffect, useRef, useState } from 'react';
 import { useInstanceSettings } from '../../hooks/useInstanceSettings';
 import type { InstanceBgTint, InstanceDensity } from '../../api/client';
 
@@ -38,7 +38,20 @@ const DENSITY_CHOICES: ReadonlyArray<{ value: InstanceDensity; label: string }> 
 const FONT_SIZE_MIN = 11;
 const FONT_SIZE_MAX = 16;
 
-export function AppearanceSection() {
+interface AppearanceSectionProps {
+  /** Scroll this section into view on mount — set when SETTINGS was opened
+   *  from the command launcher's APPEARANCE item. Même mécanique que
+   *  `UpdateSection`, `scrollIntoView` en appel optionnel car jsdom ne
+   *  l'implémente pas. */
+  focus?: boolean;
+}
+
+export function AppearanceSection({ focus = false }: AppearanceSectionProps) {
+  const rootRef = useRef<HTMLDivElement>(null);
+  useEffect(() => {
+    if (focus) rootRef.current?.scrollIntoView?.({ block: 'start' });
+  }, [focus]);
+
   const { settings, loading, error, setSettings, resetSettings } = useInstanceSettings();
   const [label, setLabel] = useState<string>(settings.instanceLabel ?? '');
   const [resetting, setResetting] = useState(false);
@@ -90,7 +103,7 @@ export function AppearanceSection() {
   }
 
   return (
-    <div className="drawer-section">
+    <div className="drawer-section" ref={rootRef}>
       <div className="h">APPEARANCE</div>
 
       {/* Instance label */}

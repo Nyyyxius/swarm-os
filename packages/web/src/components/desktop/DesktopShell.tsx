@@ -42,6 +42,14 @@ export default function DesktopShell() {
         onOpenIde={c.onOpenIde}
         onOpenSettings={() => c.setSettingsOpen(true)}
         onOpenUpdates={c.openUpdates}
+        onOpenAppearance={c.openAppearance}
+        // Les modales ci-dessous vivent en z-index 100 ; le panneau ⌘K
+        // plafonne à 91. Tant que l'une est ouverte, le raccourci reste
+        // inerte plutôt que de monter un panneau invisible derrière elle.
+        menuBlocked={
+          c.showNew || c.broadcastOpen
+          || c.spawnFor !== null || c.editConfigFor !== null
+        }
       />
       <div className="main">
         <LeftPanel
@@ -91,6 +99,7 @@ export default function DesktopShell() {
           shellMode={c.shellMode}
           setShellMode={c.setShellMode}
           focusUpdates={c.updatesFocus}
+          focusAppearance={c.appearanceFocus}
         />
       )}
       <BroadcastModal

@@ -25,6 +25,13 @@ et l'uptime. Calculer le statut visuel de chaque `team-pill`
 boutons (NEW / ROLES / cog → callbacks vers `DesktopShell`) et le clic sur
 une pill (sélection lead + route `#/orchestrators/:id`).
 
+> **Obsolète depuis Step 20** — la rangée de boutons décrite ici (NEW / ROLES /
+> cog, puis les 9 destinations accumulées ensuite) a été remplacée par
+> `+ NEW TEAM` + `MENU` (panneau ⌘K). Les callbacks `onOpen*` sont inchangés,
+> mais ils sont désormais routés par `CommandLauncher` → `onPick`.
+> Cf. `20_command-launcher.md`. Le reste de cette note (binding des données,
+> statut des pills, horloge/uptime) reste exact.
+
 ---
 
 ## 2. Données nécessaires

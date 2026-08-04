@@ -27,6 +27,11 @@ export const ICON: Record<string, ReactElement> = {
   code:     <svg viewBox="0 0 24 24"><path d="M9 7 L4 12 L9 17"/><path d="M15 7 L20 12 L15 17"/></svg>,
   shield:   <svg viewBox="0 0 24 24"><path d="M12 3 L20 7 V13 C20 17.7 16.4 21.3 12 22 C7.6 21.3 4 17.7 4 13 V7 Z"/><path d="M9 12 L11 14.5 L15 10"/></svg>,
   graph:    <svg viewBox="0 0 24 24"><circle cx="5" cy="12" r="2"/><circle cx="19" cy="5" r="2"/><circle cx="19" cy="19" r="2"/><circle cx="12" cy="12" r="2"/><path d="M7 12 L10 12"/><path d="M14 11 L17 6.5"/><path d="M14 13 L17 17.5"/></svg>,
+  // Step 20 — icônes du command launcher (cf. prototypes/v2/icons.jsx).
+  menu:     <svg viewBox="0 0 24 24"><rect x="3" y="3" width="7" height="7"/><rect x="14" y="3" width="7" height="7"/><rect x="3" y="14" width="7" height="7"/><rect x="14" y="14" width="7" height="7"/></svg>,
+  memory:   <svg viewBox="0 0 24 24"><path d="M9 3 a3 3 0 0 0 -3 3 v3 a3 3 0 0 1 -3 3 a3 3 0 0 1 3 3 v3 a3 3 0 0 0 3 3"/><path d="M15 3 a3 3 0 0 1 3 3 v3 a3 3 0 0 0 3 3 a3 3 0 0 0 -3 3 v3 a3 3 0 0 1 -3 3"/></svg>,
+  sun:      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2 V4 M12 20 V22 M2 12 H4 M20 12 H22 M4.9 4.9 L6.3 6.3 M17.7 17.7 L19.1 19.1 M4.9 19.1 L6.3 17.7 M17.7 6.3 L19.1 4.9"/></svg>,
+  search:   <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M15.5 15.5 L20 20"/></svg>,
 };
 
 export type IconName = keyof typeof ICON;

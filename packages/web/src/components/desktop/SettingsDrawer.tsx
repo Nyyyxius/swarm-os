@@ -60,6 +60,9 @@ export interface SettingsDrawerProps {
   /** True when the drawer was opened from the TopBar/dock update badge —
    *  scrolls SYSTEM UPDATE into view instead of leaving it below ABOUT. */
   focusUpdates?: boolean;
+  /** True when the drawer was opened from the command launcher's APPEARANCE
+   *  item — scrolls APPEARANCE into view instead of leaving it at the bottom. */
+  focusAppearance?: boolean;
 }
 
 export default function SettingsDrawer({
@@ -73,6 +76,7 @@ export default function SettingsDrawer({
   shellMode,
   setShellMode,
   focusUpdates,
+  focusAppearance,
 }: SettingsDrawerProps) {
   const [token, setTokenLocal] = useState<string>(() => getToken());
   const [show, setShow] = useState(false);
@@ -291,7 +295,7 @@ export default function SettingsDrawer({
           )}
 
           {/* ── APPEARANCE ──────────────────────────────── */}
-          <AppearanceSection />
+          <AppearanceSection focus={focusAppearance} />
         </div>
       </aside>
     </>

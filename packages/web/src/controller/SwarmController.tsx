@@ -139,6 +139,14 @@ export interface SwarmControllerValue {
   updatesFocus: boolean;
   /** Open SETTINGS on the SYSTEM UPDATE section (TopBar badge / mobile dock). */
   openUpdates: () => void;
+  /**
+   * True when SETTINGS was opened from the command launcher's APPEARANCE
+   * item — the drawer scrolls its APPEARANCE section into view. Cleared on
+   * close, exactly like `updatesFocus`.
+   */
+  appearanceFocus: boolean;
+  /** Open SETTINGS on the APPEARANCE section (command launcher). */
+  openAppearance: () => void;
   broadcastOpen: boolean;
   setBroadcastOpen: (v: boolean) => void;
   spawnFor: OrchestratorView | null;
@@ -313,12 +321,20 @@ export function SwarmControllerProvider({
   // Set only by the update badge; cleared whenever the drawer closes so the
   // next cog click opens a plain SETTINGS.
   const [updatesFocus, setUpdatesFocus] = useState(false);
+  // Idem pour APPEARANCE, ouvert depuis l'item du command launcher. Deux
+  // drapeaux distincts plutôt qu'un `focusSection: string | null` : chacun
+  // n'est lu que par sa propre section, et le typage garde l'exhaustivité.
+  const [appearanceFocus, setAppearanceFocus] = useState(false);
   const setSettingsOpenResolved = useCallback((v: boolean) => {
-    if (!v) setUpdatesFocus(false);
+    if (!v) { setUpdatesFocus(false); setAppearanceFocus(false); }
     setSettingsOpen(v);
   }, []);
   const openUpdates = useCallback(() => {
     setUpdatesFocus(true);
+    setSettingsOpen(true);
+  }, []);
+  const openAppearance = useCallback(() => {
+    setAppearanceFocus(true);
     setSettingsOpen(true);
   }, []);
   const [spawnFor, setSpawnFor] = useState<OrchestratorView | null>(null);
@@ -988,6 +1004,8 @@ export function SwarmControllerProvider({
     setSettingsOpen: setSettingsOpenResolved,
     updatesFocus,
     openUpdates,
+    appearanceFocus,
+    openAppearance,
     broadcastOpen,
     setBroadcastOpen,
     spawnFor,

@@ -161,8 +161,9 @@
     transition: color 120ms ease, background 120ms ease;
     flex: none;
   }
-  /* below 1280px the topbar runs out of room — collapse text labels to icons */
-  @media (max-width: 1280px) {
+  /* Step 20 — deux boutons au lieu de onze : les labels tiennent désormais
+     jusqu'à 720px. En dessous, on repasse en icônes seules. */
+  @media (max-width: 720px) {
     .tb-action .label { display: none; }
     .tb-action { padding: 0 12px; }
   }
@@ -184,6 +185,89 @@
     flex: none;
   }
   .tb-clock .clock { color: var(--text); }
+
+  /* ============ Command launcher ============ */
+  /* 90/91 : au-dessus des overlays console et IDE (80, à égalité sinon — et
+     l'égalité se résout par l'ordre DOM, donc CONTRE le backdrop du panneau
+     qui est monté en premier) et du drawer (71), mais sous les modales (100)
+     qui, elles, doivent rester la couche du dessus. */
+  .launcher-backdrop { position: fixed; inset: 0; z-index: 90; }
+  .launcher {
+    position: fixed; top: 62px; right: 12px; z-index: 91;
+    width: 460px; max-width: calc(100vw - 24px);
+    max-height: calc(100vh - 80px);
+    background: var(--panel-solid);
+    border: 1px solid var(--border-strong);
+    box-shadow: 0 24px 60px rgba(0,0,0,0.55);
+    display: flex; flex-direction: column;
+    animation: launcher-in 160ms cubic-bezier(.2,.7,.2,1);
+  }
+  @keyframes launcher-in {
+    from { opacity: 0; transform: translateY(-6px) scale(0.99); }
+    to   { opacity: 1; transform: translateY(0) scale(1); }
+  }
+  .launcher-search {
+    display: flex; align-items: center; gap: 10px;
+    padding: 12px 14px;
+    border-bottom: 1px solid var(--border);
+  }
+  .launcher-search svg { width: 13px; height: 13px; stroke: var(--text-mute); fill: none; stroke-width: 1.5; flex: none; }
+  .launcher-search input {
+    flex: 1; background: none; border: none; outline: none;
+    color: var(--text);
+    font-family: "Geist Mono", monospace; font-size: 12px; letter-spacing: 0.10em;
+  }
+  .launcher-search input::placeholder { color: var(--text-mute); }
+  .launcher-kbd {
+    font-family: "Geist Mono", monospace; font-size: 8.5px; letter-spacing: 0.14em;
+    color: var(--text-mute);
+    border: 1px solid var(--border); padding: 2px 6px;
+    flex: none;
+  }
+  .launcher-body { overflow: auto; padding: 6px 0 8px; }
+  .launcher-group + .launcher-group { margin-top: 4px; }
+  .launcher-group-h {
+    font-family: "Geist Mono", monospace; font-size: 9px;
+    letter-spacing: 0.20em; color: var(--text-mute);
+    padding: 10px 16px 6px;
+  }
+  .launcher-item {
+    width: 100%;
+    display: grid;
+    grid-template-columns: 18px 108px 1fr auto auto;
+    align-items: center; gap: 12px;
+    padding: 9px 16px;
+    background: none; border: none; border-left: 2px solid transparent;
+    color: var(--text-dim);
+    cursor: pointer; text-align: left;
+  }
+  .launcher-item .li-icon { display: grid; place-items: center; }
+  .launcher-item .li-icon svg { width: 14px; height: 14px; stroke: currentColor; fill: none; stroke-width: 1.4; }
+  .launcher-item .li-label {
+    font-family: "Geist Mono", monospace; font-size: 11px;
+    letter-spacing: 0.16em; color: var(--text);
+  }
+  .launcher-item .li-desc {
+    font-family: "Geist Mono", monospace; font-size: 9.5px;
+    letter-spacing: 0.06em; color: var(--text-mute);
+    overflow: hidden; text-overflow: ellipsis; white-space: nowrap;
+  }
+  /* `.li-badge` du prototype volontairement non porté : aucun compteur
+     honnête à afficher tant que le serveur n'expose pas de pending global
+     (cf. 20_command-launcher.md §2). */
+  .launcher-item.active {
+    background: rgba(255, 176, 96, 0.08);
+    border-left-color: var(--amber);
+    color: var(--amber);
+  }
+  .launcher-item.active .li-label { color: var(--amber); }
+  .launcher-item.active .li-desc { color: var(--text-dim); }
+  .launcher-item.accent .li-label { color: var(--amber); }
+  .launcher-empty {
+    padding: 26px 16px; text-align: center;
+    font-family: "Geist Mono", monospace; font-size: 10px;
+    letter-spacing: 0.16em; color: var(--text-mute);
+  }
 
   /* ============ Main grid ============ */
   .main {
