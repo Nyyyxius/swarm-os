@@ -21,7 +21,7 @@ import * as path from 'node:path';
 import { withModule } from '../../logger.js';
 import type { CodegraphScopeKind } from './store.js';
 import { hasCodeFiles } from './scan.js';
-import { IGNORED_DIR_NAMES } from './constants.js';
+import { shouldSkipDir } from './ignore.js';
 
 const log = withModule('codegraph.discovery');
 
@@ -121,7 +121,13 @@ export function discoverScopes(input: DiscoverScopesInput): DiscoveredScope[] {
     // root scope excludes them all — it then covers only root-level files (and
     // any non-project subdirs, of which there are none by construction). This
     // kills the overlap + whole-workspace-rebuild problem flagged in P1.
-    const childDirs = safeReaddirDirs(workspaceRoot).filter((n) => !IGNORED_DIR_NAMES.has(n));
+    // `shouldSkipDir` (not a bare name lookup): a top-level `.venv-intraday`
+    // used to slip through exact-name matching and become a scope of its own —
+    // graphify then failed on 656 dirs of vendored Python. The full path is
+    // required so the structural `pyvenv.cfg` check can fire too.
+    const childDirs = safeReaddirDirs(workspaceRoot).filter(
+      (n) => !shouldSkipDir(path.join(workspaceRoot, n), n),
+    );
     push(WORKSPACE_ROOT_SCOPE_ID, 'project', workspaceRoot, childDirs);
     for (const name of childDirs) {
       push(projectScopeId(name), 'project', path.join(workspaceRoot, name));

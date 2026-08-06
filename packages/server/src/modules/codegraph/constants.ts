@@ -27,11 +27,16 @@ export const CODE_EXTENSIONS: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * Directory names skipped by BOTH the code-detection walk and the source
+ * EXACT directory names skipped by BOTH the code-detection walk and the source
  * fingerprint. These are dependency trees, VCS metadata, build output and our
  * own artifacts — never first-party code (constraint C1 "no packages"). The
  * graphify runner ALSO excludes them via the seeded build config, so a walk we
  * skip is a walk graphify skips.
+ *
+ * This set is the exact-match layer only. Do NOT consume it directly: go through
+ * `shouldSkipDir` in `ignore.ts`, which adds the anchored name variants
+ * (`.venv-intraday`, `venv312`…) and the structural `pyvenv.cfg` virtualenv
+ * check that exact matching by construction cannot cover.
  */
 export const IGNORED_DIR_NAMES: ReadonlySet<string> = new Set([
   'node_modules',
@@ -61,15 +66,47 @@ export const IGNORED_DIR_NAMES: ReadonlySet<string> = new Set([
  * (graphify's persisted `--exclude` store, read by every `update` rebuild). This
  * is how C1 "no packages" is materialised WITHOUT writing a `.graphifyignore`
  * into the user's source dir — the source stays pristine (see graphify.ts).
+ *
+ * PARITY IS THE CONTRACT: this list must exclude the same set as
+ * `IGNORED_DIR_NAMES` + `IGNORED_DIR_PATTERNS` (ignore.ts). A name the walk skips
+ * but graphify indexes puts third-party code in the graph; a name graphify skips
+ * but the walk keeps makes the change-detection fingerprint move for files that
+ * can never change the graph (a permanent re-index loop). So the character
+ * classes below transcribe the regex anchors literally, including their
+ * deliberate asymmetry: dot-prefixed names accept a separator suffix
+ * (`.venv[-_.]*`), bare names accept digits only (`venv[0-9]*`) so a
+ * first-party `venv-manager/` or `node_modules-path/` checkout stays in the
+ * graph. A blanket "venv" + star + slash glob would have excluded those, i.e.
+ * traded the bug for silent code loss.
+ *
+ * Two residual, ACCEPTED divergences — both fail in the harmless direction (the
+ * walk is stricter than graphify, so the worst case is graph noise inside an
+ * already-legitimate scope, never a bogus scope, and graphify's own
+ * `gitignore: true` usually covers both):
+ *   1. The structural `pyvenv.cfg` check has no gitignore equivalent, so an
+ *      oddly-named venv (`env-prod/`, `venv_old/`) is skipped by the walk yet
+ *      still visible to graphify.
+ *   2. `IGNORED_DIR_PATTERNS` is case-INSENSITIVE, gitignore globs are not
+ *      (graphify has no equivalent of git's `core.ignorecase`). So a `.Venv-x/`
+ *      on a case-preserving mount is skipped by the walk and indexed by
+ *      graphify. Encoding the 16 casings of `venv` as character classes would
+ *      make this list unreadable to buy a case nobody has ever produced —
+ *      virtualenv, npm and pip all create these directories lower-cased.
  */
 export const DEFAULT_GRAPHIFY_EXCLUDES: readonly string[] = [
   'node_modules/',
+  'node_modules[0-9]*/',
   '.pnpm/',
   'vendor/',
   '.venv/',
+  '.venv[-_.]*/',
+  '.venv[0-9]*/',
   'venv/',
+  'venv[0-9]*/',
   '__pycache__/',
   '.git/',
+  '.hg/',
+  '.svn/',
   'dist/',
   'build/',
   'out/',

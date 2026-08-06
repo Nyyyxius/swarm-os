@@ -1,9 +1,9 @@
 /**
  * Filesystem scanning for codegraph: the C3 "is there any code?" gate and the
  * change-detection fingerprint. Both ride the SAME recursive walk (skipping
- * `IGNORED_DIR_NAMES`, symlinks and going no deeper than `MAX_WALK_FILES`) so
- * the set of files that decides "index this scope" is exactly the set whose
- * mtimes decide "re-index this scope".
+ * whatever `shouldSkipDir` rejects, symlinks, and going no deeper than
+ * `MAX_WALK_FILES`) so the set of files that decides "index this scope" is
+ * exactly the set whose mtimes decide "re-index this scope".
  *
  * Everything here is best-effort and NEVER throws: an unreadable dir is skipped
  * with a debug log, because a janitor tick must survive a permission hiccup on
@@ -14,7 +14,8 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { createHash } from 'node:crypto';
 import { withModule } from '../../logger.js';
-import { CODE_EXTENSIONS, IGNORED_DIR_NAMES, MAX_WALK_FILES } from './constants.js';
+import { CODE_EXTENSIONS, MAX_WALK_FILES } from './constants.js';
+import { shouldSkipDir } from './ignore.js';
 
 const log = withModule('codegraph.scan');
 
@@ -56,8 +57,18 @@ function walk(
       if (ent.isSymbolicLink()) continue;
       const full = path.join(dir, ent.name);
       if (ent.isDirectory()) {
-        if (IGNORED_DIR_NAMES.has(ent.name)) continue;
+        // Order matters for COST, not for outcome (both branches just skip):
+        // `extraExcludes` is a Set lookup, while `shouldSkipDir` may pay an
+        // `existsSync` for the structural virtualenv probe. Cheapest test first.
+        // `lifecycle.ts`'s watcher walk applies the same two gates in the same
+        // order — they must agree, or we would watch a directory the fingerprint
+        // never reads (or worse, stop watching one it does).
         if (extraExcludes?.has(ent.name)) continue;
+        // Name-based skip PLUS structural virtualenv detection (`pyvenv.cfg`):
+        // a `.venv-intraday` matches no exact name but is still 656 dirs of
+        // third-party Python we must never walk. `full` is already computed, so
+        // this costs at most one extra existsSync per directory.
+        if (shouldSkipDir(full, ent.name)) continue;
         stack.push(full);
         continue;
       }
