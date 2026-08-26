@@ -18,20 +18,38 @@ Status: **MVP implementation-complete.** Phases 0–7 implemented (see
 
 ## Deploy (third party / fresh host)
 
-Pull the published image from GHCR and run the installer — no build toolchain
-required. Full bilingual guide in `docs/deploy/`.
+One command on a fresh host — no build toolchain required, nothing cloned first:
 
 ```sh
-cp .env.example .env     # edit WORKSPACE_PATH, DATA_PATH, SWARM_OS_IMAGE, project name
-./install.sh             # logs in/pulls, starts, waits for /health, prints the token
+T=<YOUR_GITHUB_PAT>; curl -fsSL -H "Authorization: Bearer $T" \
+  https://raw.githubusercontent.com/luminis1986/swarm-os/master/bootstrap.sh | SWARM_OS_PAT=$T bash
 ```
+
+`bootstrap.sh` fetches the deploy kit into `~/swarm-os` (the repo is private, so
+the read-only PAT is needed twice: once by curl, once by the script) and hands
+over to the same wizard `./install.sh` runs from a checkout:
+
+```sh
+./install.sh             # guided setup, then deploy
+```
+
+With no `.env` present it runs a **nine-step wizard**: host prerequisites (it can
+install Docker, and it runs the Claude Code OAuth login for you), project name
+and paths, image + `docker login ghcr.io`, the agent transport (generating and
+authorising an SSH key when you pick `ssh`), the other provider CLIs, remote
+access including Tailscale, Discord, update detection — each answer checked
+against the host as you give it. It then writes `.env`, deploys, waits for
+`boot_complete` and prints the URL, the token and each provider's verdict.
+`--reconfigure` re-runs it with your current values as defaults; `--yes` deploys
+an existing `.env` with no questions (CI). Full bilingual guide in `docs/deploy/`.
 
 Prerequisite: an **authenticated Claude Code CLI on the host**
 (`~/.claude/.credentials.json` must exist) — agents launch the CLI and inherit
-those credentials. Remote access (Tailscale / reverse proxy / SSH tunnel) and
-troubleshooting are in `docs/deploy/install.en.md` (FR: `install.fr.md`).
-Image distribution is handled by `.github/workflows/release-image.yml` (push a
-`vX.Y.Z` tag) or `scripts/push-image.sh` for a manual publish.
+those credentials; the wizard walks you through it if it is missing. Remote
+access (Tailscale / reverse proxy / SSH tunnel) and troubleshooting are in
+`docs/deploy/install.en.md` (FR: `install.fr.md`). Image distribution is handled
+by `.github/workflows/release-image.yml` (push a `vX.Y.Z` tag) or
+`scripts/push-image.sh` for a manual publish.
 
 ---
 
@@ -128,8 +146,9 @@ no-ops. See `docs/phase-1-spawner-lead.md` for the full local-dev wiring.
 - `packages/web/` — React + Vite + xterm.js UI + PWA shell
 - `packages/plugin-sdk/` — types-only SDK for plugin authors (`@swarm-os/plugin-sdk`)
 - `scripts/` — `verify-claude-code.ts` (spike harness), `gen-icons.ts` (PWA icons), `push-image.sh` (manual GHCR publish)
-- `examples/` — `docker-compose.{single,multi,dist}.yml` reference deployments (`dist` = third-party, `.env`-driven); `plugins/` — example plugins (`echo`, `slack-bridge`, `discord-agent`, `novelai`)
-- `install.sh` + `.env.example` — one-shot installer + config template for a third-party deployment
+- `examples/` — `docker-compose.{single,multi,dist}.yml` reference deployments (`dist` = third-party, `.env`-driven) + `docker-compose.ssh.yml` (overlay for the `ssh` agent transport); `plugins/` — example plugins (`echo`, `slack-bridge`, `discord-agent`, `novelai`)
+- `bootstrap.sh` — remote entry point: fetches the kit onto a bare host and starts the installer (`curl … | bash`)
+- `install.sh` + `.env.example` — guided installer (wizard + deploy) and the config template it writes
 - `docs/deploy/` — bilingual install + usage guides for shipping to a third party
 - `docs/` — phase-by-phase implementation reports (mandatory pre-reading)
 - `archives/` — superseded plan revisions (historical, do not edit)

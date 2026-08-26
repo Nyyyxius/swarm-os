@@ -1,11 +1,18 @@
 # swarm-os — third-party deployment compose, parameterised entirely by `.env`.
 #
-# Do NOT hardcode host-specific values here. Put them in `.env` (copy from
-# `.env.example` at the repo root), then either:
-#     ./install.sh
+# Do NOT hardcode host-specific values here. Put them in `.env` — the guided
+# installer writes it for you:
+#     ./install.sh                 # wizard on first run, deploy afterwards
 # or manually, exporting the env first so ${HOME} in paths is expanded:
 #     set -a && source .env && set +a
 #     docker compose -f examples/docker-compose.dist.yml up -d
+#
+# This file sets up the `local` agent transport (agents run inside the
+# container). For `SWARM_OS_AGENT_TRANSPORT=ssh` — agents on the host, all four
+# provider CLIs, one-click updates — layer the overlay on top:
+#     docker compose -f examples/docker-compose.dist.yml \
+#                    -f examples/docker-compose.ssh.yml up -d
+# `install.sh` adds it automatically when the env file asks for ssh.
 #
 # The UI binds to the host loopback (127.0.0.1) only — there is no TLS inside
 # the container. For remote access (Tailscale / reverse proxy / SSH tunnel) see
@@ -29,12 +36,13 @@ services:
       # always listens on 8787 internally; only the host port is remappable.
       - "127.0.0.1:${SWARM_OS_PORT:-8787}:8787"
       # MCP port 8788 is INTENTIONALLY NOT mapped — intra-container only.
-      # VS Code web (`code serve-web`). 1:1 mapping required (host port ==
-      # container port == SWARM_OS_IDE_PORT): /ide-info reports the container
-      # port and the browser connects to it directly. For remote access also:
-      #   tailscale serve --bg --https=8790 http://127.0.0.1:8790
-      # Set SWARM_OS_IDE_ENABLED=false to turn the editor off entirely.
-      - "127.0.0.1:${SWARM_OS_IDE_PORT:-8790}:${SWARM_OS_IDE_PORT:-8790}"
+      # The VS Code web editor is NOT published either: `code serve-web` listens
+      # on loopback inside the container and swarm-os reverse-proxies it under
+      # /ide on THIS port, same origin. One ingress covers the whole product —
+      # nothing to expose, nothing to give its own vhost, and a remote setup
+      # that works for the UI works for the editor. `SWARM_OS_IDE_PORT` below is
+      # the in-container port only; set SWARM_OS_IDE_ENABLED=false to turn the
+      # editor off entirely.
     volumes:
       # The project the agents work in. RW.
       - ${WORKSPACE_PATH}:/workspace
@@ -53,8 +61,8 @@ services:
       # through as an env var is the only way the process inside can read it;
       # OCI labels are not visible from within the container.
       SWARM_OS_IMAGE: ${SWARM_OS_IMAGE:-}
-      # The IDE port must match the published port above (the browser connects
-      # straight to it). Keep these two in sync via .env.
+      # In-container port for `code serve-web` (proxied under /ide, see above).
+      # Change it only if something else in the container already uses 8790.
       SWARM_OS_IDE_PORT: ${SWARM_OS_IDE_PORT:-8790}
       SWARM_OS_IDE_ENABLED: ${SWARM_OS_IDE_ENABLED:-true}
       # Update detection: the GitHub PAT that reads the releases of the (private)
@@ -67,12 +75,24 @@ services:
       # Used for Discord embed deep-links (no token included).
       SWARM_OS_PUBLIC_URL: ${SWARM_OS_PUBLIC_URL:-}
       SWARM_OS_DISCORD_WEBHOOK_URL: ${SWARM_OS_DISCORD_WEBHOOK_URL:-}
+      # Which CLI a team gets when neither the request nor the role names one.
+      # claude|codex|gemini|opencode — validated at boot, an unknown value stops
+      # the server rather than silently falling back.
+      SWARM_OS_DEFAULT_PROVIDER: ${SWARM_OS_DEFAULT_PROVIDER:-claude}
       # Optional overrides (defaults shown).
-      SWARM_OS_DEFAULT_MODEL: ${SWARM_OS_DEFAULT_MODEL:-claude-opus-4-8}
+      # EMPTY ON PURPOSE: unset, the instance default becomes the default model
+      # OF THE DEFAULT PROVIDER, kept current from models.dev. A hardcoded
+      # fallback here would hand every team a claude model id even on a codex or
+      # gemini instance — a foreign id no downstream layer can catch.
+      SWARM_OS_DEFAULT_MODEL: ${SWARM_OS_DEFAULT_MODEL:-}
       SWARM_OS_DEFAULT_EFFORT: ${SWARM_OS_DEFAULT_EFFORT:-xhigh}
       SWARM_OS_MAX_ORCHESTRATORS: ${SWARM_OS_MAX_ORCHESTRATORS:-10}
       SWARM_OS_MAX_WORKERS_PER_ORCH: ${SWARM_OS_MAX_WORKERS_PER_ORCH:-20}
       SWARM_OS_LOG_LEVEL: ${SWARM_OS_LOG_LEVEL:-info}
+      # Dev/CI fallback only: the normal place for the OpenRouter key that
+      # `opencode` agents need is SETTINGS ▸ OPENROUTER in the UI, and a key
+      # stored there always wins over this one.
+      SWARM_OS_OPENROUTER_API_KEY: ${SWARM_OS_OPENROUTER_API_KEY:-}
     healthcheck:
       # Always the in-container port (8787), independent of the host mapping.
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/health"]

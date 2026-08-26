@@ -5,6 +5,52 @@ one project.** This guide takes a fresh host to a running, accessible instance.
 
 ---
 
+## Install in one command
+
+On a fresh host, this whole document fits on one line:
+
+```sh
+T=<YOUR_GITHUB_PAT>; curl -fsSL -H "Authorization: Bearer $T" \
+  https://raw.githubusercontent.com/luminis1986/swarm-os/master/bootstrap.sh | SWARM_OS_PAT=$T bash
+```
+
+`bootstrap.sh` downloads the kit (installer, compose files, docs) into
+`~/swarm-os` and hands over to the guided setup
+([§4](#4-install--the-guided-setup)), which asks one question at a time: Docker,
+the Claude login, paths, image, transport, providers, remote access,
+notifications.
+
+Why the token appears twice: the repository is **private**, so the first `curl`
+has to authenticate to read `bootstrap.sh`, and the script reuses the same value
+(`SWARM_OS_PAT`) to fetch the rest of the kit — then offers it as the update
+detection token. A **read-only** PAT is enough (classic: scope `repo`;
+fine-grained: `Contents: Read` on swarm-os).
+
+With no token in the environment the script asks for one (hidden input). That is
+the form to use if you publish `bootstrap.sh` at a public URL (a gist, your own
+host), where the first `curl` needs no header at all:
+
+```sh
+curl -fsSL https://<public-url>/bootstrap.sh | bash
+```
+
+Options, after `bash -s --`: `--dir <path>` (default `~/swarm-os`),
+`--ref <branch|tag>`, `--token <pat>`, `--fetch-only` (download, start nothing).
+Re-running the command **updates the kit**, and never touches your `.env`.
+
+Piping a remote script into `bash` is an act of trust; to read it first:
+
+```sh
+curl -fsSL -H "Authorization: Bearer $T" \
+  https://raw.githubusercontent.com/luminis1986/swarm-os/master/bootstrap.sh -o bootstrap.sh
+less bootstrap.sh && bash bootstrap.sh
+```
+
+Sections 1–3 remain the reference for what the wizard does, and the manual path.
+The rest of the guide applies either way.
+
+---
+
 ## 1. Requirements
 
 - **Docker** + **Docker Compose v2** (`docker compose version` works).
@@ -125,22 +171,82 @@ As with `SWARM_OS_GITHUB_TOKEN`, a variable only reaches the process if the
 compose service names it in `environment:` — that block is an explicit
 allow-list (§7.4).
 
+### The choice that matters — the agent transport
+
+`SWARM_OS_AGENT_TRANSPORT` decides **where the agent process runs**. It is the
+one variable that changes three things at once, and the wizard asks it as a real
+question (step 4):
+
+| | `local` (default) | `ssh` |
+|---|---|---|
+| Where the agent runs | inside the container | on the host, over `ssh -tt` |
+| Usable providers | `claude` only — the image carries nothing else | all four, with the host's own logins |
+| One-click update | no (`TRANSPORT IS NOT SSH`) | yes |
+| Plugin `host-exec` | no | yes |
+| OAuth refresh race | possible (host and container write the same file) | impossible |
+| What it costs | nothing | an SSH key the container can read, and agents running with the host user's privileges |
+
+The `ssh` transport needs a **compose overlay** on top of the base file:
+
+```sh
+docker compose -f examples/docker-compose.dist.yml \
+               -f examples/docker-compose.ssh.yml up -d
+```
+
+`./install.sh` adds that `-f` by itself as soon as the env file says `ssh` — you
+do not have to remember it. The overlay mounts the key's directory at
+`/host-ssh`, adds the `host.docker.internal` alias, and passes the
+`SWARM_OS_SSH_*` / `SWARM_OS_HOST_*` variables through (its header documents
+each one).
+
 ---
 
-## 4. Install (easy mode)
+## 4. Install — the guided setup
 
 ```sh
 ./install.sh
 ```
 
-It checks Docker, checks your Claude credentials, pulls the image, starts the
-container, waits for `/health`, and prints your **access token** and URL. Re-run it
-any time after editing `.env`, or to update to a newer image tag.
+On a host with no `.env`, `install.sh` opens a **nine-step wizard**: it asks for
+each value, checks each answer against the host, writes `.env`, then deploys.
+Values in `[brackets]` are working answers — enter accepts them. **Nothing is
+installed or written without a confirmation naming the exact command**, and every
+offer can be declined, leaving you the manual path described above.
+
+| # | Step | What it does |
+|---|---|---|
+| 1 | Prerequisites | Docker + Compose (offers the official install, the `usermod -aG docker`, starting the daemon); the claude CLI (`npm i -g`); **the OAuth login** — it launches `claude` for you and waits; creates `~/.claude.json` if missing, because a bind mount to a non-existent file makes Docker create a *directory* there and the first session then freezes on the theme picker |
+| 2 | Project | name, workspace (creates it, and offers a `git clone` if it is empty), state directory, container name, port — a port already in use is detected and a free one suggested; if `/data` is not owned by uid 1000 it offers the `chown` (the container runs as `node`, uid 1000, and otherwise cannot write its database) |
+| 3 | Image | GHCR or a local build. It **tests the `docker pull` immediately** and, if that fails, offers the `docker login ghcr.io`, asking for the PAT with hidden input |
+| 4 | Transport | `local` or `ssh` (§3). Under `ssh`: generates a dedicated ed25519 key in its own directory, adds it to `authorized_keys`, tests the connection **and** checks that `claude` resolves in the *login* shell — the agent runs under `bash -lc`, so a CLI that only exists in the interactive branch of `~/.bashrc` is invisible to it |
+| 5 | Providers | detects codex / gemini / opencode, offers to install and log in to each, picks the default provider among the ones actually present, and pins `oauth-personal` when gemini's Google login is detected |
+| 6 | Remote access | loopback/SSH tunnel, **Tailscale** (install, `tailscale up`, `tailscale serve`, public URL derived from the tailnet) or a reverse proxy |
+| 7 | Notifications & updates | Discord webhook; the GitHub PAT for release detection — **tested live** against the API, so you know at once whether it is 200, 401 or 404 (the "valid token, no access to the repo" case) |
+| 8 | Advanced | default model and effort, team and worker ceilings, log level, the VS Code editor. Skippable in one keystroke |
+| 9 | Review | full summary with secrets masked, then a confirmation. The old `.env` is saved as `.env.backup-<timestamp>`, the new one written 0600 (it holds your tokens) |
+
+The deploy that follows pulls (or builds) the image, starts the container, waits
+for `/health` **all the way to `boot_complete`** — not merely the first 200 —,
+prints the token, and then **what the instance makes of each provider**, with the
+reason when one is unavailable. That is the question that always follows an
+install; it is answered before it is asked.
+
+### Options
+
+| Command | Effect |
+|---|---|
+| `./install.sh` | wizard when there is no `.env`; otherwise a menu: deploy / reconfigure / quit |
+| `./install.sh --reconfigure` | re-runs the wizard with your current values as the defaults |
+| `./install.sh --yes` | no questions: deploys the existing `.env` (CI, cron, scripts) |
+| `./install.sh --env-file <path>` | use another env file |
+
+Re-run it any time after editing `.env`, or to move to a newer image tag.
 
 > **Manual equivalent** (if you prefer not to use the script):
 > ```sh
 > set -a && source .env && set +a
 > docker compose -f examples/docker-compose.dist.yml up -d
+> # ssh transport: add -f examples/docker-compose.ssh.yml
 > docker exec "$SWARM_OS_CONTAINER_NAME" cat /data/token
 > ```
 > The `set -a && source .env` step expands `${HOME}` in your paths before Compose
@@ -169,11 +275,13 @@ Put the host on your tailnet, then expose the loopback over HTTPS:
 
 ```sh
 tailscale serve --bg --https=8787 http://127.0.0.1:8787
-tailscale serve --bg --https=8790 http://127.0.0.1:8790   # only if the IDE is enabled
 ```
 
-Reach it at `https://<host>.<tailnet>.ts.net:8787`. Set `SWARM_OS_PUBLIC_URL` in
-`.env` to that URL so Discord deep-links resolve. No public port is ever opened.
+One line: the VS Code editor is reverse-proxied by swarm-os itself under `/ide`,
+on this port. Reach it at `https://<host>.<tailnet>.ts.net:8787`. Set
+`SWARM_OS_PUBLIC_URL` in `.env` to that URL so Discord deep-links resolve. No
+public port is ever opened. (The wizard offers to do all of this at step 6 —
+including reading your tailnet name for you.)
 
 ### B. Reverse proxy + TLS (public domain)
 
@@ -181,18 +289,17 @@ Terminate TLS at Caddy/nginx in front of `127.0.0.1:8787`. Requirements:
 
 - the proxy **must forward WebSockets** (the live terminal and the events stream
   rely on them);
-- the VS Code editor (port 8790) needs **its own host/port** — `serve-web` cannot
-  live under a sub-path, and an HTTPS page cannot embed a plain-HTTP iframe. Give
-  8790 its own TLS vhost, or disable the editor with `SWARM_OS_IDE_ENABLED=false`.
+- **one vhost is enough.** The VS Code editor has no port to expose any more:
+  `serve-web` listens on loopback *inside* the container and swarm-os
+  reverse-proxies it under `/ide` on the same port, same origin. Whatever serves
+  the UI serves the editor — no second certificate, no plain-HTTP iframe.
+  `SWARM_OS_IDE_ENABLED=false` turns it off entirely.
 
 Caddy example:
 
 ```
 swarm.example.com {
     reverse_proxy 127.0.0.1:8787
-}
-ide.example.com {
-    reverse_proxy 127.0.0.1:8790
 }
 ```
 
@@ -359,8 +466,9 @@ release.
   expected: those CLIs have no "blocked on a human" signal, so
   `SWARM_OS_COMPACT_ON_WAITING` is a no-op for them. See
   [../providers.md](../providers.md).
-- **IDE iframe is blank** — confirm port 8790 is published and (when remote)
-  served over HTTPS matching the UI's scheme.
+- **IDE iframe is blank** — the editor is served under `/ide` on the UI's own
+  port (nothing to publish). Check `SWARM_OS_IDE_ENABLED` is not `false`, and
+  that your reverse proxy forwards WebSockets under that path.
 - **SYSTEM UPDATE says "no SWARM_OS_GITHUB_TOKEN" although you set one** — the
   variable is in `.env` but not in the service's `environment:` allow-list, so
   it never reaches the process. Add

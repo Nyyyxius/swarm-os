@@ -122,9 +122,15 @@ Détail complet, raisons d'inéligibilité et dépannage :
 
 ```sh
 # logs
-docker compose -f examples/docker-compose.dist.yml logs -f
+docker compose --env-file .env -f examples/docker-compose.dist.yml logs -f
 # arrêt (conserve /data)
-docker compose -f examples/docker-compose.dist.yml down
+docker compose --env-file .env -f examples/docker-compose.dist.yml down
 # mise à jour vers un nouveau tag (édite .env d'abord), puis
 ./install.sh
+# reconfigurer (assistant guidé, valeurs actuelles en défauts)
+./install.sh --reconfigure
 ```
+
+Sous le transport `ssh`, ajoute `-f examples/docker-compose.ssh.yml` aux deux
+premières commandes — `install.sh` le fait tout seul, et affiche la ligne exacte
+à la fin de chaque déploiement.

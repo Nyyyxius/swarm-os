@@ -12,11 +12,30 @@ Everything needed to install and operate swarm-os on your own host — bilingual
 The one hard prerequisite is an **authenticated Claude Code CLI on the host**
 (`~/.claude/.credentials.json` must exist). Without it, no agent can start.
 
-TL;DR:
+TL;DR — on a bare host, one command:
+
+```sh
+T=<YOUR_GITHUB_PAT>; curl -fsSL -H "Authorization: Bearer $T" \
+  https://raw.githubusercontent.com/luminis1986/swarm-os/master/bootstrap.sh | SWARM_OS_PAT=$T bash
+```
+
+From a checkout, the same wizard without the fetch:
+
+```sh
+./install.sh             # guided setup: asks, checks, writes .env, deploys
+```
+
+On a host with no `.env`, `install.sh` runs a nine-step wizard — host
+prerequisites (it can install Docker and run the Claude login for you), project
+paths, image + registry login, agent transport (it generates and authorises the
+SSH key), the other provider CLIs, remote access (incl. Tailscale),
+notifications, update detection — then deploys and prints the token, the URL and
+each provider's verdict. `--reconfigure` re-runs it, `--yes` deploys an existing
+`.env` without asking anything. The manual path still works:
 
 ```sh
 cp .env.example .env     # edit WORKSPACE_PATH, DATA_PATH, SWARM_OS_IMAGE, project name
-./install.sh             # pulls the image, starts it, prints token + URL
+./install.sh
 ```
 
 Two variables decide what the update surface can do — both documented in
@@ -40,9 +59,18 @@ GitHub account/team read access to the GHCR package.
 > `workflow_dispatch` run publishes `:<short-sha>` only: it does not move
 > `:latest` and cuts no release.
 
-**Hand over** (the kit only): the repo/source or just `install.sh`, `.env.example`,
-`examples/docker-compose.dist.yml`, `docs/deploy/`, `LICENSE` — plus the image
-tag and a `read:packages` access path.
+**Hand over**: ideally just the one-command line above plus two credentials —
+a read-only PAT that can read this repository (classic: scope `repo`;
+fine-grained: `Contents: Read`) and `read:packages` access to the GHCR package.
+`bootstrap.sh` pulls the kit itself (`install.sh`, `bootstrap.sh`,
+`.env.example`, `examples/docker-compose.{dist,ssh,multi}.yml`, `docs/deploy/`,
+`LICENSE`) — that list lives in the script, in `KIT`.
+
+> To hand out a line with **no token in it**, publish `bootstrap.sh` at a public
+> URL you control — a public gist (`https://gist.githubusercontent.com/<you>/<id>/raw/bootstrap.sh`
+> always serves the latest revision) or your own host. The recipient then runs
+> `curl -fsSL <url> | bash` and the script asks for the PAT itself, hidden. Keep
+> the copy in sync with this repo: it is the one file that cannot fix itself.
 
 **Do NOT hand over** your personal state: your `.env`, `~/.claude`, `~/.ssh`,
 `docker-compose.stiix.yml` / `docker-compose.test.yml` (they hold your paths,

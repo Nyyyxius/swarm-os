@@ -117,9 +117,15 @@ Full walkthrough, eligibility reasons and troubleshooting:
 
 ```sh
 # logs
-docker compose -f examples/docker-compose.dist.yml logs -f
+docker compose --env-file .env -f examples/docker-compose.dist.yml logs -f
 # stop (keeps /data)
-docker compose -f examples/docker-compose.dist.yml down
+docker compose --env-file .env -f examples/docker-compose.dist.yml down
 # update to a newer image tag (edit .env first), then
 ./install.sh
+# reconfigure (guided setup, current values as defaults)
+./install.sh --reconfigure
 ```
+
+Under the `ssh` transport, add `-f examples/docker-compose.ssh.yml` to the first
+two — `install.sh` does it for you, and prints the exact line at the end of every
+deploy.

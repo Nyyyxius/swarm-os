@@ -6,6 +6,53 @@ accessible.
 
 ---
 
+## Installation en une commande
+
+Sur un hôte vierge, tout ce document tient en une ligne :
+
+```sh
+T=<TON_PAT_GITHUB>; curl -fsSL -H "Authorization: Bearer $T" \
+  https://raw.githubusercontent.com/luminis1986/swarm-os/master/bootstrap.sh | SWARM_OS_PAT=$T bash
+```
+
+`bootstrap.sh` télécharge le kit (installeur, fichiers compose, docs) dans
+`~/swarm-os`, puis lance l'assistant guidé ([§4](#4-installer--lassistant-guidé))
+qui pose les questions une par une : Docker, login Claude, chemins, image,
+transport, providers, accès distant, notifications.
+
+Pourquoi le token apparaît deux fois : le dépôt est **privé**, donc le premier
+`curl` doit s'authentifier pour lire `bootstrap.sh`, et le script réutilise la
+même valeur (`SWARM_OS_PAT`) pour récupérer le reste du kit — puis la propose
+comme token de détection des mises à jour. Un PAT **en lecture seule** suffit
+(classique : scope `repo` ; fine-grained : `Contents: Read` sur swarm-os).
+
+Sans token dans l'environnement, le script le demande (saisie masquée) : c'est
+la forme à utiliser si tu publies `bootstrap.sh` sur une URL publique (gist,
+domaine à toi), auquel cas le premier `curl` n'a plus besoin d'en-tête :
+
+```sh
+curl -fsSL https://<url-publique>/bootstrap.sh | bash
+```
+
+Options, après `bash -s --` : `--dir <chemin>` (défaut `~/swarm-os`),
+`--ref <branche|tag>`, `--token <pat>`, `--fetch-only` (télécharge sans rien
+lancer). Relancer la commande **met à jour le kit** sans jamais toucher au
+`.env`.
+
+Piper un script distant dans `bash` est un acte de confiance ; pour le lire
+d'abord :
+
+```sh
+curl -fsSL -H "Authorization: Bearer $T" \
+  https://raw.githubusercontent.com/luminis1986/swarm-os/master/bootstrap.sh -o bootstrap.sh
+less bootstrap.sh && bash bootstrap.sh
+```
+
+Les sections 1 à 3 restent la référence de ce que fait l'assistant, et la voie
+manuelle. La suite du guide vaut dans les deux cas.
+
+---
+
 ## 1. Prérequis
 
 - **Docker** + **Docker Compose v2** (`docker compose version` répond).
@@ -130,22 +177,82 @@ Comme pour `SWARM_OS_GITHUB_TOKEN`, une variable n'atteint le processus que si
 le service compose la nomme dans `environment:` — ce bloc est une liste blanche
 explicite (§7.4).
 
+### Le choix qui compte — le transport des agents
+
+`SWARM_OS_AGENT_TRANSPORT` décide **où tourne le process de l'agent**. C'est la
+seule variable qui change trois choses à la fois, et l'assistant la pose comme
+une vraie question (étape 4) :
+
+| | `local` (défaut) | `ssh` |
+|---|---|---|
+| Où tourne l'agent | dans le conteneur | sur l'hôte, via `ssh -tt` |
+| Providers utilisables | `claude` seul — l'image ne contient que lui | les quatre, avec les logins de l'hôte |
+| Mise à jour en un clic | non (`TRANSPORT IS NOT SSH`) | oui |
+| `host-exec` des plugins | non | oui |
+| Course sur le refresh OAuth | possible (hôte + conteneur écrivent le même fichier) | impossible |
+| Ce que ça coûte | rien | une clé SSH lisible par le conteneur, et des agents qui tournent avec les droits de l'utilisateur hôte |
+
+Le transport `ssh` a besoin d'un **overlay compose** en plus du fichier de base :
+
+```sh
+docker compose -f examples/docker-compose.dist.yml \
+               -f examples/docker-compose.ssh.yml up -d
+```
+
+`./install.sh` ajoute ce `-f` tout seul dès que le fichier d'env dit `ssh` — tu
+n'as pas à t'en souvenir. L'overlay monte le répertoire de la clé sur
+`/host-ssh`, ajoute l'alias `host.docker.internal` et transmet les variables
+`SWARM_OS_SSH_*` / `SWARM_OS_HOST_*` (son en-tête documente chacune).
+
 ---
 
-## 4. Installer (mode facile)
+## 4. Installer — l'assistant guidé
 
 ```sh
 ./install.sh
 ```
 
-Le script vérifie Docker, vérifie tes identifiants Claude, pulle l'image, démarre
-le conteneur, attend `/health`, puis affiche ton **token d'accès** et l'URL.
-Relance-le après toute modif de `.env`, ou pour mettre à jour vers un nouveau tag.
+Sur un hôte sans `.env`, `install.sh` ouvre un **assistant en neuf étapes** : il
+pose chaque question, vérifie chaque réponse contre l'hôte, écrit `.env`, puis
+déploie. Les valeurs entre `[crochets]` sont des réponses qui marchent — entrée
+les accepte. **Rien n'est installé ni écrit sans une confirmation qui nomme la
+commande exacte**, et chaque proposition peut être refusée : il reste alors la
+voie manuelle décrite dans les sections précédentes.
+
+| # | Étape | Ce qu'elle fait |
+|---|---|---|
+| 1 | Prérequis | Docker + Compose (propose l'install officielle, le `usermod -aG docker`, le démarrage du daemon) ; CLI claude (`npm i -g`) ; **le login OAuth** — l'assistant lance `claude` pour toi et attend ; crée `~/.claude.json` s'il manque, parce qu'un bind mount vers un fichier absent fait créer un *répertoire* à sa place, et la première session gèle sur le sélecteur de thème |
+| 2 | Projet | nom, workspace (le crée, et propose un `git clone` s'il est vide), répertoire d'état, nom du conteneur, port — un port déjà pris est détecté et un port libre proposé ; si `/data` n'appartient pas à l'uid 1000, il propose le `chown` (le conteneur tourne en `node`, uid 1000, et sinon n'écrit pas sa base) |
+| 3 | Image | GHCR ou build local. Il **teste le `docker pull` tout de suite** et, s'il échoue, propose le `docker login ghcr.io` en demandant le PAT en saisie masquée |
+| 4 | Transport | `local` ou `ssh` (§3). En `ssh` : génère une clé ed25519 dédiée dans son propre répertoire, l'ajoute à `authorized_keys`, teste la connexion **et** vérifie que `claude` est résolu par le *login shell* — l'agent tourne sous `bash -lc`, donc un CLI qui n'existe que dans la branche interactive de `~/.bashrc` lui est invisible |
+| 5 | Providers | détecte codex / gemini / opencode, propose l'install et le login de chacun, choisit le provider par défaut parmi ceux réellement présents, et épingle `oauth-personal` si le login Google de gemini est détecté |
+| 6 | Accès distant | loopback/tunnel SSH, **Tailscale** (install, `tailscale up`, `tailscale serve`, URL publique déduite du tailnet) ou reverse proxy |
+| 7 | Notifs & MAJ | webhook Discord ; PAT GitHub de détection des releases — **testé en direct** contre l'API, donc tu sais immédiatement si c'est 200, 401 ou 404 (le cas « token valide mais aucun accès au dépôt ») |
+| 8 | Avancé | modèle et effort par défaut, plafonds d'équipes et de workers, niveau de log, éditeur VS Code. Sautable d'une touche |
+| 9 | Revue | récapitulatif complet, secrets masqués, confirmation. L'ancien `.env` est sauvegardé en `.env.backup-<horodatage>`, le nouveau est écrit en 0600 (il contient tes tokens) |
+
+Le déploiement qui suit pulle (ou construit) l'image, lance le conteneur, attend
+`/health` **jusqu'à `boot_complete`** — pas seulement le premier 200 —, affiche le
+token, puis **ce que l'instance pense de chaque provider**, avec la raison quand
+il est indisponible. C'est la question qui suit toujours l'installation ; elle
+est répondue avant d'être posée.
+
+### Options
+
+| Commande | Effet |
+|---|---|
+| `./install.sh` | assistant s'il n'y a pas de `.env` ; sinon un menu : déployer / reconfigurer / quitter |
+| `./install.sh --reconfigure` | rejoue l'assistant, tes valeurs actuelles servant de défauts |
+| `./install.sh --yes` | aucune question : déploie le `.env` existant (CI, cron, script) |
+| `./install.sh --env-file <chemin>` | utilise un autre fichier d'env |
+
+Relance-le après toute modif de `.env`, ou pour passer à un nouveau tag d'image.
 
 > **Équivalent manuel** (si tu préfères ne pas utiliser le script) :
 > ```sh
 > set -a && source .env && set +a
 > docker compose -f examples/docker-compose.dist.yml up -d
+> # transport ssh : ajouter -f examples/docker-compose.ssh.yml
 > docker exec "$SWARM_OS_CONTAINER_NAME" cat /data/token
 > ```
 > L'étape `set -a && source .env` étend `${HOME}` dans tes chemins avant que
@@ -174,11 +281,13 @@ Mets l'hôte sur ton tailnet, puis expose le loopback en HTTPS :
 
 ```sh
 tailscale serve --bg --https=8787 http://127.0.0.1:8787
-tailscale serve --bg --https=8790 http://127.0.0.1:8790   # seulement si l'IDE est actif
 ```
 
-Accès via `https://<hôte>.<tailnet>.ts.net:8787`. Mets `SWARM_OS_PUBLIC_URL` dans
-`.env` à cette URL pour que les liens Discord résolvent. Aucun port public ouvert.
+Une seule ligne : l'éditeur VS Code est reverse-proxifié par swarm-os lui-même
+sous `/ide`, sur ce port. Accès via `https://<hôte>.<tailnet>.ts.net:8787`. Mets
+`SWARM_OS_PUBLIC_URL` dans `.env` à cette URL pour que les liens Discord
+résolvent. Aucun port public ouvert. (L'assistant, étape 6, propose de faire tout
+ça — jusqu'au nom de tailnet, qu'il lit lui-même.)
 
 ### B. Reverse proxy + TLS (domaine public)
 
@@ -186,19 +295,17 @@ Termine le TLS sur Caddy/nginx devant `127.0.0.1:8787`. Exigences :
 
 - le proxy **doit relayer les WebSockets** (le terminal live et le flux d'events
   en dépendent) ;
-- l'éditeur VS Code (port 8790) a besoin de **son propre hôte/port** : `serve-web`
-  ne peut pas vivre sous un sous-chemin, et une page HTTPS ne peut pas embarquer
-  une iframe en HTTP simple. Donne-lui son propre vhost TLS, ou désactive l'éditeur
-  avec `SWARM_OS_IDE_ENABLED=false`.
+- **un seul vhost suffit.** L'éditeur VS Code n'a plus de port à exposer :
+  `serve-web` écoute en loopback *dans* le conteneur et swarm-os le
+  reverse-proxifie sous `/ide` sur le même port, même origine. Ce qui sert l'UI
+  sert l'éditeur, sans second certificat ni iframe en HTTP simple.
+  `SWARM_OS_IDE_ENABLED=false` le désactive complètement.
 
 Exemple Caddy :
 
 ```
 swarm.example.com {
     reverse_proxy 127.0.0.1:8787
-}
-ide.example.com {
-    reverse_proxy 127.0.0.1:8790
 }
 ```
 
@@ -365,8 +472,9 @@ crée aucune release.
   `waiting`** — c'est attendu : ces CLI n'ont aucun signal « bloqué sur un
   humain », donc `SWARM_OS_COMPACT_ON_WAITING` est sans effet pour elles. Voir
   [../providers.md](../providers.md).
-- **Iframe IDE vide** — vérifie que le port 8790 est publié et (en distant) servi
-  en HTTPS cohérent avec le schéma de l'UI.
+- **Iframe IDE vide** — l'éditeur est servi sous `/ide` sur le port de l'UI
+  (aucun port à publier). Vérifie que `SWARM_OS_IDE_ENABLED` n'est pas `false`,
+  et que ton reverse proxy relaie bien les WebSockets sous ce chemin.
 - **SYSTEM UPDATE dit « no SWARM_OS_GITHUB_TOKEN » alors que tu en as mis un** —
   la variable est dans `.env` mais pas dans la liste blanche `environment:` du
   service : elle n'atteint jamais le processus. Ajoute

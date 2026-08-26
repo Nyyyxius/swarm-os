@@ -1,0 +1,65 @@
+# swarm-os — SSH-transport overlay for `docker-compose.dist.yml`.
+#
+# Layered ON TOP of the dist file, never on its own:
+#     docker compose --env-file .env \
+#       -f examples/docker-compose.dist.yml \
+#       -f examples/docker-compose.ssh.yml up -d
+# `./install.sh` adds it automatically whenever the env file says
+# `SWARM_OS_AGENT_TRANSPORT=ssh` — you do not have to remember it.
+#
+# WHAT IT CHANGES: the agent CLI process stops being a child of the container
+# and becomes a process ON THE HOST, reached over `ssh -tt`. That single move
+# buys three things the `local` transport cannot have:
+#
+#   * all four provider CLIs (claude, codex, gemini, opencode) — the image only
+#     carries claude, but the HOST can carry any of them, with the host's own
+#     logins;
+#   * no OAuth refresh race — host and container never write the same
+#     `~/.claude/.credentials.json` from two processes;
+#   * one-click updates (SETTINGS ▸ SYSTEM UPDATE) and plugin host-exec, both of
+#     which need a way to run `docker` on the host.
+#
+# WHAT IT COSTS: an SSH key the container can read, and agents that run with the
+# host user's privileges rather than the container's. That is the deliberate
+# trade — see docs/deploy/install.en.md §3.
+services:
+  swarm-os:
+    extra_hosts:
+      # Linux docker does not resolve host.docker.internal by default. This
+      # gateway alias is what makes SWARM_OS_SSH_TARGET reachable from inside.
+      # (Docker Desktop provides the name already; declaring it is harmless.)
+      - "host.docker.internal:host-gateway"
+    volumes:
+      # The directory holding the private key, read-only. Point HOST_SSH_DIR at
+      # a directory that contains ONLY the swarm-os key (install.sh generates
+      # one under ~/.swarm-os/ssh) rather than your whole ~/.ssh — the container
+      # can read every file it mounts.
+      # The key file must be readable by uid 1000: the image runs as `node`.
+      - ${HOST_SSH_DIR:-${HOME}/.ssh}:/host-ssh:ro
+    environment:
+      SWARM_OS_AGENT_TRANSPORT: ssh
+      # user@host as resolved FROM THE CONTAINER, e.g. ubuntu@host.docker.internal.
+      SWARM_OS_SSH_TARGET: ${SWARM_OS_SSH_TARGET:?SWARM_OS_SSH_TARGET is required by the ssh transport}
+      # Path INSIDE the container, i.e. under /host-ssh.
+      SWARM_OS_SSH_KEY: ${SWARM_OS_SSH_KEY:-/host-ssh/id_ed25519}
+      SWARM_OS_SSH_PORT: ${SWARM_OS_SSH_PORT:-22}
+      # Host-side twins of the bind mounts. The agent resolves paths in the
+      # HOST's filesystem namespace, so /data and /workspace mean nothing to it;
+      # these are how a container path is translated back into a host one.
+      SWARM_OS_HOST_DATA_DIR: ${SWARM_OS_HOST_DATA_DIR:-${DATA_PATH}}
+      SWARM_OS_HOST_WORKSPACE_ROOT: ${SWARM_OS_HOST_WORKSPACE_ROOT:-${WORKSPACE_PATH}}
+      # Per-CLI state directories on the host, where the per-session credential
+      # symlinks point. Their built-in default derives from the CONTAINER's home
+      # (/home/node/.codex …), a path that does not exist on the host: left
+      # unset, the symlinks dangle, the agent starts with no visible error and
+      # fails authentication on its first turn.
+      SWARM_OS_HOST_CLAUDE_DIR: ${SWARM_OS_HOST_CLAUDE_DIR:-${CLAUDE_DIR}}
+      SWARM_OS_HOST_CODEX_DIR: ${SWARM_OS_HOST_CODEX_DIR:-}
+      SWARM_OS_HOST_GEMINI_DIR: ${SWARM_OS_HOST_GEMINI_DIR:-}
+      SWARM_OS_HOST_OPENCODE_DIR: ${SWARM_OS_HOST_OPENCODE_DIR:-}
+      # gemini has no "use whatever works" auth mode, and from in here we cannot
+      # see whether the host holds Google OAuth credentials. Unpinned, gemini
+      # opens an auth picker that repaints for ever: the agent then never goes
+      # idle and never reads its team messages. Set it to oauth-personal when
+      # the host is logged in with a Google account.
+      SWARM_OS_GEMINI_AUTH_TYPE: ${SWARM_OS_GEMINI_AUTH_TYPE:-}
