@@ -18,8 +18,9 @@
  */
 
 import type { SwarmDb, OrchestratorRow, SessionRow } from '../db/index.js';
+import { estimateTokenCostUsd, type TokenCostRates } from '../providers/catalogue.js';
 import type { Orchestrator, OrchestratorView } from './index.js';
-import type { Session, SessionView } from './session.js';
+import type { Session, SessionInit, SessionView, TokenUsageView } from './session.js';
 
 export interface OrchestratorPersistence {
   /** Write the current state of the orchestrator to the persistence layer. */
@@ -263,6 +264,24 @@ export function sessionToRow(
     log_path: view.logPath,
     last_activity_at: view.lastActivityAt,
     hidden_at: null,
+    // Monitoring — `null` (not 0) when the view carries no counter, so a row
+    // written by a caller that doesn't track it stays indistinguishable from
+    // a pre-column row instead of resetting the total to zero.
+    messages_processed: view.messagesProcessed ?? null,
+    // Lot 11 — same `null`-not-`0` rule, one column per bucket. `costUsd` is
+    // deliberately not persisted: it is a multiplication by a live rate card,
+    // and a stored price would freeze what a model cost on the day it ran.
+    tokens_in: view.tokenUsage?.in ?? null,
+    tokens_out: view.tokenUsage?.out ?? null,
+    tokens_cache_read: view.tokenUsage?.cacheRead ?? null,
+    tokens_cache_write: view.tokenUsage?.cacheWrite ?? null,
+    // Lot 13 — the one price that IS persisted, and only when the provider is
+    // the one who quoted it. Read off the basis rather than a field of its own,
+    // so the row keeps being a pure function of the view: an `'estimated'`
+    // `costUsd` is a multiplication we can redo, and writing it here would
+    // freeze today's rate card into a column that outlives it.
+    reported_cost_usd:
+      view.tokenUsage?.costBasis === 'reported' ? view.tokenUsage.costUsd ?? null : null,
   };
 }
 
@@ -311,7 +330,111 @@ export function rowToOrchView(
   };
 }
 
-export function rowToSessionView(row: SessionRow): SessionView {
+/**
+ * Row → resume seed for the cumulative token counters (Lot 11).
+ *
+ * `null` when the row predates the columns, which is what tells the respawned
+ * `Session` "never measured" apart from "measured, and it was zero" — the same
+ * distinction the nullable columns exist to preserve.
+ */
+export function sessionRowTokenSeed(row: SessionRow): SessionInit['tokenUsage'] {
+  if (
+    row.tokens_in == null &&
+    row.tokens_out == null &&
+    row.tokens_cache_read == null &&
+    row.tokens_cache_write == null
+  ) {
+    return null;
+  }
+  return {
+    in: row.tokens_in ?? null,
+    out: row.tokens_out ?? null,
+    cacheRead: row.tokens_cache_read ?? null,
+    cacheWrite: row.tokens_cache_write ?? null,
+  };
+}
+
+/**
+ * Prices one model, for the history views built straight from SQLite
+ * (docs/monitoring-agents.md, Lot 11). Structurally `ModelCatalogue.costRates`;
+ * declared here so this module — a pile of pure row/view mappers — does not
+ * have to depend on the catalogue class to hand a terminated agent its cost.
+ */
+export type SessionCostRates = (
+  providerId: string,
+  modelId: string,
+) => TokenCostRates | null;
+
+/**
+ * The token block of a row, or `undefined` when the row carries no counter at
+ * all — a session that ended before Lot 11, whose four columns read NULL.
+ *
+ * ONE non-null column is enough: they are written together, and a partially
+ * populated row (a hand-edited DB, a half-applied migration) is better read as
+ * "what we know" than dropped entirely.
+ */
+function rowTokenUsage(
+  row: SessionRow,
+  rates: SessionCostRates | null | undefined,
+): TokenUsageView | undefined {
+  const reported = rowCostUsd(row.reported_cost_usd);
+  if (
+    row.tokens_in == null &&
+    row.tokens_out == null &&
+    row.tokens_cache_read == null &&
+    row.tokens_cache_write == null &&
+    reported === null
+  ) {
+    return undefined;
+  }
+  const usage = {
+    in: clampCount(row.tokens_in),
+    out: clampCount(row.tokens_out),
+    cacheRead: clampCount(row.tokens_cache_read),
+    cacheWrite: clampCount(row.tokens_cache_write),
+  };
+  // Lot 13 — a stored REPORTED price wins here for exactly the reason it wins
+  // on a live session: the provider did the arithmetic against its own billing
+  // rules. It also needs no rate card, so a terminated opencode agent keeps a
+  // real dollar figure even when the catalogue is cold or has never heard of
+  // its model.
+  if (reported !== null) {
+    return { ...usage, costUsd: reported, costBasis: 'reported' };
+  }
+  let rate: TokenCostRates | null = null;
+  try {
+    rate = rates?.(row.provider ?? 'claude', row.model) ?? null;
+  } catch {
+    rate = null;
+  }
+  return { ...usage, costUsd: estimateTokenCostUsd(usage, rate), costBasis: 'estimated' };
+}
+
+function clampCount(v: number | null | undefined): number {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? Math.floor(v) : 0;
+}
+
+/**
+ * A persisted dollar amount, or `null` (Lot 13).
+ *
+ * Deliberately NOT `clampCount`: that one floors, which would turn every
+ * sub-dollar bill — i.e. almost all of them — into `0` and quietly report a
+ * day's work as free. `0` and negatives answer `null` too: a reported cost of
+ * zero says nothing the estimate does not say better.
+ */
+function rowCostUsd(v: number | null | undefined): number | null {
+  return typeof v === 'number' && Number.isFinite(v) && v > 0 ? v : null;
+}
+
+export function rowToSessionView(
+  row: SessionRow,
+  /**
+   * Optional rate card. Absent ⇒ `costUsd: null` — the totals are still served,
+   * because a bill an operator can read in tokens beats no row at all.
+   */
+  rates?: SessionCostRates | null,
+): SessionView {
+  const tokenUsage = rowTokenUsage(row, rates);
   return {
     id: row.id,
     orchestratorId: row.orchestrator_id,
@@ -332,5 +455,12 @@ export function rowToSessionView(row: SessionRow): SessionView {
     stopReason: row.stop_reason,
     logPath: row.log_path,
     lastActivityAt: row.last_activity_at,
+    // Monitoring — omitted, not zeroed, for rows written before the column
+    // existed: the UI renders an absent counter as `—` rather than a figure
+    // we never measured.
+    ...(row.messages_processed != null ? { messagesProcessed: row.messages_processed } : {}),
+    // Lot 11 — a terminated agent keeps its bill. Absent, never zeroed, for a
+    // row written before the columns existed.
+    ...(tokenUsage ? { tokenUsage } : {}),
   };
 }

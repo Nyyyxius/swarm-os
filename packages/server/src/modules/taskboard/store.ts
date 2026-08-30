@@ -79,6 +79,15 @@ export interface TaskboardCard {
   autoCreated: boolean;
   /** Epoch millis when soft-deleted, or `null`. */
   hiddenAt: number | null;
+  /**
+   * Lot 16 — dollars attributed to this card, or `null` when the question has
+   * no honest answer: nothing was ever measured, the assignee changed while the
+   * card was in `doing`, or the session has no cost counters. NEVER a doubtful
+   * figure — the web renders nothing at all for `null` (docs/monitoring-agents.md
+   * "Lot 16"). Additive: a `doing → review → doing → done` round trip SUMS its
+   * spells, it does not keep only the last one.
+   */
+  costUsd: number | null;
 }
 
 export interface TaskboardEvent {
@@ -146,7 +155,53 @@ interface CardRow {
   orphaned_at: number | null;
   auto_created: number;
   hidden_at: number | null;
+  /** Lot 16 — settled dollars for this card (see `TaskboardCard.costUsd`). */
+  cost_usd: number | null;
+  /**
+   * Lot 16 bookkeeping — the assignee's CUMULATIVE cost at the instant the card
+   * entered `doing`, or `null` when nothing is in flight. Never leaves the row:
+   * it is a subtrahend, not a fact about the card.
+   */
+  cost_start_usd: number | null;
+  /**
+   * Lot 16 bookkeeping — the session id `cost_start_usd` was snapshotted from.
+   * The delta is only banked if THIS same session is still the assignee on the
+   * way out of `doing`; anything else and the spell is dropped, unattributed.
+   */
+  cost_assignee_session: string | null;
 }
+
+/**
+ * The columns the card INSERT/UPDATE statements bind. The two Lot 16
+ * bookkeeping columns are deliberately absent: they are written apart (
+ * `setCostBookStmt`, same transaction) by the three status transitions that own
+ * them, so every OTHER mutation preserves them without having to know they
+ * exist — and so they never reach `TaskboardCard`, which is the frontend's DTO.
+ */
+type CardWriteRow = Omit<CardRow, 'cost_start_usd' | 'cost_assignee_session'>;
+
+/** What one status transition does to a card's cost columns. */
+interface CardCostPatch {
+  costUsd: number | null;
+  costStartUsd: number | null;
+  costAssigneeSession: string | null;
+}
+
+/**
+ * Lot 16 — how the board turns a card's `assignee` into live money. Injected
+ * (never imported): the store must keep knowing nothing about the orchestrator
+ * module, and it is wired only at boot, AFTER the spawner exists.
+ *
+ * Resolves an assignee — which may be a session id OR an agent name — inside
+ * its own team, and answers the session's CUMULATIVE cost in USD.
+ * `null` when the team is gone, the assignee resolves to nothing, or a name is
+ * ambiguous. `costUsd: null` when the session has no priced counters. Both mean
+ * the same thing to the caller: no snapshot, no attribution.
+ */
+export type TaskboardCostLookup = (
+  orchestratorId: string,
+  assignee: string,
+) => { sessionId: string; costUsd: number | null } | null;
 
 interface EventRow {
   id: string;
@@ -299,10 +354,18 @@ export class TaskboardStore {
   private readonly listOrphanedStmt;
   private readonly listTeamsStmt;
   private readonly expiredOrphansStmt;
+  private readonly setCostBookStmt;
 
-  constructor(swarmDb: SwarmDb, opts: { eventBus?: SwarmEventBus } = {}) {
+  /** Lot 16 — see `setCostLookup`. `null` ⇒ no card is ever priced. */
+  private costLookup: TaskboardCostLookup | null;
+
+  constructor(
+    swarmDb: SwarmDb,
+    opts: { eventBus?: SwarmEventBus; costLookup?: TaskboardCostLookup } = {},
+  ) {
     this.db = swarmDb.db;
     this.eventBus = opts.eventBus ?? null;
+    this.costLookup = opts.costLookup ?? null;
 
     this.db.exec(`
       CREATE TABLE IF NOT EXISTS taskboard_cards (
@@ -323,6 +386,9 @@ export class TaskboardStore {
         orphaned_at         INTEGER,
         auto_created        INTEGER NOT NULL DEFAULT 0,
         hidden_at           INTEGER,
+        cost_usd              REAL,
+        cost_start_usd        REAL,
+        cost_assignee_session TEXT,
         FOREIGN KEY (orchestrator_id) REFERENCES orchestrators(id) ON DELETE CASCADE
       );
       CREATE INDEX IF NOT EXISTS idx_tb_cards_orch_status ON taskboard_cards(orchestrator_id, status);
@@ -355,25 +421,32 @@ export class TaskboardStore {
     this.getCardStmt = this.db.prepare<[string], CardRow>(
       'SELECT * FROM taskboard_cards WHERE id = ?',
     );
-    this.insertCardStmt = this.db.prepare<CardRow>(`
+    this.insertCardStmt = this.db.prepare<CardWriteRow>(`
       INSERT INTO taskboard_cards (
         id, orchestrator_id, title, body, status, assignee_session_id, priority, labels,
         order_key, created_by, created_at, updated_at, version, closed_at, orphaned_at,
-        auto_created, hidden_at
+        auto_created, hidden_at, cost_usd
       ) VALUES (
         @id, @orchestrator_id, @title, @body, @status, @assignee_session_id, @priority, @labels,
         @order_key, @created_by, @created_at, @updated_at, @version, @closed_at, @orphaned_at,
-        @auto_created, @hidden_at
+        @auto_created, @hidden_at, @cost_usd
       )
     `);
-    this.updateCardStmt = this.db.prepare<CardRow>(`
+    this.updateCardStmt = this.db.prepare<CardWriteRow>(`
       UPDATE taskboard_cards SET
         title = @title, body = @body, status = @status,
         assignee_session_id = @assignee_session_id, priority = @priority, labels = @labels,
         order_key = @order_key, updated_at = @updated_at, version = @version,
-        closed_at = @closed_at, orphaned_at = @orphaned_at, hidden_at = @hidden_at
+        closed_at = @closed_at, orphaned_at = @orphaned_at, hidden_at = @hidden_at,
+        cost_usd = @cost_usd
       WHERE id = @id
     `);
+    // Lot 16 bookkeeping, written apart from the card itself (see CardWriteRow):
+    // only the three status transitions touch it, always inside their own
+    // transaction, so no other mutation can clobber an in-flight snapshot.
+    this.setCostBookStmt = this.db.prepare<[number | null, string | null, string]>(
+      'UPDATE taskboard_cards SET cost_start_usd = ?, cost_assignee_session = ? WHERE id = ?',
+    );
     this.listByOrchStmt = this.db.prepare<[string], CardRow>(
       'SELECT * FROM taskboard_cards WHERE orchestrator_id = ? ORDER BY order_key ASC',
     );
@@ -436,6 +509,11 @@ export class TaskboardStore {
     const additions = [
       'ALTER TABLE taskboard_cards ADD COLUMN orphaned_at INTEGER',
       'ALTER TABLE taskboard_cards ADD COLUMN auto_created INTEGER NOT NULL DEFAULT 0',
+      // Lot 16 — cost per card. NULL-able with no default on purpose: NULL is
+      // "never attributed", which is a different statement from `0`.
+      'ALTER TABLE taskboard_cards ADD COLUMN cost_usd REAL',
+      'ALTER TABLE taskboard_cards ADD COLUMN cost_start_usd REAL',
+      'ALTER TABLE taskboard_cards ADD COLUMN cost_assignee_session TEXT',
     ];
     for (const ddl of additions) {
       try {
@@ -447,6 +525,92 @@ export class TaskboardStore {
         }
       }
     }
+  }
+
+  // --- cost per card (Lot 16) ----------------------------------------------
+
+  /**
+   * Late wiring: this store is built at boot BEFORE the spawner exists, so the
+   * lookup cannot be a constructor dependency in the real server (mirror of
+   * `SkillsSubsystem.setOrchestratorLookup`). Until it is set — and on any
+   * deployment that never sets it — every card simply stays unpriced.
+   */
+  setCostLookup(lookup: TaskboardCostLookup | null): void {
+    this.costLookup = lookup;
+  }
+
+  /**
+   * Resolve a card's assignee to its session id + cumulative dollars. Never
+   * throws and never guesses: a lookup that blows up, an unknown assignee or an
+   * ambiguous name all answer `null`, which costs a snapshot and nothing else.
+   */
+  private resolveAssigneeCost(
+    orchestratorId: string,
+    assignee: string | null,
+  ): { sessionId: string; costUsd: number | null } | null {
+    if (!assignee || !this.costLookup) return null;
+    try {
+      const hit = this.costLookup(orchestratorId, assignee);
+      if (!hit || typeof hit.sessionId !== 'string' || hit.sessionId.length === 0) return null;
+      const costUsd =
+        typeof hit.costUsd === 'number' && Number.isFinite(hit.costUsd) ? hit.costUsd : null;
+      return { sessionId: hit.sessionId, costUsd };
+    } catch (err) {
+      log.warn({ event: 'taskboard.cost_lookup_failed', orchestratorId, error: String(err) });
+      return null;
+    }
+  }
+
+  /**
+   * THE one place the per-card dollar rule lives. Given a card's row as it
+   * stands BEFORE a status write and the status it is about to take, answer the
+   * cost columns to write — or `null` when this transition has nothing to do
+   * with the accounting (neither end is `doing`), so the caller writes nothing.
+   *
+   * Entering `doing` snapshots the assignee's running total; leaving it banks
+   * `now − start`, clamped at 0 (a session whose counters reset must not credit
+   * the card a negative bill) and ADDED to what the card already owes, so a
+   * `doing → review → doing → done` round trip sums its spells.
+   *
+   * The delta is banked ONLY if the very session it was snapshotted from is
+   * still the assignee and still has a priced total. Otherwise the spell is
+   * dropped and `cost_usd` is left exactly as it was — `null` if it never held
+   * a figure. Attribution is honest or it is absent; it is never approximate.
+   */
+  private costTransition(row: CardRow, to: TaskboardStatus): CardCostPatch | null {
+    const from = this.normalizeStatus(row.status);
+    if (from === to) return null;
+
+    if (to === 'doing') {
+      const resolved = this.resolveAssigneeCost(row.orchestrator_id, row.assignee_session_id);
+      // No session, no counters ⇒ no snapshot: with no start there can be no
+      // delta later, which is the point.
+      if (!resolved || resolved.costUsd == null) {
+        return { costUsd: row.cost_usd, costStartUsd: null, costAssigneeSession: null };
+      }
+      return {
+        costUsd: row.cost_usd,
+        costStartUsd: resolved.costUsd,
+        costAssigneeSession: resolved.sessionId,
+      };
+    }
+
+    if (from === 'doing') {
+      let costUsd = row.cost_usd;
+      if (row.cost_start_usd != null && row.cost_assignee_session != null) {
+        const resolved = this.resolveAssigneeCost(row.orchestrator_id, row.assignee_session_id);
+        if (
+          resolved &&
+          resolved.sessionId === row.cost_assignee_session &&
+          resolved.costUsd != null
+        ) {
+          costUsd = (row.cost_usd ?? 0) + Math.max(0, resolved.costUsd - row.cost_start_usd);
+        }
+      }
+      return { costUsd, costStartUsd: null, costAssigneeSession: null };
+    }
+
+    return null;
   }
 
   // --- helpers --------------------------------------------------------------
@@ -482,6 +646,9 @@ export class TaskboardStore {
       orphanedAt: row.orphaned_at,
       autoCreated: row.auto_created !== 0,
       hiddenAt: row.hidden_at,
+      // Lot 16 — straight through, `null` included: an absent figure is a
+      // statement ("never attributed"), not a zero to be papered over.
+      costUsd: row.cost_usd,
     };
   }
 
@@ -498,7 +665,7 @@ export class TaskboardStore {
   }
 
   /** Row → the full `@`-named object the INSERT/UPDATE prepared statements need. */
-  private cardToRow(c: TaskboardCard): CardRow {
+  private cardToRow(c: TaskboardCard): CardWriteRow {
     return {
       id: c.id,
       orchestrator_id: c.orchestratorId,
@@ -517,6 +684,7 @@ export class TaskboardStore {
       orphaned_at: c.orphanedAt,
       auto_created: c.autoCreated ? 1 : 0,
       hidden_at: c.hiddenAt,
+      cost_usd: c.costUsd,
     };
   }
 
@@ -693,6 +861,11 @@ export class TaskboardStore {
       orphanedAt: null,
       autoCreated: input.autoCreated ?? false,
       hiddenAt: null,
+      // Lot 16 — a brand-new card has cost nothing yet. Note that a card
+      // CREATED straight into `doing` takes no snapshot: creation is not a
+      // transition, and v1 keeps the rule to the one place transitions happen.
+      // Such a card simply stays unpriced until its next real move.
+      costUsd: null,
     };
 
     const deps = (input.dependsOn ?? []).filter((d) => d && d !== card.id);
@@ -781,16 +954,19 @@ export class TaskboardStore {
     const status = input.status as TaskboardStatus;
     const from = this.normalizeStatus(row.status);
     const now = Date.now();
+    const cost = this.costTransition(row, status);
     const next: TaskboardCard = {
       ...this.rowToCard(row),
       status,
       orderKey: this.appendKey(row.orchestrator_id, status),
       updatedAt: now,
       version: row.version + 1,
+      ...(cost ? { costUsd: cost.costUsd } : {}),
     };
 
     this.db.transaction(() => {
       this.updateCardStmt.run(this.cardToRow(next));
+      if (cost) this.setCostBookStmt.run(cost.costStartUsd, cost.costAssigneeSession, next.id);
       this.insertEventStmt.run(this.makeEvent(next, 'moved', input.actorSessionId, { from, to: status }));
     })();
 
@@ -918,6 +1094,9 @@ export class TaskboardStore {
       throw new TaskboardConflictError(row.version, input.expectedVersion);
     }
     const now = Date.now();
+    // `board.close` is a `doing → done` exit like any other — the accounting
+    // does not care which tool got the card there.
+    const cost = this.costTransition(row, 'done');
     const next: TaskboardCard = {
       ...this.rowToCard(row),
       status: 'done',
@@ -925,9 +1104,11 @@ export class TaskboardStore {
       orderKey: this.appendKey(row.orchestrator_id, 'done'),
       updatedAt: now,
       version: row.version + 1,
+      ...(cost ? { costUsd: cost.costUsd } : {}),
     };
     this.db.transaction(() => {
       this.updateCardStmt.run(this.cardToRow(next));
+      if (cost) this.setCostBookStmt.run(cost.costStartUsd, cost.costAssigneeSession, next.id);
       this.insertEventStmt.run(this.makeEvent(next, 'closed', input.actorSessionId, {}));
     })();
     this.emit('closed', next, {});
@@ -941,6 +1122,9 @@ export class TaskboardStore {
       throw new TaskboardConflictError(row.version, input.expectedVersion);
     }
     const now = Date.now();
+    // A reopen out of `doing` (rare, but reachable) settles the spell exactly
+    // like any other exit rather than silently dropping it on the floor.
+    const cost = this.costTransition(row, 'todo');
     const next: TaskboardCard = {
       ...this.rowToCard(row),
       status: 'todo',
@@ -948,9 +1132,11 @@ export class TaskboardStore {
       orderKey: this.appendKey(row.orchestrator_id, 'todo'),
       updatedAt: now,
       version: row.version + 1,
+      ...(cost ? { costUsd: cost.costUsd } : {}),
     };
     this.db.transaction(() => {
       this.updateCardStmt.run(this.cardToRow(next));
+      if (cost) this.setCostBookStmt.run(cost.costStartUsd, cost.costAssigneeSession, next.id);
       this.insertEventStmt.run(this.makeEvent(next, 'reopened', input.actorSessionId, {}));
     })();
     this.emit('reopened', next, {});

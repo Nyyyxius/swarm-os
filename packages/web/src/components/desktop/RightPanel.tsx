@@ -11,13 +11,24 @@ import {
   formatUptime, formatClockShort, formatRelative,
   statusChipClass, statusLabel,
 } from '../../lib/format';
-import { formatLoadPercent } from '../../lib/loadPercent';
+import {
+  contextBarWidth, contextColorVar, contextLevel,
+  formatContextPercent, formatContextTokens,
+} from '../../lib/contextPercent';
+import type { ContextUsageView } from '../../api/client';
 
 /** Action déclenchable depuis le panneau droit. */
 export type AgentAction =
   | 'stop' | 'start' | 'pause' | 'resume' | 'kill' | 'restart'
   /** Soft-delete a terminal session/team from the map. */
-  | 'remove';
+  | 'remove'
+  /**
+   * Monitoring — arm a deferred context reset on THIS agent. Unlike every
+   * other action above, these two are routed by the controller WITHOUT
+   * reading the current selection: the monitoring page fires them on rows
+   * that are not the selected agent (`onContextReset`).
+   */
+  | 'compact' | 'clear';
 
 /** Forme partielle d'un agent (session) attendue par le RightPanel. */
 export interface RightPanelAgent {
@@ -28,8 +39,14 @@ export interface RightPanelAgent {
   pid: number | null;
   startedAt: string | number | null;
   lastActivityAt: string | number | null;
-  /** load (0..1) — pour l'instant `undefined` ; affichera "—" via formatLoadPercent. */
-  load?: number;
+  /**
+   * Monitoring — context-window usage of this agent, or `null` when the
+   * provider/session offers no telemetry. The CTX cell renders `—` rather
+   * than a synthesised number (cf. `lib/contextPercent.ts`).
+   */
+  contextUsage?: ContextUsageView | null;
+  /** A compact/clear is armed and will fire at the next idle. */
+  contextResetPending?: boolean;
   /** Compteur log lines (xterm gérera plus tard). */
   logLines?: number;
   /** WRITER/READER pip — dérivé du hello frame WS dans Terminal.tsx. */
@@ -180,6 +197,19 @@ export default function RightPanel({
       });
       return;
     }
+    if (action === 'clear') {
+      // CLEAR wipes the agent's whole working context — irreversible, and
+      // unlike KILL it leaves the agent running, so a mis-click is not even
+      // obvious afterwards. COMPACT, which only summarises, goes through
+      // directly (bottom of this function).
+      setConfirm({
+        action,
+        label: isLead ? 'CLEAR LEAD CONTEXT' : 'CLEAR WORKER CONTEXT',
+        body: `CLEAR ${selected.name} will wipe its entire conversation context at the next idle. Its role preamble is restored through the durable channel and its inbox is re-signalled, but everything it currently holds in-context — plans, findings, half-finished reasoning — is lost. Use COMPACT to summarise instead.`,
+        cls: 'danger',
+      });
+      return;
+    }
     // Toute autre action passe directement (PAUSE, RESTART, RESUME, etc.).
     onAction(selected.id, action);
   }
@@ -221,6 +251,39 @@ export default function RightPanel({
       status === 'killed' || status === 'exited' || status === 'failed';
     const writer = selected.writer !== false;
     const hasDiscord = !!team.discordWebhook;
+
+    // ── CTX cell (replaces the dead LOAD placeholder) ────────────────────
+    // A terminated session serialises no usage at all, so we short-circuit
+    // to `—` rather than painting the last snapshot as if it were live.
+    const usage = stopped || isFailed ? null : (selected.contextUsage ?? null);
+    const ctxStale = !!usage?.stale;
+    const ctxLevel = contextLevel(usage?.pct);
+    // A stale reading drops to the muted token rather than keeping its
+    // threshold colour: an amber 82% that is actually a pre-`/clear` leftover
+    // would read as a live warning and could earn the agent a second,
+    // pointless reset. Muted + the STALE tag says "last known", not "now".
+    const ctxColor = ctxStale ? 'var(--text-mute)' : contextColorVar(ctxLevel);
+    const ctxPct = formatContextPercent(usage?.pct);
+    const ctxWidth = contextBarWidth(usage?.pct);
+    const ctxTokens = usage
+      ? formatContextTokens(usage.usedTokens, usage.limitTokens)
+      : null;
+    const ctxTitle = usage
+      ? `context ${ctxPct} of window · ${ctxTokens ?? '—'} tokens · read from ${usage.basis} ${formatRelative(usage.updatedAt)}${ctxStale ? ' · STALE: awaiting the next turn after a reset' : ''}`
+      : 'no context telemetry for this agent (provider without a readable transcript, or session not running)';
+
+    // ── COMPACT / CLEAR gating ───────────────────────────────────────────
+    // A paused agent will never reach the idle point the reset fires at, and
+    // a terminated one has no PTY left; an already-armed reset must not be
+    // queued twice (the server answers 409 RESET_ALREADY_PENDING anyway, but
+    // an inert button says so without a round-trip).
+    const resetPending = !!selected.contextResetPending;
+    const ctxActionsDisabled = stopped || isFailed || isPaused || resetPending;
+    const ctxActionTitle = resetPending
+      ? 'reset armed — fires at next idle'
+      : ctxActionsDisabled
+        ? 'agent is not running — nothing to reset'
+        : null;
 
     return (
       <>
@@ -297,6 +360,15 @@ export default function RightPanel({
               ↻ RESUMED {team.resumeCount}×
             </span>
           )}
+          {resetPending && (
+            <span
+              className="discord-chip"
+              style={{ color: 'var(--warn)', borderColor: 'var(--warn)' }}
+              title="a context reset is armed on this agent — it fires at the next idle, never mid-turn"
+            >
+              ◷ RESET ARMED
+            </span>
+          )}
         </div>
 
         <div className="pr-cfgline">
@@ -322,11 +394,18 @@ export default function RightPanel({
         </div>
 
         <div className="pr-stats">
-          <div className="pr-stat">
-            <div className="v">
-              {stopped ? '—' : formatLoadPercent(selected.load)}
+          <div className="pr-stat" title={ctxTitle}>
+            <div className="v" style={{ color: ctxColor }}>
+              {ctxPct}
+              {ctxStale && <span className="pr-ctx-stale">STALE</span>}
             </div>
-            <div className="k">LOAD</div>
+            <div
+              className="pill-bar pr-ctx-bar"
+              style={{ opacity: ctxStale ? 0.45 : 1 }}
+            >
+              <i className={ctxLevel ?? 'stopped'} style={{ width: `${ctxWidth}%` }} />
+            </div>
+            <div className="k">CTX{ctxTokens ? ` · ${ctxTokens}` : ''}</div>
           </div>
           <div className="pr-stat">
             <div className="v">{stopped ? '—' : formatUptime(selected.startedAt)}</div>
@@ -400,6 +479,24 @@ export default function RightPanel({
           onClick={() => onSpawnWorker(team)}
           title={isLead ? 'spawn a worker in this team' : 'lead-only action'}>
           {ICON.fork}<span>+ WORKER</span>
+        </button>
+      </div>
+
+      {/* Second action row — context control. Kept OUT of the 5-column grid
+          above: those five are lifecycle actions on the process, these two
+          act on what the agent remembers. Same chrome, own row. */}
+      <div className="pr-actions pr-actions-ctx">
+        <button className="pr-action primary"
+          disabled={ctxActionsDisabled}
+          title={ctxActionTitle ?? 'summarise this agent\'s context — runs at its next idle, never mid-turn'}
+          onClick={() => onAction(selected.id, 'compact')}>
+          {ICON.collapse}<span>COMPACT</span>
+        </button>
+        <button className="pr-action danger"
+          disabled={ctxActionsDisabled}
+          title={ctxActionTitle ?? 'wipe this agent\'s context — runs at its next idle, never mid-turn'}
+          onClick={() => askConfirm('clear')}>
+          {ICON.trash}<span>CLEAR</span>
         </button>
       </div>
 

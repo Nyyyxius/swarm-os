@@ -1,5 +1,5 @@
 import { describe, it, expect, beforeEach, afterEach, vi } from 'vitest';
-import { api, getToken, setToken, HttpError } from './client';
+import { api, apiErrorMessage, getToken, setToken, HttpError } from './client';
 
 /**
  * Phase 7 — REST client wrapper.
@@ -412,5 +412,134 @@ describe('Lot 5b — export / pack API functions', () => {
     try { await api.installPack(file); } catch (e) { err = e; }
     expect(err).toBeInstanceOf(HttpError);
     expect((err as HttpError).status).toBe(422);
+  });
+});
+
+describe('apiErrorMessage — both server error conventions', () => {
+  // The server speaks two dialects and an operator-facing string must survive
+  // both. Losing the written reason turns an actionable 409 into a bare
+  // machine code, which names the failure without saying what to do about it.
+  function httpError(status: number, body: unknown): HttpError {
+    return new HttpError(`HTTP ${status} POST /x`, status, body);
+  }
+
+  it('renders `{error: reason, code: CODE}` as "CODE: reason"', () => {
+    const msg = apiErrorMessage(
+      httpError(409, { error: 'provider gemini is unavailable', code: 'PROVIDER_UNAVAILABLE' }),
+    );
+    expect(msg).toBe('PROVIDER_UNAVAILABLE: provider gemini is unavailable');
+  });
+
+  it('keeps the reason from `{error: CODE, message: reason}` (session routes)', () => {
+    // `sendActionError` in http/routes/sessions.ts — this is what
+    // POST /sessions/:id/context-reset returns on a 409.
+    const msg = apiErrorMessage(
+      httpError(409, {
+        error: 'PROVIDER_NO_RESET',
+        message: 'provider gemini has no context-reset command',
+      }),
+    );
+    expect(msg).toContain('PROVIDER_NO_RESET');
+    expect(msg).toContain('provider gemini has no context-reset command');
+  });
+
+  it('does not repeat itself when message duplicates error', () => {
+    const msg = apiErrorMessage(httpError(409, { error: 'boom', message: 'boom' }));
+    expect(msg).toBe('boom');
+  });
+
+  it('still appends unavailableReason and the known-providers list', () => {
+    const msg = apiErrorMessage(
+      httpError(400, {
+        error: 'unknown provider',
+        code: 'UNKNOWN_PROVIDER',
+        unavailableReason: 'binary not on PATH',
+        known: ['claude', 'codex'],
+      }),
+    );
+    expect(msg).toBe(
+      'UNKNOWN_PROVIDER: unknown provider — binary not on PATH — known providers: claude, codex',
+    );
+  });
+
+  it('falls back to the bare HTTP line when the body carries nothing usable', () => {
+    expect(apiErrorMessage(httpError(500, undefined))).toBe('HTTP 500 POST /x');
+  });
+
+  it('handles a non-HttpError rejection', () => {
+    expect(apiErrorMessage(new Error('network down'))).toBe('network down');
+    expect(apiErrorMessage('plain string')).toBe('plain string');
+  });
+});
+
+// ── Lot 15 — cost export ────────────────────────────────────────────────────
+//
+// The function's whole job is to hand back the server's document UNTOUCHED
+// over an authenticated request. Two ways to get that wrong are worth a
+// regression test: parsing the JSON flavour (which would destroy the exact
+// bytes the operator asked to save) and swallowing the 404 that an older
+// server answers with (which would produce an empty file instead of a notice).
+
+describe('exportCosts (Lot 15)', () => {
+  it('sends the auth header and the format + days query', async () => {
+    setToken('cost-token');
+    globalThis.fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response('day,orchestrator_id\n2026-08-30,o1\n', {
+        status: 200,
+        headers: { 'content-type': 'text/csv' },
+      });
+    }) as typeof fetch;
+
+    const text = await api.exportCosts('csv', 30);
+
+    const last = calls[calls.length - 1]!;
+    expect(last.url).toBe('/metrics/costs/export?format=csv&days=30');
+    expect((last.init?.headers as Record<string, string>)['X-Auth-Token']).toBe('cost-token');
+    expect(text).toBe('day,orchestrator_id\n2026-08-30,o1\n');
+  });
+
+  it('omits days entirely when the caller does not ask for a window', async () => {
+    setToken('t');
+    globalThis.fetch = vi.fn(async (url: RequestInfo | URL, init?: RequestInit) => {
+      calls.push({ url: String(url), init });
+      return new Response('', { status: 200, headers: { 'content-type': 'text/csv' } });
+    }) as typeof fetch;
+
+    await api.exportCosts('csv');
+
+    expect(calls[calls.length - 1]!.url).toBe('/metrics/costs/export?format=csv');
+  });
+
+  it('returns the JSON flavour as raw text — never a parsed object', async () => {
+    setToken('t');
+    const body = '{"days":30,"rows":[{"day":"2026-08-30","cost_usd":1.5}]}';
+    globalThis.fetch = vi.fn(async () =>
+      new Response(body, { status: 200, headers: { 'content-type': 'application/json' } }),
+    ) as typeof fetch;
+
+    const text = await api.exportCosts('json', 90);
+
+    expect(typeof text).toBe('string');
+    expect(text).toBe(body);
+  });
+
+  it('throws HttpError(404) on a server predating the endpoint', async () => {
+    setToken('t');
+    globalThis.fetch = vi.fn(async () =>
+      new Response('{"error":"not found"}', {
+        status: 404,
+        headers: { 'content-type': 'application/json' },
+      }),
+    ) as typeof fetch;
+
+    let err: unknown = null;
+    try {
+      await api.exportCosts('csv', 30);
+    } catch (e) {
+      err = e;
+    }
+    expect(err).toBeInstanceOf(HttpError);
+    expect((err as HttpError).status).toBe(404);
   });
 });

@@ -84,6 +84,14 @@ export interface FakeProviderOptions {
    * without a real binary.
    */
   buildSpawnError?: string;
+  /**
+   * Per-session HTTP control plane (opencode, from Lot 7). Omitted ⇒ this fake
+   * answers `null`, which models the port that failed to bind: the TUI carries
+   * on silently and the session simply has no measurement.
+   */
+  controlPlane?: (
+    configDir: string | null,
+  ) => { baseUrl: string; username: string; password: string } | null;
 }
 
 export class FakeProvider implements AgentProvider {
@@ -159,6 +167,12 @@ export class FakeProvider implements AgentProvider {
 
   contextResetLine(cmd: ContextResetCommand, instructions?: string): string | null {
     return this._contextResetLine(cmd, instructions);
+  }
+
+  controlPlane(
+    configDir: string | null,
+  ): { baseUrl: string; username: string; password: string } | null {
+    return this._opts.controlPlane?.(configDir) ?? null;
   }
 
   mcpToolName(logicalName: string): string {

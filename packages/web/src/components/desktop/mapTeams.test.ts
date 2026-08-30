@@ -58,22 +58,22 @@ function orch(over: Partial<OrchestratorView> = {}): OrchestratorView {
 
 describe('toMapViewTeams', () => {
   it('returns [] when input is empty', () => {
-    expect(toMapViewTeams([], 0, new Map())).toEqual([]);
+    expect(toMapViewTeams([], 0)).toEqual([]);
   });
 
   it('skips orchestrators without a leadSessionId', () => {
     const o = orch({ leadSessionId: null });
-    expect(toMapViewTeams([o], 0, new Map())).toEqual([]);
+    expect(toMapViewTeams([o], 0)).toEqual([]);
   });
 
   it('skips ended orchestrators (history rows)', () => {
     const o = orch({ endedAt: '2026-05-22T11:00:00.000Z' });
-    expect(toMapViewTeams([o], 0, new Map())).toEqual([]);
+    expect(toMapViewTeams([o], 0)).toEqual([]);
   });
 
   it('skips orchestrators with empty sessions array', () => {
     const o = orch({ sessions: [] });
-    expect(toMapViewTeams([o], 0, new Map())).toEqual([]);
+    expect(toMapViewTeams([o], 0)).toEqual([]);
   });
 
   it('skips orchestrators where leadSessionId is not in sessions', () => {
@@ -81,12 +81,12 @@ describe('toMapViewTeams', () => {
     // hasn't surfaced yet (transient between create + first list snapshot).
     const wk = sess({ id: 'wk-1', type: 'worker' });
     const o = orch({ leadSessionId: 'ghost', sessions: [wk] });
-    expect(toMapViewTeams([o], 0, new Map())).toEqual([]);
+    expect(toMapViewTeams([o], 0)).toEqual([]);
   });
 
   it('computes the correct angle for N=1 (top, -π/2)', () => {
     const o = orch();
-    const teams = toMapViewTeams([o], 0, new Map());
+    const teams = toMapViewTeams([o], 0);
     expect(teams).toHaveLength(1);
     expect(teams[0]?.angle).toBeCloseTo(-Math.PI / 2, 6);
   });
@@ -100,7 +100,6 @@ describe('toMapViewTeams', () => {
         orch({ id: 'd', leadSessionId: 'ld', sessions: [sess({ id: 'ld' })] }),
       ],
       0,
-      new Map(),
     );
     expect(teams).toHaveLength(4);
     expect(teams[0]?.angle).toBeCloseTo(-Math.PI / 2, 6);
@@ -113,7 +112,7 @@ describe('toMapViewTeams', () => {
     const lead = sess({ id: 'l1', type: 'lead', role: 'ORCHESTRATOR' });
     const worker = sess({ id: 'w1', type: 'worker', role: 'BUILDER' });
     const o = orch({ leadSessionId: lead.id, sessions: [lead, worker] });
-    const teams = toMapViewTeams([o], 0, new Map());
+    const teams = toMapViewTeams([o], 0);
     expect(teams[0]?.lead.shape).toBe('diamond');
     expect(teams[0]?.workers[0]?.shape).toBe('triangle');
   });
@@ -121,7 +120,7 @@ describe('toMapViewTeams', () => {
   it('falls back to circle for unknown roles', () => {
     const lead = sess({ id: 'l1', type: 'lead', role: 'HUNTER' });
     const o = orch({ leadSessionId: lead.id, sessions: [lead] });
-    const teams = toMapViewTeams([o], 0, new Map());
+    const teams = toMapViewTeams([o], 0);
     expect(teams[0]?.lead.shape).toBe('circle');
   });
 
@@ -130,17 +129,19 @@ describe('toMapViewTeams', () => {
     const w1 = sess({ id: 'w1', type: 'worker', role: 'BUILDER' });
     const w2 = sess({ id: 'w2', type: 'worker', role: 'ANALYST' });
     const o = orch({ leadSessionId: lead.id, sessions: [lead, w1, w2] });
-    const teams = toMapViewTeams([o], 0, new Map());
+    const teams = toMapViewTeams([o], 0);
     expect(teams[0]?.workers.map((w) => w.id)).toEqual(['w1', 'w2']);
     expect(teams[0]?.lead.id).toBe('l1');
   });
 
-  it('injects inbox counts from the map (missing → 0)', () => {
-    const lead = sess({ id: 'l1', type: 'lead' });
+  it('reads inbox counts off SessionView.inboxCount (absent → 0)', () => {
+    // Monitoring Lot 1 replaced the N+1 `peekInbox` poll with a field the
+    // server decorates on the snapshot. A backend predating it omits the
+    // field entirely, and the badge must read 0 rather than NaN/undefined.
+    const lead = sess({ id: 'l1', type: 'lead', inboxCount: 3 });
     const w1 = sess({ id: 'w1', type: 'worker' });
     const o = orch({ leadSessionId: lead.id, sessions: [lead, w1] });
-    const counts = new Map<string, number>([['l1', 3]]);
-    const teams = toMapViewTeams([o], 0, counts);
+    const teams = toMapViewTeams([o], 0);
     expect(teams[0]?.lead.inbox).toBe(3);
     expect(teams[0]?.workers[0]?.inbox).toBe(0);
   });
@@ -151,8 +152,8 @@ describe('toMapViewTeams', () => {
     const o = orch({ leadSessionId: lead.id, sessions: [lead] });
     const before = new Date(lastActivityAt).getTime() + 10_000; // 10 s
     const after = new Date(lastActivityAt).getTime() + 35_000;  // 35 s
-    expect(toMapViewTeams([o], before, new Map())[0]?.lead.status).toBe('running');
-    expect(toMapViewTeams([o], after, new Map())[0]?.lead.status).toBe('idle');
+    expect(toMapViewTeams([o], before)[0]?.lead.status).toBe('running');
+    expect(toMapViewTeams([o], after)[0]?.lead.status).toBe('idle');
   });
 
   it('does NOT downgrade non-running statuses to idle (waiting stays waiting)', () => {
@@ -160,20 +161,20 @@ describe('toMapViewTeams', () => {
     const lead = sess({ id: 'l1', type: 'lead', status: 'waiting', lastActivityAt });
     const o = orch({ leadSessionId: lead.id, sessions: [lead] });
     const t = new Date(lastActivityAt).getTime() + 60_000;
-    expect(toMapViewTeams([o], t, new Map())[0]?.lead.status).toBe('waiting');
+    expect(toMapViewTeams([o], t)[0]?.lead.status).toBe('waiting');
   });
 
   it('passes through team status from the orchestrator', () => {
     const o = orch({ status: 'failed' });
-    const teams = toMapViewTeams([o], 0, new Map());
+    const teams = toMapViewTeams([o], 0);
     expect(teams[0]?.status).toBe('failed');
   });
 });
 
 describe('toNodeAgent', () => {
   it('produces a NodeAgent with the expected primitives', () => {
-    const s = sess({ id: 'x', name: 'FOO', role: 'MEMORY', status: 'running' });
-    const n = toNodeAgent(s, 0, 7);
+    const s = sess({ id: 'x', name: 'FOO', role: 'MEMORY', status: 'running', inboxCount: 7 });
+    const n = toNodeAgent(s, 0);
     expect(n).toEqual({
       id: 'x',
       name: 'FOO',

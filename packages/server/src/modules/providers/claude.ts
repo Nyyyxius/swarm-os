@@ -26,6 +26,7 @@ import {
   refreshClaudeSharedFiles,
 } from '../../runtime/claude-init.js';
 import {
+  buildHookCommand,
   buildNotificationHookCommand,
   linkSharedState,
   writeSessionFile,
@@ -352,6 +353,16 @@ export class ClaudeProvider implements AgentProvider {
         hookToken: req.hookToken,
         mainHttpPort: req.mainHttpPort,
       });
+      // Monitoring (docs/monitoring-agents.md, Lot 2) — `SessionStart` is the
+      // only thing that ever tells us WHERE this agent's transcript is, and it
+      // is re-fired at every boot, `/clear` and `/compact` (spike S1a/S1c/S1d).
+      const transcriptCmd = buildHookCommand({
+        kind: 'session.transcript',
+        orchestratorId: req.orchestratorId,
+        sessionId: req.sessionId,
+        hookToken: req.hookToken,
+        mainHttpPort: req.mainHttpPort,
+      });
       // Pre-accept the "bypass permissions mode" disclaimer at the
       // user-settings level. claude-code 2.1.143 migrates the legacy
       // `.claude.json#bypassPermissionsModeAccepted` flag into
@@ -382,6 +393,22 @@ export class ClaudeProvider implements AgentProvider {
                 {
                   type: 'command',
                   command: shellCmd,
+                },
+              ],
+            },
+          ],
+          // Empty matcher = EVERY source. The spike exercised `startup`,
+          // `clear` and `compact` (and `--print`, which reuses `startup`);
+          // `resume` and `fork` were not, and an empty matcher is what makes
+          // them work anyway instead of silently dropping the one payload that
+          // would have re-pointed the tracker at a forked transcript.
+          SessionStart: [
+            {
+              matcher: '',
+              hooks: [
+                {
+                  type: 'command',
+                  command: transcriptCmd,
                 },
               ],
             },

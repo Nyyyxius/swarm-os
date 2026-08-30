@@ -6,6 +6,7 @@
 // controller's waitingToasts / handleToastOpen / dismissToast (fed by the
 // single lifted useEvents).
 import { formatRelative } from '../../lib/format';
+import { formatBudgetLine } from '../../lib/budget';
 import { useSwarmController } from '../../controller/SwarmController';
 
 const MAX_VISIBLE = 4;
@@ -14,7 +15,14 @@ export default function MobileToasts() {
   const c = useSwarmController();
   const items = c.waitingToasts;
   const approvals = c.approvalToasts;
-  if (items.length === 0 && approvals.length === 0) return null;
+  const notices = c.notices;
+  const budgets = c.budgetToasts;
+  if (
+    items.length === 0 && approvals.length === 0
+    && notices.length === 0 && budgets.length === 0
+  ) {
+    return null;
+  }
 
   const visible = items.slice(0, MAX_VISIBLE);
   const olderCount = items.length - visible.length;
@@ -22,7 +30,60 @@ export default function MobileToasts() {
 
   return (
     <div className="m-toasts">
-      {/* Approvals first — actionable and time-sensitive (P3). */}
+      {/* Budget breaches lead (Lot 14). This stack is a plain `column` — the
+          first child is the TOP one — so leading it puts the one notice that
+          reports a possibly-paused team where a thumb reaches first. */}
+      {budgets.map((t) => (
+        <div className="m-toast m-toast-budget" key={t.id}>
+          <div className="m-toast-head">
+            <span className="m-toast-title">BUDGET EXCEEDED</span>
+            <span className="m-toast-time">{formatRelative(t.at)}</span>
+          </div>
+          <div className="m-toast-id">{t.teamName}</div>
+          <div className="m-toast-figure">
+            {formatBudgetLine(t.costUsd, t.budgetUsd, t.action)}
+          </div>
+          <div className="m-toast-foot">
+            <button
+              type="button"
+              className="m-toast-dismiss"
+              onClick={() => c.dismissBudgetToast(t.id)}
+              aria-label="dismiss"
+            >×</button>
+            <button
+              type="button"
+              className="m-toast-open"
+              onClick={() => c.handleBudgetOpen(t)}
+            >→ OPEN TEAM</button>
+          </div>
+        </div>
+      ))}
+      {/* Operator notices next — they answer an action just taken (context
+          reset scheduled / refused), so they must not sit under an unrelated
+          event stack. */}
+      {notices.map((n) => (
+        <div className="m-toast" key={n.id}>
+          <div className="m-toast-head">
+            <span
+              className="m-toast-title"
+              style={n.kind === 'error' ? { color: 'var(--bad)' } : undefined}
+            >
+              {n.title}
+            </span>
+            <span className="m-toast-time">{formatRelative(n.at)}</span>
+          </div>
+          {n.body && <div className="m-toast-reason">{n.body}</div>}
+          <div className="m-toast-foot">
+            <button
+              type="button"
+              className="m-toast-dismiss"
+              onClick={() => c.dismissNotice(n.id)}
+              aria-label="dismiss"
+            >×</button>
+          </div>
+        </div>
+      ))}
+      {/* Approvals next — actionable and time-sensitive (P3). */}
       {approvals.map((t) => (
         <div className="m-toast m-toast-approval" key={t.id}>
           <div className="m-toast-head">

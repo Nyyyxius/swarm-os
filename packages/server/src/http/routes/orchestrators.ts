@@ -11,6 +11,8 @@ import {
   rowToOrchView,
   rowToSessionView,
 } from '../../modules/orchestrator/persistence.js';
+import type { SessionView } from '../../modules/orchestrator/session.js';
+import { buildSessionCostViews } from '../../modules/metrics/costs.js';
 import {
   resolveAgentDefaults,
   resolveProviderId,
@@ -87,6 +89,20 @@ function bytesOf(s: string): number {
 
 export function createOrchestratorsRouter(spawner: Spawner, config: Config): Router {
   const router = Router();
+
+  /**
+   * Rate card for the history views (docs/monitoring-agents.md, Lot 11). A
+   * terminated agent's token totals come straight out of SQLite, so its cost
+   * has to be priced here — the live `Session` that used to hold the thunk is
+   * long gone. `null` catalogue ⇒ tokens without a price, never a made-up one.
+   *
+   * Written as an explicit lambda everywhere it is used: `.map(rowToSessionView)`
+   * would hand the array INDEX to the second parameter.
+   */
+  const sessionView = (row: Parameters<typeof rowToSessionView>[0]): SessionView =>
+    rowToSessionView(row, (providerId, modelId) =>
+      spawner.modelCatalogue?.costRates(providerId, modelId) ?? null,
+    );
 
   router.post('/orchestrators', async (req: Request, res: Response) => {
     const body = (req.body ?? {}) as CreateBody;
@@ -345,9 +361,7 @@ export function createOrchestratorsRouter(spawner: Spawner, config: Config): Rou
       history = rows
         .filter((r) => !liveIds.has(r.id))
         .map((r) => {
-          const sessions = spawner.persistence.db
-            .listSessions(r.id)
-            .map(rowToSessionView);
+          const sessions = spawner.persistence.db.listSessions(r.id).map(sessionView);
           return rowToOrchView(r, sessions);
         });
     } catch {
@@ -372,9 +386,7 @@ export function createOrchestratorsRouter(spawner: Spawner, config: Config): Rou
         res.status(404).json({ error: 'not found' });
         return;
       }
-      const sessions = spawner.persistence.db
-        .listSessions(req.params.id)
-        .map(rowToSessionView);
+      const sessions = spawner.persistence.db.listSessions(req.params.id).map(sessionView);
       res.json(rowToOrchView(row, sessions));
     } catch {
       res.status(404).json({ error: 'not found' });
@@ -442,6 +454,40 @@ export function createOrchestratorsRouter(spawner: Spawner, config: Config): Rou
     } catch {
       res.status(404).json({ error: 'not found' });
     }
+  });
+
+  /**
+   * Lot 12 — per-session cost ventilation for ONE team, the drill-down behind
+   * an expanded row of the MONITORING page's TEAM COSTS section.
+   *
+   * Served from SQLite rather than from the live session map, and that is the
+   * point: the rows worth naming here are the ones that are GONE (killed,
+   * reaped, removed by hand), and they only exist in the database. Live rows
+   * come from the same place so both halves are read consistently — the state
+   * throttle persists a running agent once a second, so "a second stale" is the
+   * worst case, and a cost table does not need better.
+   *
+   * 404 only when the team exists nowhere: not in the spawner AND with no
+   * session row at all. A team that has ended still answers — its history is
+   * the most interesting thing about its bill.
+   */
+  router.get('/orchestrators/:id/cost', (req: Request<{ id: string }>, res: Response) => {
+    const orchId = req.params.id;
+    let rows: ReturnType<typeof spawner.persistence.db.sessionCostRowsForOrchestrator> = [];
+    try {
+      rows = spawner.persistence.db.sessionCostRowsForOrchestrator(orchId);
+    } catch {
+      rows = [];
+    }
+    if (rows.length === 0 && !spawner.get(orchId)) {
+      res.status(404).json({ error: 'not found' });
+      return;
+    }
+    res.json({
+      sessions: buildSessionCostViews(rows, (providerId, modelId) =>
+        spawner.modelCatalogue?.costRates(providerId, modelId) ?? null,
+      ),
+    });
   });
 
   router.get('/orchestrators/:id/sessions', (req: Request<{ id: string }>, res: Response) => {

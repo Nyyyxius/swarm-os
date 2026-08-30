@@ -608,6 +608,17 @@
   font-size: 11px;
   letter-spacing: 0.08em;
 }
+/* BUDGET EXCEEDED (Lot 14) — the same card in the `--bad` key, mirroring
+   `.toast-budget` on desktop. */
+.m-toast-budget { border-color: rgba(224, 101, 74, 0.55); }
+.m-toast-budget .m-toast-title { color: var(--bad); }
+.m-toast-figure {
+  font-size: 11px;
+  color: var(--text-dim);
+  margin-top: 2px;
+  font-variant-numeric: tabular-nums;
+  letter-spacing: 0.06em;
+}
 
 /* ── Reused desktop modals: near-full-width on a phone ──────
    The desktop NewOrchestratorDialog / Broadcast / Spawn / Edit modals use

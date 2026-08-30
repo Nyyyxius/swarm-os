@@ -67,6 +67,9 @@ interface Props {
   /** Open the code knowledge graph overlay (`#/graph`). Optional for
    *  backward compatibility with existing call sites. */
   onOpenGraph?: () => void;
+  /** Open the per-agent monitoring overlay (`#/monitoring`). Optional for
+   *  backward compatibility with existing call sites. */
+  onOpenMonitoring?: () => void;
   onOpenPlugins: () => void;
   /** Open the skills library management overlay (`#/skills`). */
   onOpenSkills?: () => void;
@@ -86,7 +89,7 @@ const EMPTY_FLASH_SET: ReadonlySet<string> = new Set();
 
 export default function TopBar({
   teams, selectedTeamId, flashTeamIds, totalAgents, info,
-  onSelectTeam, onNewTeam, onOpenRoles, onOpenMemory, onOpenBoard, onOpenApprovals, onOpenGraph, onOpenPlugins, onOpenSkills, onOpenIde, onOpenSettings,
+  onSelectTeam, onNewTeam, onOpenRoles, onOpenMemory, onOpenBoard, onOpenApprovals, onOpenGraph, onOpenMonitoring, onOpenPlugins, onOpenSkills, onOpenIde, onOpenSettings,
   onOpenUpdates, onOpenAppearance, menuBlocked,
 }: Props) {
   const flashSet = flashTeamIds ?? EMPTY_FLASH_SET;
@@ -130,6 +133,7 @@ export default function TopBar({
       case 'memory':     onOpenMemory?.(); return;
       case 'board':      onOpenBoard?.(); return;
       case 'approvals':  onOpenApprovals?.(); return;
+      case 'monitoring': onOpenMonitoring?.(); return;
       case 'code-graph': onOpenGraph?.(); return;
       case 'skills':     onOpenSkills?.(); return;
       case 'plugins':    onOpenPlugins(); return;

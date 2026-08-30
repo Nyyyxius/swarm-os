@@ -38,9 +38,11 @@ import type { PluginHttpRegistry } from '../modules/plugins/http-registry.js';
 import type { PluginInstaller } from '../modules/plugins/installer.js';
 import type { ConnectorRegistry } from '../modules/plugins/connector-registry.js';
 import type { RoleStore } from '../modules/roles/index.js';
+import { createTeamBudgetLookup } from '../modules/orchestrator/budget-watch.js';
 import type { SettingsStore } from '../modules/settings/index.js';
 import type { MessagesAggregator } from '../modules/metrics/aggregator.js';
 import type { BusMetricsCollector } from '../modules/metrics/busMetrics.js';
+import { getSystemMetricsCollector } from '../modules/metrics/systemMetrics.js';
 import type { BackupScheduler } from '../modules/backup/index.js';
 import { TerminalHub } from './ws/terminal.js';
 import { EventsHub } from './ws/events.js';
@@ -372,11 +374,36 @@ export function createApp(
   app.use(createPreamblesRouter());
   app.use(createAiRouter(config));
   app.use(createDiscordRouter());
-  // S9 + S8 — `GET /metrics/messages` and `GET /metrics/bus`. Mounted
-  // after the auth middleware so they return 401 without X-Auth-Token
-  // (parity with `/orchestrators`). `/metrics/bus` is only mounted when
-  // a `BusMetricsCollector` was provided.
-  app.use(createMetricsRouter(aggregator, busMetrics));
+  // S9 + S8 + Lot 10 — `GET /metrics/messages`, `/metrics/bus` and
+  // `/metrics/system`. Mounted after the auth middleware so they return 401
+  // without X-Auth-Token (parity with `/orchestrators`). `/metrics/bus` is
+  // only mounted when a `BusMetricsCollector` was provided. The system
+  // collector takes no dependency and has no lifecycle (lazy delta, no
+  // timer), so it is fetched here as a process-wide singleton rather than
+  // threaded through `createApp`/`startServer`/`index.ts` — its only state,
+  // the previous CPU sample, has to survive across requests and does.
+  // Lot 12 adds `/metrics/costs`, wired to the spawner through three thunks
+  // rather than by handing the router a `Spawner`: the DB aggregate, the live
+  // teams, and the live rate card. Rates are looked up per call, never
+  // captured — the catalogue is cold at boot and warms up seconds later.
+  app.use(
+    createMetricsRouter(aggregator, busMetrics, getSystemMetricsCollector(), {
+      sumTokenUsage: () => spawner.persistence.db.sumTokenUsageByOrchestrator(),
+      listActive: () => spawner.listActive(),
+      rateLookup: (providerId, modelId) =>
+        spawner.modelCatalogue?.costRates(providerId, modelId) ?? null,
+      // Lot 14 — the same comparison rule the budget janitor acts on, applied
+      // to the same figure this response carries. Deliberately re-evaluated per
+      // request rather than read from the janitor's one-shot flag map: that map
+      // is notification state (empty when the watch is disabled, cleared when a
+      // budget is raised), not a verdict.
+      teamBudget: createTeamBudgetLookup(spawner, roleStore),
+      // Lot 15 — `/metrics/costs/export`. Reads the daily ledger the hourly
+      // roll-up writes, never the live sessions: the export is history, and
+      // history is what SQLite holds.
+      dailySince: (sinceDay) => spawner.persistence.db.sessionTokenDailySince(sinceDay),
+    }),
+  );
   // Operator backup: force a snapshot now + list existing snapshots. Same
   // X-Auth-Token gate as the rest; reuses the live BackupScheduler.
   app.use(createBackupRouter(backup));

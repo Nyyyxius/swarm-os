@@ -196,6 +196,36 @@ export function parseRoleSkills(json: string | null | undefined): RoleSkillRef[]
   }
 }
 
+/**
+ * What the budget janitor (modules/orchestrator/budget-watch) does the first
+ * time a team of this role crosses `costBudgetUsd`:
+ *
+ *   - `notify` — emit `session.budget_exceeded` (toast on the web, Discord when
+ *     the role carries a webhook) and let the team keep running;
+ *   - `pause` — all of the above, then SIGSTOP every running session of the
+ *     team, LEAD INCLUDED. Nothing is killed: the operator resumes by hand.
+ *
+ * `notify` is the default everywhere — the destructive outcome is never the one
+ * you get by omission.
+ */
+export type BudgetAction = 'notify' | 'pause';
+
+/** The two accepted budget actions, single source of truth for the whitelist. */
+export const BUDGET_ACTIONS: readonly BudgetAction[] = ['notify', 'pause'];
+
+/** The action used when none is stored (or when a stored value is unknown). */
+export const DEFAULT_BUDGET_ACTION: BudgetAction = 'notify';
+
+/**
+ * Narrow a persisted `budget_action` to the union. Anything unrecognised — a
+ * value from a newer server, a hand-edited row — degrades to `notify`. Failing
+ * OPEN here would mean pausing a team on a typo, so the fallback is always the
+ * harmless outcome.
+ */
+export function toBudgetAction(raw: string | null | undefined): BudgetAction {
+  return raw === 'pause' ? 'pause' : DEFAULT_BUDGET_ACTION;
+}
+
 export interface Role {
   id: string;
   label: string;
@@ -233,9 +263,40 @@ export interface Role {
   approval: RoleApprovalSettings | null;
   /** Skills activated on this role (docs/plan-skills-importables.md §3.2). */
   skills: RoleSkillRef[];
+  /**
+   * Dead-worker reaper toggle. When `true`, the in-process session reaper
+   * (modules/orchestrator/reaper) soft-deletes (hideSession) terminal workers
+   * — statuses `killed`/`exited`/`failed` — of teams of this role once they
+   * have been terminal for longer than `autoRemoveDeadWorkersDelayMs`. Default
+   * `false` everywhere (no surprise behaviour change). Never touches leads or
+   * non-terminal sessions.
+   */
+  autoRemoveDeadWorkers: boolean;
+  /**
+   * Grace period (ms) a terminal worker stays visible before the reaper hides
+   * it. Only consulted when `autoRemoveDeadWorkers` is `true`. Default 600000
+   * (10 min).
+   */
+  autoRemoveDeadWorkersDelayMs: number;
+  /**
+   * Cost budget (docs/monitoring-agents.md, Lot 14): the ceiling in USD on the
+   * CUMULATIVE spend of one team of this role — removed/reaped workers
+   * included, since the bill is read from the Lot 12 DB aggregate. `null` = no
+   * budget (the default), which is NOT the same as `0`.
+   *
+   * The figure compared against it is a LOWER BOUND: a model with no published
+   * rate contributes 0 rather than a guess, so a team can only ever cross its
+   * budget LATE, never early.
+   */
+  costBudgetUsd: number | null;
+  /** What happens at the crossing. Always set; `notify` unless stored otherwise. */
+  budgetAction: BudgetAction;
   createdAt: string;
   updatedAt: string;
 }
+
+/** Default grace period (ms) before a dead worker is reaped. 10 minutes. */
+export const DEFAULT_AUTO_REMOVE_DEAD_WORKERS_DELAY_MS = 600_000;
 
 export interface RoleInit {
   label: string;
@@ -252,6 +313,10 @@ export interface RoleInit {
   scheduleMessage?: string | null;
   approval?: RoleApprovalSettings | null;
   skills?: RoleSkillRef[];
+  autoRemoveDeadWorkers?: boolean;
+  autoRemoveDeadWorkersDelayMs?: number;
+  costBudgetUsd?: number | null;
+  budgetAction?: BudgetAction;
 }
 
 export type RolePatch = Partial<RoleInit>;
@@ -286,6 +351,25 @@ function rowToRole(row: RoleRow): Role {
     scheduleMessage: row.schedule_message,
     approval: parseApprovalSettings(row.approval_json),
     skills: parseRoleSkills(row.skills_json),
+    // SQLite stores the flag as 0/1; anything but 1 reads as OFF. Delay is a
+    // plain INTEGER (NOT NULL DEFAULT 600000) — the `?? default` guards test
+    // fixtures / rows read before the column existed.
+    autoRemoveDeadWorkers: row.auto_remove_dead_workers === 1,
+    autoRemoveDeadWorkersDelayMs:
+      typeof row.auto_remove_dead_workers_delay_ms === 'number'
+        ? row.auto_remove_dead_workers_delay_ms
+        : DEFAULT_AUTO_REMOVE_DEAD_WORKERS_DELAY_MS,
+    // A budget is a positive finite REAL or nothing. A stored 0, a NaN out of
+    // a corrupted row, or a negative amount all read as "no budget" rather than
+    // as a ceiling every team is instantly over — the janitor must never pause
+    // a fleet because of a bad row.
+    costBudgetUsd:
+      typeof row.cost_budget_usd === 'number' &&
+      Number.isFinite(row.cost_budget_usd) &&
+      row.cost_budget_usd > 0
+        ? row.cost_budget_usd
+        : null,
+    budgetAction: toBudgetAction(row.budget_action),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -308,6 +392,10 @@ function roleToRow(r: Role): RoleRow {
     schedule_message: r.scheduleMessage,
     approval_json: serializeApprovalSettings(r.approval),
     skills_json: r.skills.length ? JSON.stringify(r.skills) : null,
+    auto_remove_dead_workers: r.autoRemoveDeadWorkers ? 1 : 0,
+    auto_remove_dead_workers_delay_ms: r.autoRemoveDeadWorkersDelayMs,
+    cost_budget_usd: r.costBudgetUsd,
+    budget_action: r.budgetAction,
     created_at: r.createdAt,
     updated_at: r.updatedAt,
   };
@@ -334,6 +422,11 @@ export class RoleStore {
       scheduleMessage: init.scheduleMessage ?? null,
       approval: init.approval ?? null,
       skills: init.skills ?? [],
+      autoRemoveDeadWorkers: init.autoRemoveDeadWorkers ?? false,
+      autoRemoveDeadWorkersDelayMs:
+        init.autoRemoveDeadWorkersDelayMs ?? DEFAULT_AUTO_REMOVE_DEAD_WORKERS_DELAY_MS,
+      costBudgetUsd: init.costBudgetUsd ?? null,
+      budgetAction: init.budgetAction ?? DEFAULT_BUDGET_ACTION,
       createdAt: now,
       updatedAt: now,
     };
@@ -374,6 +467,19 @@ export class RoleStore {
         patch.scheduleMessage !== undefined ? patch.scheduleMessage : existing.scheduleMessage,
       approval: patch.approval !== undefined ? patch.approval : existing.approval,
       skills: patch.skills !== undefined ? patch.skills : existing.skills,
+      autoRemoveDeadWorkers:
+        patch.autoRemoveDeadWorkers !== undefined
+          ? patch.autoRemoveDeadWorkers
+          : existing.autoRemoveDeadWorkers,
+      autoRemoveDeadWorkersDelayMs:
+        patch.autoRemoveDeadWorkersDelayMs !== undefined
+          ? patch.autoRemoveDeadWorkersDelayMs
+          : existing.autoRemoveDeadWorkersDelayMs,
+      // `null` is a MEANINGFUL patch value here (clear the budget), so the
+      // `!== undefined` guard is load-bearing — `??` would make a clear a no-op.
+      costBudgetUsd:
+        patch.costBudgetUsd !== undefined ? patch.costBudgetUsd : existing.costBudgetUsd,
+      budgetAction: patch.budgetAction !== undefined ? patch.budgetAction : existing.budgetAction,
       updatedAt: new Date().toISOString(),
     };
     this.db.updateRole(roleToRow(updated));

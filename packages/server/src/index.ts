@@ -31,6 +31,7 @@ import {
   type CodegraphJanitorHandle,
 } from './modules/codegraph/lifecycle.js';
 import { TaskboardStore } from './modules/taskboard/store.js';
+import { makeSessionCostLookup } from './modules/taskboard/cost.js';
 import { SkillStore } from './modules/skills/store.js';
 import { SkillInstaller } from './modules/skills/installer.js';
 import { SkillsSubsystem } from './modules/skills/index.js';
@@ -44,6 +45,19 @@ import {
   startTaskboardJanitor,
   type TaskboardJanitorHandle,
 } from './modules/taskboard/lifecycle.js';
+import {
+  startSessionReaper,
+  type SessionReaperHandle,
+} from './modules/orchestrator/reaper.js';
+import {
+  startBudgetWatch,
+  type BudgetWatchHandle,
+} from './modules/orchestrator/budget-watch.js';
+import {
+  startCostRollup,
+  costRollupJanitor,
+  type CostRollupHandle,
+} from './modules/orchestrator/cost-rollup.js';
 import { createEmbeddingProvider } from './modules/memory/embeddings.js';
 import { PluginHost } from './modules/plugins/host.js';
 import { PluginToolRegistry } from './modules/plugins/mcp-registry.js';
@@ -408,6 +422,12 @@ const spawner = new Spawner(config, {
 // activation paths can fire the HOT channel (docs/plan-skills-importables.md §2.2).
 skillsSubsystem?.setOrchestratorLookup((id) => spawner.get(id) ?? null);
 
+// Lot 16 — give the board a way to price a card's assignee. Late-wired for the
+// same reason as the lookup above: the store is opened at boot, ~160 lines
+// BEFORE the spawner exists. Until this line runs (and on any boot where the
+// board failed to open) cards simply stay unpriced.
+taskboardStore?.setCostLookup(makeSessionCostLookup(spawner));
+
 // ---- S9: in-memory `/metrics/messages` aggregator -------------------------
 // Owns a 60-pt global ring + 8-pt per-orch rings, ticked every 60 s. Lost on
 // restart by design (see docs/update_system/09_metrics_messages.md §7.3).
@@ -465,6 +485,50 @@ if (approvalStore) {
     });
   }
 }
+
+// ---- Dead-worker session reaper -------------------------------------------
+// In-process; per role, soft-deletes (hideSession) terminal workers
+// (killed/exited/failed) once they have been terminal longer than the role's
+// configured delay. OFF for every role by default (opt-in toggle). Unref'd
+// interval, every tick guarded — a bad sweep can never crash the 24/7 loop.
+// `sessionReaperIntervalMs = 0` disables it. NEVER touches leads or
+// non-terminal sessions.
+const sessionReaper: SessionReaperHandle = startSessionReaper(spawner, roleStore, {
+  intervalMs: config.sessionReaperIntervalMs,
+});
+
+// ---- Cost-budget watch (Lot 14) -------------------------------------------
+// In-process; per role, compares each live team's CUMULATIVE spend (the Lot 12
+// DB aggregate — reaped/killed workers included, and a lower bound: an
+// unpriceable model contributes 0) against the role's `costBudgetUsd`. On the
+// FIRST crossing only: `session.budget_exceeded` on the bus, a Discord post
+// through the team's own notifier, and — when the role says `pause` — SIGSTOP on
+// every running session of the team, LEAD INCLUDED. Nothing is ever killed.
+// One-shot state is in memory and re-arms if the budget is raised.
+// `budgetCheckIntervalMs = 0` disables it; a role with no budget is never
+// touched, which is every role by default.
+const budgetWatch: BudgetWatchHandle = startBudgetWatch(spawner, roleStore, db, {
+  intervalMs: config.budgetCheckIntervalMs,
+});
+
+// ---- Daily cost roll-up (Lot 15) ------------------------------------------
+// In-process; every hour, files each live agent's token DELTA since the last
+// tick into `session_token_daily` — the history the long-trend charts and
+// `GET /metrics/costs/export` read, since a cumulative counter cannot describe
+// the shape of a week. The watermark lives in SQLite, so a missed tick or a
+// restart delays a delta but never loses it. `costRollupIntervalMs = 0`
+// disables it. The boot GC keeps 90 days, which is also the export's cap.
+try {
+  costRollupJanitor(db);
+} catch (err) {
+  log.warn({
+    event: 'boot.cost_rollup_gc_failed',
+    error: err instanceof Error ? err.message : String(err),
+  });
+}
+const costRollup: CostRollupHandle = startCostRollup(spawner, db, {
+  intervalMs: config.costRollupIntervalMs,
+});
 
 // ---- Per-role cron scheduler ----------------------------------------------
 // In-process; for each role carrying a `schedule` cron, delivers its
@@ -832,6 +896,13 @@ async function runAutoResume(): Promise<void> {
     // in flight, so an ordinary boot still writes nowhere.
     reconcileUpdateTeams(spawner, updateTeams, updateRunId, updateStore ?? null);
     bootGate.value = true;
+    // Lot 15 — one roll-up pass now that the fleet is back. The janitor's own
+    // start-up tick ran before any of these sessions existed, and on a container
+    // redeployed more often than the hourly interval it would be the only one to
+    // ever run. Nothing is LOST without this (the watermark makes the next tick
+    // pick the delta up whole), but a delta straddling the restart would be
+    // filed under the day the tick lands rather than the day it was billed.
+    costRollup.tick();
     log.info({ event: 'boot.complete', listening: true });
   }
 }
@@ -888,6 +959,15 @@ async function shutdown(signal: string): Promise<void> {
     taskboardJanitor?.stop();
     // Disarm the approval-gate TTL janitor for the same reason.
     approvalJanitor?.stop();
+    // Disarm the dead-worker session reaper (unref'd, but stop it explicitly so
+    // no sweep fires hideSession into a half-torn-down spawner during shutdown).
+    sessionReaper.stop();
+    // Disarm the cost-budget watch for the same reason — a sweep firing during
+    // shutdown would SIGSTOP sessions the spawner is already tearing down.
+    budgetWatch.stop();
+    // Disarm the daily cost roll-up. Nothing is lost by stopping mid-hour: the
+    // watermark is in SQLite, so the next process files the pending delta whole.
+    costRollup.stop();
     // Disarm the codegraph janitor (interval + fs watchers) so no sweep/watch
     // event fires a graphify run into a half-closed DB during shutdown.
     codegraphJanitor?.stop();

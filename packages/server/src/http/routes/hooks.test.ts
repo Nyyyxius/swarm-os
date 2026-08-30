@@ -93,6 +93,10 @@ afterEach(async () => {
 interface FakeSession {
   id: string;
   resets: Array<{ cmd: string; idleMs: number }>;
+  /** Monitoring — every path the route handed to `setTranscriptPath`, in order. */
+  transcripts: string[];
+  /** Monitoring — every codex `thread-id` the route handed over, in order. */
+  threadIds: string[];
 }
 
 /**
@@ -119,6 +123,8 @@ function fakeStack(
   const permissionMode = opts.permissionMode ?? 'bypassPermissions';
   const hasRole = 'roleApproval' in opts;
   const resets: Array<{ cmd: string; idleMs: number }> = [];
+  const transcripts: string[] = [];
+  const threadIds: string[] = [];
   const session = {
     id: 'sess-1',
     name: 'lead',
@@ -129,6 +135,8 @@ function fakeStack(
     stopReason: null,
     permissionMode,
     resets,
+    transcripts,
+    threadIds,
     providerCapabilities: {
       effort: true,
       permissionModes: ['bypassPermissions'],
@@ -142,6 +150,12 @@ function fakeStack(
     requestContextReset: (cmd: string, opts2: { idleMs: number }) => {
       resets.push({ cmd, idleMs: opts2.idleMs });
       return true;
+    },
+    setTranscriptPath: (filePath: string) => {
+      transcripts.push(filePath);
+    },
+    setAgentThreadId: (threadId: string) => {
+      threadIds.push(threadId);
     },
   };
   // The PER-ORCH notifier (docs §2.2) — distinct from the global one passed to
@@ -491,5 +505,224 @@ describe('POST /hooks/notification — enriched approval notification (P3)', () 
     expect(orchNotifier.events).toHaveLength(0);
     expect(notifier.events).toHaveLength(1);
     expect(notifier.events[0]?.kind).toBe('session.waiting');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// `session.transcript` — the SessionStart channel (docs/monitoring-agents.md)
+// ---------------------------------------------------------------------------
+
+/**
+ * POST one hook body verbatim (no envelope helper): these tests are about what
+ * the route tolerates, so the body has to be under the test's control.
+ */
+async function post(
+  spawner: Spawner,
+  body: unknown,
+): Promise<{ status: number; body: Record<string, unknown> }> {
+  const base = await serve(spawner, new RecordingNotifier(), false);
+  const res = await fetch(`${base}/hooks/notification`, {
+    method: 'POST',
+    headers: { 'content-type': 'application/json', authorization: `Bearer ${HOOK_TOKEN}` },
+    body: JSON.stringify(body),
+  });
+  return { status: res.status, body: (await res.json()) as Record<string, unknown> };
+}
+
+/** The payload claude's `SessionStart` hook actually delivers (spike S2). */
+function sessionStartPayload(transcriptPath: string): string {
+  return JSON.stringify({
+    session_id: '566a03de-207e-46a4-b772-25d47de95e6c',
+    transcript_path: transcriptPath,
+    cwd: '/workspace/demo',
+    hook_event_name: 'SessionStart',
+    source: 'startup',
+  });
+}
+
+describe('POST /hooks/notification — session.transcript', () => {
+  const TRANSCRIPT = '/home/ubuntu/.claude/projects/-workspace-demo/566a03de.jsonl';
+
+  it('adopts the transcript path and answers 200', async () => {
+    const { spawner, session } = fakeStack('needs-human');
+    const { status, body } = await post(spawner, {
+      orch_id: 'orch-1',
+      session_id: 'sess-1',
+      kind: 'session.transcript',
+      message: sessionStartPayload(TRANSCRIPT),
+    });
+    expect(status).toBe(200);
+    expect(body).toEqual({ ok: true, transcript: true });
+    expect(session.transcripts).toEqual([TRANSCRIPT]);
+  });
+
+  it('answers 200 on a payload it cannot read at all', async () => {
+    // The hook runs SYNCHRONOUSLY while the CLI boots. A body we cannot parse
+    // costs one poll cycle of gauge; it must never cost a startup. Three shapes
+    // that all reach the same answer.
+    const bodies = [
+      'not json at all',
+      JSON.stringify({ hook_event_name: 'SessionStart' }),
+      JSON.stringify({ transcript_path: 42 }),
+    ];
+    for (const message of bodies) {
+      const { spawner, session } = fakeStack('needs-human');
+      const { status, body } = await post(spawner, {
+        orch_id: 'orch-1',
+        session_id: 'sess-1',
+        kind: 'session.transcript',
+        message,
+      });
+      expect(status).toBe(200);
+      expect(body).toEqual({ ok: true, transcript: false });
+      expect(session.transcripts).toEqual([]);
+    }
+  });
+
+  it('fires none of the waiting side effects', async () => {
+    // A SessionStart is not a request for attention: no badge, no Discord, no
+    // armed /compact. Only the path is taken from it.
+    const { spawner, session } = fakeStack('needs-human');
+    const notifier = new RecordingNotifier();
+    const base = await serve(spawner, notifier, true);
+    const events: SwarmEvent[] = [];
+    unsubscribe = eventBus.onEvent((ev) => events.push(ev));
+    await fetch(`${base}/hooks/notification`, {
+      method: 'POST',
+      headers: { 'content-type': 'application/json', authorization: `Bearer ${HOOK_TOKEN}` },
+      body: JSON.stringify({
+        orch_id: 'orch-1',
+        session_id: 'sess-1',
+        kind: 'session.transcript',
+        message: sessionStartPayload(TRANSCRIPT),
+      }),
+    });
+    await new Promise((r) => setTimeout(r, 20));
+    expect(notifier.events).toEqual([]);
+    expect(session.resets).toEqual([]);
+    expect(events.filter((e) => e.kind === 'session.status_changed')).toEqual([]);
+  });
+
+  it('reaches a provider that declares no notification callback', async () => {
+    // `notificationHook: false` gates the WAITING semantics, not this one:
+    // SessionStart is a different hook, and a session that never reports
+    // `waiting` still has a transcript worth reading.
+    const { spawner, session } = fakeStack(false);
+    const { status } = await post(spawner, {
+      orch_id: 'orch-1',
+      session_id: 'sess-1',
+      kind: 'session.transcript',
+      message: sessionStartPayload(TRANSCRIPT),
+    });
+    expect(status).toBe(200);
+    expect(session.transcripts).toEqual([TRANSCRIPT]);
+  });
+
+  it('still answers 200 for an unknown session (a restart race)', async () => {
+    const { spawner } = fakeStack('needs-human');
+    const { status, body } = await post(spawner, {
+      orch_id: 'orch-1',
+      session_id: 'sess-gone',
+      kind: 'session.transcript',
+      message: sessionStartPayload(TRANSCRIPT),
+    });
+    expect(status).toBe(200);
+    expect(body).toEqual({ ok: true, ignored: 'session_unknown' });
+  });
+
+  it('rejects an unknown kind, exactly as before', async () => {
+    const { spawner } = fakeStack('needs-human');
+    const { status } = await post(spawner, {
+      orch_id: 'orch-1',
+      session_id: 'sess-1',
+      kind: 'session.invented',
+      message: '{}',
+    });
+    expect(status).toBe(400);
+  });
+});
+
+describe('POST /hooks/notification — belt-and-braces transcript parse', () => {
+  it('takes `transcript_path` out of a WAITING payload too', async () => {
+    // claude's `Notification` payload carries it as well. An agent whose
+    // SessionStart hook never fired (an older per-session settings.json left by
+    // a previous release) still ends up tracked.
+    const { session } = await fire('needs-human', {
+      message: JSON.stringify({
+        session_id: 'x',
+        transcript_path: '/home/ubuntu/.claude/projects/-w/abc.jsonl',
+        hook_event_name: 'Notification',
+      }),
+    });
+    expect(session.transcripts).toEqual(['/home/ubuntu/.claude/projects/-w/abc.jsonl']);
+  });
+
+  it('leaves the waiting branch untouched when the message is a plain sentence', async () => {
+    const { res, body, notifier, session } = await fire('needs-human', {
+      message: 'Claude needs your permission to use Bash',
+    });
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ ok: true });
+    expect(session.transcripts).toEqual([]);
+    expect(session.threadIds).toEqual([]);
+    expect(notifier.events).toHaveLength(1);
+  });
+});
+
+describe('POST /hooks/notification — codex thread-id (Lot 6)', () => {
+  /** The payload codex hands `notify.sh` as argv[1] (spike verify-codex C5). */
+  function notifyPayload(threadId: string): string {
+    return JSON.stringify({
+      type: 'agent-turn-complete',
+      'thread-id': threadId,
+      'turn-id': '019fa005-1aba-7150-bc42-560d5c66e27c',
+      cwd: '/workspace/demo',
+      client: 'codex-tui',
+      'input-messages': ['do the thing'],
+      'last-assistant-message': 'done',
+    });
+  }
+
+  const THREAD = '019fa005-0a8b-7f73-ba10-1ae5a444ea73';
+
+  it('hands the thread-id to the session and still answers 200', async () => {
+    // It rides the `session.waiting` kind because that IS what codex posts: one
+    // `notify` per completed turn, which the route already treats as a turn
+    // boundary. The thread-id is simply the other thing that payload carries.
+    const { res, body, session } = await fire('turn-complete', {
+      message: notifyPayload(THREAD),
+    });
+    expect(res.status).toBe(200);
+    expect(body).toMatchObject({ ok: true, semantics: 'turn-complete' });
+    expect(session.threadIds).toEqual([THREAD]);
+  });
+
+  it('accepts the snake_case spelling too', async () => {
+    const { session } = await fire('turn-complete', {
+      message: JSON.stringify({ type: 'agent-turn-complete', thread_id: THREAD }),
+    });
+    expect(session.threadIds).toEqual([THREAD]);
+  });
+
+  it('takes nothing from a payload that carries no thread at all', async () => {
+    for (const message of ['not json', '{}', JSON.stringify({ 'thread-id': 42 })]) {
+      const { res, session } = await fire('turn-complete', { message });
+      expect(res.status).toBe(200);
+      expect(session.threadIds).toEqual([]);
+    }
+  });
+
+  it('reaches the session through the SessionStart kind as well', async () => {
+    // Belt and braces, exactly like the transcript path: whichever kind the
+    // payload arrives on, every field we can use is read from it.
+    const { spawner, session } = fakeStack('turn-complete');
+    const { status } = await post(spawner, {
+      orch_id: 'orch-1',
+      session_id: 'sess-1',
+      kind: 'session.transcript',
+      message: notifyPayload(THREAD),
+    });
+    expect(status).toBe(200);
+    expect(session.threadIds).toEqual([THREAD]);
   });
 });

@@ -17,6 +17,12 @@
  *                               or `failed`. Carries the lead's exit code.
  *  - `session.exit_anomaly`   — a worker exited abnormally (already wired in
  *                               Phase 3 to push a synthetic mail to the lead).
+ *  - `session.budget_exceeded` — the team crossed its role's cost budget
+ *                               (docs/monitoring-agents.md, Lot 14). ONE-SHOT
+ *                               per crossing, emitted by the budget janitor. It
+ *                               carries no session: the budget belongs to the
+ *                               TEAM, and under `pause` every session of it —
+ *                               lead included — was just SIGSTOPped.
  *
  * Plugins additionally reach `Notifier.notifyCustom({...})` through the
  * capability-gated `api.notify.custom` façade — a free-form title/message/level
@@ -42,7 +48,8 @@ export type NotificationKind =
   | 'session.waiting'
   | 'session.approval_requested'
   | 'orchestrator.ended'
-  | 'session.exit_anomaly';
+  | 'session.exit_anomaly'
+  | 'session.budget_exceeded';
 
 /** Severity of a plugin-originated custom notification (`api.notify.custom`). */
 export type NotificationLevel = 'info' | 'warn' | 'critical';

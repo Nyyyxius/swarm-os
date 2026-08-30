@@ -59,6 +59,7 @@ const COLORS: Record<NotificationKind, number> = {
   'session.approval_requested': 0xff9900, // amber — a human decision is pending
   'orchestrator.ended': 0xff6666, // soft red — overridden to green for clean exits
   'session.exit_anomaly': 0xff0000, // red
+  'session.budget_exceeded': 0xff0000, // red — money already spent, possibly paused
 };
 
 const TITLES: Record<NotificationKind, string> = {
@@ -66,6 +67,7 @@ const TITLES: Record<NotificationKind, string> = {
   'session.approval_requested': 'Approval requested',
   'orchestrator.ended': 'Orchestrator ended',
   'session.exit_anomaly': 'Session exit anomaly',
+  'session.budget_exceeded': 'Cost budget exceeded',
 };
 
 const TITLE_GLYPHS: Record<NotificationKind, string> = {
@@ -73,6 +75,7 @@ const TITLE_GLYPHS: Record<NotificationKind, string> = {
   'session.approval_requested': '[APPROVE?]',
   'orchestrator.ended': '[END]',
   'session.exit_anomaly': '[FAIL]',
+  'session.budget_exceeded': '[BUDGET]',
 };
 
 /**
@@ -175,6 +178,29 @@ export class DiscordWebhookNotifier implements Notifier {
         fields.push({ name: 'Category', value: String(input.extra.category), inline: true });
       }
       fields.push({ name: 'Action', value: APPROVAL_INSTRUCTION, inline: false });
+    }
+
+    // Budget enrichment (Lot 14): the two numbers that justify the alert, and
+    // what the server did about it. `costUsd` is a LOWER BOUND — anything the
+    // rate card could not price counts as 0 — so the embed says `>=` rather
+    // than pretending to an exact bill.
+    if (kind === 'session.budget_exceeded') {
+      if (input.extra?.costUsd != null) {
+        fields.push({ name: 'Spent', value: `>= $${String(input.extra.costUsd)}`, inline: true });
+      }
+      if (input.extra?.budgetUsd != null) {
+        fields.push({ name: 'Budget', value: `$${String(input.extra.budgetUsd)}`, inline: true });
+      }
+      if (input.extra?.action != null) {
+        fields.push({
+          name: 'Outcome',
+          value:
+            input.extra.action === 'pause'
+              ? 'PAUSE — every session of the team was suspended (lead included). Resume by hand.'
+              : 'NOTIFY — the team keeps running.',
+          inline: false,
+        });
+      }
     }
 
     const embed: DiscordEmbed = {

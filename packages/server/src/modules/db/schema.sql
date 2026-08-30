@@ -162,3 +162,55 @@ CREATE TABLE IF NOT EXISTS instance_settings (
   openrouter_api_key TEXT,
   updated_at TEXT NOT NULL              -- ISO 8601
 );
+
+-- Monitoring Lot 15 (docs/monitoring-agents.md) — DAILY token deltas per agent.
+--
+-- The long-trend table. `sessions` carries only CUMULATIVE counters, so it can
+-- answer "what has this agent cost in total" and nothing else: the shape of a
+-- week is not derivable from a running total read once. This table is that
+-- history, written hourly by `modules/orchestrator/cost-rollup` and kept for 90
+-- days by the boot GC — bounded, and small (one row per agent PER DAY, not per
+-- turn).
+--
+-- Two column groups, and confusing them would silently double-count:
+--   * `tokens_*` / `cache_*` are the DELTAS of the day — what the agent billed
+--     between the first and the last tick of that UTC day. They are what a chart
+--     and the CSV export sum.
+--   * `cum_*` is bookkeeping: the LAST cumulative total the rollup observed for
+--     this session. The next tick's delta is `cumulative_now - cum_*`, which is
+--     what makes the rollup idempotent, restart-proof (the session counters are
+--     seeded from the DB on resume) and continuous across midnight.
+--
+-- `cost_usd` is the ONE price this schema stores besides `sessions.reported_cost_usd`,
+-- and for a different reason: it is the delta priced AT THE RATES IN FORCE WHEN
+-- IT WAS WRITTEN. Everywhere else swarm-os re-prices tokens at read time so a
+-- catalogue correction fixes yesterday; here, historical fidelity is the point —
+-- a rate change in September must not silently rewrite what August cost.
+-- NULL = the model could not be priced at that moment (never `0`, which would
+-- read as "this day was free"), and a NULL that later gains a priceable delta
+-- becomes that amount rather than staying NULL.
+--
+-- NO foreign key, deliberately, unlike `sessions` and `mailbox_messages`: this
+-- is an accounting ledger and it must outlive the rows it names. A team hard-
+-- deleted (or a session id whose row was dropped by a future cleanup) leaves its
+-- spend in the history; the export LEFT JOINs for the names and renders `''`
+-- when there is nothing left to join to.
+CREATE TABLE IF NOT EXISTS session_token_daily (
+  day TEXT NOT NULL,                       -- YYYY-MM-DD, UTC (the rollup's clock)
+  session_id TEXT NOT NULL,
+  orchestrator_id TEXT NOT NULL,
+  tokens_in INTEGER NOT NULL DEFAULT 0,    -- deltas of THIS day
+  tokens_out INTEGER NOT NULL DEFAULT 0,
+  cache_read INTEGER NOT NULL DEFAULT 0,
+  cache_write INTEGER NOT NULL DEFAULT 0,
+  cost_usd REAL,                           -- the day's deltas, priced when written
+  cum_in INTEGER NOT NULL DEFAULT 0,       -- last cumulative observed (bookkeeping)
+  cum_out INTEGER NOT NULL DEFAULT 0,
+  cum_cache_read INTEGER NOT NULL DEFAULT 0,
+  cum_cache_write INTEGER NOT NULL DEFAULT 0,
+  PRIMARY KEY (day, session_id)
+);
+-- The export scans a date window across every session; the PK's leading column
+-- already serves that, but the index is what keeps the 90-day GC
+-- (`WHERE day < ?`) from degrading into a full table scan on a large history.
+CREATE INDEX IF NOT EXISTS idx_session_token_daily_day ON session_token_daily(day);

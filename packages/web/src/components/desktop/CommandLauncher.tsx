@@ -14,7 +14,7 @@ import { ICON, type IconName } from './icons';
  *  tant que la TopBar ne le route pas (cf. `_exhaustive`). */
 export type LauncherActionId =
   | 'new-team' | 'roles' | 'memory' | 'board' | 'approvals'
-  | 'code-graph' | 'skills' | 'plugins' | 'ide'
+  | 'monitoring' | 'code-graph' | 'skills' | 'plugins' | 'ide'
   | 'update' | 'settings' | 'appearance';
 
 export interface LauncherItem {
@@ -50,6 +50,7 @@ export const LAUNCHER_GROUPS: readonly LauncherGroup[] = [
     // quand on écarte un toast sans résoudre le gate. Un badge nourri par là
     // mentirait. À rebrancher le jour où le serveur expose un pending global.
     { id: 'approvals',  label: 'APPROVALS',  desc: 'pending human decisions',     icon: 'shield' },
+    { id: 'monitoring', label: 'MONITORING', desc: 'context, throughput & inbox per agent', icon: 'graph' },
     { id: 'code-graph', label: 'CODE GRAPH', desc: 'symbol + dependency map',     icon: 'graph' },
     { id: 'skills',     label: 'SKILLS',     desc: 'importable instruction sets', icon: 'inbox' },
     { id: 'plugins',    label: 'PLUGINS',    desc: 'MCP servers + connectors',    icon: 'link' },

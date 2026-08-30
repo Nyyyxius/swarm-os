@@ -11,8 +11,15 @@
 //    (`(i / N) * 2π - π/2`, starting at 12 o'clock then clockwise).
 //  - Apply `enrichWithIdle` to downgrade `running → idle` after 30 s of
 //    silence; pass other statuses through untouched.
-//  - Inject per-session inbox counts (from `peekInbox` poll) so each Node
-//    can render its `INBOX N` badge without a second pass.
+//  - Read the per-session inbox count straight off `SessionView.inboxCount`
+//    so each Node can render its `INBOX N` badge without a second pass.
+//    Until the monitoring feature (docs/monitoring-agents.md, Lot 1) that
+//    count came from an N+1 `peekInbox` poll in `SwarmController` — one HTTP
+//    request per live session every 3 s, purely to paint a badge. The server
+//    now decorates it on the `/orchestrators` payload the map already polls,
+//    so the whole fan-out is gone. A backend predating Lot 1 omits the field
+//    and every badge reads 0, which is what an unknown count should look
+//    like on a map glyph.
 //
 // We intentionally derive angles client-side: the server never stores them
 // (creation order is the only ordering signal). Consequence: when an orch
@@ -34,11 +41,7 @@ const TAU = Math.PI * 2;
  * pass through untouched so the `Node` ring/dot/label can pick the
  * appropriate variant (waiting, starting, failed, paused, exited, …).
  */
-export function toNodeAgent(
-  s: SessionView,
-  now: number,
-  inboxCount: number,
-): NodeAgent {
+export function toNodeAgent(s: SessionView, now: number): NodeAgent {
   const v = enrichWithIdle(s, now);
   const status = v.visual === 'idle' ? 'idle' : s.status;
   return {
@@ -47,7 +50,7 @@ export function toNodeAgent(
     role: s.role,
     shape: shapeForRole(s.role),
     status,
-    inbox: inboxCount,
+    inbox: s.inboxCount ?? 0,
     // Multi-provider Lot 3 — carried straight through so the node can tag it.
     provider: s.provider,
   };
@@ -73,7 +76,6 @@ export function toNodeAgent(
 export function toMapViewTeams(
   orchestrators: readonly OrchestratorView[],
   now: number,
-  inboxCounts: ReadonlyMap<string, number>,
 ): MapViewTeam[] {
   const live = orchestrators.filter(
     (o) =>
@@ -92,10 +94,8 @@ export function toMapViewTeams(
       id: o.id,
       angle,
       status: o.status,
-      lead: toNodeAgent(leadSession, now, inboxCounts.get(leadSession.id) ?? 0),
-      workers: workers.map((w) =>
-        toNodeAgent(w, now, inboxCounts.get(w.id) ?? 0),
-      ),
+      lead: toNodeAgent(leadSession, now),
+      workers: workers.map((w) => toNodeAgent(w, now)),
     });
   });
   return out;

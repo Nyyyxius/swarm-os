@@ -310,3 +310,265 @@ describe('getCard on a missing card', () => {
     expect(store.getCard('does-not-exist')).toBeNull();
   });
 });
+
+// --- Lot 16: cost per card --------------------------------------------------
+
+/**
+ * A stand-in fleet: assignee → what the cost lookup answers for it. Mutating an
+ * entry between two transitions is how a test makes an agent "spend" money.
+ */
+let fleet: Map<string, { sessionId: string; costUsd: number | null }>;
+
+/** Read the three raw cost columns — the bookkeeping never reaches the DTO. */
+function costRow(id: string): {
+  cost_usd: number | null;
+  cost_start_usd: number | null;
+  cost_assignee_session: string | null;
+} {
+  return db.db
+    .prepare('SELECT cost_usd, cost_start_usd, cost_assignee_session FROM taskboard_cards WHERE id = ?')
+    .get(id) as never;
+}
+
+/** A card assigned to `who`, parked in `todo`, ready to be moved into `doing`. */
+function cardFor(who: string): string {
+  return store.createCard({ orchestratorId: ORCH_A, title: 'Costed', assignee: who, createdBy: LEAD })
+    .id;
+}
+
+const move = (id: string, status: string): void => {
+  store.moveCard({ id, status, actorSessionId: LEAD });
+};
+
+describe('cost per card (Lot 16)', () => {
+  beforeEach(() => {
+    fleet = new Map([[WORKER, { sessionId: WORKER, costUsd: 1 }]]);
+    store.setCostLookup((_orch, assignee) => fleet.get(assignee) ?? null);
+  });
+
+  it('banks the delta over one doing → done spell', () => {
+    const id = cardFor(WORKER);
+    move(id, 'doing');
+    // The snapshot is the assignee's running total at entry, not zero.
+    expect(costRow(id).cost_start_usd).toBe(1);
+    expect(costRow(id).cost_assignee_session).toBe(WORKER);
+    expect(store.getCard(id)!.costUsd).toBeNull(); // nothing settled yet
+
+    fleet.set(WORKER, { sessionId: WORKER, costUsd: 1.75 });
+    move(id, 'done');
+
+    expect(store.getCard(id)!.costUsd).toBeCloseTo(0.75, 6);
+    // Bookkeeping is cleared on the way out — nothing is in flight any more.
+    expect(costRow(id).cost_start_usd).toBeNull();
+    expect(costRow(id).cost_assignee_session).toBeNull();
+  });
+
+  it('SUMS the spells of a doing → review → doing → done round trip', () => {
+    const id = cardFor(WORKER);
+    move(id, 'doing');
+    fleet.set(WORKER, { sessionId: WORKER, costUsd: 1.75 });
+    move(id, 'review'); // banks 0.75
+
+    expect(store.getCard(id)!.costUsd).toBeCloseTo(0.75, 6);
+
+    move(id, 'doing'); // re-snapshots at 1.75
+    expect(costRow(id).cost_start_usd).toBeCloseTo(1.75, 6);
+    fleet.set(WORKER, { sessionId: WORKER, costUsd: 2.25 });
+    move(id, 'done'); // banks another 0.50 ON TOP
+
+    expect(store.getCard(id)!.costUsd).toBeCloseTo(1.25, 6);
+  });
+
+  it('leaves the cost UNCHANGED when the assignee changed mid-flight', () => {
+    fleet.set('sess-other', { sessionId: 'sess-other', costUsd: 40 });
+    const id = cardFor(WORKER);
+    move(id, 'doing');
+    fleet.set(WORKER, { sessionId: WORKER, costUsd: 9 });
+    // Someone else takes the card over before it lands.
+    store.assignCard({ id, assignee: 'sess-other', actorSessionId: LEAD });
+    move(id, 'done');
+
+    // Neither the 8 the first agent burned nor the other's 40: nobody can say
+    // who spent what, so the card carries no figure at all.
+    expect(store.getCard(id)!.costUsd).toBeNull();
+    expect(costRow(id).cost_start_usd).toBeNull();
+    expect(costRow(id).cost_assignee_session).toBeNull();
+  });
+
+  it('takes no snapshot for a session without counters, and settles nothing', () => {
+    fleet.set(WORKER, { sessionId: WORKER, costUsd: null });
+    const id = cardFor(WORKER);
+    move(id, 'doing');
+
+    expect(costRow(id).cost_start_usd).toBeNull();
+    expect(costRow(id).cost_assignee_session).toBeNull();
+
+    // Counters show up mid-flight: with no start there is still no delta.
+    fleet.set(WORKER, { sessionId: WORKER, costUsd: 3 });
+    move(id, 'done');
+    expect(store.getCard(id)!.costUsd).toBeNull();
+  });
+
+  it('takes no snapshot for an unresolvable or ambiguous assignee', () => {
+    const id = cardFor('ghost-agent'); // resolves to nothing
+    move(id, 'doing');
+    expect(costRow(id).cost_start_usd).toBeNull();
+    move(id, 'done');
+    expect(store.getCard(id)!.costUsd).toBeNull();
+  });
+
+  it('clamps a negative delta to zero when the session counters reset', () => {
+    const id = cardFor(WORKER);
+    fleet.set(WORKER, { sessionId: WORKER, costUsd: 2 });
+    move(id, 'doing');
+    // The agent was restarted: its cumulative total went BACKWARDS.
+    fleet.set(WORKER, { sessionId: WORKER, costUsd: 0.5 });
+    move(id, 'done');
+
+    expect(store.getCard(id)!.costUsd).toBe(0); // never negative
+  });
+
+  it('keeps an already-banked figure when a later spell cannot be attributed', () => {
+    const id = cardFor(WORKER);
+    move(id, 'doing');
+    fleet.set(WORKER, { sessionId: WORKER, costUsd: 1.5 });
+    move(id, 'review'); // banks 0.50
+    move(id, 'doing');
+    // The agent vanishes before the card lands.
+    fleet.delete(WORKER);
+    move(id, 'done');
+
+    expect(store.getCard(id)!.costUsd).toBeCloseTo(0.5, 6);
+  });
+
+  it('settles a doing → done exit made through closeCard', () => {
+    const id = cardFor(WORKER);
+    move(id, 'doing');
+    fleet.set(WORKER, { sessionId: WORKER, costUsd: 3 });
+    const closed = store.closeCard({ id, actorSessionId: LEAD });
+
+    expect(closed.status).toBe('done');
+    expect(closed.costUsd).toBeCloseTo(2, 6);
+    expect(costRow(id).cost_start_usd).toBeNull();
+  });
+
+  it('resolves an assignee given as an agent NAME, not a session id', () => {
+    fleet.set('refactor-worker', { sessionId: 'sess-w7', costUsd: 5 });
+    const id = cardFor('refactor-worker');
+    move(id, 'doing');
+    // The snapshot is booked against the resolved SESSION, not the name.
+    expect(costRow(id).cost_assignee_session).toBe('sess-w7');
+    fleet.set('refactor-worker', { sessionId: 'sess-w7', costUsd: 6.5 });
+    move(id, 'done');
+    expect(store.getCard(id)!.costUsd).toBeCloseTo(1.5, 6);
+  });
+
+  it('drops the spell when the name now resolves to a DIFFERENT session', () => {
+    fleet.set('refactor-worker', { sessionId: 'sess-w7', costUsd: 5 });
+    const id = cardFor('refactor-worker');
+    move(id, 'doing');
+    // The worker was restarted under the same name: same label, new agent.
+    fleet.set('refactor-worker', { sessionId: 'sess-w8', costUsd: 12 });
+    move(id, 'done');
+
+    expect(store.getCard(id)!.costUsd).toBeNull();
+  });
+
+  it('ignores transitions that never touch doing', () => {
+    const id = cardFor(WORKER);
+    move(id, 'review');
+    move(id, 'blocked');
+    move(id, 'done');
+    expect(store.getCard(id)!.costUsd).toBeNull();
+    expect(costRow(id).cost_start_usd).toBeNull();
+  });
+
+  it('never throws when the lookup itself blows up', () => {
+    store.setCostLookup(() => {
+      throw new Error('spawner exploded');
+    });
+    const id = cardFor(WORKER);
+    expect(() => move(id, 'doing')).not.toThrow();
+    expect(() => move(id, 'done')).not.toThrow();
+    expect(store.getCard(id)!.costUsd).toBeNull();
+  });
+});
+
+describe('cost per card without a lookup wired', () => {
+  it('exposes costUsd: null on the card view and prices nothing', () => {
+    // `store` here is the default fixture — no setCostLookup call at all.
+    const card = store.createCard({
+      orchestratorId: ORCH_A,
+      title: 'Unpriced',
+      assignee: WORKER,
+      createdBy: LEAD,
+    });
+    expect(card.costUsd).toBeNull();
+    store.moveCard({ id: card.id, status: 'doing', actorSessionId: LEAD });
+    store.moveCard({ id: card.id, status: 'done', actorSessionId: LEAD });
+
+    // The field is PRESENT (the web contract) and null (nothing to show).
+    const listed = store.listCards({ orchestratorId: ORCH_A }).find((c) => c.id === card.id)!;
+    expect('costUsd' in listed).toBe(true);
+    expect(listed.costUsd).toBeNull();
+    expect(store.getCard(card.id)!.costUsd).toBeNull();
+  });
+
+  it('migrates a pre-Lot-16 table and stays idempotent', () => {
+    const dir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'taskboard-migr-'));
+    const db2 = new SwarmDb(dir2);
+    try {
+      // `taskboard_cards` exactly as an earlier build of this store left it:
+      // CREATE TABLE IF NOT EXISTS skips it wholesale, so only the ALTERs help.
+      db2.db.exec(`
+        CREATE TABLE taskboard_cards (
+          id TEXT PRIMARY KEY, orchestrator_id TEXT NOT NULL, title TEXT NOT NULL,
+          body TEXT NOT NULL DEFAULT '', status TEXT NOT NULL DEFAULT 'todo',
+          assignee_session_id TEXT, priority INTEGER NOT NULL DEFAULT 0, labels TEXT,
+          order_key TEXT NOT NULL, created_by TEXT NOT NULL, created_at INTEGER NOT NULL,
+          updated_at INTEGER NOT NULL, version INTEGER NOT NULL DEFAULT 1,
+          closed_at INTEGER, orphaned_at INTEGER,
+          auto_created INTEGER NOT NULL DEFAULT 0, hidden_at INTEGER
+        );
+      `);
+      const cols = (): string[] =>
+        (db2.db.prepare('PRAGMA table_info(taskboard_cards)').all() as { name: string }[]).map(
+          (c) => c.name,
+        );
+      expect(cols()).not.toContain('cost_usd');
+
+      const migrated = new TaskboardStore(db2);
+      expect(cols()).toEqual(
+        expect.arrayContaining(['cost_usd', 'cost_start_usd', 'cost_assignee_session']),
+      );
+      // Re-opening the same DB must not throw (duplicate column name swallowed).
+      expect(() => new TaskboardStore(db2)).not.toThrow();
+
+      // And the upgraded table is writable through the new mapping.
+      db2.db
+        .prepare(
+          `INSERT INTO orchestrators (id, name, role, status, default_model, default_effort, default_permission_mode, created_at)
+           VALUES (?, ?, ?, ?, ?, ?, ?, ?)`,
+        )
+        .run(ORCH_A, 'T', 'lead', 'running', 'claude-x', 'high', 'default', new Date().toISOString());
+      const card = migrated.createCard({ orchestratorId: ORCH_A, title: 'Post-migration', createdBy: LEAD });
+      expect(card.costUsd).toBeNull();
+      expect(migrated.getCard(card.id)!.costUsd).toBeNull();
+    } finally {
+      db2.close();
+      fs.rmSync(dir2, { recursive: true, force: true });
+    }
+  });
+
+  it('round-trips the cost columns through the row mapping', () => {
+    const card = store.createCard({ orchestratorId: ORCH_A, title: 'RT', createdBy: LEAD });
+    db.db.prepare('UPDATE taskboard_cards SET cost_usd = ? WHERE id = ?').run(2.5, card.id);
+
+    expect(store.getCard(card.id)!.costUsd).toBeCloseTo(2.5, 6);
+    // A mutation that has nothing to do with the cost must PRESERVE it.
+    store.updateCard({ id: card.id, expectedVersion: 1, actorSessionId: LEAD, title: 'RT2' });
+    expect(store.getCard(card.id)!.costUsd).toBeCloseTo(2.5, 6);
+    store.assignCard({ id: card.id, assignee: WORKER, actorSessionId: LEAD });
+    expect(store.getCard(card.id)!.costUsd).toBeCloseTo(2.5, 6);
+  });
+});

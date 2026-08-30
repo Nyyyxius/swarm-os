@@ -555,7 +555,7 @@ describe('SpawnWorkerDialog — reset on re-open', () => {
       onSpawn: onSpawn as unknown as (
         orchestratorId: string,
         body: { prompt: string },
-      ) => Promise<void>,
+      ) => Promise<{ sessionId: string }>,
     };
     const { rerender } = render(<SpawnWorkerDialog open {...props} />);
     fillRequired('X', 'y');

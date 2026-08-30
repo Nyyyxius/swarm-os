@@ -1,6 +1,7 @@
 import * as crypto from 'node:crypto';
 import {
   Session,
+  type SessionInit,
   type SessionView,
   type SessionSshTransport,
   type ContextResetCommand,
@@ -15,12 +16,22 @@ import type { Config, EffortLevel, PermissionMode } from '../../config.js';
 import type { Notifier } from '../notify/index.js';
 import { NoOpNotifier } from '../notify/null.js';
 import type { Persistence } from './persistence.js';
-import { NoOpPersistence } from './persistence.js';
+import { NoOpPersistence, sessionRowTokenSeed } from './persistence.js';
 import { computeOrchestratorHealth, type OrchestratorHealth } from './health.js';
 import { makeMailboxPersistenceForOrch } from './mailbox-persistence.js';
 import { buildResumeNotice } from './log-tail-reader.js';
 import type { SessionRow } from '../db/index.js';
+import {
+  createLocalRangeReader,
+  createLocalTailReader,
+  createSshRangeReader,
+  createSshTailReader,
+  type ContextUsageWiring,
+  type RolloutLister,
+} from './context-usage.js';
+import { createLocalRolloutLister, createSshRolloutLister } from './context-usage-codex.js';
 import { createBuiltinProviderRegistry } from '../providers/index.js';
+import { modelContextLimit, modelCostRates, type ModelCatalogue } from '../providers/catalogue.js';
 import { DEFAULT_PROVIDER_ID } from '../providers/ids.js';
 import type { ProviderRegistry } from '../providers/registry.js';
 import { resolveAgentDefaults } from '../providers/resolve.js';
@@ -135,6 +146,13 @@ export interface OrchestratorDeps {
    */
   providerRegistry?: ProviderRegistry;
   /**
+   * Live model catalogue, read for ONE thing here: the context window of a
+   * session's model (docs/monitoring-agents.md — "Limites par modèle"). Omitted
+   * ⇒ the pinned per-model table answers instead, and an unknown model shows
+   * `—` rather than a made-up denominator.
+   */
+  modelCatalogue?: ModelCatalogue | null;
+  /**
    * Invoked once when the orchestrator first reaches a terminal status
    * (`stopped` / `failed`) AND `setHideOnExit(true)` was called beforehand
    * (i.e. the operator clicked KILL on the lead). The Spawner wires this to
@@ -209,6 +227,21 @@ export interface WorkerSpec {
   existingId?: string;
   startedAt?: string;
   /**
+   * Auto-resume only — seed for the worker's cumulative "messages processed"
+   * counter, read from its persisted row (docs/monitoring-agents.md).
+   */
+  messagesProcessed?: number;
+  /**
+   * Auto-resume only — seed for the worker's cumulative token counters, read
+   * from its persisted row (docs/monitoring-agents.md, Lot 11).
+   */
+  tokenUsage?: SessionInit['tokenUsage'];
+  /**
+   * Auto-resume only — seed for the worker's cumulative provider-REPORTED cost
+   * (docs/monitoring-agents.md, Lot 13).
+   */
+  reportedCostUsd?: SessionInit['reportedCostUsd'];
+  /**
    * Phase 8 — auto-resume only. Prefixed to the worker's positional prompt
    * (NOT the durable system prompt) so the agent sees the "## Server restart
    * notice" block at the start of its replayed prompt, and so a later `/clear`
@@ -239,7 +272,11 @@ export class SessionActionError extends Error {
       | 'ALREADY_TERMINATED'
       | 'NOT_PAUSED'
       | 'INVALID_TRANSITION'
-      | 'RESTART_IN_PROGRESS',
+      | 'RESTART_IN_PROGRESS'
+      // Monitoring (docs/monitoring-agents.md) — operator context reset.
+      | 'PROVIDER_NO_RESET'
+      | 'SESSION_NOT_ACTIVE'
+      | 'RESET_ALREADY_PENDING',
     message: string,
     public readonly httpStatus: number,
   ) {
@@ -324,9 +361,38 @@ export class Orchestrator {
   private readonly _skills:
     | ((orchestratorId: string, sessionId: string) => readonly SkillFragment[])
     | null;
+  /** Monitoring — model context limits (`null` ⇒ the pinned table answers). */
+  private readonly _modelCatalogue: ModelCatalogue | null;
+  /** Monitoring — bounded transcript tail reader for this team's transport. */
+  private readonly _tailReader: ContextUsageWiring['readTail'];
+  /** Monitoring — ranged transcript reader (Lot 11, token accounting). */
+  private readonly _rangeReader: ContextUsageWiring['readRange'];
+  /** Monitoring — codex rollout lister for this team's transport. */
+  private readonly _rolloutLister: RolloutLister;
 
   /** All sessions, including terminated ones, indexed by id. */
   private readonly sessions = new Map<string, Session>();
+
+  /**
+   * Monitoring — what a new `Session` needs to track its context window.
+   *
+   * The limit is a THUNK, not a value: the catalogue is cold at boot and warms
+   * up a few seconds later, so a limit captured at spawn time would pin every
+   * session started in that window to `—` for its whole life.
+   */
+  private _contextUsageWiring(provider: AgentProvider, model: string): ContextUsageWiring {
+    return {
+      ttlMs: this.config.contextUsageTtlMs ?? 0,
+      limitTokens: () => modelContextLimit(this._modelCatalogue, provider.id, model),
+      // Lot 11 — a thunk for the same reason as the limit: prices arrive with
+      // the catalogue, seconds after boot, and a session spawned in that window
+      // must not be priceless for the rest of its life.
+      costRates: () => modelCostRates(this._modelCatalogue, provider.id, model),
+      readTail: this._tailReader,
+      readRange: this._rangeReader,
+      listRollouts: this._rolloutLister,
+    };
+  }
 
   /**
    * Snapshot the plugin tools for one preamble.
@@ -392,6 +458,18 @@ export class Orchestrator {
     this._pluginTools = deps.pluginTools ?? null;
     this._taskboard = deps.taskboard ?? null;
     this._skills = deps.skills ?? null;
+    this._modelCatalogue = deps.modelCatalogue ?? null;
+    // Monitoring — one reader per orchestrator, shared by its sessions: the
+    // transport cannot change under a live team, and the closure holds nothing
+    // per-session. SSH sessions read the transcript in the HOST's namespace.
+    this._tailReader =
+      config.agentTransport === 'ssh' ? createSshTailReader(config) : createLocalTailReader();
+    this._rangeReader =
+      config.agentTransport === 'ssh' ? createSshRangeReader(config) : createLocalRangeReader();
+    this._rolloutLister =
+      config.agentTransport === 'ssh'
+        ? createSshRolloutLister(config)
+        : createLocalRolloutLister();
     // Phase 8 — write-through mailbox: every push/markDelivered routes to
     // SQLite via the hook below. Constructed AFTER persistence is set.
     // The hook impl is provided by mailbox-persistence.ts to keep the DB
@@ -560,6 +638,7 @@ export class Orchestrator {
       sourceDir: this.config.claudeSourceDir,
       siblingSource: this.config.claudeJsonSource,
       sshTransport: this._sshTransportBundle(),
+      contextUsage: this._contextUsageWiring(provider, resolved.model),
     });
 
     this._leadSessionId = lead.id;
@@ -673,6 +752,12 @@ export class Orchestrator {
     const lead = new Session({
       id: leadRow.id,
       startedAt: leadRow.started_at,
+      // Monitoring — the operator's running total survives the restart.
+      messagesProcessed: leadRow.messages_processed ?? 0,
+      tokenUsage: sessionRowTokenSeed(leadRow),
+      // Lot 13 — the reported bill cannot be recomputed; without this seed a
+      // redeploy would silently reset it to the estimate.
+      reportedCostUsd: leadRow.reported_cost_usd ?? null,
       orchestratorId: this.id,
       name: leadRow.name,
       role: leadRow.role,
@@ -699,6 +784,7 @@ export class Orchestrator {
       sourceDir: this.config.claudeSourceDir,
       siblingSource: this.config.claudeJsonSource,
       sshTransport: this._sshTransportBundle(),
+      contextUsage: this._contextUsageWiring(provider, resolved.model),
     });
 
     this._leadSessionId = lead.id;
@@ -743,6 +829,9 @@ export class Orchestrator {
           provider: workerRow.provider,
           existingId: workerRow.id,
           startedAt: workerRow.started_at,
+          messagesProcessed: workerRow.messages_processed ?? 0,
+          tokenUsage: sessionRowTokenSeed(workerRow),
+          reportedCostUsd: workerRow.reported_cost_usd ?? null,
           resumeNotice: buildResumeNotice(workerRow.log_path),
         });
         if (wasPaused) {
@@ -843,6 +932,9 @@ export class Orchestrator {
     const worker = new Session({
       id: sessionId,
       startedAt: spec.startedAt,
+      messagesProcessed: spec.messagesProcessed,
+      tokenUsage: spec.tokenUsage ?? null,
+      reportedCostUsd: spec.reportedCostUsd ?? null,
       orchestratorId: this.id,
       name: spec.name,
       role: spec.role,
@@ -871,6 +963,7 @@ export class Orchestrator {
       sourceDir: this.config.claudeSourceDir,
       siblingSource: this.config.claudeJsonSource,
       sshTransport: this._sshTransportBundle(),
+      contextUsage: this._contextUsageWiring(provider, model),
     });
 
     this.sessions.set(worker.id, worker);
@@ -972,6 +1065,65 @@ export class Orchestrator {
       idleMs: this.config.idleThresholdMs,
       instructions,
     });
+  }
+
+  /**
+   * Operator-driven context reset of ANY session in this team, lead included
+   * (docs/monitoring-agents.md, "Action compact/clear opérateur"). Backs
+   * `POST /sessions/:id/context-reset`.
+   *
+   * Separate from `requestWorkerContextReset` on purpose: that one stays
+   * worker-only because it backs the `team.clear_worker` MCP tool, where "the
+   * lead decides, the worker never self-clears" IS the semantics. A human
+   * asking has no such constraint — a lead is as resettable as a worker.
+   *
+   * Refusals are `SessionActionError`s so the HTTP layer maps them for free,
+   * and they are checked in this order so each one stays distinguishable:
+   * unknown id (404) → provider without the command → session not live →
+   * reset already armed. The command itself is only ARMED here; it fires at
+   * the session's next idle boundary, never mid-turn.
+   */
+  requestContextReset(
+    sessionId: string,
+    cmd: ContextResetCommand,
+    instructions?: string,
+  ): Session {
+    const s = this.sessions.get(sessionId);
+    if (!s) {
+      throw new SessionActionError('SESSION_UNKNOWN', `session ${sessionId} not found`, 404);
+    }
+    if (!s.supportsContextReset(cmd)) {
+      throw new SessionActionError(
+        'PROVIDER_NO_RESET',
+        `provider '${s.toView().provider}' has no '${cmd}' — nothing would be typed`,
+        409,
+      );
+    }
+    if (s.status !== 'running' && s.status !== 'waiting') {
+      throw new SessionActionError(
+        'SESSION_NOT_ACTIVE',
+        `session ${sessionId} is not active (status=${s.status})`,
+        409,
+      );
+    }
+    if (s.hasPendingContextReset) {
+      throw new SessionActionError(
+        'RESET_ALREADY_PENDING',
+        `session ${sessionId} already has a context reset armed`,
+        409,
+      );
+    }
+    if (!s.requestContextReset(cmd, { idleMs: this.config.idleThresholdMs, instructions })) {
+      // Every documented refusal is covered above, so landing here means the
+      // session lost its PTY between the status check and the arm. Report it
+      // rather than answer 200 for a command nobody will ever type.
+      throw new SessionActionError(
+        'SESSION_NOT_ACTIVE',
+        `session ${sessionId} has no live agent process`,
+        409,
+      );
+    }
+    return s;
   }
 
   /**
@@ -1270,7 +1422,20 @@ export class Orchestrator {
   }
 
   toView(): OrchestratorView {
-    const sessions = this.listSessions().map((s) => s.toView());
+    const sessions = this.listSessions().map((s) => {
+      // Monitoring — THE heartbeat of the context tracker (no timer exists in
+      // this feature): the UI polls `/orchestrators` every 3 s, and this call
+      // starts at most one TTL'd, byte-bounded transcript read per session.
+      // Fire-and-forget by construction — it returns before any I/O happens, so
+      // the view below is always the previous snapshot.
+      s.maybeRefreshContextUsage();
+      return {
+        ...s.toView(),
+        // Monitoring — decorated here rather than in `Session.toView()`: the
+        // session has no handle on the mailbox. O(1), and 0 once drained.
+        inboxCount: this.mailbox.size(s.id),
+      };
+    });
     const base = {
       id: this.id,
       name: this.name,

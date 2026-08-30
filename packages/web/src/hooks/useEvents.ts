@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from 'react';
-import { api } from '../api/client';
+import { api, type BudgetAction } from '../api/client';
+import { toBudgetAction } from '../lib/budget';
 
 /**
  * Phase 4 — subscribe to `/ws/events` and surface a toast whenever a
@@ -51,6 +52,34 @@ export interface PendingApproval {
   sessionId?: string;
   category?: string;
   requestedSummary?: string;
+}
+
+/**
+ * Lot 14 — a team that has crossed its role's cost budget
+ * (`session.budget_exceeded`, docs/monitoring-agents.md).
+ *
+ * Keyed by `orchestratorId`: the budget belongs to the TEAM, and a second
+ * frame for the same team is the same fact, refreshed.
+ *
+ * Deliberately NO auto-dismiss timer, unlike `WaitingNotice`. The server emits
+ * this ONE-SHOT per crossing (it re-arms only if the team falls back under its
+ * budget, which a paused team never will), so a toast that expired after 30 s
+ * would be the operator's only chance to learn that a team was suspended —
+ * gone, with nothing on the page saying it ever happened. It leaves on a
+ * click, like a pending approval.
+ */
+export interface BudgetNotice {
+  /** The orchestrator id — one live notice per team. */
+  id: string;
+  ts: string;
+  orchestratorId?: string;
+  /** Team name as the SERVER named it; the controller falls back to the snapshot. */
+  teamName?: string;
+  /** Cumulative team spend at the crossing, and the ceiling it crossed. */
+  costUsd?: number;
+  budgetUsd?: number;
+  /** What the server DID — `pause` means the team is already stopped. */
+  action: BudgetAction;
 }
 
 /**
@@ -207,10 +236,13 @@ export function useEvents(opts: UseEventsOptions = {}): {
   approvals: PendingApproval[];
   dismissApproval: (id: string) => void;
   clearApprovals: () => void;
+  budgets: BudgetNotice[];
+  dismissBudget: (id: string) => void;
 } {
   const [connected, setConnected] = useState(false);
   const [waiting, setWaiting] = useState<WaitingNotice[]>([]);
   const [approvals, setApprovals] = useState<PendingApproval[]>([]);
+  const [budgets, setBudgets] = useState<BudgetNotice[]>([]);
   const wsRef = useRef<WebSocket | null>(null);
   const closedRef = useRef(false);
   const timersRef = useRef<Map<string, ReturnType<typeof setTimeout>>>(new Map());
@@ -264,6 +296,13 @@ export function useEvents(opts: UseEventsOptions = {}): {
 
   const clearApprovals = (): void => {
     setApprovals([]);
+  };
+
+  // Budget notices carry no timer either (see `BudgetNotice`), so dismissal is
+  // the same plain state filter. It closes the TOAST only — it does not resume
+  // a paused team, which is an explicit operator gesture on the team itself.
+  const dismissBudget = (id: string): void => {
+    setBudgets((b) => b.filter((n) => n.id !== id));
   };
 
   useEffect(() => {
@@ -474,6 +513,38 @@ export function useEvents(opts: UseEventsOptions = {}): {
                   }
                 }
 
+                // Lot 14 — session.budget_exceeded: a team crossed its role's
+                // cost budget. Surfaced as an actionable toast, one per team.
+                // Every payload field is read defensively but NONE is
+                // required: the frame itself is the news, and a toast that
+                // refused to render because an amount was missing would drop
+                // a one-shot notice that a team has just been SIGSTOPped.
+                if (ev.kind === 'session.budget_exceeded') {
+                  const p = ev.payload as
+                    | {
+                        teamName?: string;
+                        costUsd?: number;
+                        budgetUsd?: number;
+                        action?: string;
+                      }
+                    | undefined;
+                  const id = ev.orchestratorId ?? `unknown-${ev.ts}`;
+                  const notice: BudgetNotice = {
+                    id,
+                    ts: ev.ts,
+                    orchestratorId: ev.orchestratorId,
+                    teamName: typeof p?.teamName === 'string' ? p.teamName : undefined,
+                    costUsd: typeof p?.costUsd === 'number' ? p.costUsd : undefined,
+                    budgetUsd: typeof p?.budgetUsd === 'number' ? p.budgetUsd : undefined,
+                    action: toBudgetAction(p?.action),
+                  };
+                  setBudgets((b) => {
+                    const filtered = b.filter((n) => n.id !== id);
+                    filtered.push(notice);
+                    return filtered;
+                  });
+                }
+
                 // Phase 4: notification hook fires session.status_changed
                 // with payload.status === 'waiting'. Surface it as a toast.
                 if (
@@ -523,5 +594,9 @@ export function useEvents(opts: UseEventsOptions = {}): {
     };
   }, []);
 
-  return { connected, waiting, dismiss, clear, approvals, dismissApproval, clearApprovals };
+  return {
+    connected, waiting, dismiss, clear,
+    approvals, dismissApproval, clearApprovals,
+    budgets, dismissBudget,
+  };
 }

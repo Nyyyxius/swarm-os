@@ -13,7 +13,11 @@
  * WHAT EACH ENTRY IS HERE TO PROVE (do not prune without reading):
  *   anthropic
  *     claude-opus-5                    newest opus → wins `BUILTIN_PROVIDER_DEFAULT_FAMILIES.claude`
+ *                                      + carries `limit.context` (monitoring, Lot 2)
+ *                                      + all FOUR prices, incl. `cache_read`/`cache_write`
+ *                                        → the complete rate card of Lot 11's `costUsd`
  *     claude-sonnet-5                  newer than opus-4-8 but NOT in the opus family
+ *                                      + a `limit.context` that DISAGREES with the pin
  *     claude-fable-5                   passes every filter at DOUBLE the price — §3's whole point
  *     claude-opus-4-8                  the current pin; must survive the merge
  *     claude-haiku-4-5                 undated id…
@@ -34,6 +38,8 @@
  *     anthropic/claude-opus-5          wins the opencode family
  *     anthropic/claude-opus-5-fast     `-fast` → excluded by the anchored family regex
  *     anthropic/claude-sonnet-5        allow-listed vendor, not in the family
+ *                                      + input/output prices and NO cache prices — the
+ *                                        Lot 11 case where a bucket contributes 0
  *     openai/gpt-5.5                   a second allow-listed vendor (drives the `<optgroup>` case)
  *     deepseek/deepseek-chat           the pinned opencode id, live-confirmed
  *     inception/mercury-coder          vendor NOT on the allowlist → excluded
@@ -52,6 +58,7 @@ export const MODELS_DEV_FIXTURE: Record<string, unknown> = {
         tool_call: true,
         modalities: { input: ['text', 'image', 'pdf'], output: ['text'] },
         cost: { input: 5, output: 25, cache_read: 0.5, cache_write: 6.25 },
+        limit: { context: 200000, output: 64000 },
       },
       'claude-sonnet-5': {
         id: 'claude-sonnet-5',
@@ -60,6 +67,10 @@ export const MODELS_DEV_FIXTURE: Record<string, unknown> = {
         tool_call: true,
         modalities: { input: ['text', 'image', 'pdf'], output: ['text'] },
         cost: { input: 2, output: 10, cache_read: 0.2, cache_write: 2.5 },
+        // A live window that DISAGREES with the pinned 200 000 for `claude-*`:
+        // whichever of the two this fixture proves is used, it cannot be an
+        // accident of both saying the same thing.
+        limit: { context: 1000000, output: 64000 },
       },
       'claude-fable-5': {
         id: 'claude-fable-5',
@@ -125,6 +136,9 @@ export const MODELS_DEV_FIXTURE: Record<string, unknown> = {
         tool_call: true,
         modalities: { input: ['text'], output: ['text'] },
         cost: 'free',
+        // `limit.context: 0` — present but unusable. A zero denominator would
+        // pin every gauge at 100 %, so it must be dropped like a missing one.
+        limit: { context: 0 },
       },
     },
   },

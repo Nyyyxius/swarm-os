@@ -372,9 +372,40 @@ export interface RoleView {
   approval?: RoleApprovalSettings | null;
   /** Skills activated for this role (Lot 1b). Optional: older servers omit it. */
   skills?: SkillActivation[];
+  /**
+   * Dead-worker reaper toggle: when `true`, the server soft-removes terminal
+   * workers (killed/exited/failed) of this role's teams after
+   * `autoRemoveDeadWorkersDelayMs`. Optional so older servers that never sent
+   * the field keep type-checking; treat absent as `false`.
+   */
+  autoRemoveDeadWorkers?: boolean;
+  /** Grace period (ms) before a dead worker is removed. Default 600000 (10 min). */
+  autoRemoveDeadWorkersDelayMs?: number;
+  /**
+   * Cost budget (docs/monitoring-agents.md, Lot 14) — the ceiling, in USD, on
+   * the CUMULATIVE spend of one team of this role, removed workers included.
+   * `null` (or absent, on a server predating Lot 14) = no budget at all, which
+   * is deliberately distinct from `0` ("stop this role from spending anything").
+   */
+  costBudgetUsd?: number | null;
+  /** What the server does at the crossing. Absent = `notify`. */
+  budgetAction?: BudgetAction;
   createdAt: string;
   updatedAt: string;
 }
+
+/**
+ * What happens when a team crosses its role's `costBudgetUsd`:
+ *
+ *   - `notify` — an event (toast + Discord when a webhook is configured) and
+ *     nothing else. The team keeps running.
+ *   - `pause` — SIGSTOP on the WHOLE team, lead included; resuming is a manual
+ *     operator gesture.
+ *
+ * Absent = `notify`, which is why every read site defaults to it: a missing
+ * field must never be read as "this team may be paused".
+ */
+export type BudgetAction = 'notify' | 'pause';
 
 /**
  * Per-role approval override. Every field is independently optional; an absent
@@ -457,6 +488,159 @@ export interface PluginInstallResult {
   newCapabilities: string[];
 }
 
+/**
+ * Per-session context-window usage — mirror of the server-side
+ * `ContextUsageView` (`modules/orchestrator/session.ts`). See
+ * `docs/monitoring-agents.md` § "Forme du champ".
+ *
+ * Present ONLY for a provider whose usage we can actually read (claude via
+ * the `SessionStart` hook + transcript tail; codex/opencode best-effort;
+ * gemini never) AND only while the session is `running | waiting` — nothing
+ * is serialised for a terminated session. Every consumer must therefore
+ * treat the whole object as optional and render `—`, never a guess
+ * (`lib/contextPercent.ts`).
+ */
+export interface ContextUsageView {
+  usedTokens: number;
+  /**
+   * Model context window. `null` when the model is absent both from the
+   * models.dev catalogue and from the pinned per-model fallbacks — in which
+   * case `pct` is null too, but `usedTokens` is still a real measurement.
+   */
+  limitTokens: number | null;
+  /** `min(1, used/limit)` — computed server-side. `null` iff `limitTokens` is. */
+  pct: number | null;
+  basis: 'transcript' | 'control-plane' | 'estimated';
+  /** ISO timestamp of the snapshot. */
+  updatedAt: string;
+  /**
+   * The snapshot may be outdated — typically right after a `/clear`, until
+   * the agent's next turn is read back. NOT a missing value: keep showing
+   * the number, muted, with a STALE tag.
+   */
+  stale: boolean;
+}
+
+/**
+ * The four CUMULATIVE token counters, without the pricing that usually rides
+ * along. Split out of `TokenUsageView` at Lot 12 because the per-session
+ * ventilation of `GET /orchestrators/:id/cost` carries its `costUsd` NEXT to
+ * the counters rather than inside them — one shape, so a bucket renamed on
+ * the wire breaks both call sites at once instead of drifting silently.
+ */
+export interface TokenCounters {
+  /** Input tokens billed at full price — cache reads NOT included. */
+  in: number;
+  out: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+/**
+ * Mirror of the server's `TokenUsageView` (`modules/orchestrator/session.ts`).
+ * See `docs/monitoring-agents.md` § Lot 11.
+ *
+ * The counters are CUMULATIVE for the life of the agent — they survive a
+ * `/compact` or `/clear` (unlike `ContextUsageView`, which measures what is
+ * in the window right now) and keep accumulating across the session
+ * rotations those commands cause under codex and opencode.
+ *
+ * Absent for a provider with no readable spend (gemini), for a backend
+ * predating Lot 11, and for a session that has not produced a single turn
+ * yet. Consumers render `—`, never a zero (`lib/tokenCost.ts`).
+ */
+export interface TokenUsageView extends TokenCounters {
+  /**
+   * Catalogue list prices applied to the four counters, or `null` when the
+   * model's input AND output prices are both unknown. A single bucket
+   * without a known price contributes 0 rather than inventing a rate, so a
+   * non-null amount is always a LOWER bound on the truth.
+   */
+  costUsd: number | null;
+  /**
+   * Where the amount comes from (Lot 13).
+   *
+   * - `'estimated'` — catalogue list prices applied to the counters we read.
+   *   Every provider today, and the fallback whenever a CLI reports nothing.
+   * - `'reported'` — the amount the provider's own CLI put on the wire
+   *   (opencode carries a `cost` per message). It supersedes the estimate
+   *   rather than sitting next to it: two amounts for one agent on one screen
+   *   is a support ticket.
+   *
+   * The UI never hides the difference — the TOKENS · COST cell suffixes the
+   * amount `EST` or `RPT` (`lib/tokenCost.ts`). A backend predating Lot 13
+   * only ever sends `'estimated'`, so nothing has to be back-filled.
+   */
+  costBasis: 'estimated' | 'reported';
+}
+
+/**
+ * Provider-level rate-limit budget attached to a session (Lot 13).
+ *
+ * This is an ACCOUNT quota, not an agent one: codex reports `rate_limits`
+ * (used_percent / resets_at / plan) on the `token_count` line, and every codex
+ * agent on this instance draws from the same bucket. The UI says so out loud
+ * (the sidebar chip's `title`) because a per-agent reading of `62% USED` would
+ * suggest starting a second agent to spread the load, which is exactly wrong.
+ *
+ * Present only on codex sessions, and only once the CLI has reported it.
+ * Every field is independently nullable — a plan-less account still reports a
+ * percentage, and the reset time can be missing from an older CLI.
+ */
+export interface ProviderQuotaView {
+  /** Consumed share of the account's window, 0-100. */
+  usedPercent: number | null;
+  /** ISO timestamp at which the window rolls over. */
+  resetsAt: string | null;
+  /** Plan name as the provider spells it (`pro`, `plus`, …). */
+  plan: string | null;
+}
+
+/**
+ * Time windows offered by `GET /sessions/:id/context-history` — the server
+ * rejects anything else with a 400, so the union is the contract, not a hint.
+ */
+export type ContextHistoryWindow = '1h' | '24h' | '3d';
+
+/**
+ * One time bucket of the context-usage history (Lot 9). `min`/`max`/`last`
+ * are **token counts**, not percentages: the server bucketises raw samples
+ * and keeps the three extremes so a `/compact` drop inside a bucket can never
+ * be smoothed away by an average.
+ */
+export interface ContextHistoryPoint {
+  /** ISO timestamp of the bucket (its last sample). */
+  t: string;
+  min: number;
+  max: number;
+  last: number;
+}
+
+/** A context reset that actually FIRED (never a merely armed one). */
+export interface ContextHistoryReset {
+  t: string;
+  cmd: 'compact' | 'clear';
+}
+
+/**
+ * `GET /sessions/:id/context-history?window=1h|24h|3d` (Lot 9).
+ *
+ * In-memory, three sliding days, wiped by a server restart — which is why
+ * the band that renders it says so. Both arrays are empty (200, not 404)
+ * for a live session that has no history yet, so "empty" is a normal state
+ * to render, never an error.
+ */
+export interface ContextHistoryView {
+  /**
+   * Model context window, or `null` when unknown — in which case the chart
+   * has no percentage to plot and falls back to a raw-token Y axis with no
+   * threshold lines (a 70% line on an unknown window would be invented).
+   */
+  limitTokens: number | null;
+  points: ContextHistoryPoint[];
+  resets: ContextHistoryReset[];
+}
+
 export interface SessionView {
   id: string;
   orchestratorId: string;
@@ -491,6 +675,48 @@ export interface SessionView {
   stopReason: string | null;
   logPath: string;
   lastActivityAt: string;
+  // ── Monitoring (docs/monitoring-agents.md, Lots 1-3) ───────────────────
+  // All four are ADDITIVE and optional: a backend predating the feature
+  // omits them, and Lot 2 (the context tracker) can land after Lot 1. The UI
+  // contract is "absent → `—`", never a synthesised value.
+  /**
+   * Messages currently queued in this session's mailbox (`mailbox.size(sid)`,
+   * decorated in `Orchestrator.toView()`). Replaces the per-session
+   * `peekInbox` N+1 poll the web client used to run every 3 s.
+   */
+  inboxCount?: number;
+  /** Monotone count of mailbox messages actually drained by this session. */
+  messagesProcessed?: number;
+  /**
+   * A `compact`/`clear` has been armed and will fire at the session's next
+   * idle (never mid-turn). Falls back to `false` once fired.
+   */
+  contextResetPending?: boolean;
+  /** Context-window usage, or `null`/absent when unmeasurable. */
+  contextUsage?: ContextUsageView | null;
+  /**
+   * Lot 9 — the last ~20 context-usage readings as whole percents (0-100),
+   * oldest first. Rides on the 3 s `/orchestrators` poll, so the MONITORING
+   * table gets a trend column for free; absent for a session with no
+   * telemetry, no known limit, or a backend predating Lot 9 (→ the cell
+   * renders `—`, never a flat line at zero).
+   */
+  contextSpark?: number[];
+  /**
+   * Lot 11 — cumulative token spend + its estimated cost. Additive and
+   * optional like every field above it: absent for gemini, for a backend
+   * predating the feature, and for a session that has produced nothing yet.
+   */
+  tokenUsage?: TokenUsageView | null;
+  /**
+   * Lot 13 — the provider ACCOUNT quota this agent draws from, or absent when
+   * the provider reports none (everything but codex today) and on a backend
+   * predating Lot 13. Deliberately carried per session even though it
+   * describes the account: it arrives on a session's own CLI output, and the
+   * page de-duplicates identical readings rather than guessing which session
+   * speaks for the account.
+   */
+  providerQuota?: ProviderQuotaView | null;
 }
 
 /**
@@ -881,6 +1107,141 @@ export interface BusMetricsSnapshot {
 }
 
 /**
+ * Monitoring Lot 10 — snapshot returned by `GET /metrics/system`
+ * (docs/monitoring-agents.md § Lot 10). Container-level CPU and memory read
+ * from the deployment's OWN cgroup files — no Docker socket, so the numbers
+ * cover every process in the container, agent CLIs included.
+ *
+ * EVERY field is nullable and that is the contract, not sloppiness: cgroup
+ * files can be unreadable, and the CPU sampler needs two `cpu.stat` reads to
+ * produce a delta, so the first call after a boot legitimately has no
+ * percentage. The whole endpoint may also 404 on a server predating Lot 10.
+ * Callers render `—`; nothing here is ever defaulted to zero.
+ *
+ * `basis: 'host'` means the denominator came from the host (`os.totalmem()` /
+ * `os.cpus().length`) because the cgroup limit was `max` (unlimited). The
+ * reading is still true, but it is a share of the MACHINE, not of a quota —
+ * the UI tags it `HOST BASIS` so an operator does not read it as a container
+ * limit they can raise.
+ */
+export interface SystemMetricsSnapshot {
+  cpu: {
+    /** Fraction of the available cores in use, `0..1`, or `null`. */
+    pct: number | null;
+    /** Cores the fraction is measured against (cgroup quota, else host). */
+    cores: number | null;
+    basis: 'cgroup' | 'host' | null;
+  };
+  memory: {
+    usedBytes: number | null;
+    limitBytes: number | null;
+    /** `usedBytes / limitBytes`, `0..1`, or `null`. */
+    pct: number | null;
+    basis: 'cgroup' | 'host' | null;
+  };
+}
+
+/**
+ * ── Team cost DTOs (Lot 12, docs/monitoring-agents.md) ────────────────────
+ *
+ * The one place in this client where the numbers do NOT come from the
+ * `/orchestrators` snapshot: a team's true spend includes the workers that
+ * are no longer in it. Killed and removed sessions keep their row (and their
+ * Lot 11 counters) in the DB, so the server aggregates in SQL over hidden
+ * rows included — which is exactly why an in-memory sum over `SessionView[]`
+ * could never produce this figure, and why the section says `DB TOTALS`.
+ */
+export interface TeamCostTotals extends TokenCounters {
+  /**
+   * Priced spend for the whole team, live and removed agents together, or
+   * `null` when NOTHING under it could be priced. A non-null amount is always
+   * a lower bound: an unpriced model contributes 0 rather than a guess.
+   */
+  costUsd: number | null;
+}
+
+/** One team's line in `GET /metrics/costs`. */
+export interface TeamCostRow {
+  orchId: string;
+  name: string;
+  /** Agents still in the team — the denominator the operator sees as `N LIVE`. */
+  live: number;
+  total: TeamCostTotals;
+  removed: {
+    /** How many sessions left the team (killed, reaped, removed by hand). */
+    count: number;
+    /**
+     * Their share of the total, or `null` when they exist but carry no
+     * counters — sessions that ran before Lot 11 have no numbers to recover,
+     * and a `$0.00` there would read as "those workers were free".
+     */
+    costUsd: number | null;
+  };
+  /**
+   * USD per hour over the trailing hour, from the tracker's cumulative-cost
+   * ring — `null` with fewer than two points (a team younger than the ring,
+   * or a server restarted since). Live sessions only: a removed worker's
+   * spend is in `total`, but it is not burning anything any more.
+   */
+  burnPerHour: number | null;
+  /**
+   * Lot 14 — the budget of the ROLE this team was spawned from, resolved
+   * against `total.costUsd` server-side. `null` (or absent, on a server
+   * predating Lot 14) = this team has no budget, which is NOT the same as a
+   * budget it has not reached: `exceeded: false` is a measured verdict, an
+   * absent `budget` is no verdict at all.
+   */
+  budget?: TeamBudgetView | null;
+}
+
+/** The budget half of a `TeamCostRow` — the ceiling and where the team is against it. */
+export interface TeamBudgetView {
+  /** The ceiling, in USD. */
+  usd: number;
+  action: BudgetAction;
+  /** `true` once `total.costUsd` has crossed `usd`. */
+  exceeded: boolean;
+}
+
+/** `GET /metrics/costs`. Ordering is NOT contractual — the client sorts. */
+export interface TeamCostsSnapshot {
+  teams: TeamCostRow[];
+}
+
+/** One session's line in `GET /orchestrators/:id/cost`. */
+export interface SessionCostRow {
+  id: string;
+  name: string;
+  type: 'lead' | 'worker';
+  /** Free-form session status (`running`, `killed`, `stopped`, …). */
+  status: string;
+  /** `true` once the session left the team — the rows the detail view shows. */
+  removed: boolean;
+  /** `null` for a session that predates the Lot 11 counters. */
+  tokens: TokenCounters | null;
+  costUsd: number | null;
+}
+
+/**
+ * `GET /orchestrators/:id/cost` — per-session ventilation behind an expanded
+ * team row. Fetched ON DEMAND (never polled): it is a drill-down, and the
+ * numbers in it only move for the sessions that are still alive.
+ */
+export interface OrchestratorCostView {
+  sessions: SessionCostRow[];
+}
+
+/**
+ * Monitoring Lot 15 — the two wire formats of `GET /metrics/costs/export`.
+ *
+ * `csv` is the one an operator opens in a spreadsheet (header row
+ * `day,orchestrator_id,team,session_id,agent,tokens_in,tokens_out,cache_read,
+ * cache_write,cost_usd`), `json` the one a script consumes
+ * (`{days, rows: [...]}`). Both come back as TEXT — see `api.exportCosts`.
+ */
+export type CostExportFormat = 'csv' | 'json';
+
+/**
  * ── Shared memory / knowledge-graph DTOs ──────────────────────────────────
  * Hand-maintained mirror of the server's `MemoryStore` view types (design doc
  * `docs/memoire-partagee.md` §7-8). `web` does not depend on `server`, so a
@@ -1041,6 +1402,22 @@ export interface BoardCard {
   orphanedAt: number | null;
   autoCreated: boolean;
   hiddenAt: number | null;
+  /**
+   * Monitoring Lot 16 — what this card cost while it was in `doing`, in USD:
+   * the delta of its assignee's cumulative spend between the move IN and the
+   * move OUT of that column.
+   *
+   * OPTIONAL and nullable, and the two absences mean different things to the
+   * server but the same thing to the UI — nothing is rendered:
+   *  - `undefined`: a backend predating Lot 16 (the field is not on the wire);
+   *  - `null`: the server declined to attribute one (assignee changed mid-card,
+   *    the session carries no counters, the card never passed through `doing`).
+   *
+   * A missing cost is the NORM, not an anomaly — hence no `—` placeholder on
+   * the cards, unlike every other "no signal" cell in this app: forty cards
+   * each carrying an em-dash would be forty times the noise for zero signal.
+   */
+  costUsd?: number | null;
 }
 
 /** One audit-journal entry — mirrors `TaskboardEvent`. */
@@ -1156,14 +1533,28 @@ class HttpError extends Error {
  * reason plus a machine code (`UNKNOWN_PROVIDER`, `PROVIDER_UNAVAILABLE`, …);
  * this surfaces both, and appends `unavailableReason` when present since that
  * is the sentence that actually tells the operator what to fix.
+ *
+ * TWO server conventions exist and both must survive this function:
+ *   - `{ error: <written reason>, code: <CODE> }` — orchestrator/provider routes;
+ *   - `{ error: <CODE>, message: <written reason> }` — the session routes,
+ *     including `POST /sessions/:id/context-reset` (`sendActionError` in
+ *     `http/routes/sessions.ts`).
+ * Reading only `error` + `code` covers the first and silently truncates the
+ * second to a bare `PROVIDER_NO_RESET`, which names the failure without ever
+ * saying what to do about it. So `message` is appended too, when it adds
+ * something the head does not already say.
  */
 export function apiErrorMessage(err: unknown): string {
   if (err instanceof HttpError) {
     const body = err.body as
-      | { error?: string; code?: string; unavailableReason?: string | null; known?: string[] }
+      | {
+          error?: string; code?: string; message?: string;
+          unavailableReason?: string | null; known?: string[];
+        }
       | undefined;
     const head = body?.error ?? err.message;
     const parts = [body?.code ? `${body.code}: ${head}` : head];
+    if (body?.message && body.message !== head) parts.push(body.message);
     if (body?.unavailableReason) parts.push(body.unavailableReason);
     if (body?.known?.length) parts.push(`known providers: ${body.known.join(', ')}`);
     return parts.join(' — ');
@@ -1530,6 +1921,46 @@ export const api = {
   hideSession: (id: string) =>
     request<void>('POST', `/sessions/${id}/hide`),
   /**
+   * Monitoring Lot 3 — arm a context `compact` / `clear` on a session (lead
+   * OR worker). The reset is DEFERRED: the server fires it at the session's
+   * next idle, never mid-turn, so a `200 {scheduled:true}` means "armed",
+   * not "done" — `SessionView.contextResetPending` is what falls back at the
+   * next 3 s poll.
+   *
+   * Rejects with `HttpError` on 404 (unknown session) and on 409 with a
+   * machine code: `PROVIDER_NO_RESET` (gemini & co. have no reset line),
+   * `SESSION_NOT_ACTIVE` (terminal status), `RESET_ALREADY_PENDING`. Render
+   * those through `apiErrorMessage` — the bare `HTTP 409 POST …` says
+   * nothing an operator can act on.
+   */
+  contextReset: (
+    sessionId: string,
+    cmd: 'compact' | 'clear',
+    instructions?: string,
+  ) =>
+    request<{ scheduled: true }>(
+      'POST',
+      `/sessions/${sessionId}/context-reset`,
+      instructions === undefined ? { cmd } : { cmd, instructions },
+    ),
+  /**
+   * Monitoring Lot 9 — context-usage history for ONE session over a sliding
+   * window. Called only while the history band is open (there is no cheap
+   * aggregate for it, unlike the sparkline series that rides on the
+   * `/orchestrators` poll).
+   *
+   * Rejects with `HttpError` on 400 (window outside the union) and 404
+   * (unknown session). A live session with nothing recorded yet answers
+   * `200 {points: [], resets: []}` — an EMPTY state to render, not an error.
+   * A backend predating Lot 9 answers 404 for every session; the band
+   * treats that the same way, silently.
+   */
+  contextHistory: (sessionId: string, window: ContextHistoryWindow) =>
+    request<ContextHistoryView>(
+      'GET',
+      `/sessions/${sessionId}/context-history?window=${window}`,
+    ),
+  /**
    * Soft-delete a terminal orchestrator (stopped/failed). Cascades to hide
    * all its sessions. Returns 204 on success, 409 if not terminal.
    */
@@ -1577,6 +2008,71 @@ export const api = {
    */
   getMetricsBus: () =>
     request<BusMetricsSnapshot>('GET', '/metrics/bus'),
+  /**
+   * Monitoring Lot 10 — container CPU / memory from the deployment's own
+   * cgroups. Drives the two arc gauges at the head of the MONITORING KPI
+   * band. 404s on a server predating Lot 10; `useSystemMetrics` swallows the
+   * error and the gauges stay at `—`.
+   */
+  getMetricsSystem: () =>
+    request<SystemMetricsSnapshot>('GET', '/metrics/system'),
+  /**
+   * Monitoring Lot 12 — cost per team, workers that already left INCLUDED
+   * (SQL aggregate over the soft-deleted session rows). Drives the TEAM COSTS
+   * section and the BURN /H KPI. 404s on a server predating Lot 12;
+   * `useTeamCosts` swallows the error and the section stays empty.
+   */
+  getMetricsCosts: () =>
+    request<TeamCostsSnapshot>('GET', '/metrics/costs'),
+  /**
+   * Monitoring Lot 12 — per-session ventilation for ONE team, fetched when
+   * its row is expanded. Not polled: the panel is a drill-down, and re-asking
+   * every 15 s for a list of dead workers would be pure noise.
+   */
+  getOrchestratorCost: (orchId: string) =>
+    request<OrchestratorCostView>(
+      'GET',
+      `/orchestrators/${encodeURIComponent(orchId)}/cost`,
+    ),
+  /**
+   * Monitoring Lot 15 — the daily cost table (`session_token_daily`) as a
+   * downloadable document: one row per day × session, `days` back (server
+   * default 30, capped at 90).
+   *
+   * Returns the response body VERBATIM as a string, and deliberately stops
+   * there: no Blob, no anchor, no `document` at all. Three reasons this is not
+   * a `request()` call and not a download either —
+   *
+   *  1. `request()` would hand back the CSV as a `string` too, but only by
+   *     accident of its content-type sniffing, and would silently `JSON.parse`
+   *     the JSON flavour into an object — destroying the exact bytes the
+   *     operator asked to save (key order, formatting, everything).
+   *  2. A bare `window.open` of this URL cannot carry `X-Auth-Token`, so the
+   *     fetch has to be explicit — same reason as `getCodegraphGraphHtml`.
+   *  3. Keeping the DOM out means the failure path is a plain rejected promise
+   *     the caller can turn into a toast, instead of a browser tab that has
+   *     already opened onto an error page. `lib/costExport.ts` owns the save.
+   *
+   * Throws `HttpError` on any non-2xx — notably 404 on a server predating this
+   * lot, which the caller reports as "server too old" rather than as a failure.
+   */
+  exportCosts: async (
+    format: CostExportFormat,
+    days?: number,
+  ): Promise<string> => {
+    const qs = new URLSearchParams({ format });
+    if (days != null) qs.set('days', String(days));
+    const path = `/metrics/costs/export?${qs.toString()}`;
+    const res = await fetch(path, { headers: { 'X-Auth-Token': getToken() } });
+    if (!res.ok) {
+      const ct = res.headers.get('content-type') ?? '';
+      const parsed: unknown = ct.includes('application/json')
+        ? await res.json()
+        : await res.text();
+      throw new HttpError(`HTTP ${res.status} GET ${path}`, res.status, parsed);
+    }
+    return res.text();
+  },
   /**
    * Per-instance visual settings (theme + label). Singleton on the server.
    * The GET returns hard-coded defaults until the first PATCH seeds the DB

@@ -24,6 +24,7 @@ import {
   type BoardStatus,
 } from '../api/client';
 import { ICON } from './desktop/icons';
+import { formatUsd } from '../lib/tokenCost';
 
 interface Props {
   open: boolean;
@@ -261,47 +262,74 @@ export function BoardPage({ open, onClose }: Props) {
                     <span className="board-col-count">{col.length}</span>
                   </div>
                   <div className="board-col-cards">
-                    {col.map((card) => (
-                      <button
-                        key={card.id}
-                        className={[
-                          'board-card',
-                          card.orphanedAt ? 'orphaned' : '',
-                          selectedCardId === card.id ? 'selected' : '',
-                        ].filter(Boolean).join(' ')}
-                        onClick={() =>
-                          setSelectedCardId(
-                            selectedCardId === card.id ? null : card.id,
-                          )
-                        }
-                        title={card.orphanedAt ? 'Orphaned — assignee disconnected' : undefined}
-                      >
-                        <div className="board-card-head">
-                          <span className={priorityCls(card.priority)}>
-                            {priorityLabel(card.priority)}
-                          </span>
-                          {card.orphanedAt && (
-                            <span className="board-orphan-badge" title="orphaned">ORPHAN</span>
-                          )}
-                          {card.autoCreated && (
-                            <span className="board-auto-badge" title="auto-created at spawn">AUTO</span>
-                          )}
-                        </div>
-                        <div className="board-card-title">{card.title}</div>
-                        {card.assigneeSessionId && (
-                          <div className="board-card-assignee">
-                            {shortId(card.assigneeSessionId)}
+                    {col.map((card) => {
+                      // Lot 16 — what this card cost while it was in DOING, or
+                      // `null` when the server could not attribute one (older
+                      // backend, assignee changed mid-flight, session without
+                      // counters). `formatUsd` also absorbs a negative or
+                      // non-finite amount from a drifting backend: those are
+                      // bugs upstream, and rendering them would hide them
+                      // behind a plausible-looking figure.
+                      const cost = formatUsd(card.costUsd);
+                      return (
+                        <button
+                          key={card.id}
+                          className={[
+                            'board-card',
+                            card.orphanedAt ? 'orphaned' : '',
+                            selectedCardId === card.id ? 'selected' : '',
+                          ].filter(Boolean).join(' ')}
+                          onClick={() =>
+                            setSelectedCardId(
+                              selectedCardId === card.id ? null : card.id,
+                            )
+                          }
+                          title={card.orphanedAt ? 'Orphaned — assignee disconnected' : undefined}
+                        >
+                          <div className="board-card-head">
+                            <span className={priorityCls(card.priority)}>
+                              {priorityLabel(card.priority)}
+                            </span>
+                            {card.orphanedAt && (
+                              <span className="board-orphan-badge" title="orphaned">ORPHAN</span>
+                            )}
+                            {card.autoCreated && (
+                              <span className="board-auto-badge" title="auto-created at spawn">AUTO</span>
+                            )}
                           </div>
-                        )}
-                        {card.labels.length > 0 && (
-                          <div className="board-card-labels">
-                            {card.labels.map((l) => (
-                              <span key={l} className="board-label-chip">{l}</span>
-                            ))}
-                          </div>
-                        )}
-                      </button>
-                    ))}
+                          <div className="board-card-title">{card.title}</div>
+                          {/* Footer: who ran it, and what it cost. Both are
+                              provenance rather than content, both are
+                              optional, and NEITHER gets a placeholder when
+                              absent — a board where most cards were never
+                              priced (nothing before Lot 16 was) would
+                              otherwise carry a column of em-dashes that says
+                              only "this feature is new". */}
+                          {(card.assigneeSessionId || cost) && (
+                            <div className="board-card-foot">
+                              {card.assigneeSessionId && (
+                                <span className="board-card-assignee">
+                                  {shortId(card.assigneeSessionId)}
+                                </span>
+                              )}
+                              {cost && (
+                                <span
+                                  className="board-card-cost"
+                                  title="estimated cost while this card was in progress"
+                                >{cost}</span>
+                              )}
+                            </div>
+                          )}
+                          {card.labels.length > 0 && (
+                            <div className="board-card-labels">
+                              {card.labels.map((l) => (
+                                <span key={l} className="board-label-chip">{l}</span>
+                              ))}
+                            </div>
+                          )}
+                        </button>
+                      );
+                    })}
                   </div>
                 </div>
               );

@@ -156,6 +156,17 @@ export interface Config {
    */
   contextAutoCompactBytes: number;
   /**
+   * Monitoring (docs/monitoring-agents.md, Lot 2) — how long a session's
+   * context-usage snapshot is served before the next transcript tail read.
+   *
+   * There is no timer: the read is triggered by `Orchestrator.toView()`, i.e.
+   * by the UI's existing 3 s `/orchestrators` poll, so this is what keeps the
+   * poll from turning into one file read per session per 3 s. `0` disables the
+   * tracker entirely — nothing is ever read and every gauge shows `—`.
+   * Default 15 000. Env: `SWARM_OS_CONTEXT_USAGE_TTL_MS`.
+   */
+  contextUsageTtlMs: number;
+  /**
    * Hot-backup interval in ms. The server takes an online SQLite snapshot of
    * `swarm-os.db` into `<dataDir>/backups/` every `backupIntervalMs`. Since
    * `/data` is bind-mounted, snapshots land on the host. `0` disables the
@@ -195,6 +206,35 @@ export interface Config {
    * `SWARM_OS_APPROVAL_JANITOR_INTERVAL_MS`.
    */
   approvalJanitorIntervalMs: number;
+  /**
+   * Dead-worker session reaper (modules/orchestrator/reaper) — how often (ms)
+   * the reaper sweeps live teams for terminal workers (killed/exited/failed)
+   * whose ROLE opted into auto-removal and whose terminal age exceeds the
+   * role's delay. `0` disables the reaper entirely. Default 60000 (1 min).
+   * Env: `SWARM_OS_SESSION_REAPER_INTERVAL_MS`.
+   */
+  sessionReaperIntervalMs: number;
+  /**
+   * Cost-budget watch (modules/orchestrator/budget-watch) — how often (ms) the
+   * janitor compares each live team's cumulative spend (Lot 12 DB aggregate,
+   * removed workers included) against its ROLE's `costBudgetUsd`, and on a
+   * first crossing emits `session.budget_exceeded`, posts to Discord and — when
+   * the role says `pause` — SIGSTOPs the whole team. `0` disables it entirely
+   * (`GET /metrics/costs` still reports `budget.exceeded`; only the acting
+   * stops). Default 60000 (1 min). Env: `SWARM_OS_BUDGET_CHECK_INTERVAL_MS`.
+   */
+  budgetCheckIntervalMs: number;
+  /**
+   * Daily cost roll-up (modules/orchestrator/cost-rollup) — how often (ms) the
+   * janitor files each live agent's token delta into `session_token_daily`, the
+   * table the long-trend charts and `GET /metrics/costs/export` read. `0`
+   * disables it entirely (the export then returns whatever history is already
+   * there, and stops growing). Default 3600000 (1 h): the ledger's resolution is
+   * the DAY, so a finer cadence would buy nothing but writes — and nothing is
+   * lost at this one, since each tick files what the previous did not.
+   * Env: `SWARM_OS_COST_ROLLUP_INTERVAL_MS`.
+   */
+  costRollupIntervalMs: number;
   /**
    * Per-role cron scheduler (modules/schedule): master switch. When `true`
    * (default), a role carrying a `schedule` gets an in-process cron that
@@ -653,6 +693,9 @@ export function loadConfig(): Config {
   // backstops). Both default to "off" so behaviour is unchanged unless opted in.
   const contextCompactOnWaiting = boolEnv('SWARM_OS_COMPACT_ON_WAITING', false);
   const contextAutoCompactBytes = intEnv('SWARM_OS_AUTO_COMPACT_BYTES', 0);
+  // Monitoring — TTL of the per-session context-usage snapshot. Rides the
+  // existing 3 s poll (no timer of its own); `0` turns the tracker off.
+  const contextUsageTtlMs = intEnv('SWARM_OS_CONTEXT_USAGE_TTL_MS', 15_000);
 
   // Hot SQLite backup scheduler (in-process; writes to <dataDir>/backups).
   const backupIntervalMs = intEnv('SWARM_OS_BACKUP_INTERVAL_MS', 6 * 60 * 60 * 1000);
@@ -675,6 +718,22 @@ export function loadConfig(): Config {
     'SWARM_OS_APPROVAL_JANITOR_INTERVAL_MS',
     6 * 60 * 60 * 1000,
   );
+
+  // Dead-worker session reaper (in-process; modules/orchestrator/reaper). Sweeps
+  // live teams every minute by default and hides terminal workers whose ROLE
+  // opted in and whose terminal age passed the role's delay. `0` disables it.
+  const sessionReaperIntervalMs = intEnv('SWARM_OS_SESSION_REAPER_INTERVAL_MS', 60 * 1000);
+
+  // Cost-budget watch (in-process; modules/orchestrator/budget-watch). Same
+  // cadence as the reaper: one aggregate query per tick, and a minute is the
+  // right resolution for a bill that moves in dollars per hour. `0` disables it.
+  const budgetCheckIntervalMs = intEnv('SWARM_OS_BUDGET_CHECK_INTERVAL_MS', 60 * 1000);
+
+  // Daily cost roll-up (in-process; modules/orchestrator/cost-rollup). Hourly,
+  // NOT per minute like the two above: this one WRITES, its output has a
+  // one-day resolution, and a delta missed by a tick is picked up whole by the
+  // next (the watermark lives in SQLite). `0` disables it.
+  const costRollupIntervalMs = intEnv('SWARM_OS_COST_ROLLUP_INTERVAL_MS', 60 * 60 * 1000);
 
   // Per-role cron scheduler (in-process; modules/schedule).
   const scheduleEnabled = boolEnv('SWARM_OS_SCHEDULE_ENABLED', true);
@@ -902,12 +961,16 @@ export function loadConfig(): Config {
     idleThresholdMs,
     contextCompactOnWaiting,
     contextAutoCompactBytes,
+    contextUsageTtlMs,
     backupIntervalMs,
     backupKeep,
     taskboardOrphanTtlMs,
     taskboardJanitorIntervalMs,
     approvalOrphanTtlMs,
     approvalJanitorIntervalMs,
+    sessionReaperIntervalMs,
+    budgetCheckIntervalMs,
+    costRollupIntervalMs,
     scheduleEnabled,
     scheduleTimezone,
     codegraphEnabled,

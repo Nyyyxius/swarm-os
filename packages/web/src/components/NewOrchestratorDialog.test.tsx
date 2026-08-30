@@ -215,7 +215,18 @@ describe('NewOrchestratorDialog — provider selection', () => {
     const onCreate = makeOnCreate();
     render(<NewOrchestratorDialog open onClose={() => undefined} onCreate={onCreate} />);
     // Wait for GET /providers to land before asserting on derived controls.
-    await waitFor(() => expect(providerSelect().value).toBe('claude'));
+    //
+    // BOTH selects, not just the provider: they settle in separate state
+    // updates, so under load the provider can read `claude` a tick before the
+    // model options exist. A `fireEvent.change` on a still-empty <select> is
+    // silently dropped by jsdom (the value is not among its options), which
+    // surfaced as a rare, confusing failure in the test below that switches
+    // MODEL to `__custom_model__`. Waiting on the derived control removes the
+    // race instead of papering over it with a timeout.
+    await waitFor(() => {
+      expect(providerSelect().value).toBe('claude');
+      expect(modelSelect().value).toBe('claude-opus-4-8');
+    });
     return { onCreate };
   }
 

@@ -5,6 +5,7 @@ import { RolesPage } from './components/RolesPage';
 import { MemoryPage } from './components/MemoryPage';
 import { BoardPage } from './components/BoardPage';
 import { ApprovalsPage } from './components/ApprovalsPage';
+import { MonitoringPage } from './components/MonitoringPage';
 import { PluginsPage } from './components/PluginsPage';
 import { SkillsPage } from './components/SkillsPage';
 import { CodeGraphPage } from './components/CodeGraphPage';
@@ -20,6 +21,7 @@ type Route =
   | { kind: 'memory' }
   | { kind: 'board' }
   | { kind: 'approvals' }
+  | { kind: 'monitoring' }
   | { kind: 'graph' }
   | { kind: 'plugins' }
   | { kind: 'skills' }
@@ -45,6 +47,7 @@ function parseHash(): Route {
   if (h === '#/memory') return { kind: 'memory' };
   if (h === '#/board') return { kind: 'board' };
   if (h === '#/approvals') return { kind: 'approvals' };
+  if (h === '#/monitoring') return { kind: 'monitoring' };
   if (h === '#/graph') return { kind: 'graph' };
   if (h === '#/plugins') return { kind: 'plugins' };
   if (h === '#/skills') return { kind: 'skills' };
@@ -59,6 +62,7 @@ function setHashRoute(route: Route): void {
   else if (route.kind === 'memory') target = '#/memory';
   else if (route.kind === 'board') target = '#/board';
   else if (route.kind === 'approvals') target = '#/approvals';
+  else if (route.kind === 'monitoring') target = '#/monitoring';
   else if (route.kind === 'graph') target = '#/graph';
   else if (route.kind === 'plugins') target = '#/plugins';
   else if (route.kind === 'skills') target = '#/skills';
@@ -117,6 +121,7 @@ export default function App() {
           onOpenMemory={() => setRoute({ kind: 'memory' })}
           onOpenBoard={() => setRoute({ kind: 'board' })}
           onOpenApprovals={() => setRoute({ kind: 'approvals' })}
+          onOpenMonitoring={() => setRoute({ kind: 'monitoring' })}
           onOpenGraph={() => setRoute({ kind: 'graph' })}
           onOpenPlugins={() => setRoute({ kind: 'plugins' })}
           onOpenSkills={() => setRoute({ kind: 'skills' })}
@@ -155,6 +160,16 @@ export default function App() {
               Always-mounted gated by `open`, same pattern as BoardPage. */}
           <ApprovalsPage
             open={route.kind === 'approvals'}
+            onClose={() => setRoute({ kind: 'list' })}
+          />
+
+          {/* MonitoringPage overlay — per-agent context / throughput / inbox
+              (docs/monitoring-agents.md). Always-mounted gated by `open`, same
+              pattern as ApprovalsPage; its polling and its clock tick are both
+              gated by `open`, so a closed page issues no request and does not
+              re-render. */}
+          <MonitoringPage
+            open={route.kind === 'monitoring'}
             onClose={() => setRoute({ kind: 'list' })}
           />
 

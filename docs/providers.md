@@ -92,6 +92,7 @@ remote shell sources.
 | Clear token | `/clear` | `/new` (keeps the scrollback) | `/clear` | `/clear` |
 | PTY submit | two-step: text, then a lone `\r` at +150 ms | two-step | two-step | single write is enough |
 | MCP tool naming | `team.whoami` (canonical kept) | `team_whoami` | `mcp_team-comms_team.whoami` | `team_team_whoami` |
+| Context usage (monitoring) | transcript `.jsonl` — path via `SessionStart` hook, last main-chain assistant `message.usage` (`verify-claude-sessionstart.report.md`) | rollout `.jsonl` in the live `CODEX_HOME` — `last_token_usage.total_tokens` / `model_context_window`, keyed on the notify `thread-id` (`verify-codex-rollout.report.md`) | **none** (excluded by design) | control plane HTTP — `tokens.total` of the last *completed* assistant message, session re-resolved every poll; **local only** (`verify-opencode-tokens.report.md`) |
 
 Notes the table cannot hold:
 

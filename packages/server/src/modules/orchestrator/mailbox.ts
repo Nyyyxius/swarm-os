@@ -136,6 +136,21 @@ export class Mailbox {
    * ever drained an inbox (a handful), so it is not a growth concern.
    */
   private readonly reads = new Map<string, number>();
+  /**
+   * Monitoring (docs/monitoring-agents.md, Lot 1) — per-session count of
+   * *messages* an agent actually took out of this inbox, as opposed to
+   * `reads`, which counts the drains themselves.
+   *
+   * Same single-increment discipline as `reads`, for the same reason: a queue
+   * emptied by `clearAll()`, `removeSession()` or the drop-oldest cap eviction
+   * was never handed to anybody, so counting it would inflate the number the
+   * operator reads on the monitoring page into a fiction. Only `read()` moves
+   * it, by the exact number of messages returned.
+   *
+   * In-memory like the queues; the durable value is mirrored onto the
+   * `Session` at drain time (`readInbox`) and persisted from there.
+   */
+  private readonly processed = new Map<string, number>();
   private readonly maxSize: number;
   private readonly persist: MailboxPersistHook | undefined;
   /**
@@ -349,9 +364,10 @@ export class Mailbox {
       return [];
     }
     this.inboxes.delete(sid);
-    // The ONLY place this counter moves. Every other way a queue can empty
+    // The ONLY place these counters move. Every other way a queue can empty
     // (clearAll, removeSession, cap eviction) is not an agent reading.
     this.reads.set(sid, (this.reads.get(sid) ?? 0) + 1);
+    this.processed.set(sid, (this.processed.get(sid) ?? 0) + q.length);
     return q;
   }
 
@@ -379,6 +395,19 @@ export class Mailbox {
    */
   readCount(sid: string): number {
     return this.reads.get(sid) ?? 0;
+  }
+
+  /**
+   * Monotonic count of inbox messages `sid` actually drained since this
+   * mailbox was constructed — see the `processed` field for the full
+   * contract. 0 for a session that never read anything.
+   *
+   * Absolute (unlike `readCount`), which is why it is mirrored onto the
+   * `Session` and persisted: the in-memory value restarts at 0 with the
+   * process, and the operator's counter must not.
+   */
+  messagesProcessed(sid: string): number {
+    return this.processed.get(sid) ?? 0;
   }
 
   /**

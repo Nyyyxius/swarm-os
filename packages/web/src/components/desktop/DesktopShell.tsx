@@ -37,6 +37,7 @@ export default function DesktopShell() {
         onOpenBoard={c.onOpenBoard}
         onOpenApprovals={c.onOpenApprovals}
         onOpenGraph={c.onOpenGraph}
+        onOpenMonitoring={c.onOpenMonitoring}
         onOpenPlugins={c.onOpenPlugins}
         onOpenSkills={c.onOpenSkills}
         onOpenIde={c.onOpenIde}
@@ -56,6 +57,8 @@ export default function DesktopShell() {
           orchestrators={c.orchestrators}
           onSelectTeam={c.handleLeftSelectTeam}
           onSelectEnded={c.handleLeftSelectEnded}
+          onSelectAgent={c.selectAgent}
+          onOpenMonitoring={c.onOpenMonitoring}
         />
         <MapView
           teams={c.mapViewTeams}
@@ -120,7 +123,8 @@ export default function DesktopShell() {
         onClose={() => c.setEditConfigFor(null)}
       />
 
-      {c.waitingToasts.length > 0 || c.approvalToasts.length > 0 ? (
+      {c.waitingToasts.length > 0 || c.approvalToasts.length > 0
+        || c.notices.length > 0 || c.budgetToasts.length > 0 ? (
         <Toasts
           items={c.waitingToasts}
           onOpen={c.handleToastOpen}
@@ -131,6 +135,11 @@ export default function DesktopShell() {
           onDeny={c.denyApproval}
           onApprovalOpen={c.handleApprovalOpen}
           onApprovalDismiss={c.dismissApprovalToast}
+          notices={c.notices}
+          onNoticeDismiss={c.dismissNotice}
+          budgets={c.budgetToasts}
+          onBudgetOpen={c.handleBudgetOpen}
+          onBudgetDismiss={c.dismissBudgetToast}
         />
       ) : (
         <EventsPip connected={c.eventsConnected} panelOpen={c.panelOpen} />

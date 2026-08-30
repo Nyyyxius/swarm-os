@@ -6,6 +6,7 @@
 // `useOrchestrators` poll) into the row models. Cf.
 // `docs/redesign-desktop/05_leftpanel-data-binding.md`.
 
+import { useMemo } from 'react';
 import Sparkline from './Sparkline';
 import BigGraph from './BigGraph';
 import { formatRelative } from '../../lib/format';
@@ -21,6 +22,17 @@ import {
   useServerMessagesMetrics,
   type MessageFlowSource,
 } from '../../lib/leftPanelAdapters';
+import { topContextRows } from '../../lib/agentContext';
+import {
+  contextBarWidth, contextColorVar, contextLevel, formatContextPercent,
+} from '../../lib/contextPercent';
+
+/**
+ * How many agents the AGENT CONTEXT section lists before folding the rest
+ * behind "+N MORE". Four is what fits between MESSAGE FLOW and PER-TEAM
+ * TRAFFIC without pushing the team list below the fold on a 900 px panel.
+ */
+const CONTEXT_TOP_N = 4;
 
 /** Forme minimale d'une équipe pour la liste PER-TEAM TRAFFIC. */
 export interface LeftPanelTeam {
@@ -61,6 +73,13 @@ interface Props {
   onSelectEnded: (orchestratorId: string) => void;
   /** Source du big graph MESSAGE FLOW. Default : `'s4-client'`. */
   messageFlowSource?: MessageFlowSource;
+  /**
+   * Clic sur un agent de la section AGENT CONTEXT → sélectionne cette
+   * session (le RightPanel s'ouvre dessus).
+   */
+  onSelectAgent?: (sessionId: string) => void;
+  /** Pied de la section AGENT CONTEXT → page `#/monitoring`. */
+  onOpenMonitoring?: () => void;
 }
 
 export default function LeftPanel({
@@ -68,6 +87,8 @@ export default function LeftPanel({
   onSelectTeam,
   onSelectEnded,
   messageFlowSource = 's4-client',
+  onSelectAgent,
+  onOpenMonitoring,
 }: Props) {
   // ── MESSAGE FLOW (S4 client par défaut, S9 server si demandé) ──────────
   const flow = useMessageFlow(orchestrators, messageFlowSource);
@@ -88,6 +109,19 @@ export default function LeftPanel({
   // ── BUS HEALTH (S8, 3 s) ──────────────────────────────────────────────
   const busHealth = useBusHealth(3_000);
 
+  // ── AGENT CONTEXT (top N par pression de contexte, toutes teams) ──────
+  // Zéro requête supplémentaire : `orchestrators` porte déjà `contextUsage`
+  // (poll 3 s partagé). Les agents sans télémétrie sont écartés — quatre
+  // lignes de `—` n'apprendraient rien ; la page MONITORING, elle, les
+  // compte dans un bucket NO TELEMETRY.
+  // Memoized: this allocates one row per session across every team, then
+  // filters and sorts. The panel re-renders at least every 3 s (BUS HEALTH),
+  // and the result only changes when the snapshot does.
+  const { rows: contextRows, overflow: contextOverflow } = useMemo(
+    () => topContextRows(orchestrators, CONTEXT_TOP_N),
+    [orchestrators],
+  );
+
   return (
     <aside className="panel-left">
       {/* ============ MESSAGE FLOW ============ */}
@@ -99,6 +133,72 @@ export default function LeftPanel({
         </div>
         <div className="big-sub">TOTAL EXCHANGED · LAST 60 MIN</div>
         <div className="graph"><BigGraph data={flow.history} /></div>
+      </div>
+
+      {/* ============ AGENT CONTEXT ============ */}
+      {/* Deliberately a SEPARATE section rather than sub-rows under each team
+          in PER-TEAM TRAFFIC: context pressure is a cross-team ranking (the
+          agent about to blow its window matters whichever team it belongs
+          to), and nesting it would have made the team rows N× taller for a
+          signal most of them don't carry. */}
+      <div className="pl-section">
+        <h3>
+          AGENT CONTEXT
+          {contextRows.length > 0 && (
+            <span className="count">{contextRows.length + contextOverflow}</span>
+          )}
+        </h3>
+        <div className="pl-ctx-list">
+          {contextRows.map((r) => {
+            const level = contextLevel(r.pct);
+            const stale = !!r.usage?.stale;
+            return (
+              // A <button>, not a clickable <div>: this row selects an agent,
+              // which is a real navigation, and it must be reachable by
+              // keyboard like the equivalent row on the monitoring page.
+              <button
+                key={r.sessionId}
+                type="button"
+                className="pl-ctx-row"
+                onClick={() => onSelectAgent?.(r.sessionId)}
+                title={`${r.teamName} :: ${r.name} — ${formatContextPercent(r.pct)} of context window${stale ? ' (stale — awaiting the next turn after a reset)' : ''}${r.resetPending ? ' — reset armed' : ''}`}
+              >
+                <span className="pl-ctx-name">{r.name}</span>
+                <span className="pl-ctx-team">{r.teamName}</span>
+                <div
+                  className="pill-bar pl-ctx-bar"
+                  style={{ opacity: stale ? 0.45 : 1 }}
+                >
+                  <i
+                    className={level ?? 'stopped'}
+                    style={{ width: `${contextBarWidth(r.pct)}%` }}
+                  />
+                </div>
+                <span
+                  className="pl-ctx-pct"
+                  style={{
+                    color: stale ? 'var(--text-mute)' : contextColorVar(level),
+                  }}
+                >
+                  {formatContextPercent(r.pct)}
+                </span>
+                {r.inbox !== null && r.inbox > 0 && (
+                  <span className="pl-ctx-inbox">{r.inbox}</span>
+                )}
+              </button>
+            );
+          })}
+          {contextRows.length === 0 && (
+            <div className="pl-ctx-empty">— no context telemetry —</div>
+          )}
+        </div>
+        <button
+          type="button"
+          className="pl-ctx-more"
+          onClick={() => onOpenMonitoring?.()}
+        >
+          {contextOverflow > 0 ? `+${contextOverflow} MORE → MONITORING` : '→ MONITORING'}
+        </button>
       </div>
 
       {/* ============ PER-TEAM TRAFFIC ============ */}

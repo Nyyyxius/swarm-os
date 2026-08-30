@@ -338,3 +338,163 @@ describe('useEvents — Step 6 callback subscriptions', () => {
     expect(cb1).not.toHaveBeenCalled();
   });
 });
+
+// ── Lot 14 · session.budget_exceeded ────────────────────────────────────────
+//
+// The frame is emitted ONCE per crossing, server-side. Everything below is a
+// consequence of that: it may not be dropped for a malformed payload, it may
+// not expire on a timer, and a second frame for the same team must refresh
+// the notice rather than stack a second one.
+
+describe('useEvents — Lot 14 budget breaches', () => {
+  const frame = (over: Record<string, unknown> = {}) => ({
+    kind: 'session.budget_exceeded',
+    ts: '2026-08-30T10:00:00.000Z',
+    orchestratorId: 'o1',
+    payload: {
+      teamName: 'ATLAS',
+      costUsd: 52.1,
+      budgetUsd: 50,
+      action: 'pause',
+    },
+    ...over,
+  });
+
+  it('surfaces the breach, keyed by the team', async () => {
+    const { result } = renderHook(() => useEvents());
+    const ws = await waitForSocket();
+
+    act(() => { ws.emit(frame()); });
+
+    await waitFor(() => {
+      expect(result.current.budgets).toHaveLength(1);
+    });
+    expect(result.current.budgets[0]).toEqual({
+      id: 'o1',
+      ts: '2026-08-30T10:00:00.000Z',
+      orchestratorId: 'o1',
+      teamName: 'ATLAS',
+      costUsd: 52.1,
+      budgetUsd: 50,
+      action: 'pause',
+    });
+  });
+
+  it('reads an unknown action as notify, never as pause', async () => {
+    // "Is this team stopped?" is the question the toast answers; guessing
+    // `pause` from a field we did not understand would answer it wrongly.
+    const { result } = renderHook(() => useEvents());
+    const ws = await waitForSocket();
+
+    act(() => { ws.emit(frame({ payload: { teamName: 'ATLAS' } })); });
+
+    await waitFor(() => {
+      expect(result.current.budgets).toHaveLength(1);
+    });
+    expect(result.current.budgets[0]?.action).toBe('notify');
+    expect(result.current.budgets[0]?.costUsd).toBeUndefined();
+  });
+
+  it('still surfaces the breach when the payload carries no figures', async () => {
+    const { result } = renderHook(() => useEvents());
+    const ws = await waitForSocket();
+
+    act(() => { ws.emit(frame({ payload: undefined })); });
+
+    await waitFor(() => {
+      expect(result.current.budgets).toHaveLength(1);
+    });
+    expect(result.current.budgets[0]?.id).toBe('o1');
+  });
+
+  it('refreshes rather than stacks on a second frame for the same team', async () => {
+    const { result } = renderHook(() => useEvents());
+    const ws = await waitForSocket();
+
+    act(() => {
+      ws.emit(frame());
+      ws.emit(frame({ ts: '2026-08-30T11:00:00.000Z' }));
+    });
+
+    await waitFor(() => {
+      expect(result.current.budgets).toHaveLength(1);
+    });
+    expect(result.current.budgets[0]?.ts).toBe('2026-08-30T11:00:00.000Z');
+  });
+
+  it('keeps two teams apart', async () => {
+    const { result } = renderHook(() => useEvents());
+    const ws = await waitForSocket();
+
+    act(() => {
+      ws.emit(frame());
+      ws.emit(frame({
+        orchestratorId: 'o2',
+        payload: { teamName: 'NOVA', costUsd: 9, budgetUsd: 5, action: 'notify' },
+      }));
+    });
+
+    await waitFor(() => {
+      expect(result.current.budgets).toHaveLength(2);
+    });
+    expect(result.current.budgets.map((b) => b.id)).toEqual(['o1', 'o2']);
+  });
+
+  it('does NOT expire on a timer, unlike a waiting toast', async () => {
+    // The server never re-sends this frame while the team stays over budget,
+    // so an auto-dismiss would be the operator's only chance to learn that a
+    // team was suspended — silently spent.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    try {
+      const { result } = renderHook(() => useEvents());
+      const ws = await waitForSocket();
+      act(() => { ws.emit(frame()); });
+      await waitFor(() => {
+        expect(result.current.budgets).toHaveLength(1);
+      });
+
+      await act(async () => {
+        await vi.advanceTimersByTimeAsync(120_000);
+      });
+      expect(result.current.budgets).toHaveLength(1);
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('dismissBudget closes the toast without touching the team', async () => {
+    const { result } = renderHook(() => useEvents());
+    const ws = await waitForSocket();
+    act(() => { ws.emit(frame()); });
+    await waitFor(() => {
+      expect(result.current.budgets).toHaveLength(1);
+    });
+
+    act(() => { result.current.dismissBudget('o1'); });
+    await waitFor(() => {
+      expect(result.current.budgets).toHaveLength(0);
+    });
+  });
+
+  it('leaves the waiting stack alone', async () => {
+    const { result } = renderHook(() => useEvents());
+    const ws = await waitForSocket();
+
+    act(() => {
+      ws.emit(frame());
+      ws.emit({
+        kind: 'session.status_changed',
+        ts: '2026-08-30T10:00:01.000Z',
+        orchestratorId: 'o1',
+        sessionId: 's-wait',
+        payload: { status: 'waiting' },
+      });
+    });
+
+    await waitFor(() => {
+      expect(result.current.budgets).toHaveLength(1);
+    });
+    expect(result.current.waiting).toHaveLength(1);
+  });
+});
+

@@ -160,6 +160,8 @@ interface RawModel {
   tool_call?: unknown;
   modalities?: unknown;
   cost?: unknown;
+  /** `{ context, output }` — the context window is what monitoring needs. */
+  limit?: unknown;
 }
 
 /** One entry that survived validation. Internal — never leaves this module. */
@@ -172,6 +174,34 @@ interface LiveModel {
   textOnlyOutput: boolean;
   costInput: number | null;
   costOutput: number | null;
+  /**
+   * `cost.cache_read` / `cost.cache_write` (docs/monitoring-agents.md, Lot 11).
+   * Absent from most non-Anthropic entries, hence nullable per bucket rather
+   * than per model: a vendor that publishes an input price and no cache price
+   * still gets its input tokens costed.
+   */
+  costCacheRead: number | null;
+  costCacheWrite: number | null;
+  /** `limit.context` when the payload carries a usable one (docs/monitoring-agents.md). */
+  contextLimit: number | null;
+}
+
+/**
+ * Per-MILLION-token prices of one model, one nullable field per token bucket
+ * (docs/monitoring-agents.md, Lot 11 — "un bucket sans tarif connu contribue 0,
+ * jamais de tarif inventé").
+ *
+ * `null` is load-bearing and is NOT the same as `0`: a free model publishes
+ * `0` and is costed at zero, while a model whose payload omits `cache_read`
+ * publishes nothing and its cached tokens simply do not contribute. Inventing a
+ * house rate — "cache read is usually a tenth of input" — would put a number in
+ * front of the operator that no vendor ever quoted.
+ */
+export interface TokenCostRates {
+  input: number | null;
+  output: number | null;
+  cacheRead: number | null;
+  cacheWrite: number | null;
 }
 
 /** What a provider's slice of the catalogue reduces to. */
@@ -180,6 +210,20 @@ export interface ProviderCatalogueView {
   models: readonly ProviderModel[];
   /** Newest member of the pinned family, or `null` when the family is empty. */
   familyDefault: string | null;
+  /**
+   * `model id → context window`, for the ids that published one. A separate map
+   * rather than a field on `ProviderModel` because `ProviderModel` is a
+   * `<select>` option shipped to the browser, and a context window is server-side
+   * arithmetic (`docs/monitoring-agents.md` — "Limites par modèle").
+   */
+  contextLimits: Readonly<Record<string, number>>;
+  /**
+   * `model id → per-million prices`, for the ids that published at least one.
+   * Same separation, and the same reason, as `contextLimits`: a price is
+   * server-side arithmetic (Lot 11's `costUsd`), not a `<select>` option — the
+   * label already carries the two figures an operator reads while choosing.
+   */
+  costs: Readonly<Record<string, TokenCostRates>>;
 }
 
 function asRecord(v: unknown): Record<string, unknown> | null {
@@ -190,6 +234,16 @@ function asRecord(v: unknown): Record<string, unknown> | null {
 
 function asFiniteNumber(v: unknown): number | null {
   return typeof v === 'number' && Number.isFinite(v) ? v : null;
+}
+
+/**
+ * A per-million price, or `null`. `0` is a legitimate value (a free model) and
+ * survives; a negative one does not — it would subtract from an estimate the
+ * operator reads as money, and no vendor has ever quoted one.
+ */
+function asPrice(v: unknown): number | null {
+  const n = asFiniteNumber(v);
+  return n !== null && n >= 0 ? n : null;
 }
 
 /**
@@ -214,13 +268,23 @@ function readModel(key: string, raw: RawModel): LiveModel | null {
     output !== null && output.length === 1 && output[0] === 'text';
 
   const cost = asRecord(raw.cost);
+  // `limit.context`, and only when it is a usable figure: models.dev carries
+  // `0`, `null` and (rarely) a string here. A zero would make every `pct` read
+  // 100 %, which is worse than the `—` a null renders.
+  const limit = asRecord(raw.limit);
+  const context = limit ? asFiniteNumber(limit.context) : null;
   return {
     id,
     name: typeof raw.name === 'string' && raw.name.length > 0 ? raw.name : id,
     releaseDate: typeof raw.release_date === 'string' ? raw.release_date : '',
     textOnlyOutput,
-    costInput: cost ? asFiniteNumber(cost.input) : null,
-    costOutput: cost ? asFiniteNumber(cost.output) : null,
+    costInput: cost ? asPrice(cost.input) : null,
+    costOutput: cost ? asPrice(cost.output) : null,
+    // Lot 11. models.dev spells the two cache buckets `cache_read` /
+    // `cache_write`; Anthropic entries carry both, most others carry neither.
+    costCacheRead: cost ? asPrice(cost.cache_read) : null,
+    costCacheWrite: cost ? asPrice(cost.cache_write) : null,
+    contextLimit: context !== null && context > 0 ? Math.floor(context) : null,
   };
 }
 
@@ -314,9 +378,32 @@ function familyWinner(models: readonly LiveModel[], family: RegExp): string | nu
 
 function toView(models: LiveModel[], provider: BuiltinProviderId): ProviderCatalogueView {
   const sorted = [...models].sort(byReleaseDesc);
+  const contextLimits: Record<string, number> = {};
+  const costs: Record<string, TokenCostRates> = {};
+  for (const m of sorted) {
+    if (m.contextLimit !== null) contextLimits[m.id] = m.contextLimit;
+    // At least ONE known bucket earns an entry: a model priced on input and
+    // output only is exactly the common case, and dropping it would cost the
+    // estimate its two biggest buckets over the two it never published.
+    if (
+      m.costInput !== null ||
+      m.costOutput !== null ||
+      m.costCacheRead !== null ||
+      m.costCacheWrite !== null
+    ) {
+      costs[m.id] = {
+        input: m.costInput,
+        output: m.costOutput,
+        cacheRead: m.costCacheRead,
+        cacheWrite: m.costCacheWrite,
+      };
+    }
+  }
   return {
     models: sorted.map((m) => ({ value: m.id, label: labelFor(m) })),
     familyDefault: familyWinner(sorted, BUILTIN_PROVIDER_DEFAULT_FAMILIES[provider]),
+    contextLimits,
+    costs,
   };
 }
 
@@ -419,7 +506,237 @@ export function deriveCodexCatalogue(raw: unknown): ProviderCatalogueView | null
   return {
     models: entries.map((e) => ({ value: e.slug, label: e.label })),
     familyDefault: entries.find((e) => family.test(e.slug))?.slug ?? null,
+    // The codex cache carries no window figure — `PINNED_CONTEXT_LIMITS` answers
+    // for `gpt-*` instead.
+    contextLimits: {},
+    // Nor any price: the file is the CLI's own model list, not a rate card. A
+    // codex agent therefore reports its tokens with `costUsd: null` — an honest
+    // gap rather than a models.dev figure for an id codex may not even accept.
+    costs: {},
   };
+}
+
+// ---------------------------------------------------------------------------
+// Context windows — the live figure, and what answers when there is none
+// ---------------------------------------------------------------------------
+
+/**
+ * Fallback context windows, PER MODEL rather than per provider.
+ *
+ * Per provider would be a lie the moment a vendor ships one long-context member
+ * of a family, and the monitoring gauge is only worth drawing if the
+ * denominator is the real one — hence `null` (rendered `—`,
+ * `web/lib/loadPercent.ts` doctrine: never invent a figure) for everything not
+ * listed here rather than a house average.
+ *
+ * Deliberately short, and every entry is sourced:
+ *
+ *  - `[1m]` / `-1m` suffix → 1 000 000. Claude Code's own marker for the
+ *    long-context variants; the suffix IS the vendor's way of saying it.
+ *  - any other `claude-*` → 200 000, the standard Anthropic window.
+ *  - `gpt-*` / `codex-*` → 272 000 input tokens (400 000 total minus the
+ *    128 000 output reservation) — the figure the codex CLI runs on.
+ *
+ * gemini and the openrouter ids get nothing: gemini is out of scope for context
+ * usage (docs/monitoring-agents.md §Providers) and openrouter proxies ~60
+ * vendors whose windows we cannot pin one by one. models.dev answers for both
+ * when it is reachable, which is the normal case.
+ */
+const PINNED_CONTEXT_LIMITS: ReadonlyArray<{ match: RegExp; limit: number }> = [
+  { match: /(\[1m\]|-1m)$/i, limit: 1_000_000 },
+  { match: /^claude-/i, limit: 200_000 },
+  { match: /^(gpt-|codex-|o[34]-)/i, limit: 272_000 },
+];
+
+/**
+ * The pinned answer for `(provider, model)`, or `null` when we have none.
+ *
+ * PURE and exported: the tracker calls it through `modelContextLimit`, and a
+ * test can assert the fallback without standing up a catalogue.
+ */
+export function pinnedContextLimit(providerId: string, modelId: string): number | null {
+  if (typeof modelId !== 'string' || modelId.length === 0) return null;
+  // opencode ids are `vendor/model`; the vendor prefix is not part of the name
+  // the pins match on.
+  const id = modelId.includes('/') ? (modelId.split('/').pop() ?? modelId) : modelId;
+  for (const entry of PINNED_CONTEXT_LIMITS) {
+    if (entry.match.test(id)) return entry.limit;
+  }
+  // The claude CLI accepts bare aliases (`haiku`, `sonnet`, `opus`, …) and
+  // resolves them itself — `POST /orchestrators` passes them straight through,
+  // so a team spawned with `model: "haiku"` matches no `claude-*` pin and its
+  // gauge silently loses its denominator. Whatever an alias resolves to is an
+  // Anthropic model on the standard 200K window unless the vendor says
+  // otherwise with the `[1m]` suffix (caught above). Scoped to the claude
+  // provider: every other provider's ids are literal model ids.
+  if (providerId === 'claude') return 200_000;
+  return null;
+}
+
+/**
+ * `catalogue → pins → null`, for callers that may not have a catalogue at all
+ * (unit tests, embedders). The one entry point the monitoring tracker uses.
+ */
+export function modelContextLimit(
+  catalogue: ModelCatalogue | null | undefined,
+  providerId: string,
+  modelId: string,
+): number | null {
+  return catalogue
+    ? catalogue.contextLimit(providerId, modelId)
+    : pinnedContextLimit(providerId, modelId);
+}
+
+// ---------------------------------------------------------------------------
+// Prices — the live rate card, and the arithmetic on top of it (Lot 11)
+// ---------------------------------------------------------------------------
+
+/**
+ * Fallback rate cards, PER MODEL FAMILY (docs/monitoring-agents.md, Lot 15).
+ *
+ * This table exists because of one failure mode seen in the field: models.dev
+ * unreachable — a cold boot behind a proxy, a DNS blip, an air-gapped host —
+ * and every `$` in the product disappears at once. Costs, burn rates, budgets
+ * and the daily roll-up all read `null`, and an operator cannot tell "we could
+ * not price this" from "nothing is running".
+ *
+ * It took until Lot 15 to add it, and the reason is the reason every entry is
+ * shaped the way it is: an INVENTED price is worse than no price. So —
+ *
+ *  - **Every figure here is one models.dev itself publishes** for that family
+ *    (mirrored in `catalogue.fixture.ts`, which is a verbatim slice of the live
+ *    payload). Nothing is averaged, extrapolated, or read off a vendor page.
+ *  - **Per family, not per provider.** `claude-opus-4-1` is three times the
+ *    price of `claude-opus-5`, so it gets its own entry ABOVE the generic opus
+ *    one — first match wins, most specific first.
+ *  - **Buckets we have not seen stay `null`**, which `estimateTokenCostUsd`
+ *    scores as 0. The gpt entry publishes input/output only, so a codex agent
+ *    priced from this table is under-reported rather than embellished — the
+ *    same lower-bound direction the whole cost feature errs in.
+ *  - **The live catalogue always wins** (`ModelCatalogue.costRates` consults
+ *    these only on a miss), so a repricing upstream still corrects everything
+ *    the moment models.dev answers again.
+ *
+ * gemini and the openrouter long tail get nothing, exactly as in
+ * `PINNED_CONTEXT_LIMITS`: ~60 vendors whose rate cards we cannot pin one by
+ * one, and models.dev answers for them in the normal case.
+ */
+const OPUS_RATES: TokenCostRates = { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 };
+const SONNET_RATES: TokenCostRates = { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 };
+const HAIKU_RATES: TokenCostRates = { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 };
+
+const PINNED_COST_RATES: ReadonlyArray<{ match: RegExp; rates: TokenCostRates }> = [
+  // Opus 4.1 is priced apart from the rest of the opus line — and it is still
+  // spawnable, so the generic entry below would treat it as a third of its
+  // price. Specific first.
+  { match: /^claude-opus-4-1/i, rates: { input: 15, output: 75, cacheRead: 1.5, cacheWrite: 18.75 } },
+  // opus-5 and opus-4-8 quote the same card in the payload.
+  { match: /^claude-opus-/i, rates: OPUS_RATES },
+  { match: /^claude-sonnet-/i, rates: SONNET_RATES },
+  { match: /^claude-haiku-/i, rates: HAIKU_RATES },
+  { match: /^claude-fable-/i, rates: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 } },
+  // The one non-Anthropic family the payload lets us pin: `openai/gpt-5.5`, the
+  // model the codex CLI offers first. No cache buckets are published for it, so
+  // none are invented — see the lower-bound note above.
+  { match: /^gpt-5\.5/i, rates: { input: 5, output: 20, cacheRead: null, cacheWrite: null } },
+];
+
+/**
+ * The bare aliases the claude CLI resolves on its own. `POST /orchestrators`
+ * passes `model: "haiku"` straight through, so a team spawned that way matches
+ * no `claude-*` pin — the same hole `pinnedContextLimit` closes for windows,
+ * closed here for prices. Claude-scoped: every other provider takes literal ids.
+ */
+const PINNED_CLAUDE_ALIAS_RATES: Readonly<Record<string, TokenCostRates>> = {
+  opus: OPUS_RATES,
+  sonnet: SONNET_RATES,
+  haiku: HAIKU_RATES,
+};
+
+/**
+ * The pinned rate card for `(provider, model)`, or `null` when we have none.
+ *
+ * PURE and exported, like `pinnedContextLimit`: the catalogue calls it on a
+ * miss, and a test can assert the fallback without standing up a catalogue.
+ */
+export function pinnedCostRates(providerId: string, modelId: string): TokenCostRates | null {
+  if (typeof modelId !== 'string' || modelId.length === 0) return null;
+  // opencode ids are `vendor/model`; the vendor prefix is not part of the name
+  // the pins match on (same normalization as `pinnedContextLimit`).
+  const id = modelId.includes('/') ? (modelId.split('/').pop() ?? modelId) : modelId;
+  for (const entry of PINNED_COST_RATES) {
+    if (entry.match.test(id)) return entry.rates;
+  }
+  if (providerId === 'claude') {
+    const alias = PINNED_CLAUDE_ALIAS_RATES[id.toLowerCase()];
+    if (alias) return alias;
+  }
+  return null;
+}
+
+/**
+ * `catalogue → pins → null`, for callers that may not have a catalogue at all
+ * (unit tests, embedders). The counterpart of `modelContextLimit`.
+ *
+ * This function used to return `null` outright without a catalogue, on the
+ * grounds that a stale price is a wrong number wearing the confidence of a
+ * right one. Lot 15 narrowed that: the pins are per family, every figure is one
+ * models.dev publishes, unseen buckets stay `null`, and the live card still
+ * takes precedence — so the residual risk is a bill quoted at last month's
+ * rates, against the certainty of no bill at all whenever models.dev is
+ * unreachable. See `PINNED_COST_RATES`.
+ */
+export function modelCostRates(
+  catalogue: ModelCatalogue | null | undefined,
+  providerId: string,
+  modelId: string,
+): TokenCostRates | null {
+  return catalogue
+    ? catalogue.costRates(providerId, modelId)
+    : pinnedCostRates(providerId, modelId);
+}
+
+/** What `estimateTokenCostUsd` needs of a token tally. Structural on purpose. */
+export interface TokenCostCounters {
+  in: number;
+  out: number;
+  cacheRead: number;
+  cacheWrite: number;
+}
+
+/**
+ * `Σ bucket × rate / 1e6`, over the buckets whose rate is KNOWN.
+ *
+ * Two rules, both from docs/monitoring-agents.md Lot 11:
+ *
+ *  - a bucket with no published rate contributes **0**, never an invented one.
+ *    An Anthropic model prices all four; an OpenRouter passthrough often prices
+ *    two. Under-reporting the cache half of a bill is a number an operator can
+ *    reason about ("cache isn't counted"); a fabricated rate is not.
+ *  - `null` — not `0` — when input AND output are both unknown. At that point
+ *    nothing meaningful is priced, and `0` would read as "this agent was free".
+ *
+ * Rounded to the micro-dollar: the inputs are per-million rates against token
+ * counts, so the float tail is noise, and `0.30000000000000004` in a JSON
+ * response is an invitation to a bug report.
+ */
+export function estimateTokenCostUsd(
+  counters: TokenCostCounters,
+  rates: TokenCostRates | null | undefined,
+): number | null {
+  if (!rates) return null;
+  if (rates.input === null && rates.output === null) return null;
+  let usd = 0;
+  const add = (tokens: number, rate: number | null): void => {
+    if (rate === null || !Number.isFinite(rate)) return;
+    if (!Number.isFinite(tokens) || tokens <= 0) return;
+    usd += (tokens * rate) / 1_000_000;
+  };
+  add(counters.in, rates.input);
+  add(counters.out, rates.output);
+  add(counters.cacheRead, rates.cacheRead);
+  add(counters.cacheWrite, rates.cacheWrite);
+  return Math.round(usd * 1_000_000) / 1_000_000;
 }
 
 // ---------------------------------------------------------------------------
@@ -543,6 +860,53 @@ export class ModelCatalogue {
   defaultModel(provider: BuiltinProviderId, pinnedDefault: string): string {
     void this.#maybeRefresh();
     return this.#views.get(provider)?.familyDefault ?? pinnedDefault;
+  }
+
+  /**
+   * Context window of one model, `null` when nothing can answer for it
+   * (docs/monitoring-agents.md — "Limites par modèle").
+   *
+   * Live figure first, `PINNED_CONTEXT_LIMITS` second. `providerId` is a plain
+   * string, not a `BuiltinProviderId`: a plugin adapter has no slice here, and
+   * asking about one must degrade to the pins rather than fail to typecheck at
+   * the callsite.
+   *
+   * Refreshes on read like `models()` — this runs on the `/orchestrators` poll,
+   * i.e. exactly the heartbeat the no-timer doctrine relies on. The call is a
+   * TTL check plus a map lookup; the fetch it may start is single-flighted.
+   */
+  contextLimit(providerId: string, modelId: string): number | null {
+    void this.#maybeRefresh();
+    if (typeof modelId !== 'string' || modelId.length === 0) return null;
+    const live = this.#views.get(providerId as BuiltinProviderId)?.contextLimits[modelId];
+    if (typeof live === 'number' && Number.isFinite(live) && live > 0) return live;
+    return pinnedContextLimit(providerId, modelId);
+  }
+
+  /**
+   * Per-million prices of one model (docs/monitoring-agents.md, Lot 11), live
+   * card first and `PINNED_COST_RATES` second (Lot 15).
+   *
+   * The precedence is the whole point: a model the payload prices is priced
+   * from the payload, always — the pins only answer for an id the live
+   * catalogue has never carried, which covers the cold-boot window, an
+   * unreachable models.dev, and the providers whose own cache is a model list
+   * with no rate card (codex).
+   *
+   * No partial answer, either way: a model the payload knows returns the
+   * buckets it published and `null` for the rest, which reads as "these two
+   * buckets are not in the total" — never as a reason to consult the pins for
+   * the missing halves and mix two sources in one figure.
+   *
+   * Refreshes on read like the other getters: this runs on the `/orchestrators`
+   * poll, which is the heartbeat the no-timer doctrine relies on.
+   */
+  costRates(providerId: string, modelId: string): TokenCostRates | null {
+    void this.#maybeRefresh();
+    if (typeof modelId !== 'string' || modelId.length === 0) return null;
+    const live = this.#views.get(providerId as BuiltinProviderId)?.costs[modelId];
+    if (live) return live;
+    return pinnedCostRates(providerId, modelId);
   }
 
   /**

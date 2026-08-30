@@ -22,7 +22,10 @@ import { Terminal } from '../Terminal';
 import {
   statusChipClass, statusLabel, formatUptime, formatClockShort, formatRelative,
 } from '../../lib/format';
-import { formatLoadPercent } from '../../lib/loadPercent';
+import {
+  contextBarWidth, contextColorVar, contextLevel,
+  formatContextPercent, formatContextTokens,
+} from '../../lib/contextPercent';
 import { useSwarmController } from '../../controller/SwarmController';
 import type { AgentAction, RightPanelAgent, RightPanelTeam } from '../desktop/RightPanel';
 
@@ -101,6 +104,15 @@ export default function AgentSheet() {
       });
       return;
     }
+    if (action === 'clear') {
+      setConfirm({
+        action,
+        label: isLead ? 'CLEAR LEAD CONTEXT' : 'CLEAR WORKER CONTEXT',
+        body: `CLEAR ${selected.name} wipes its entire conversation context at the next idle. The role preamble is restored and the inbox re-signalled, but everything held in-context is lost. Use COMPACT to summarise instead.`,
+        cls: 'danger',
+      });
+      return;
+    }
     void c.onAction(selected.id, action);
   }
 
@@ -121,6 +133,20 @@ export default function AgentSheet() {
     const writer = selected.writer !== false;
     const hasDiscord = !!team.discordWebhook;
     const showTerminal = tab === 'console' && !stopped && !isFailed && !enlarged && open;
+
+    // ── CTX cell + context actions — exact mirror of the desktop RightPanel
+    //    (same helper, same thresholds, same disabled matrix). ────────────
+    const usage = stopped || isFailed ? null : (selected.contextUsage ?? null);
+    const ctxStale = !!usage?.stale;
+    const ctxLevel = contextLevel(usage?.pct);
+    const ctxTokens = usage
+      ? formatContextTokens(usage.usedTokens, usage.limitTokens)
+      : null;
+    const resetPending = !!selected.contextResetPending;
+    const ctxActionsDisabled = stopped || isFailed || isPaused || resetPending;
+    const ctxActionTitle = resetPending
+      ? 'reset armed — fires at next idle'
+      : undefined;
 
     return (
       <>
@@ -174,6 +200,15 @@ export default function AgentSheet() {
                 ↻ RESUMED {team.resumeCount}×
               </span>
             )}
+            {resetPending && (
+              <span
+                className="discord-chip"
+                style={{ color: 'var(--warn)', borderColor: 'var(--warn)' }}
+                title="a context reset is armed — it fires at the next idle"
+              >
+                ◷ RESET ARMED
+              </span>
+            )}
           </div>
 
           <div className="m-as-cfg">
@@ -196,8 +231,27 @@ export default function AgentSheet() {
 
           <div className="m-as-stats">
             <div className="m-as-stat">
-              <div className="v">{stopped ? '—' : formatLoadPercent(selected.load)}</div>
-              <div className="k">LOAD</div>
+              <div
+                className="v"
+                style={{
+                  // Stale → muted token, not a dimmed threshold colour: see
+                  // the same reasoning in RightPanel's CTX cell.
+                  color: ctxStale ? 'var(--text-mute)' : contextColorVar(ctxLevel),
+                }}
+              >
+                {formatContextPercent(usage?.pct)}
+                {ctxStale && <span className="pr-ctx-stale">STALE</span>}
+              </div>
+              <div
+                className="pill-bar pr-ctx-bar"
+                style={{ opacity: ctxStale ? 0.45 : 1 }}
+              >
+                <i
+                  className={ctxLevel ?? 'stopped'}
+                  style={{ width: `${contextBarWidth(usage?.pct)}%` }}
+                />
+              </div>
+              <div className="k">CTX{ctxTokens ? ` · ${ctxTokens}` : ''}</div>
             </div>
             <div className="m-as-stat">
               <div className="v">{stopped ? '—' : formatUptime(selected.startedAt)}</div>
@@ -246,6 +300,20 @@ export default function AgentSheet() {
               title="spawn a worker in this team"
             >+ WORKER</button>
           )}
+          {/* Context control — same deferred semantics as desktop: armed now,
+              fired at the agent's next idle. CLEAR is confirmed. */}
+          <button
+            className="m-as-action primary"
+            disabled={ctxActionsDisabled}
+            title={ctxActionTitle}
+            onClick={() => void c.onAction(selected.id, 'compact')}
+          >COMPACT</button>
+          <button
+            className="m-as-action danger"
+            disabled={ctxActionsDisabled}
+            title={ctxActionTitle}
+            onClick={() => askConfirm('clear')}
+          >CLEAR</button>
         </div>
 
         {/* ── Tabs ── */}

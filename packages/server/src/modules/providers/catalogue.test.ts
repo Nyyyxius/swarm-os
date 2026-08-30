@@ -17,6 +17,11 @@ import {
   MODEL_CATALOGUE_URL,
   deriveCatalogue,
   deriveCodexCatalogue,
+  estimateTokenCostUsd,
+  modelContextLimit,
+  modelCostRates,
+  pinnedContextLimit,
+  pinnedCostRates,
   type ModelCatalogueOptions,
 } from './catalogue.js';
 import { MODELS_DEV_FIXTURE, CODEX_CACHE_FIXTURE } from './catalogue.fixture.js';
@@ -568,5 +573,307 @@ describe('deriveCodexCatalogue', () => {
     const pinned: readonly ProviderModel[] = [{ value: 'gpt-5.5', label: 'GPT-5.5' }];
     expect(values(cat.models('codex', pinned))).toEqual(['gpt-5.5']);
     expect(cat.defaultModel('codex', 'gpt-5.5')).toBe('gpt-5.5');
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4. Context windows — the live figure, and the pinned fallback
+// ---------------------------------------------------------------------------
+
+describe('context limits — readModel', () => {
+  const view = deriveCatalogue(MODELS_DEV_FIXTURE).claude;
+
+  it('reads `limit.context` when the payload carries one', () => {
+    expect(view!.contextLimits['claude-opus-5']).toBe(200_000);
+    expect(view!.contextLimits['claude-sonnet-5']).toBe(1_000_000);
+  });
+
+  it('omits a model with no `limit` block at all — rather than inventing one', () => {
+    // `claude-fable-5` is a perfectly good entry that simply published no
+    // window. The absence has to survive as an absence: a default here would
+    // become a gauge denominator nobody can trace back to a source.
+    expect(view!.models.map((m) => m.value)).toContain('claude-fable-5');
+    expect(view!.contextLimits['claude-fable-5']).toBeUndefined();
+  });
+
+  it('rejects `limit.context: 0` — a zero denominator pins every gauge at 100 %', () => {
+    expect(view!.models.map((m) => m.value)).toContain('claude-opus-5-priceless');
+    expect(view!.contextLimits['claude-opus-5-priceless']).toBeUndefined();
+  });
+
+  it('gives the codex view an empty map — its cache carries no window', () => {
+    expect(deriveCodexCatalogue(CODEX_CACHE_FIXTURE)!.contextLimits).toEqual({});
+  });
+});
+
+// ---------------------------------------------------------------------------
+// 4b. Prices — the rate card behind `SessionView.tokenUsage.costUsd` (Lot 11)
+// ---------------------------------------------------------------------------
+
+describe('cost rates — readModel', () => {
+  const claude = deriveCatalogue(MODELS_DEV_FIXTURE).claude;
+  const opencode = deriveCatalogue(MODELS_DEV_FIXTURE).opencode;
+
+  it('keeps all four buckets when the payload publishes them', () => {
+    expect(claude!.costs['claude-opus-5']).toEqual({
+      input: 5,
+      output: 25,
+      cacheRead: 0.5,
+      cacheWrite: 6.25,
+    });
+  });
+
+  it('keeps a model priced on input/output alone, with null cache buckets', () => {
+    // The common case outside Anthropic. Dropping the entry would cost the
+    // estimate its two BIGGEST buckets over the two it never published.
+    expect(opencode!.costs['anthropic/claude-sonnet-5']).toEqual({
+      input: 2,
+      output: 10,
+      cacheRead: null,
+      cacheWrite: null,
+    });
+  });
+
+  it('omits a model whose `cost` is not an object at all', () => {
+    // `claude-opus-5-priceless` survives as a MODEL — only its price is gone.
+    expect(claude!.models.map((m) => m.value)).toContain('claude-opus-5-priceless');
+    expect(claude!.costs['claude-opus-5-priceless']).toBeUndefined();
+  });
+
+  it('gives the codex view an empty rate card — its cache is a model list', () => {
+    expect(deriveCodexCatalogue(CODEX_CACHE_FIXTURE)!.costs).toEqual({});
+  });
+
+  it('serves rates through the catalogue, and null for an id nothing can price', async () => {
+    const { cat } = netOnly();
+    await cat.resolve(1_000);
+    expect(cat.costRates('claude', 'claude-opus-5')).toMatchObject({ input: 5, output: 25 });
+    // Neither the payload nor a pinned family knows this one.
+    expect(cat.costRates('claude', 'claude-not-a-model')).toBeNull();
+  });
+});
+
+describe('cost rates — the pinned fallback (Lot 15)', () => {
+  it('prices the claude families from figures models.dev publishes', () => {
+    expect(pinnedCostRates('claude', 'claude-opus-5')).toEqual({
+      input: 5,
+      output: 25,
+      cacheRead: 0.5,
+      cacheWrite: 6.25,
+    });
+    expect(pinnedCostRates('claude', 'claude-sonnet-5')).toEqual({
+      input: 2,
+      output: 10,
+      cacheRead: 0.2,
+      cacheWrite: 2.5,
+    });
+    expect(pinnedCostRates('claude', 'claude-haiku-4-5-20251001')).toEqual({
+      input: 1,
+      output: 5,
+      cacheRead: 0.1,
+      cacheWrite: 1.25,
+    });
+  });
+
+  it('keeps opus 4.1 apart from the rest of the opus line — it costs 3×', () => {
+    // The whole reason the table is per FAMILY and ordered: a generic
+    // `^claude-opus-` pin would quote this model at a third of its price.
+    expect(pinnedCostRates('claude', 'claude-opus-4-1')).toMatchObject({
+      input: 15,
+      output: 75,
+    });
+    expect(pinnedCostRates('claude', 'claude-opus-4-8')).toMatchObject({ input: 5, output: 25 });
+  });
+
+  it('covers the bare aliases the claude CLI resolves itself', () => {
+    // Same hole `pinnedContextLimit` closes for windows: `POST /orchestrators`
+    // passes `model: "haiku"` straight through, matching no `claude-*` pin.
+    expect(pinnedCostRates('claude', 'haiku')).toMatchObject({ input: 1, output: 5 });
+    expect(pinnedCostRates('claude', 'sonnet')).toMatchObject({ input: 2, output: 10 });
+    expect(pinnedCostRates('claude', 'opus')).toMatchObject({ input: 5, output: 25 });
+    // Alias leniency is claude-scoped: other providers keep exact ids.
+    expect(pinnedCostRates('codex', 'opus')).toBeNull();
+  });
+
+  it('strips the vendor prefix of an opencode id before matching', () => {
+    expect(pinnedCostRates('opencode', 'anthropic/claude-opus-5')).toMatchObject({ input: 5 });
+  });
+
+  it('invents no bucket the payload never published', () => {
+    // gpt-5.5 is quoted input/output only. The two cache buckets stay null and
+    // contribute 0 — a lower bound, never an embellishment.
+    expect(pinnedCostRates('codex', 'gpt-5.5')).toEqual({
+      input: 5,
+      output: 20,
+      cacheRead: null,
+      cacheWrite: null,
+    });
+  });
+
+  it('answers null for anything it cannot source — gemini included', () => {
+    expect(pinnedCostRates('gemini', 'gemini-3-pro-preview')).toBeNull();
+    expect(pinnedCostRates('opencode', 'z-ai/glm-5')).toBeNull();
+    expect(pinnedCostRates('claude', '')).toBeNull();
+  });
+});
+
+describe('cost rates — ModelCatalogue.costRates over the pins', () => {
+  it('answers from the pins alone before anything has been fetched', () => {
+    // THE failure this table exists for: models.dev unreachable at boot used to
+    // make every `$` in the product disappear at once.
+    const { cat } = netOnly();
+    expect(cat.costRates('claude', 'claude-opus-5')).toEqual({
+      input: 5,
+      output: 25,
+      cacheRead: 0.5,
+      cacheWrite: 6.25,
+    });
+  });
+
+  it('prefers the LIVE card over the pin', async () => {
+    // The fixture prices the openrouter passthrough of sonnet-5 at 2/10 with NO
+    // cache buckets; the pinned claude family carries all four. Live wins whole
+    // — a pin never fills in the halves a live entry left null.
+    const { cat } = netOnly();
+    await cat.resolve(1_000);
+    expect(cat.costRates('opencode', 'anthropic/claude-sonnet-5')).toEqual({
+      input: 2,
+      output: 10,
+      cacheRead: null,
+      cacheWrite: null,
+    });
+  });
+
+  it('falls back to the pin for an id the live payload never carried', async () => {
+    const { cat } = netOnly();
+    await cat.resolve(1_000);
+    // Not in the payload at all → the family pin answers.
+    expect(cat.costRates('claude', 'claude-opus-9')).toMatchObject({ input: 5, output: 25 });
+    // In the payload but with an unusable `cost` → same.
+    expect(cat.costRates('claude', 'claude-opus-5-priceless')).toMatchObject({ input: 5 });
+  });
+
+  it('modelCostRates() works with no catalogue at all', () => {
+    expect(modelCostRates(null, 'claude', 'claude-opus-5')).toMatchObject({ input: 5 });
+    expect(modelCostRates(undefined, 'gemini', 'gemini-3-pro-preview')).toBeNull();
+  });
+});
+
+describe('estimateTokenCostUsd', () => {
+  const full = { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 };
+
+  it('sums every bucket at its own per-million rate', () => {
+    // 1M in ($5) + 100k out ($2.5) + 2M cache read ($1) + 200k cache write ($1.25)
+    expect(
+      estimateTokenCostUsd(
+        { in: 1_000_000, out: 100_000, cacheRead: 2_000_000, cacheWrite: 200_000 },
+        full,
+      ),
+    ).toBeCloseTo(9.75, 6);
+  });
+
+  it('lets a bucket with no published rate contribute ZERO, never a guess', () => {
+    // The two cache buckets are unpriced here. 1M in ($2) + 1M out ($10) = $12,
+    // and the 5M cached tokens are simply not in the total — which is a
+    // statement an operator can check, unlike a house rate they cannot.
+    expect(
+      estimateTokenCostUsd(
+        { in: 1_000_000, out: 1_000_000, cacheRead: 5_000_000, cacheWrite: 1_000_000 },
+        { input: 2, output: 10, cacheRead: null, cacheWrite: null },
+      ),
+    ).toBeCloseTo(12, 6);
+  });
+
+  it('answers null — not 0 — when neither input nor output is priced', () => {
+    // `0` would read as "this agent was free".
+    expect(
+      estimateTokenCostUsd(
+        { in: 10, out: 10, cacheRead: 10, cacheWrite: 10 },
+        { input: null, output: null, cacheRead: 1, cacheWrite: 1 },
+      ),
+    ).toBeNull();
+    expect(estimateTokenCostUsd({ in: 10, out: 10, cacheRead: 0, cacheWrite: 0 }, null)).toBeNull();
+  });
+
+  it('prices a free model at 0 — `0` is a rate, `null` is an absence', () => {
+    expect(
+      estimateTokenCostUsd(
+        { in: 5_000_000, out: 1_000_000, cacheRead: 0, cacheWrite: 0 },
+        { input: 0, output: 0, cacheRead: null, cacheWrite: null },
+      ),
+    ).toBe(0);
+  });
+
+  it('rounds to the micro-dollar rather than shipping float noise', () => {
+    const usd = estimateTokenCostUsd(
+      { in: 3, out: 7, cacheRead: 0, cacheWrite: 0 },
+      { input: 0.1, output: 0.4, cacheRead: null, cacheWrite: null },
+    );
+    expect(String(usd)).not.toMatch(/e-|0{6}\d/);
+  });
+});
+
+describe('context limits — the pinned fallback', () => {
+  it('answers 200 000 for a claude id and 272 000 for a gpt one', () => {
+    expect(pinnedContextLimit('claude', 'claude-opus-5')).toBe(200_000);
+    expect(pinnedContextLimit('codex', 'gpt-5.5')).toBe(272_000);
+  });
+
+  it('is per MODEL, not per provider: a `[1m]` id gets its million', () => {
+    // The whole point of a per-model table. A per-provider one would report a
+    // 1M-context agent as five times fuller than it is.
+    expect(pinnedContextLimit('claude', 'claude-sonnet-4-5-20250929[1m]')).toBe(1_000_000);
+    expect(pinnedContextLimit('claude', 'claude-sonnet-4-5')).toBe(200_000);
+  });
+
+  it('strips the vendor prefix of an opencode id before matching', () => {
+    expect(pinnedContextLimit('opencode', 'anthropic/claude-opus-5')).toBe(200_000);
+  });
+
+  it('covers the bare aliases the claude CLI resolves itself', () => {
+    // `POST /orchestrators` passes `model: "haiku"` straight through — seen
+    // live: the gauge lost its denominator on an alias-spawned team.
+    expect(pinnedContextLimit('claude', 'haiku')).toBe(200_000);
+    expect(pinnedContextLimit('claude', 'sonnet')).toBe(200_000);
+    expect(pinnedContextLimit('claude', 'opus[1m]')).toBe(1_000_000);
+    // Alias leniency is claude-scoped: other providers keep exact ids.
+    expect(pinnedContextLimit('codex', 'haiku')).toBeNull();
+  });
+
+  it('answers null for anything it cannot source — gemini included', () => {
+    expect(pinnedContextLimit('gemini', 'gemini-3-pro-preview')).toBeNull();
+    expect(pinnedContextLimit('opencode', 'z-ai/glm-5')).toBeNull();
+    expect(pinnedContextLimit('claude', '')).toBeNull();
+  });
+});
+
+describe('context limits — ModelCatalogue.contextLimit', () => {
+  it('prefers the live figure over the pin, and falls back to the pin', async () => {
+    const { cat } = netOnly();
+    await cat.resolve(1_000);
+    // The fixture says 1M for sonnet-5; the pinned table says 200k for any
+    // `claude-*`. Live wins, which is the only reason to read the payload.
+    expect(cat.contextLimit('claude', 'claude-sonnet-5')).toBe(1_000_000);
+    // Not in the payload at all → the pin answers.
+    expect(cat.contextLimit('claude', 'claude-opus-9')).toBe(200_000);
+    // In the payload but with an unusable figure → the pin answers.
+    expect(cat.contextLimit('claude', 'claude-opus-5-priceless')).toBe(200_000);
+  });
+
+  it('answers from the pins alone before anything has been fetched', () => {
+    const { cat } = netOnly();
+    expect(cat.contextLimit('claude', 'claude-opus-5')).toBe(200_000);
+  });
+
+  it('degrades to null for a provider that has no slice and no pin', async () => {
+    const { cat } = netOnly();
+    await cat.resolve(1_000);
+    expect(cat.contextLimit('gemini', 'gemini-3.1-pro-preview')).toBeNull();
+    expect(cat.contextLimit('some-plugin', 'weird-model')).toBeNull();
+  });
+
+  it('modelContextLimit() works with no catalogue at all', () => {
+    expect(modelContextLimit(null, 'claude', 'claude-opus-5')).toBe(200_000);
+    expect(modelContextLimit(undefined, 'gemini', 'gemini-3-pro-preview')).toBeNull();
   });
 });

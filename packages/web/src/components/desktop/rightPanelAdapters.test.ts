@@ -3,7 +3,8 @@
 // Step 7 — Pure-adapter coverage for `rightPanelAdapters.ts`. We test
 // the two derivations the RightPanel consumes:
 //   1. `buildRightPanelTeam` — with/without a role, with/without Discord.
-//   2. `buildRightPanelAgent` — `load` always undefined (S10 guard-rail),
+//   2. `buildRightPanelAgent` — context telemetry forwarded verbatim, absent
+//      telemetry normalised to null/false (never to a number),
 //      `writer` undefined fall-through, terminal-state fields propagated.
 
 import { describe, expect, it } from 'vitest';
@@ -135,16 +136,44 @@ describe('buildRightPanelTeam', () => {
 });
 
 describe('buildRightPanelAgent', () => {
-  it('builds the basic shape with load undefined (S10 guard-rail)', () => {
+  it('builds the basic shape', () => {
     const a = buildRightPanelAgent(baseSession, 0, undefined);
     expect(a.id).toBe('sess_abc12345');
     expect(a.name).toBe('lead-1');
     expect(a.role).toBe('PLANNER');
     expect(a.status).toBe('running');
     expect(a.pid).toBe(4242);
-    expect(a.load).toBeUndefined();
     expect(a.logLines).toBe(0);
     expect(a.writer).toBeUndefined();
+  });
+
+  it('normalises absent context telemetry to null/false, never to a number', () => {
+    // The CTX cell that replaced the dead LOAD placeholder must render `—`
+    // on a backend predating the monitoring feature (or on a provider with
+    // no readable transcript) — inventing a percentage there could drive an
+    // operator into a needless CLEAR.
+    const a = buildRightPanelAgent(baseSession, 0, undefined);
+    expect(a.contextUsage).toBeNull();
+    expect(a.contextResetPending).toBe(false);
+  });
+
+  it('forwards context usage + pending reset verbatim when the server sends them', () => {
+    const s: SessionView = {
+      ...baseSession,
+      contextResetPending: true,
+      contextUsage: {
+        usedTokens: 156_000,
+        limitTokens: 200_000,
+        pct: 0.78,
+        basis: 'transcript',
+        updatedAt: '2026-05-22T10:00:00.000Z',
+        stale: false,
+      },
+    };
+    const a = buildRightPanelAgent(s, 0, undefined);
+    expect(a.contextUsage?.pct).toBe(0.78);
+    expect(a.contextUsage?.usedTokens).toBe(156_000);
+    expect(a.contextResetPending).toBe(true);
   });
 
   it('propagates the logLines counter and writer flag', () => {

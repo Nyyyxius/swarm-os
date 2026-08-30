@@ -15,6 +15,19 @@ import { withModule } from '../../logger.js';
 import type { EffortLevel, PermissionMode } from '../../config.js';
 import { toHostPath as toHostPathHelper } from './path-translate.js';
 import { sessionDirFor } from './mcp-config.js';
+import {
+  ContextUsageTracker,
+  addTokenUsage,
+  isZeroTokenUsage,
+  normalizeTokenUsage,
+  type ContextUsageHistory,
+  type ContextUsageSource,
+  type ContextUsageWiring,
+  type TokenUsageCounters,
+} from './context-usage.js';
+import { estimateTokenCostUsd, type TokenCostRates } from '../providers/catalogue.js';
+import { CodexRolloutSource, createLocalRolloutLister } from './context-usage-codex.js';
+import { OpencodeControlPlaneSource } from './context-usage-opencode.js';
 import { CLAUDE_PROVIDER } from '../providers/claude.js';
 import {
   IDENTITY_PATH_MAPPER,
@@ -159,6 +172,31 @@ export interface SessionInit {
    * value in the next UPSERT.
    */
   startedAt?: string;
+  /**
+   * Auto-resume only — seed for the cumulative "messages processed" counter,
+   * read from the persisted row. Same rationale as `startedAt`: the counter
+   * is the operator's running total, and a respawn must not reset it to 0.
+   */
+  messagesProcessed?: number;
+  /**
+   * Auto-resume only — seed for the cumulative token counters, read from the
+   * persisted row (docs/monitoring-agents.md, Lot 11). Same rationale as
+   * `messagesProcessed`, with one addition: a restart relaunches the CLI on a
+   * BRAND-NEW transcript, so without the seed every redeploy would reset every
+   * agent's bill to zero. Partial and nullable per bucket — a row written
+   * before the columns existed carries NULLs.
+   */
+  tokenUsage?: Partial<Record<keyof TokenUsageCounters, number | null>> | null;
+  /**
+   * Auto-resume only — seed for the cumulative PROVIDER-REPORTED cost, read
+   * from `reported_cost_usd` (docs/monitoring-agents.md, Lot 13).
+   *
+   * Same argument as `tokenUsage`, one degree sharper: this figure cannot be
+   * recomputed from anything we keep. The tokens can always be re-priced from
+   * the catalogue, but the dollars opencode quoted exist nowhere else once the
+   * process that quoted them is gone. `null` / absent ⇒ never measured.
+   */
+  reportedCostUsd?: number | null;
   orchestratorId: string;
   name: string;
   role: string;
@@ -262,6 +300,90 @@ export interface SessionInit {
    * the session uses the local `PtyAgentProcess` (default).
    */
   sshTransport?: SessionSshTransport | null;
+  /**
+   * Monitoring (docs/monitoring-agents.md, Lot 2) — TTL, model limit resolver
+   * and bounded tail reader for the context-usage tracker. Built by
+   * `Orchestrator`, the only layer holding both the `Config` and the model
+   * catalogue. Omitted (unit tests, embedders) ⇒ this session never tracks and
+   * `contextUsage` stays absent from its view.
+   */
+  contextUsage?: ContextUsageWiring | null;
+}
+
+/**
+ * Context-window occupancy of one agent (docs/monitoring-agents.md).
+ *
+ * Declared here from Lot 1 so the web mirror and the persistence layer agree on
+ * the shape; filled from Lot 2 by `ContextUsageTracker` (`context-usage.ts`),
+ * which reads the claude transcript the `SessionStart` hook points it at. Stays
+ * absent from the view for a provider with no tracker, and for a session that
+ * has not produced a turn yet.
+ */
+export interface ContextUsageView {
+  usedTokens: number;
+  /** Model context limit; `null` when the catalogue has no figure for it. */
+  limitTokens: number | null;
+  /** `min(1, used/limit)` — computed server-side; `null` without a limit. */
+  pct: number | null;
+  basis: 'transcript' | 'control-plane' | 'estimated';
+  /** ISO 8601 — when the snapshot was taken. */
+  updatedAt: string;
+  /** True after a `/clear` until a new turn has been read back. */
+  stale: boolean;
+}
+
+/**
+ * The provider ACCOUNT's quota, as the CLI last reported it (Lot 13).
+ *
+ * codex only, today: it puts `rate_limits` on the `token_count` events the gauge
+ * already reads — including the ones whose `info` is `null`, which Lot 6 skips
+ * and which exist for no other purpose than to refresh this. Free to collect,
+ * and the one number that says whether the whole fleet is about to be throttled.
+ *
+ * NOT the agent's usage, and the UI labels it as such: it is shared by every
+ * session running under the same credentials. Never persisted either — a quota
+ * that resets on a rolling window is only true at the moment it was read, and a
+ * figure restored from SQLite after a redeploy would be a stale guess wearing a
+ * fresh timestamp.
+ */
+export interface ProviderQuotaView {
+  /** `primary.used_percent`, 0-100. `null` when the event carried none. */
+  usedPercent: number | null;
+  /** ISO 8601 rollover of the primary window, or `null`. */
+  resetsAt: string | null;
+  /** `plan_type` (`'plus'`, …), or `null`. */
+  plan: string | null;
+}
+
+/**
+ * What one agent has BILLED since it was first spawned (Lot 11).
+ *
+ * Cumulative and restart-proof: the four counters are mirrored onto the session
+ * as they are measured, persisted through the same throttled write as every
+ * other field, and seeded back on resume — so the figure an operator reads is
+ * the agent's whole life, not its current CLI process.
+ *
+ * `costUsd` is an ESTIMATE and says so twice: in its own `costBasis`, and by
+ * being `null` rather than `0` whenever the catalogue cannot price the model.
+ * It is computed at view time from the live rate card, never stored, so a
+ * price correction upstream fixes yesterday's agents too.
+ */
+export interface TokenUsageView {
+  in: number;
+  out: number;
+  cacheRead: number;
+  cacheWrite: number;
+  /** `null` when neither an input nor an output price is known for this model. */
+  costUsd: number | null;
+  /**
+   * Where `costUsd` comes from (Lot 13). `'estimated'` — tokens multiplied by
+   * the catalogue's rate card, which is a guess about the model's price list.
+   * `'reported'` — the CLI itself did the arithmetic and told us the dollars
+   * (opencode publishes a `cost` per session and per message, priced from the
+   * provider's own catalogue). A reported figure always wins: it accounts for
+   * the provider's real billing rules, discounts and cache pricing included.
+   */
+  costBasis: 'estimated' | 'reported';
 }
 
 export interface SessionView {
@@ -290,6 +412,53 @@ export interface SessionView {
   logPath: string;
   lastActivityAt: string;
   // sessionSecret intentionally NOT included
+
+  // --- Monitoring (docs/monitoring-agents.md) ----------------------------
+  // All four are OPTIONAL and purely additive: a consumer that predates them
+  // is unaffected, and a view built from a legacy DB row simply omits them.
+
+  /**
+   * Cumulative inbox messages this agent has drained. Mirrored from the
+   * mailbox at drain time so it rides `toView()` — the only shape both the
+   * persistence layer and `GET /sessions/:id` ever see.
+   */
+  messagesProcessed?: number;
+  /** A `/compact` or `/clear` is armed and waiting for the next idle boundary. */
+  contextResetPending?: boolean;
+  /**
+   * Messages currently queued for this session. Decorated by
+   * `Orchestrator.toView()`: the Session has no handle on the mailbox.
+   */
+  inboxCount?: number;
+  /** Context-window occupancy. Filled from Lot 2; absent when unknown. */
+  contextUsage?: ContextUsageView | null;
+  /**
+   * Lot 9 — the ~20 most recent occupancy samples as integer percentages
+   * (0-100), oldest first, for the sparkline in the monitoring table.
+   *
+   * It rides the poll the UI already makes rather than a second endpoint: ~20
+   * small integers per live session is the entire cost of the column. Same
+   * gates as `contextUsage` (live session, known limit), and absent — never
+   * `null`, never `[]` — when there is nothing to draw. NOT persisted: the
+   * history is memory-only and a DB row never carries it.
+   */
+  contextSpark?: number[];
+  /**
+   * Lot 11 — cumulative tokens + estimated cost. Absent, never zeroed, until
+   * something has actually been measured or seeded: `—` means "not measured
+   * here" (gemini has no source at all, and neither does a session that predates
+   * the columns), which is a different statement from `0`.
+   *
+   * NOT gated on the session being live, unlike `contextUsage`: an occupancy
+   * describes a context that dies with the agent, a bill does not.
+   */
+  tokenUsage?: TokenUsageView;
+  /**
+   * Lot 13 — the provider ACCOUNT's quota, for the sessions whose CLI reports
+   * one (codex). Live sessions only, and never persisted: see
+   * `ProviderQuotaView`.
+   */
+  providerQuota?: ProviderQuotaView;
 }
 
 export class Session extends EventEmitter {
@@ -315,6 +484,42 @@ export class Session extends EventEmitter {
   private _stopReason: string | null = null;
   private _lastActivityAt: string;
   private _idleSince: number; // epoch ms — used by mailbox idle detection (Phase 3)
+  /**
+   * Monitoring — cumulative inbox messages this agent drained, mirrored from
+   * the mailbox at the single drain point (`readInbox`) and seeded from the
+   * DB row on resume. It lives here, and not only on the mailbox, because
+   * everything durable is built from `toView()`.
+   */
+  private _messagesProcessed: number;
+  /**
+   * Monitoring (Lot 11) — cumulative tokens this agent has billed, mirrored
+   * from the context tracker as each delta is measured and seeded from the DB
+   * row on resume. Same reason it lives here rather than only in the tracker as
+   * `_messagesProcessed` lives here rather than only in the mailbox:
+   * everything durable is built from `toView()`, and the tracker dies with the
+   * process while the counter must not.
+   */
+  private _tokenUsage: TokenUsageCounters;
+  /**
+   * True when the resume seed carried a value — including an explicit zero.
+   *
+   * It is what separates "measured, and it is zero" from "never measured",
+   * which is the same distinction the nullable `messages_processed` column
+   * makes. Without it a resumed agent that has not spoken yet would drop its
+   * `tokenUsage` from the view and the UI would fall back to `—` for a figure
+   * we hold.
+   */
+  private _tokenUsageSeeded: boolean;
+  /**
+   * Monitoring (Lot 13) — cumulative dollars the PROVIDER itself billed,
+   * mirrored and seeded exactly like `_tokenUsage`.
+   *
+   * `0` means "nobody ever reported one", which is why it doubles as its own
+   * seeded flag: a provider that quotes prices quotes a positive one the moment
+   * it has served a token, and an agent whose reported bill is genuinely zero
+   * has by definition nothing to show that the estimate would not show better.
+   */
+  private _reportedCostUsd: number;
 
   private readonly mcpRuntimeDir: string;
   private mcpConfigPath: string | null = null;
@@ -334,6 +539,30 @@ export class Session extends EventEmitter {
   private readonly provider: AgentProvider;
   /** Container → agent path translation, built once from `sshTransport`. */
   private readonly _paths: AgentPathMapper;
+  /**
+   * Monitoring — context-usage wiring and the ONE tracker it builds.
+   *
+   * One tracker per session, whatever the provider: the policy (TTL, one read in
+   * flight, the module-wide cap, the generation guard, "stale rather than
+   * confidently wrong") is identical for all three, and only the SOURCE differs.
+   * Which is why the branching below is about building a `ContextUsageSource`
+   * and nothing else.
+   *
+   * WHEN it is built differs, because what each provider needs differs:
+   *
+   *   claude    lazily, on the first `setTranscriptPath` — there is nothing to
+   *             read until the `SessionStart` hook names a file.
+   *   codex     eagerly — the `CODEX_HOME` is known the moment phase A is done,
+   *             and the tracker's job is precisely to keep looking until the
+   *             agent's first model request creates the rollout in it.
+   *   opencode  eagerly, LOCAL TRANSPORT ONLY — the control plane is on the
+   *             host's loopback under SSH and we have no forward for it.
+   *   gemini    never. No source, no tracker, `—` in the UI, by design.
+   *
+   * A session with no wiring (unit tests, embedders) never gets a tracker at all.
+   */
+  private readonly _contextUsageWiring: ContextUsageWiring | null;
+  private _contextUsage: ContextUsageTracker | null = null;
 
   private agent: AgentProcess | null = null;
   private logStream: fs.WriteStream | null = null;
@@ -433,12 +662,30 @@ export class Session extends EventEmitter {
     this.startedAt = init.startedAt ?? new Date().toISOString();
     this._lastActivityAt = this.startedAt;
     this._idleSince = Date.now();
+    // Resume seed (0 on a first spawn). Negative / non-finite rows are
+    // clamped: a corrupt value must not make the counter run backwards.
+    const seed = init.messagesProcessed ?? 0;
+    this._messagesProcessed = Number.isFinite(seed) && seed > 0 ? Math.floor(seed) : 0;
+    // Lot 11 — same clamp, same reason: a corrupt row must not make the bill
+    // run backwards. `normalizeTokenUsage` floors every bucket at 0.
+    this._tokenUsage = normalizeTokenUsage(init.tokenUsage);
+    this._tokenUsageSeeded =
+      init.tokenUsage != null &&
+      (['in', 'out', 'cacheRead', 'cacheWrite'] as const).some(
+        (k) => typeof init.tokenUsage?.[k] === 'number',
+      );
+    // Lot 13 — same clamp again. A REAL column can come back as anything a
+    // hand-edited database holds; only a positive finite number is a bill.
+    const costSeed = init.reportedCostUsd;
+    this._reportedCostUsd =
+      typeof costSeed === 'number' && Number.isFinite(costSeed) && costSeed > 0 ? costSeed : 0;
     this.mcpRuntimeDir = init.mcpRuntimeDir;
     this.sshTransport = init.sshTransport ?? null;
     // Pre-multi-provider callsites pass nothing and get the built-in claude
     // adapter — the exact code path that used to be hard-wired here.
     this.provider = init.provider ?? CLAUDE_PROVIDER;
     this._paths = this._buildPathMapper();
+    this._contextUsageWiring = init.contextUsage ?? null;
     this._onStateChange = init.onStateChange ?? null;
     this._onContextReset = init.onContextReset ?? null;
     this._idleThresholdMs = init.idleThresholdMs ?? 2000;
@@ -469,6 +716,9 @@ export class Session extends EventEmitter {
     });
     this._sessionConfigDir = prepared.configDir;
     this._sessionCleanupPaths = prepared.cleanupPaths;
+    // Monitoring — codex and opencode can start looking straight away; claude
+    // waits for its hook. See `_buildContextUsageSource`.
+    this._initContextUsage();
 
     this._openLog();
     this._spawn(init);
@@ -565,12 +815,309 @@ export class Session extends EventEmitter {
     return this._idleSince;
   }
 
+  /** Cumulative inbox messages this agent has drained. */
+  get messagesProcessed(): number {
+    return this._messagesProcessed;
+  }
+
+  /**
+   * Monitoring — credit `n` freshly drained inbox messages to this session.
+   *
+   * Called from exactly one place, `readInbox`, right after `Mailbox.read`
+   * returned: that is the only moment an agent actually takes messages, and
+   * keeping the mirror on that same line is what stops the two counters from
+   * drifting. A no-op for `n <= 0` (an empty drain consumed nothing).
+   *
+   * The state notification is deliberately unforced — it rides the existing
+   * 1 write/s throttle rather than adding a DB write per read.
+   */
+  recordMessagesProcessed(n: number): void {
+    if (!Number.isFinite(n) || n <= 0) return;
+    this._messagesProcessed += Math.floor(n);
+    this._notifyState(false);
+  }
+
+  /** Cumulative tokens this agent has billed. A copy — callers may not mutate. */
+  get tokenUsage(): TokenUsageCounters {
+    return { ...this._tokenUsage };
+  }
+
+  /**
+   * Monitoring (Lot 11) — credit one measured DELTA to this session.
+   *
+   * Called from exactly one place, the context tracker's `onTokenUsage`, which
+   * fires once per accepted source reading. Deltas, not totals, for the same
+   * reason `recordMessagesProcessed` takes a count: the source knows what it
+   * has just read, the session knows what has been read so far, and neither has
+   * to trust the other's arithmetic.
+   *
+   * The state notification is deliberately unforced — it rides the existing
+   * 1 write/s throttle rather than adding a DB write per poll.
+   */
+  recordTokenUsage(delta: TokenUsageCounters): void {
+    const clean = normalizeTokenUsage(delta);
+    if (isZeroTokenUsage(clean)) return;
+    this._tokenUsage = addTokenUsage(this._tokenUsage, clean);
+    this._notifyState(false);
+  }
+
+  /** Cumulative dollars the provider itself billed for this agent (Lot 13). */
+  get reportedCostUsd(): number {
+    return this._reportedCostUsd;
+  }
+
+  /**
+   * Monitoring (Lot 13) — credit one provider-reported cost DELTA, in dollars.
+   *
+   * The money twin of `recordTokenUsage`, wired to the same tracker and
+   * unforced for the same reason. Separate from it because the two are
+   * separate measurements: opencode reports both, codex reports only tokens,
+   * and a session that somehow saw one without the other must still bank it.
+   */
+  recordReportedCost(deltaUsd: number): void {
+    if (typeof deltaUsd !== 'number' || !Number.isFinite(deltaUsd) || deltaUsd <= 0) return;
+    this._reportedCostUsd += deltaUsd;
+    this._notifyState(false);
+  }
+
+  /**
+   * Monitoring (Lot 13) — the provider ACCOUNT's quota, or `null`.
+   *
+   * codex only in practice, and by construction rather than by a test on the
+   * provider id: it is the only source that ever puts a quota on a reading.
+   */
+  get providerQuota(): ProviderQuotaView | null {
+    return this._contextUsage?.providerQuota ?? null;
+  }
+
   /** Returns the last N lines from the in-memory ring buffer (Phase 3 crash dump helper). */
   getRecentLines(n = 20): string[] {
     return this.ringBuffer.slice(-Math.max(0, n));
   }
 
+  // --- Monitoring: context usage (docs/monitoring-agents.md, Lots 2/6/7) ---
+
+  /**
+   * Build this provider's context source, once, at construction time.
+   *
+   * Only codex and opencode land here: claude's source needs a path that does
+   * not exist until its hook fires, and gemini has no source at all.
+   */
+  private _buildContextUsageSource(wiring: ContextUsageWiring): ContextUsageSource | null {
+    switch (this.provider.id) {
+      case 'codex': {
+        const configDir = this._sessionConfigDir;
+        // No `CODEX_HOME` means phase A failed, and `buildSpawn` is about to
+        // refuse the session anyway.
+        if (configDir === null) return null;
+        return new CodexRolloutSource({
+          // The agent's own view of the directory: under SSH the rollout is read
+          // in the HOST's namespace, where these paths are mounted elsewhere.
+          sessionsDir: path.join(this._paths.data(configDir), 'sessions'),
+          // Lot 11 — a resumed session keeps its id, therefore its `CODEX_HOME`,
+          // therefore the rollout of the life that has ALREADY been billed. The
+          // source has to adopt it as a base instead of billing it again.
+          resumed: this._tokenUsageSeeded,
+          ...(wiring.readTail ? { readTail: wiring.readTail } : {}),
+          listRollouts: wiring.listRollouts ?? createLocalRolloutLister(),
+        });
+      }
+      case 'opencode': {
+        // Under SSH the control plane listens on the HOST's loopback, and
+        // `SshAgentProcess` only sets up a REVERSE forward (`-R`, for MCP).
+        // Reaching it needs `ssh -L` — the same gap as the `/event` consumer
+        // (opencode.ts:868-871). No source, no tracker, `—`. Never an error.
+        if (this.sshTransport !== null) return null;
+        const provider = this.provider;
+        if (typeof provider.controlPlane !== 'function') return null;
+        const configDir = this._sessionConfigDir;
+        return new OpencodeControlPlaneSource({
+          // Re-resolved on every read: the plane dies with the process, and the
+          // adapter is the only thing that knows its port and password.
+          controlPlane: () => provider.controlPlane?.(configDir) ?? null,
+          // Same restart hazard as codex: an abandoned session stays listed
+          // with its final counters, and those have already been billed.
+          resumed: this._tokenUsageSeeded,
+        });
+      }
+      default:
+        return null;
+    }
+  }
+
+  /** Wire the tracker for a provider whose source is known at spawn time. */
+  private _initContextUsage(): void {
+    const wiring = this._contextUsageWiring;
+    if (wiring === null) return;
+    const source = this._buildContextUsageSource(wiring);
+    if (source === null) return;
+    this._contextUsage = new ContextUsageTracker({
+      sessionId: this.id,
+      source,
+      ...wiring,
+      onTokenUsage: (delta) => this.recordTokenUsage(delta),
+      onReportedCost: (usd) => this.recordReportedCost(usd),
+    });
+  }
+
+  /**
+   * Adopt the transcript path the agent's `SessionStart` hook just reported
+   * (`http/routes/hooks.ts`, kind `session.transcript`).
+   *
+   * claude ONLY — and the gate is here rather than at the callsite because the
+   * same endpoint serves gemini, whose hook payload is Claude-Code-compatible
+   * and would happily hand us a path whose `.jsonl` has no `message.usage` at
+   * all. codex and opencode resolve their own source (`_initContextUsage`).
+   *
+   * Idempotent and cheap: a hook re-firing with the same path changes nothing.
+   * Every later path WINS — `/clear` rotates the file (spike S4).
+   */
+  setTranscriptPath(filePath: string): void {
+    if (typeof filePath !== 'string' || filePath.trim().length === 0) return;
+    if (this.provider.id !== 'claude') return;
+    const wiring = this._contextUsageWiring;
+    if (wiring === null) return;
+    if (this._contextUsage === null) {
+      this._contextUsage = new ContextUsageTracker({
+        sessionId: this.id,
+        ...wiring,
+        onTokenUsage: (delta) => this.recordTokenUsage(delta),
+        onReportedCost: (usd) => this.recordReportedCost(usd),
+      });
+    }
+    this._contextUsage.setTranscriptPath(filePath);
+  }
+
+  /**
+   * Adopt the codex `thread-id` its `notify` payload just reported
+   * (`http/routes/hooks.ts`, kind `session.waiting`).
+   *
+   * codex ONLY, and it is the whole reason the codex tracker is trustworthy.
+   * A thread is one rollout file; `/new` (which is what swarm-os types for a
+   * `/clear`) starts a new thread and a new file — but that file is created
+   * LAZILY, at the new thread's first model request, while its NAME already
+   * carries the timestamp of the reset. Until it materialises, "the most recent
+   * rollout" still resolves to the previous one: complete, plausible, and
+   * describing a conversation codex has already abandoned. The thread-id flips
+   * the instant the first turn of the new thread completes, with no ordering
+   * heuristic at all (spike R5/R6).
+   *
+   * A no-op for every other provider, including one whose payload happens to
+   * carry a similar-looking field.
+   */
+  setAgentThreadId(threadId: string): void {
+    if (typeof threadId !== 'string' || threadId.trim().length === 0) return;
+    if (this.provider.id !== 'codex') return;
+    this._contextUsage?.retarget(threadId.trim());
+  }
+
+  /**
+   * Fire-and-forget, TTL-gated refresh of this session's context usage. Called
+   * from `Orchestrator.toView()` — the `/orchestrators` poll IS the heartbeat,
+   * so there is no timer anywhere in this feature. Never throws, never awaits.
+   *
+   * LIVE sessions only. `listSessions()` keeps terminated ones for the map, and
+   * their transcripts stop changing the moment the CLI exits: refreshing them
+   * would be one file read per dead agent per TTL, forever, for a number the
+   * view no longer serializes.
+   */
+  maybeRefreshContextUsage(): void {
+    if (this._status !== 'running' && this._status !== 'waiting') return;
+    this._contextUsage?.maybeRefresh();
+  }
+
+  /** Cached occupancy, or `null` when nothing has been read yet. Synchronous. */
+  get contextUsage(): ContextUsageView | null {
+    return this._contextUsage?.snapshot() ?? null;
+  }
+
+  /**
+   * Lot 9 — the rolling in-memory history behind
+   * `GET /sessions/:id/context-history`. `null` for a provider with no tracker
+   * (gemini), which the route answers with empty arrays rather than a 404: the
+   * session exists, it simply has no measurable context.
+   *
+   * Unlike `contextUsage` this is NOT gated on the session being live: a past
+   * measurement stays true after the agent exits, and nothing here is ever
+   * serialized into a row.
+   */
+  get contextHistory(): ContextUsageHistory | null {
+    return this._contextUsage?.history() ?? null;
+  }
+
+  /**
+   * Lot 12 — USD/hour this agent is burning right now, or `null` when the
+   * question has no honest answer (no tracker, no rate card, a ring too short
+   * or too old). Priced HERE rather than in the tracker for the same reason as
+   * `tokenUsage`: the tracker counts tokens, money is a read-time
+   * multiplication by a live rate card.
+   *
+   * Not part of `toView()`: the team burn is a `/metrics/costs` question, and
+   * putting a per-session dollar rate on the 3 s `/orchestrators` poll would
+   * price every agent in the fleet four times a minute for nobody.
+   */
+  get burnPerHourUsd(): number | null {
+    const tracker = this._contextUsage;
+    if (!tracker) return null;
+    let rates: TokenCostRates | null = null;
+    try {
+      rates = this._contextUsageWiring?.costRates?.() ?? null;
+    } catch {
+      // A thunk that throws costs the estimate, never the caller.
+      return null;
+    }
+    return tracker.burnPerHourUsd(rates);
+  }
+
+  /**
+   * Lot 11 — the token block, priced at emission.
+   *
+   * `undefined` — so the field stays ABSENT rather than zeroed — until
+   * something has been measured or seeded. The multiplication happens here and
+   * not in the tracker because the rate card is live: an agent spawned while
+   * the catalogue was cold gets its cost the moment the catalogue warms up,
+   * with no state to invalidate.
+   */
+  private _tokenUsageView(): TokenUsageView | undefined {
+    const usage = this._tokenUsage;
+    const reported = this._reportedCostUsd;
+    if (!this._tokenUsageSeeded && isZeroTokenUsage(usage) && reported <= 0) return undefined;
+    // Lot 13 — a price the PROVIDER quoted beats one we derived. It is the same
+    // arithmetic done against the real billing rules rather than a rate card we
+    // scraped, so it needs no catalogue and it is right even for a model ours
+    // has never heard of. No rate lookup at all on this path.
+    if (reported > 0) {
+      return { ...usage, costUsd: reported, costBasis: 'reported' };
+    }
+    let rates = null;
+    try {
+      rates = this._contextUsageWiring?.costRates?.() ?? null;
+    } catch {
+      // A thunk that throws costs the estimate, never the view.
+      rates = null;
+    }
+    return {
+      ...usage,
+      costUsd: estimateTokenCostUsd(usage, rates),
+      costBasis: 'estimated',
+    };
+  }
+
   toView(): SessionView {
+    // A terminated session's last known occupancy describes a context that no
+    // longer exists — and `DbPersistence.writeSession` builds its row from this
+    // view, so serializing it would persist that fiction. Live sessions only.
+    const live = this._status === 'running' || this._status === 'waiting';
+    const contextUsage = live ? this.contextUsage : null;
+    // Same gate, same reason. `spark()` answers `null` without a limit, so an
+    // unscaled shape is never drawn.
+    const contextSpark = live ? this._contextUsage?.spark() ?? null : null;
+    const tokenUsage = this._tokenUsageView();
+    // Lot 13 — the account quota, on the same `live` gate as the occupancy and
+    // for a sharper version of the same reason: a rolling-window percentage
+    // read hours ago, on a session that has since exited, is not a quota — it
+    // is a fossil. Nothing persists it either, so a terminated agent has none.
+    const providerQuota = live ? this.providerQuota : null;
     return {
       id: this.id,
       orchestratorId: this.orchestratorId,
@@ -591,6 +1138,20 @@ export class Session extends EventEmitter {
       stopReason: this._stopReason,
       logPath: this.logPath,
       lastActivityAt: this._lastActivityAt,
+      // Monitoring. `inboxCount` is NOT here: it belongs to the mailbox, and
+      // `Orchestrator.toView()` decorates it on the way out.
+      messagesProcessed: this._messagesProcessed,
+      contextResetPending: this.hasPendingContextReset,
+      // Additive to the letter: absent, not `null`, when there is nothing to say.
+      ...(contextUsage ? { contextUsage } : {}),
+      ...(contextSpark && contextSpark.length > 0 ? { contextSpark } : {}),
+      // Lot 11. NOT gated on `live`: unlike an occupancy, a bill stays true
+      // after the agent exits — and this view is what the final DB write is
+      // built from, so gating it would erase the totals on the way out.
+      ...(tokenUsage ? { tokenUsage } : {}),
+      // Lot 13. Absent for every provider but codex, because no other source
+      // produces one — the gate is the measurement, not a switch on the id.
+      ...(providerQuota ? { providerQuota } : {}),
     };
   }
 
@@ -711,6 +1272,22 @@ export class Session extends EventEmitter {
   }
 
   /**
+   * Does this session's provider actually have `cmd`?
+   *
+   * `_fireContextReset` already handles a provider without one — it resolves
+   * the armed reset by writing nothing (better than a half-working reset). But
+   * that answer only comes at the next idle boundary and only reaches a log
+   * line, which is invisible to an operator who just pressed COMPACT. Ask
+   * BEFORE arming to refuse loudly instead (`PROVIDER_NO_RESET`, 409).
+   *
+   * Deliberately asked WITHOUT `instructions`: they only steer a `/compact`
+   * summary, so support must not hinge on text the caller may not have typed.
+   */
+  supportsContextReset(cmd: ContextResetCommand): boolean {
+    return this.provider.contextResetLine(cmd) !== null;
+  }
+
+  /**
    * Arm a context-reset (`/clear` or `/compact`) to fire at the next task
    * boundary. We never inject mid-turn: the command is held until the PTY has
    * been quiet for `idleMs` (the same idle window the mailbox uses), so it
@@ -728,7 +1305,9 @@ export class Session extends EventEmitter {
     cmd: ContextResetCommand,
     opts: { idleMs: number; instructions?: string },
   ): boolean {
-    if (this._pendingContextReset) return false;
+    // Both halves of the occupancy: the armed slot AND the 250 ms two-step
+    // write window after `_fireContextReset` nulls it (cf. `_contextResetFiring`).
+    if (this._pendingContextReset || this._contextResetFiring) return false;
     if (!this.agent) return false;
     if (this._status !== 'running' && this._status !== 'waiting') return false;
     this._pendingContextReset = {
@@ -773,7 +1352,11 @@ export class Session extends EventEmitter {
       // write is in flight, back off rather than garble both. This branch is
       // unreachable unless someone called `armNotice` — sessions that never
       // use the new API keep the exact previous behaviour.
-      if (this._noticeFiring) {
+      if (this._noticeFiring || this._contextResetFiring) {
+        // `_contextResetFiring`: another reset's two-step write is mid-flight
+        // (only reachable through the race the occupancy guards now close, or
+        // a future caller) — firing NOW would interleave two half-typed slash
+        // commands in the same prompt buffer and garble both.
         this._scheduleContextReset(PTY_INJECT_CONTENTION_RETRY_MS);
         return;
       }
@@ -839,6 +1422,18 @@ export class Session extends EventEmitter {
         return;
       }
       log.info({ event: 'session.context_reset_fired', sessionId: this.id, cmd: pending.cmd });
+      // Monitoring — the number we are serving describes the context that was
+      // just thrown away. Mark it stale HERE, on the command actually reaching
+      // the PTY, and never on a hook callback: a `/compact` the CLI refuses
+      // ("Not enough messages to compact") fires no `SessionStart` at all
+      // (spike S1d), so anything waiting on one would wait forever. The flag
+      // clears by itself at the first turn read back from the transcript.
+      this._contextUsage?.markStale();
+      // Lot 9 — and for the same reason, the graph's COMPACT/CLEAR marker is
+      // stamped HERE, on the submitted command, not when the operator asked:
+      // an armed reset can wait minutes for an idle boundary, and a reset the
+      // provider does not support returns above without ever writing anything.
+      this._contextUsage?.recordReset(pending.cmd);
       // Hand off to the orchestrator so it can re-wake the agent if a `/clear`
       // left undelivered mail behind (the mailbox is server-side and survives).
       try {
@@ -855,7 +1450,12 @@ export class Session extends EventEmitter {
 
   /** True when a `/clear` or `/compact` is armed but not yet fired. */
   get hasPendingContextReset(): boolean {
-    return this._pendingContextReset !== null;
+    // `_pendingContextReset` is nulled at the TOP of `_fireContextReset`,
+    // 250 ms before the command is actually submitted — without the firing
+    // flag, that window reads as "nothing pending" and a second operator
+    // request arms a duplicate reset (seen live: two `/compact` 14 ms apart
+    // both answered `scheduled`).
+    return this._pendingContextReset !== null || this._contextResetFiring;
   }
 
   // --- update_system D.5 — operator notice -------------------------------

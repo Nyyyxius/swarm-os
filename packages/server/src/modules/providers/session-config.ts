@@ -125,7 +125,27 @@ export function linkSharedState(opts: LinkSharedStateOptions): void {
 }
 
 /**
- * Shell command run by the agent's `Notification` hook.
+ * What a hook callback MEANS, carried in the POST body so one endpoint can
+ * serve several CLI events (`http/routes/hooks.ts`).
+ *
+ *  - `session.waiting`    the agent is blocked on a human (claude `Notification`,
+ *                         and — with turn-boundary semantics — codex `notify` /
+ *                         gemini `AfterAgent`).
+ *  - `session.transcript` claude `SessionStart`: "here is where my transcript
+ *                         lives", the only reliable source of context usage
+ *                         (docs/monitoring-agents.md, Lot 2).
+ */
+export type SessionHookKind = 'session.waiting' | 'session.transcript';
+
+export interface HookCommandOptions {
+  orchestratorId: string;
+  sessionId: string;
+  hookToken: string;
+  mainHttpPort: number;
+}
+
+/**
+ * Shell command run by one of the agent's hooks.
  *
  * The CLI streams its hook event as JSON on stdin; we capture it with `cat`,
  * JSON-escape it (python3 when available, `sed` otherwise) and POST a minimal
@@ -134,20 +154,45 @@ export function linkSharedState(opts: LinkSharedStateOptions): void {
  *
  * The exact quoting of this string is production-critical: it is parsed by the
  * agent's shell, not by Node. Do not "tidy" it. The same command works for
- * gemini (its hook payload is Claude-Code-compatible).
+ * gemini (its hook payload is Claude-Code-compatible) and, piped from argv, for
+ * codex (`codex.ts#buildCodexNotifyScript`).
+ *
+ * `kind` is interpolated into the printf FORMAT rather than passed as one of
+ * its arguments: the value is a compile-time constant of this module, and
+ * keeping it in the format leaves the `session.waiting` command byte-identical
+ * to the one shipped before this became a builder.
+ *
+ * ⚠️ SILENCE IS A REQUIREMENT, not tidiness — measured, spike S3: a
+ * `SessionStart` hook's **stdout is injected into the agent's conversation**
+ * (the CLI appends an `attachment` / `hook_success` line whose content is the
+ * hook's stdout). A chatty curl would pollute every boot, every `/clear` and
+ * every `/compact` — and inflate the very metric we are here to measure. Both
+ * kinds end in `>/dev/null 2>&1 || true`, and `session.transcript` adds
+ * `-o /dev/null` on top; every intermediate command writes into a `$(…)`
+ * capture, never to the hook's stdout.
+ *
+ * `session.transcript` also carries `-m 5`, which `session.waiting` does not
+ * need: `SessionStart` runs SYNCHRONOUSLY as the CLI boots, so an unanswering
+ * server would hold the agent's startup for curl's default (infinite) connect
+ * budget.
  */
-export function buildNotificationHookCommand(opts: {
-  orchestratorId: string;
-  sessionId: string;
-  hookToken: string;
-  mainHttpPort: number;
-}): string {
+export function buildHookCommand(opts: HookCommandOptions & { kind: SessionHookKind }): string {
   const hookUrl = `http://127.0.0.1:${opts.mainHttpPort}/hooks/notification`;
+  const curlFlags = opts.kind === 'session.transcript' ? '-sS -m 5 -o /dev/null' : '-s';
   return (
     `payload=$(cat); ` +
     `msg=$(printf '%s' "$payload" | python3 -c 'import json,sys; sys.stdout.write(json.dumps(sys.stdin.read()))' 2>/dev/null) || ` +
     `msg=$(printf '"%s"' "$(printf '%s' "$payload" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g; s/\\n/\\\\n/g')"); ` +
-    `body=$(printf '{"orch_id":"%s","session_id":"%s","kind":"session.waiting","message":%s}' '${opts.orchestratorId}' '${opts.sessionId}' "$msg"); ` +
-    `curl -s -X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer ${opts.hookToken}' -d "$body" '${hookUrl}' >/dev/null 2>&1 || true`
+    `body=$(printf '{"orch_id":"%s","session_id":"%s","kind":"${opts.kind}","message":%s}' '${opts.orchestratorId}' '${opts.sessionId}' "$msg"); ` +
+    `curl ${curlFlags} -X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer ${opts.hookToken}' -d "$body" '${hookUrl}' >/dev/null 2>&1 || true`
   );
+}
+
+/**
+ * The `session.waiting` command, under its historical name. Every pre-Lot-2
+ * callsite (claude `Notification`, gemini `AfterAgent`, codex `notify.sh`)
+ * keeps calling this and keeps getting the same string, character for character.
+ */
+export function buildNotificationHookCommand(opts: HookCommandOptions): string {
+  return buildHookCommand({ ...opts, kind: 'session.waiting' });
 }

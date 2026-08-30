@@ -23,7 +23,12 @@ export {
 export { CodexProvider, CODEX_SHARED_ENTRIES, CODEX_EFFORT_MAP } from './codex.js';
 export { GeminiProvider, GEMINI_SHARED_ENTRIES } from './gemini.js';
 export { OpencodeProvider, OPENCODE_SHARED_ENTRIES } from './opencode.js';
-export { buildNotificationHookCommand, linkSharedState } from './session-config.js';
+export {
+  buildHookCommand,
+  buildNotificationHookCommand,
+  linkSharedState,
+  type SessionHookKind,
+} from './session-config.js';
 export { probeCliBinary, PROBE_DEFAULT_TIMEOUT_MS } from './probe.js';
 export {
   resolveAgentDefaults,

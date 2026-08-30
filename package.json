@@ -13,6 +13,7 @@
     "test:watch": "vitest",
     "test:coverage": "vitest run --coverage",
     "verify:claude": "pnpm --filter server exec tsx ../../scripts/verify-claude-code.ts",
+    "verify:claude-sessionstart": "pnpm --filter server exec tsx ../../scripts/verify-claude-sessionstart.ts",
     "verify:codex": "pnpm --filter server exec tsx ../../scripts/verify-codex.ts",
     "verify:opencode": "pnpm --filter server exec tsx ../../scripts/verify-opencode.ts",
     "verify:gemini": "pnpm --filter server exec tsx ../../scripts/verify-gemini.ts",

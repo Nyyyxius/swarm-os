@@ -234,7 +234,7 @@ describe('CommandLauncher — couverture des destinations', () => {
     // `switch` exhaustif, il faut que la table le nourrisse réellement.
     const ids: LauncherActionId[] = [
       'new-team', 'roles', 'memory', 'board', 'approvals',
-      'code-graph', 'skills', 'plugins', 'ide',
+      'monitoring', 'code-graph', 'skills', 'plugins', 'ide',
       'update', 'settings', 'appearance',
     ];
     const rendered = new Set<string>([

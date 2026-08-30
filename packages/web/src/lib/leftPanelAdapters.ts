@@ -177,13 +177,20 @@ export type MessageFlowSource = 's4-client' | 's9-server';
  * none yet) so the UI never flickers to nothing. Exposed publicly so
  * `LeftPanel` can share a single instance for both the global big graph
  * (when `messageFlowSource === 's9-server'`) and the per-team sparklines.
+ *
+ * `enabled` exists for the always-mounted route overlays (`MonitoringPage`
+ * & co.): React forbids calling the hook conditionally, so a page that
+ * renders `null` while closed would otherwise keep polling forever in the
+ * background. Same gate as `useApprovals(orchId, ms, open)`.
  */
 export function useServerMessagesMetrics(
   intervalMs: number = 60_000,
+  enabled: boolean = true,
 ): MessagesMetricsSnapshot | null {
   const [snap, setSnap] = useState<MessagesMetricsSnapshot | null>(null);
   const cancelledRef = useRef(false);
   useEffect(() => {
+    if (!enabled) return;
     cancelledRef.current = false;
     const fetchOnce = async () => {
       try {
@@ -199,7 +206,7 @@ export function useServerMessagesMetrics(
       cancelledRef.current = true;
       clearInterval(t);
     };
-  }, [intervalMs]);
+  }, [intervalMs, enabled]);
   return snap;
 }
 
@@ -213,9 +220,10 @@ export function useServerMessagesMetrics(
 export function useMessageFlow(
   orchestrators: readonly OrchestratorView[],
   source: MessageFlowSource = 's4-client',
+  enabled: boolean = true,
 ): GlobalMessageStats {
   const s4 = useGlobalMessageStats(orchestrators);
-  const s9 = useServerMessagesMetrics();
+  const s9 = useServerMessagesMetrics(60_000, enabled);
   if (source === 's9-server' && s9) {
     return {
       total: s9.total,

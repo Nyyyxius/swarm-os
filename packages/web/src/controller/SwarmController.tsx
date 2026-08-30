@@ -33,7 +33,9 @@ import {
   type RightPanelAgent, type RightPanelTeam, type MessageBubble,
   type RightPanelTab, type AgentAction,
 } from '../components/desktop/RightPanel';
-import { type WaitingToast, type ApprovalToast } from '../components/desktop/Toasts';
+import {
+  type WaitingToast, type ApprovalToast, type NoticeToast, type BudgetToast,
+} from '../components/desktop/Toasts';
 import { type AuthState } from '../components/desktop/SettingsDrawer';
 import { type ComposerAudience, type ComposerMode } from '../components/desktop/Composer';
 import { type MapPulse, type MapViewTeam } from '../components/desktop/MapView';
@@ -42,7 +44,7 @@ import { useRoles } from '../hooks/useRoles';
 import { useSession } from '../hooks/useSession';
 import { useEvents, type MailboxMessageEvent } from '../hooks/useEvents';
 import {
-  api, getToken, HttpError,
+  api, apiErrorMessage, getToken, HttpError,
   type HealthView, type InfoView, type MailMessageView,
   type OrchestratorView, type RoleView,
 } from '../api/client';
@@ -60,6 +62,16 @@ import { type ShellMode } from '../hooks/useShellMode';
  * completes; avoids a tail re-trigger on remount.
  */
 const FLASH_MS = 1700;
+
+/**
+ * How long a `NoticeToast` stays up before dismissing itself. Failures live
+ * longer than successes: "COMPACT SCHEDULED" is a confirmation the operator
+ * already expects, while a 409 carries a reason they have to read.
+ */
+const NOTICE_TTL_MS = { ok: 5_000, error: 10_000 } as const;
+
+/** Cap on simultaneously visible notices (cf. `TOAST_MAX_VISIBLE`). */
+const NOTICE_MAX_VISIBLE = 4;
 
 /** Props supplied by App.tsx (the sovereign router) to the controller. */
 export interface SwarmControllerProps {
@@ -79,6 +91,8 @@ export interface SwarmControllerProps {
   onOpenApprovals?: () => void;
   /** TopBar CODE GRAPH → route `#/graph`. */
   onOpenGraph?: () => void;
+  /** TopBar/StatsSheet MONITORING → route `#/monitoring`. */
+  onOpenMonitoring?: () => void;
   /** TopBar/Dock PLUGINS → route `#/plugins`. */
   onOpenPlugins?: () => void;
   /** TopBar SKILLS → route `#/skills`. */
@@ -123,6 +137,26 @@ export interface SwarmControllerValue {
   waitingToasts: readonly WaitingToast[];
   /** P3 — actionable approval toasts (Approve / Deny / open console). */
   approvalToasts: readonly ApprovalToast[];
+  /** Lot 14 — teams that crossed their role's cost budget. */
+  budgetToasts: readonly BudgetToast[];
+  /** Open the over-budget team (selects its lead) and close the toast. */
+  handleBudgetOpen: (t: BudgetToast) => void;
+  /** Close a budget toast without touching the team. */
+  dismissBudgetToast: (id: string) => void;
+  /** Generic operator notices (context reset scheduled / refused). */
+  notices: readonly NoticeToast[];
+  /** Close a notice before its TTL expires. */
+  dismissNotice: (id: string) => void;
+  /**
+   * Push one onto that channel from a PAGE, not just from the controller's own
+   * callbacks (Lot 15's cost export is the first: the fetch it fires lives in
+   * the page, and its 404 on an older server has to be said somewhere the
+   * operator will see it — an unexplained no-op is the failure mode).
+   *
+   * ALL-CAPS `title`, optional `body` for the server's reason. Stable
+   * identity, so it is safe in a dependency array.
+   */
+  pushNotice: (kind: NoticeToast['kind'], title: string, body?: string) => void;
   info: InfoView | null;
   health: HealthView | null;
   authState: AuthState;
@@ -174,6 +208,8 @@ export interface SwarmControllerValue {
   /** Revision counter bumped on each code.graph.* WS event (live graph refresh). */
   graphRev: number;
   onOpenGraph: () => void;
+  /** Open the per-agent monitoring page (`#/monitoring`). */
+  onOpenMonitoring: () => void;
   // shell-mode override (escape hatch from auto breakpoint)
   shellMode: ShellMode;
   setShellMode: (m: ShellMode) => void;
@@ -184,6 +220,15 @@ export interface SwarmControllerValue {
   handleLeftSelectEnded: (orchId: string) => void;
   closeRightPanel: () => void;
   onAction: (agentId: string, action: AgentAction) => void | Promise<void>;
+  /**
+   * Arm a compact/clear on an arbitrary session — NOT the selected one.
+   * `onAction` resolves its target from the current selection, which the
+   * monitoring page (one actionable row per agent) cannot use.
+   */
+  onContextReset: (
+    sessionId: string,
+    cmd: 'compact' | 'clear',
+  ) => void | Promise<void>;
   onSend: (
     agentId: string, text: string,
     opts: { mode: ComposerMode; audience: ComposerAudience },
@@ -234,6 +279,7 @@ export function SwarmControllerProvider({
   onOpenBoard,
   onOpenApprovals,
   onOpenGraph,
+  onOpenMonitoring,
   onOpenPlugins,
   onOpenSkills,
   onOpenIde,
@@ -337,6 +383,51 @@ export function SwarmControllerProvider({
     setAppearanceFocus(true);
     setSettingsOpen(true);
   }, []);
+  // ── generic operator notices ───────────────────────────────────────────
+  // The toast stack until now only carried SERVER-pushed events (waiting
+  // sessions, approval requests) fed by `useEvents`. Context reset is the
+  // first operator action whose outcome is invisible otherwise: the reset is
+  // DEFERRED to the agent's next idle, so a successful call changes nothing
+  // on screen for possibly minutes, and a 409 (`RESET_ALREADY_PENDING`,
+  // `PROVIDER_NO_RESET`) would vanish into console.error. Hence this minimal
+  // generic channel — push a line, it self-dismisses, the operator can close
+  // it early. Kept deliberately small: no queue, no dedup, no severity beyond
+  // ok/error.
+  const [notices, setNotices] = useState<readonly NoticeToast[]>([]);
+  const noticeIdRef = useRef(1);
+  const noticeTimersRef = useRef<Set<ReturnType<typeof setTimeout>>>(new Set());
+
+  useEffect(() => {
+    const timers = noticeTimersRef.current;
+    return () => {
+      for (const t of timers) clearTimeout(t);
+      timers.clear();
+    };
+  }, []);
+
+  const dismissNotice = useCallback((id: string) => {
+    setNotices((prev) => prev.filter((n) => n.id !== id));
+  }, []);
+
+  const pushNotice = useCallback(
+    (kind: NoticeToast['kind'], title: string, body?: string) => {
+      const id = `notice-${noticeIdRef.current++}`;
+      setNotices((prev) => [
+        { id, kind, title, body, at: Date.now() },
+        // Capped like the waiting stack: the monitoring table puts a COMPACT
+        // button on every row, so a bulk pass would otherwise paper the
+        // screen with a dozen simultaneous toasts.
+        ...prev.slice(0, NOTICE_MAX_VISIBLE - 1),
+      ]);
+      const timer = setTimeout(() => {
+        noticeTimersRef.current.delete(timer);
+        setNotices((prev) => prev.filter((n) => n.id !== id));
+      }, NOTICE_TTL_MS[kind]);
+      noticeTimersRef.current.add(timer);
+    },
+    [],
+  );
+
   const [spawnFor, setSpawnFor] = useState<OrchestratorView | null>(null);
   const [editConfigFor, setEditConfigFor] = useState<OrchestratorView | null>(null);
   const [broadcastOpen, setBroadcastOpen] = useState(false);
@@ -375,44 +466,18 @@ export function SwarmControllerProvider({
     if (authState === 'missing' || authState === 'invalid') setSettingsOpen(true);
   }, [authState]);
 
-  // ── INBOX BADGES (peekInbox per active session, every 3 s) ────────────
+  // ── live orchestrators mirror (read by handlers without re-subscribing) ─
   const orchRef = useRef(orchestrators);
   useEffect(() => { orchRef.current = orchestrators; }, [orchestrators]);
-  const [inboxCounts, setInboxCounts] = useState<Map<string, number>>(() => new Map());
 
-  useEffect(() => {
-    let cancelled = false;
-    async function pollAll() {
-      const snapshot = orchRef.current;
-      const tasks: Array<Promise<[string, number] | null>> = [];
-      for (const o of snapshot) {
-        if (o.endedAt != null) continue;
-        for (const s of o.sessions) {
-          if (
-            s.status === 'exited' || s.status === 'killed'
-            || s.status === 'failed' || s.status === 'interrupted'
-          ) continue;
-          tasks.push(
-            api.peekInbox(o.id, s.id)
-              .then((r) => [s.id, r.count] as [string, number])
-              .catch(() => null),
-          );
-        }
-      }
-      if (tasks.length === 0) {
-        if (!cancelled) setInboxCounts((prev) => (prev.size === 0 ? prev : new Map()));
-        return;
-      }
-      const results = await Promise.all(tasks);
-      if (cancelled) return;
-      const next = new Map<string, number>();
-      for (const r of results) if (r) next.set(r[0], r[1]);
-      setInboxCounts(next);
-    }
-    void pollAll();
-    const id = setInterval(() => void pollAll(), 3_000);
-    return () => { cancelled = true; clearInterval(id); };
-  }, []);
+  // NOTE — the INBOX BADGE poll that used to live here is GONE
+  // (docs/monitoring-agents.md, Lot 1). It fanned out one `peekInbox` request
+  // per live session every 3 s purely to feed the `INBOX N` badge on the map
+  // nodes; the server now decorates `SessionView.inboxCount` on the
+  // `/orchestrators` payload we already poll, and `toMapViewTeams` reads it
+  // straight off the session. The remaining `peekInbox` call (below, for the
+  // SELECTED session) is a different thing: it fetches message CONTENT for
+  // the MESSAGES tab, which no list payload carries.
 
   // ── SPAWN ANIMATION (diff polling + WS session.created) ───────────────
   const [spawningIds, setSpawningIds] = useState<ReadonlySet<string>>(() => new Set());
@@ -534,6 +599,8 @@ export function SwarmControllerProvider({
     dismiss,
     approvals,
     dismissApproval,
+    budgets,
+    dismissBudget,
   } = useEvents({
     onMailboxMessage: handleMailboxMessage,
     onSessionCreated: handleSessionCreated,
@@ -556,8 +623,8 @@ export function SwarmControllerProvider({
 
   // ── DERIVED MapViewTeam[] (rebuilt each `now` tick) ───────────────────
   const mapViewTeams = useMemo(
-    () => toMapViewTeams(orchestrators, now, inboxCounts),
-    [orchestrators, now, inboxCounts],
+    () => toMapViewTeams(orchestrators, now),
+    [orchestrators, now],
   );
 
   // ── info (one-shot + 60 s refresh) ────────────────────────────────────
@@ -758,6 +825,33 @@ export function SwarmControllerProvider({
     [approvals, orchestrators],
   );
 
+  // ── budget toasts (hook shape → component shape) ──────────────────────
+  // Same enrichment idiom as the two stacks above. The team NAME is taken
+  // from the frame first and from the live snapshot second: the payload names
+  // the team as it was when the janitor priced it, and a team destroyed
+  // between the crossing and the render would otherwise be an anonymous `—`
+  // on the one notice that says why it stopped.
+  const budgetToasts = useMemo<BudgetToast[]>(
+    () => {
+      const reversed = [...budgets].reverse();
+      return reversed.map<BudgetToast>((n) => {
+        const orch = n.orchestratorId
+          ? orchestrators.find((o) => o.id === n.orchestratorId)
+          : undefined;
+        return {
+          id: n.id,
+          teamId: n.orchestratorId ?? '',
+          teamName: n.teamName ?? orch?.name ?? '—',
+          costUsd: n.costUsd,
+          budgetUsd: n.budgetUsd,
+          action: n.action,
+          at: n.ts,
+        };
+      });
+    },
+    [budgets, orchestrators],
+  );
+
   // ── handlers ───────────────────────────────────────────────────────────
   const selectAgent = useCallback((id: string | null) => {
     setSelectedSessionId(id);
@@ -773,6 +867,20 @@ export function SwarmControllerProvider({
     if (t.teamId) onOpenOrchestrator(t.teamId);
     dismiss(t.id);
   }, [onOpenOrchestrator, dismiss]);
+
+  // OPEN TEAM — the same navigation the waiting toast performs, one level up:
+  // it selects the team's LEAD rather than a session, because the subject of
+  // a budget is the team and its lead is where an operator decides what to do
+  // about it (resume, kill, raise the ceiling). Dismisses on the way, like the
+  // waiting toast: the notice has been acted on.
+  const handleBudgetOpen = useCallback((t: BudgetToast) => {
+    if (t.teamId) {
+      const orch = orchRef.current.find((o) => o.id === t.teamId);
+      if (orch?.leadSessionId) setSelectedSessionId(orch.leadSessionId);
+      onOpenOrchestrator(t.teamId);
+    }
+    dismissBudget(t.id);
+  }, [onOpenOrchestrator, dismissBudget]);
 
   // ── approval handlers ─────────────────────────────────────────────────
   // POST the decision (server replays the keystroke + records it). The
@@ -878,9 +986,72 @@ export function SwarmControllerProvider({
     [spawnWorker],
   );
 
+  /**
+   * Arm a deferred context reset on ANY session — deliberately decoupled
+   * from the current selection.
+   *
+   * `onAction` below resolves its target from `selectedOrch`/`selectedSession`
+   * (and derives `actingOnLead` from them), which is correct for the right
+   * panel — you can only act on the agent you have open — but makes it
+   * unusable from the monitoring page, where every row is actionable and the
+   * selection is usually somewhere else entirely. So this one takes the
+   * session id as the sole source of truth and looks its team up only to name
+   * it in the toast.
+   *
+   * The server answers `200 {scheduled:true}`: ARMED, not done. The reset
+   * fires at the agent's next idle (never mid-turn), and it is
+   * `contextResetPending` on the next 3 s poll that shows it is still queued.
+   * The toast says so, because "COMPACT" followed by nothing visible for two
+   * minutes otherwise reads as a failure.
+   */
+  const onContextReset = useCallback(async (
+    sessionId: string,
+    cmd: 'compact' | 'clear',
+  ) => {
+    const label = cmd.toUpperCase();
+    const orch = orchRef.current.find((o) =>
+      o.sessions.some((s) => s.id === sessionId),
+    );
+    const session = orch?.sessions.find((s) => s.id === sessionId);
+    const who = orch && session ? `${orch.name} :: ${session.name}` : sessionId;
+    try {
+      await api.contextReset(sessionId, cmd);
+      pushNotice('ok', `${label} SCHEDULED — FIRES AT IDLE`, who);
+    } catch (err) {
+      // apiErrorMessage surfaces the server's `code: reason` pair
+      // (PROVIDER_NO_RESET / SESSION_NOT_ACTIVE / RESET_ALREADY_PENDING);
+      // `HttpError.message` alone would only say "HTTP 409".
+      pushNotice('error', `${label} REFUSED — ${who}`, apiErrorMessage(err));
+    }
+  }, [pushNotice]);
+
   // onAction dispatch (lead vs worker; fired AFTER user confirmation) ────
   const onAction = useCallback(async (agentId: string, action: AgentAction) => {
+    // Context actions first, BEFORE the selection guard: they are the two
+    // actions that must work on an agent that is not the selected one. TS
+    // narrows `action` past this switch, so the lifecycle switch below stays
+    // exhaustive over exactly the remaining seven.
+    switch (action) {
+      case 'compact':
+      case 'clear':
+        await onContextReset(agentId, action);
+        return;
+    }
     if (!selectedOrch || !selectedSession) return;
+    // Every branch below derives its TARGET from the selection, not from
+    // `agentId` — `actingOnLead` decides between "destroy the team" and
+    // "stop this worker". Now that `compact`/`clear` accept an arbitrary id,
+    // a future caller could reasonably assume the same holds here and pass a
+    // non-selected agent to `kill`, which would tear down the SELECTED team
+    // instead. Refuse loudly rather than act on the wrong agent.
+    if (agentId !== selectedSession.id) {
+      console.error(
+        `onAction(${action}): agentId ${agentId} is not the selected session `
+        + `(${selectedSession.id}); lifecycle actions only act on the selection. `
+        + 'Use onContextReset for selection-independent actions.',
+      );
+      return;
+    }
     const actingOnLead = selectedSession.id === selectedOrch.leadSessionId;
     try {
       switch (action) {
@@ -930,10 +1101,16 @@ export function SwarmControllerProvider({
           setSelectedSessionId(null);
           return;
       }
+      // Exhaustiveness idiom (same as `TopBar.handlePick`): a new member of
+      // `AgentAction` that nobody routes fails to compile here. Without it an
+      // unrouted action is a silent no-op — the operator clicks, nothing
+      // happens, and nothing says why.
+      const _exhaustive: never = action;
+      return _exhaustive;
     } catch (err) {
       console.error(`action ${action} failed:`, err);
     }
-  }, [selectedOrch, selectedSession]);
+  }, [selectedOrch, selectedSession, onContextReset]);
 
   // onSend dispatch (PTY vs mailbox; agent vs team) ─────────────────────
   const onSend = useCallback(async (
@@ -965,6 +1142,10 @@ export function SwarmControllerProvider({
   const onOpenBoardResolved = useCallback(() => { onOpenBoard?.(); }, [onOpenBoard]);
   const onOpenApprovalsResolved = useCallback(() => { onOpenApprovals?.(); }, [onOpenApprovals]);
   const onOpenGraphResolved = useCallback(() => { onOpenGraph?.(); }, [onOpenGraph]);
+  const onOpenMonitoringResolved = useCallback(
+    () => { onOpenMonitoring?.(); },
+    [onOpenMonitoring],
+  );
   const onOpenPluginsResolved = useCallback(() => { onOpenPlugins?.(); }, [onOpenPlugins]);
   const onOpenSkillsResolved = useCallback(() => { onOpenSkills?.(); }, [onOpenSkills]);
   const onOpenIdeResolved = useCallback(() => { onOpenIde?.(); }, [onOpenIde]);
@@ -995,6 +1176,12 @@ export function SwarmControllerProvider({
     eventsConnected,
     waitingToasts,
     approvalToasts,
+    budgetToasts,
+    handleBudgetOpen,
+    dismissBudgetToast: dismissBudget,
+    notices,
+    dismissNotice,
+    pushNotice,
     info,
     health,
     authState,
@@ -1019,6 +1206,7 @@ export function SwarmControllerProvider({
     onOpenApprovals: onOpenApprovalsResolved,
     graphRev,
     onOpenGraph: onOpenGraphResolved,
+    onOpenMonitoring: onOpenMonitoringResolved,
     onOpenPlugins: onOpenPluginsResolved,
     onOpenSkills: onOpenSkillsResolved,
     onOpenIde: onOpenIdeResolved,
@@ -1034,6 +1222,7 @@ export function SwarmControllerProvider({
     handleLeftSelectEnded,
     closeRightPanel,
     onAction,
+    onContextReset,
     onSend,
     handleToastOpen,
     dismissToast: dismiss,

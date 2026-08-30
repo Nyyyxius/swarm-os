@@ -97,23 +97,31 @@ const SHARED_ENTRIES = [
 ];
 
 /**
- * Literal copy of the Notification hook command. Duplicated on purpose: this
- * string is executed by claude-code inside the agent's shell, so an accidental
- * quoting change during the extraction must fail loudly here.
+ * Literal copy of the hook commands. Duplicated on purpose: these strings are
+ * executed by claude-code inside the agent's shell, so an accidental quoting
+ * change during a refactor must fail loudly here.
+ *
+ * The `session.transcript` variant differs by exactly two clauses, and both are
+ * measured (spike `scripts/verify-claude-sessionstart.report.md`): `-o /dev/null`
+ * because a `SessionStart` hook's STDOUT IS INJECTED into the agent's context
+ * (S3), and `-m 5` because that hook runs synchronously while the CLI boots.
  */
 function expectedHookCommand(opts: {
   orchestratorId: string;
   sessionId: string;
   hookToken: string;
   mainHttpPort: number;
+  kind?: 'session.waiting' | 'session.transcript';
 }): string {
   const hookUrl = `http://127.0.0.1:${opts.mainHttpPort}/hooks/notification`;
+  const kind = opts.kind ?? 'session.waiting';
+  const curlFlags = kind === 'session.transcript' ? '-sS -m 5 -o /dev/null' : '-s';
   return (
     `payload=$(cat); ` +
     `msg=$(printf '%s' "$payload" | python3 -c 'import json,sys; sys.stdout.write(json.dumps(sys.stdin.read()))' 2>/dev/null) || ` +
     `msg=$(printf '"%s"' "$(printf '%s' "$payload" | sed 's/\\\\/\\\\\\\\/g; s/"/\\\\"/g; s/\\n/\\\\n/g')"); ` +
-    `body=$(printf '{"orch_id":"%s","session_id":"%s","kind":"session.waiting","message":%s}' '${opts.orchestratorId}' '${opts.sessionId}' "$msg"); ` +
-    `curl -s -X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer ${opts.hookToken}' -d "$body" '${hookUrl}' >/dev/null 2>&1 || true`
+    `body=$(printf '{"orch_id":"%s","session_id":"%s","kind":"${kind}","message":%s}' '${opts.orchestratorId}' '${opts.sessionId}' "$msg"); ` +
+    `curl ${curlFlags} -X POST -H 'Content-Type: application/json' -H 'Authorization: Bearer ${opts.hookToken}' -d "$body" '${hookUrl}' >/dev/null 2>&1 || true`
   );
 }
 
@@ -448,8 +456,46 @@ describe('claude adapter — per-session settings.json', () => {
             ],
           },
         ],
+        // Monitoring (docs/monitoring-agents.md, Lot 2) — the transcript
+        // announcer. Empty matcher = every source: startup, clear, compact,
+        // and the resume/fork ones the spike did not exercise.
+        SessionStart: [
+          {
+            matcher: '',
+            hooks: [
+              {
+                type: 'command',
+                command: expectedHookCommand({
+                  orchestratorId: 'orch-1111',
+                  sessionId: 'sess-0000',
+                  hookToken: 'hook-token-xyz',
+                  mainHttpPort: 8787,
+                  kind: 'session.transcript',
+                }),
+              },
+            ],
+          },
+        ],
       },
     });
+  });
+
+  it('keeps the SessionStart hook silent — its stdout would enter the context', () => {
+    // THE fact this whole channel rests on (spike S3): claude-code appends the
+    // hook's trimmed stdout to the conversation as an `attachment` /
+    // `hook_success` line. A chatty curl would pollute every boot, every
+    // `/clear` and every `/compact` — and inflate the very number the hook
+    // exists to measure. Asserted on the shipped string, not on the builder.
+    const s = makeSession({ skipSpawn: true });
+    const body = JSON.parse(
+      fs.readFileSync(path.join(s.claudeConfigDir!, 'settings.json'), 'utf8'),
+    ) as { hooks: { SessionStart: Array<{ hooks: Array<{ command: string }> }> } };
+    const command = body.hooks.SessionStart[0]!.hooks[0]!.command;
+    expect(command).toContain('-o /dev/null');
+    expect(command).toContain('>/dev/null 2>&1 || true');
+    // And bounded: the hook blocks the CLI's startup while it runs.
+    expect(command).toContain('-m 5');
+    expect(command).toContain('"kind":"session.transcript"');
   });
 
   it('creates the config dir 0700 and the settings file 0600', () => {

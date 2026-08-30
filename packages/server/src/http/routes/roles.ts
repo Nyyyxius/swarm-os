@@ -8,7 +8,8 @@ import type {
   RoleApprovalSettings,
   RoleSkillRef,
 } from '../../modules/roles/index.js';
-import { isDiscordConnector } from '../../modules/roles/index.js';
+import { isDiscordConnector, BUDGET_ACTIONS } from '../../modules/roles/index.js';
+import type { BudgetAction } from '../../modules/roles/index.js';
 import type { Config, EffortLevel, PermissionMode } from '../../config.js';
 import { isValidCron } from '../../modules/schedule/index.js';
 import {
@@ -85,6 +86,10 @@ interface RoleBody {
   scheduleMessage?: unknown;
   approval?: unknown;
   skills?: unknown;
+  autoRemoveDeadWorkers?: unknown;
+  autoRemoveDeadWorkersDelayMs?: unknown;
+  costBudgetUsd?: unknown;
+  budgetAction?: unknown;
 }
 
 /**
@@ -200,6 +205,80 @@ function parseWorkerCount(
     return { ok: false, error: `workerCount must be between 0 and ${cap}` };
   }
   return { ok: true, value: x };
+}
+
+/** Cap on the dead-worker reap delay: 30 days in ms. Guards a fat-fingered value. */
+const AUTO_REMOVE_DELAY_MAX_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Validate the OPTIONAL `autoRemoveDeadWorkersDelayMs`. A non-negative integer
+ * number of milliseconds, capped at 30 days. `undefined`/omitted is handled by
+ * the caller (the field keeps its stored value / default).
+ */
+function parseAutoRemoveDelayMs(
+  x: unknown,
+): { ok: true; value: number } | { ok: false; error: string } {
+  if (typeof x !== 'number' || !Number.isInteger(x)) {
+    return { ok: false, error: 'autoRemoveDeadWorkersDelayMs must be a non-negative integer (ms)' };
+  }
+  if (x < 0 || x > AUTO_REMOVE_DELAY_MAX_MS) {
+    return {
+      ok: false,
+      error: `autoRemoveDeadWorkersDelayMs must be between 0 and ${AUTO_REMOVE_DELAY_MAX_MS} ms`,
+    };
+  }
+  return { ok: true, value: x };
+}
+
+/**
+ * Cap on a role's cost budget: $1M. Not a policy, a fat-finger guard — a
+ * budget nobody could reach is indistinguishable from no budget, and a value
+ * that large is a stray keystroke or a cents/dollars mix-up.
+ */
+const COST_BUDGET_MAX_USD = 1_000_000;
+
+/**
+ * Validate the OPTIONAL `costBudgetUsd` (Lot 14). `null` = clear the budget.
+ * Otherwise a FINITE number strictly greater than 0.
+ *
+ * `0` is rejected rather than stored, and that is the whole subtlety of this
+ * field: a zero budget would be crossed by every team on its first tick, so an
+ * operator who meant "no budget" and typed `0` would pause their fleet. The web
+ * half rejects it identically (`lib/budget.parseCostBudget`) — this is the
+ * server-side half of the same rule, because the dialog is not the only caller.
+ */
+function parseCostBudget(
+  x: unknown,
+): { ok: true; value: number | null } | { ok: false; error: string } {
+  if (x === null) return { ok: true, value: null };
+  if (typeof x !== 'number' || !Number.isFinite(x)) {
+    return { ok: false, error: 'costBudgetUsd must be a finite number > 0, or null' };
+  }
+  if (x <= 0) {
+    return {
+      ok: false,
+      error: 'costBudgetUsd must be > 0 (use null for "no budget"; 0 would pause the team at once)',
+    };
+  }
+  if (x > COST_BUDGET_MAX_USD) {
+    return { ok: false, error: `costBudgetUsd must be at most ${COST_BUDGET_MAX_USD}` };
+  }
+  return { ok: true, value: x };
+}
+
+/**
+ * Validate the OPTIONAL `budgetAction` — a STRICT whitelist, no coercion. An
+ * unknown action must 400 at the form rather than be stored and later degraded
+ * to `notify` on read: a typo'd `"Pause"` that silently never pauses is the
+ * kind of guard-rail failure only discovered by the bill.
+ */
+function parseBudgetAction(
+  x: unknown,
+): { ok: true; value: BudgetAction } | { ok: false; error: string } {
+  if (typeof x !== 'string' || !(BUDGET_ACTIONS as readonly string[]).includes(x)) {
+    return { ok: false, error: `budgetAction must be one of ${BUDGET_ACTIONS.join('|')}` };
+  }
+  return { ok: true, value: x as BudgetAction };
 }
 
 /** Parse result — `status` lets a caller map an unknown type to 422 vs 400. */
@@ -491,6 +570,40 @@ export function createRolesRouter(
     const appr = parseApprovalBody(body.approval);
     if (!appr.ok) return res.status(400).json({ error: appr.error });
 
+    // Dead-worker reaper toggle (optional; defaults false / 600000 in the store).
+    let autoRemove: boolean | undefined;
+    if (body.autoRemoveDeadWorkers !== undefined) {
+      if (typeof body.autoRemoveDeadWorkers !== 'boolean') {
+        return res.status(400).json({ error: 'autoRemoveDeadWorkers must be a boolean' });
+      }
+      autoRemove = body.autoRemoveDeadWorkers;
+    }
+    let autoRemoveDelay: number | undefined;
+    if (body.autoRemoveDeadWorkersDelayMs !== undefined) {
+      const r = parseAutoRemoveDelayMs(body.autoRemoveDeadWorkersDelayMs);
+      if (!r.ok) return res.status(400).json({ error: r.error });
+      autoRemoveDelay = r.value;
+    }
+
+    // Cost budget (Lot 14). Both optional; the store defaults to no budget /
+    // `notify`. The dialog always SENDS both — including `costBudgetUsd: null`
+    // — so that clearing a budget is expressible.
+    let costBudget: number | null | undefined;
+    if (body.costBudgetUsd !== undefined) {
+      const r = parseCostBudget(body.costBudgetUsd);
+      if (!r.ok) return res.status(400).json({ error: r.error });
+      costBudget = r.value;
+    }
+    let budgetAction: BudgetAction | undefined;
+    // Strict on `null` too, unlike the nullable text fields: there is ALWAYS an
+    // action (the amount is what is optional), so "no action" is not a state a
+    // caller can ask for — it is a bug in the caller.
+    if (body.budgetAction !== undefined) {
+      const r = parseBudgetAction(body.budgetAction);
+      if (!r.ok) return res.status(400).json({ error: r.error });
+      budgetAction = r.value;
+    }
+
     const init: RoleInit = {
       label: body.label,
       leadPrompt: lp.value,
@@ -506,6 +619,10 @@ export function createRolesRouter(
       scheduleMessage: smsg.value,
       approval: appr.value,
       skills: coerceSkills(body.skills),
+      ...(autoRemove !== undefined ? { autoRemoveDeadWorkers: autoRemove } : {}),
+      ...(autoRemoveDelay !== undefined ? { autoRemoveDeadWorkersDelayMs: autoRemoveDelay } : {}),
+      ...(costBudget !== undefined ? { costBudgetUsd: costBudget } : {}),
+      ...(budgetAction !== undefined ? { budgetAction } : {}),
     };
     const role = store.create(init);
     onRolesChanged?.();
@@ -623,6 +740,29 @@ export function createRolesRouter(
     }
     if (body.skills !== undefined) {
       patch.skills = coerceSkills(body.skills);
+    }
+    if (body.autoRemoveDeadWorkers !== undefined) {
+      if (typeof body.autoRemoveDeadWorkers !== 'boolean') {
+        return res.status(400).json({ error: 'autoRemoveDeadWorkers must be a boolean' });
+      }
+      patch.autoRemoveDeadWorkers = body.autoRemoveDeadWorkers;
+    }
+    if (body.autoRemoveDeadWorkersDelayMs !== undefined) {
+      const r = parseAutoRemoveDelayMs(body.autoRemoveDeadWorkersDelayMs);
+      if (!r.ok) return res.status(400).json({ error: r.error });
+      patch.autoRemoveDeadWorkersDelayMs = r.value;
+    }
+    // Cost budget (Lot 14). `null` is a meaningful patch value — it clears the
+    // budget — so it goes through the parser rather than being skipped.
+    if (body.costBudgetUsd !== undefined) {
+      const r = parseCostBudget(body.costBudgetUsd);
+      if (!r.ok) return res.status(400).json({ error: r.error });
+      patch.costBudgetUsd = r.value;
+    }
+    if (body.budgetAction !== undefined) {
+      const r = parseBudgetAction(body.budgetAction);
+      if (!r.ok) return res.status(400).json({ error: r.error });
+      patch.budgetAction = r.value;
     }
     // Enforce the schedule⇒message invariant against the MERGED role: a patch
     // can set a schedule without a message, or clear the message while the

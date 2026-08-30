@@ -65,9 +65,13 @@ export function buildRightPanelTeam(
  * `SessionView` + the live `logLines` accumulator + the current writer
  * flag (both derived in `DesktopShell` from `Terminal.tsx` callbacks).
  *
- * `load` is hard-wired to `undefined` (S10 by-design — no signal exists
- * server-side). The numeric branch is reserved for a future option (b)
- * implementation, cf. `lib/loadPercent.ts`.
+ * The dead `load` field is gone: the stat-bar cell it fed was an S10
+ * placeholder that could only ever render `—`, and its own guard-rail file
+ * asked for the label to change the day a real signal landed. That signal is
+ * `contextUsage` (docs/monitoring-agents.md), so the cell is now `CTX` and
+ * carries a measurement instead of a promise. Both context fields are
+ * forwarded verbatim — including `null`/`undefined`, which the panel renders
+ * as `—` rather than inventing a number.
  */
 export function buildRightPanelAgent(
   session: SessionView,
@@ -82,10 +86,11 @@ export function buildRightPanelAgent(
     pid: session.pid,
     startedAt: session.startedAt,
     lastActivityAt: session.lastActivityAt,
-    load: undefined,
     logLines,
     writer,
     provider: session.provider,
+    contextUsage: session.contextUsage ?? null,
+    contextResetPending: session.contextResetPending ?? false,
     exitCode: session.exitCode,
     stopReason: session.stopReason,
     lastError: session.lastError,

@@ -503,6 +503,8 @@ export class Spawner {
       notifier: effectiveNotifier,
       persistence: this.persistence,
       providerRegistry: this.providerRegistry,
+      // Monitoring — model context limits for the context-usage gauges.
+      modelCatalogue: this.modelCatalogue,
       // KILL UI flow on the lead: when the operator clicked KILL we ask the
       // orchestrator to call us back once it reaches terminal, so we can soft
       // delete the whole team from the map in one shot.
@@ -1068,6 +1070,7 @@ export class Spawner {
         notifier: effectiveNotifier,
         persistence: this.persistence,
         providerRegistry: this.providerRegistry,
+        modelCatalogue: this.modelCatalogue,
         onHideRequested: (id) => this.hideOrchestrator(id),
         ...(this.pluginTools ? { pluginTools: this.pluginTools } : {}),
         ...(this.taskboard ? { taskboard: this.taskboard } : {}),

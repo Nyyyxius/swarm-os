@@ -46,6 +46,14 @@ export default function StatsSheet({ open, onClose }: StatsSheetProps) {
     onClose();
     c.handleLeftSelectEnded(orchId);
   }
+  // The dock is FULL (6 buttons, cf. MobileShell) and a 7th does not fit on a
+  // phone, so MONITORING is reached from here — this sheet is already the
+  // "everything about the swarm at a glance" surface, and the page is its
+  // per-agent drill-down.
+  function openMonitoring() {
+    onClose();
+    c.onOpenMonitoring();
+  }
 
   const busCells: Array<{ k: string; v: string; u: string; warn?: boolean }> = [
     { k: 'LATENCY', v: busCell(bus?.latency_ms, 0), u: 'ms' },
@@ -72,6 +80,15 @@ export default function StatsSheet({ open, onClose }: StatsSheetProps) {
         </div>
         <div className="m-big-sub">TOTAL EXCHANGED · LAST 60 MIN</div>
         <div className="m-graph"><BigGraph data={flow.history} /></div>
+
+        <h3 className="m-sec">Agents</h3>
+        <button type="button" className="m-team-row mon-link-row" onClick={openMonitoring}>
+          <div className="m-tr-name">MONITORING</div>
+          <div className="m-tr-count">→</div>
+          <div className="m-tr-meta">
+            <span>CONTEXT · THROUGHPUT · INBOX PER AGENT</span>
+          </div>
+        </button>
 
         <h3 className="m-sec">Per-team traffic <span className="m-count">{activeTeams.length}</span></h3>
         {activeTeams.length === 0 && <div className="m-stat-empty">— no active teams —</div>}

@@ -3,6 +3,12 @@ import * as path from 'node:path';
 import { Router, type Request, type Response } from 'express';
 import { Spawner } from '../../modules/spawner/index.js';
 import { SessionActionError } from '../../modules/orchestrator/index.js';
+import type { ContextResetCommand } from '../../modules/orchestrator/session.js';
+import {
+  contextHistoryWindowMs,
+  downsampleContextHistory,
+  parseContextHistoryWindow,
+} from '../../modules/orchestrator/context-usage.js';
 import { rowToSessionView } from '../../modules/orchestrator/persistence.js';
 import type { Config } from '../../config.js';
 
@@ -34,7 +40,15 @@ export function createSessionsRouter(spawner: Spawner, config: Config): Router {
         res.status(404).json({ error: 'not found' });
         return;
       }
-      res.json(rowToSessionView(row));
+      // Lot 11 — a terminated agent's cost is priced here: its live `Session`,
+      // which held the rate-card thunk, is gone.
+      res.json(
+        rowToSessionView(
+          row,
+          (providerId, modelId) =>
+            spawner.modelCatalogue?.costRates(providerId, modelId) ?? null,
+        ),
+      );
     } catch {
       res.status(404).json({ error: 'not found' });
     }
@@ -211,6 +225,101 @@ export function createSessionsRouter(spawner: Spawner, config: Config): Router {
       if (err instanceof SessionActionError) return sendActionError(res, err);
       throw err;
     }
+  });
+
+  /**
+   * Monitoring (docs/monitoring-agents.md) — operator compact/clear.
+   *
+   * `{ cmd: 'compact' | 'clear', instructions?: string }`. The wire vocabulary
+   * is bare words, not the provider slash commands: what claude spells
+   * `/clear` codex spells `/new`, and the mapping is the adapter's business
+   * (`AgentProvider.contextResetLine`), never the client's.
+   *
+   * A 200 means SCHEDULED, not done: the command is armed and fires at the
+   * agent's next idle boundary, because injecting mid-turn garbles the turn.
+   */
+  router.post('/sessions/:id/context-reset', (req: Request<{ id: string }>, res: Response) => {
+    const found = spawner.findSession(req.params.id);
+    if (!found) {
+      res.status(404).json({ error: 'SESSION_UNKNOWN' });
+      return;
+    }
+    const body = req.body ?? {};
+    // Strict whitelist rather than a lookup table: `body.cmd` is attacker-shaped
+    // input and this way no prototype key can ever resolve to a command.
+    let cmd: ContextResetCommand;
+    if (body.cmd === 'compact') cmd = '/compact';
+    else if (body.cmd === 'clear') cmd = '/clear';
+    else {
+      res.status(400).json({ error: "body.cmd must be 'compact' or 'clear'" });
+      return;
+    }
+    let instructions: string | undefined;
+    if (body.instructions != null) {
+      if (typeof body.instructions !== 'string') {
+        res.status(400).json({ error: 'body.instructions must be a string' });
+        return;
+      }
+      // Same cap as a spawn prompt: the text is typed into the PTY as one
+      // line, so an unbounded string is an unbounded paste into a live agent.
+      const bytes = Buffer.byteLength(body.instructions, 'utf8');
+      if (bytes > config.maxPromptSizeBytes) {
+        res.status(413).json({
+          error: `instructions too large: ${bytes} bytes > ${config.maxPromptSizeBytes}`,
+        });
+        return;
+      }
+      if (body.instructions.length > 0) instructions = body.instructions;
+    }
+    try {
+      found.orchestrator.requestContextReset(req.params.id, cmd, instructions);
+      res.status(200).json({ scheduled: true });
+    } catch (err) {
+      if (err instanceof SessionActionError) return sendActionError(res, err);
+      throw err;
+    }
+  });
+
+  /**
+   * Monitoring (docs/monitoring-agents.md, Lot 9) — the context graph.
+   *
+   * `?window=1h|24h|3d` (default `1h`). Answers what one panel needs and
+   * nothing else: the denominator, the folded samples, and the resets that
+   * actually fired, all read from the in-memory rings of the session's tracker.
+   *
+   * Three normal outcomes, only one of which is an error:
+   *
+   *   - an unknown `window` is a 400. The set is closed on purpose — a
+   *     client-supplied span would be a client-supplied point count;
+   *   - an unknown session is a 404 (no DB fallback: the history is memory-only
+   *     and a row could not answer this);
+   *   - a session with no tracker (gemini) or no history yet is a 200 with
+   *     empty arrays. The panel then says "no history", which is the truth,
+   *     rather than rendering an error for a healthy agent.
+   */
+  router.get('/sessions/:id/context-history', (req: Request<{ id: string }>, res: Response) => {
+    const window = parseContextHistoryWindow(req.query.window);
+    if (window === null) {
+      res.status(400).json({ error: "query.window must be '1h', '24h' or '3d'" });
+      return;
+    }
+    const found = spawner.findSession(req.params.id);
+    if (!found) {
+      res.status(404).json({ error: 'SESSION_UNKNOWN' });
+      return;
+    }
+    const history = found.session.contextHistory;
+    const now = Date.now();
+    const since = now - contextHistoryWindowMs(window);
+    res.json({
+      limitTokens: history?.limitTokens ?? null,
+      points: history ? downsampleContextHistory(history.samples, window, now) : [],
+      // Markers are never bucketed: two resets 30 s apart are two events, and
+      // the graph labels each one.
+      resets: (history?.resets ?? [])
+        .filter((r) => r.t >= since)
+        .map((r) => ({ t: new Date(r.t).toISOString(), cmd: r.cmd })),
+    });
   });
 
   // Soft-delete from the map. Session must be terminal (killed/exited/failed).

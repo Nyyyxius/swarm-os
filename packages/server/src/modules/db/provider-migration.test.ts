@@ -302,6 +302,10 @@ describe('provider columns — round-trip through the UPSERT', () => {
         schedule_message: null,
         approval_json: null,
         skills_json: null,
+        auto_remove_dead_workers: 0,
+        auto_remove_dead_workers_delay_ms: 600000,
+        cost_budget_usd: null,
+        budget_action: 'notify',
         created_at: now,
         updated_at: now,
       });
@@ -322,6 +326,10 @@ describe('provider columns — round-trip through the UPSERT', () => {
         schedule_message: null,
         approval_json: null,
         skills_json: null,
+        auto_remove_dead_workers: 0,
+        auto_remove_dead_workers_delay_ms: 600000,
+        cost_budget_usd: null,
+        budget_action: 'notify',
         created_at: now,
         updated_at: new Date().toISOString(),
       });
@@ -343,6 +351,10 @@ describe('provider columns — round-trip through the UPSERT', () => {
         schedule_message: null,
         approval_json: null,
         skills_json: null,
+        auto_remove_dead_workers: 0,
+        auto_remove_dead_workers_delay_ms: 600000,
+        cost_budget_usd: null,
+        budget_action: 'notify',
         created_at: now,
         updated_at: new Date().toISOString(),
       });

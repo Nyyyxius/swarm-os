@@ -132,6 +132,39 @@ describe('upsertSession + listSessions', () => {
     db.upsertOrchestrator(makeOrchRow({ id: 'orch-empty' }));
     expect(db.listSessions('orch-empty')).toEqual([]);
   });
+
+  it('round-trips the monitoring counters, reported cost included', () => {
+    // Lot 13's `reported_cost_usd` is REAL, and the assertion that matters is
+    // that a sub-cent bill survives the trip unrounded: an INTEGER column (or a
+    // floor anywhere on the path) would store a real day's spend as 0.
+    db.upsertOrchestrator(makeOrchRow());
+    db.upsertSession(
+      makeSessionRow({
+        id: 'sess-bill',
+        messages_processed: 3,
+        tokens_in: 11,
+        tokens_out: 22,
+        tokens_cache_read: 33,
+        tokens_cache_write: 44,
+        reported_cost_usd: 0.00016725,
+      }),
+    );
+    expect(db.getSession('sess-bill')).toMatchObject({
+      tokens_in: 11,
+      tokens_cache_write: 44,
+      reported_cost_usd: 0.00016725,
+    });
+
+    // The UPSERT must UPDATE the column too, not just write it at creation —
+    // the third of the three places a new column has to be added.
+    db.upsertSession(makeSessionRow({ id: 'sess-bill', reported_cost_usd: 0.5 }));
+    expect(db.getSession('sess-bill')?.reported_cost_usd).toBe(0.5);
+
+    // And a row that carries none binds NULL rather than throwing: every named
+    // parameter must be present, whatever the caller left off.
+    db.upsertSession(makeSessionRow({ id: 'sess-bare' }));
+    expect(db.getSession('sess-bare')?.reported_cost_usd).toBeNull();
+  });
 });
 
 describe('markAllNonTerminalAsInterrupted', () => {

@@ -434,6 +434,21 @@ export interface AgentProvider {
   mcpToolName(logicalName: string): string;
 
   /**
+   * OPTIONAL — the per-session HTTP control plane this adapter started, keyed by
+   * the config dir `prepareSessionConfig` returned. opencode is the only adapter
+   * that has one (`--port` + basic auth); everybody else omits the method
+   * entirely, which is how `Session` decides whether a control-plane context
+   * source is even possible (docs/monitoring-agents.md, Lot 7).
+   *
+   * `null` once the session is gone, or before its plane was allocated. The
+   * returned credentials are the ones the running process is actually using —
+   * minting fresh ones here would produce a plane nobody can talk to.
+   */
+  controlPlane?(
+    configDir: string | null,
+  ): { baseUrl: string; username: string; password: string } | null;
+
+  /**
    * Only exercised by claude in local transport (no-op elsewhere): materialise
    * the host's state dir into the container's writable runtime root. Called
    * once at boot, through the registry, BEFORE the HTTP server accepts traffic.

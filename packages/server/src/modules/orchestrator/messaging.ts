@@ -605,6 +605,14 @@ export function broadcastToLeadsFromExternal(
  */
 export function readInbox(deps: MessagingDeps, sid: string): Message[] {
   const msgs = deps.mailbox.read(sid);
+  // Monitoring — mirror the drain onto the Session. The mailbox counter is
+  // in-memory and invisible to `toView()`, which is what persistence and
+  // `GET /sessions/:id` are built from; this is the one place both the
+  // session id and the message count are known at the moment of the drain.
+  // A no-op when the drain was empty or the session is already gone.
+  if (msgs.length > 0) {
+    deps.orchestrator.getSession(sid)?.recordMessagesProcessed(msgs.length);
+  }
   log.info({
     event: 'mail.read',
     sid,

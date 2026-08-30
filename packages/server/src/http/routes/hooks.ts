@@ -65,9 +65,18 @@
  *   {
  *     "orch_id":   "<UUID>",
  *     "session_id":"<UUID>",
- *     "kind":      "session.waiting" | optional,
+ *     "kind":      "session.waiting" (default) | "session.transcript",
  *     "message":   "<raw stdin from Claude — opaque>"
  *   }
+ *
+ * SECOND KIND — `session.transcript` (docs/monitoring-agents.md, Lot 2). Claude
+ * Code's `SessionStart` hook, which fires at boot and after every `/clear` and
+ * `/compact`, and whose payload carries the path of the transcript `.jsonl`
+ * this agent is writing. It is the ONLY reliable source of context usage (the
+ * TUI's stdout is a repainting terminal). It shares this endpoint, this auth and
+ * this envelope on purpose: one hook command builder, one production-critical
+ * quoting, one place where a provider's callback is given a meaning. The branch
+ * answers 200 unconditionally — see below.
  *
  * Auth:
  *
@@ -82,6 +91,10 @@
  *
  *   200 { ok: true }                        — accepted (side effects fired,
  *                                             filtered by provider semantics)
+ *   200 { ok: true, transcript: bool }      — `session.transcript`: `false` means
+ *                                             the payload carried no readable
+ *                                             `transcript_path`, which costs one
+ *                                             poll cycle of gauge and nothing else
  *   200 { ok: true, ignored: '...' }        — orch/session unknown, or a provider
  *                                             that declares no consumed callback
  *                                             (per spike H6: Claude must not
@@ -119,6 +132,65 @@ interface HookBody {
   session_id?: unknown;
   kind?: unknown;
   message?: unknown;
+}
+
+/**
+ * The raw hook payload as an object, or `null`.
+ *
+ * The hook command re-stringifies the CLI's stdin into `message` (one shell
+ * pipeline, shared by all three providers — `providers/session-config.ts`), so
+ * what arrives here is a JSON document inside a JSON string. Everything about
+ * this is untrusted: a `message` that is a plain sentence, a truncated body, an
+ * array where an object was expected. All of it answers `null`.
+ */
+function readHookPayload(message: string): Record<string, unknown> | null {
+  if (typeof message !== 'string' || message.length === 0) return null;
+  try {
+    const parsed: unknown = JSON.parse(message);
+    if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) return null;
+    return parsed as Record<string, unknown>;
+  } catch {
+    return null;
+  }
+}
+
+/** A non-empty trimmed string field, or `null`. */
+function readStringField(
+  payload: Record<string, unknown> | null,
+  ...keys: readonly string[]
+): string | null {
+  if (payload === null) return null;
+  for (const key of keys) {
+    const value = payload[key];
+    if (typeof value === 'string' && value.trim().length > 0) return value.trim();
+  }
+  return null;
+}
+
+/**
+ * `transcript_path` out of a hook payload — claude's `SessionStart` and
+ * `Notification` both carry it (docs/monitoring-agents.md, Lot 2).
+ */
+function readTranscriptPath(payload: Record<string, unknown> | null): string | null {
+  return readStringField(payload, 'transcript_path');
+}
+
+/**
+ * `thread-id` out of a codex `notify` payload (docs/monitoring-agents.md, Lot 6).
+ *
+ * codex hands its notification JSON to `notify.sh` as a single argv, which the
+ * shared POST pipeline pipes here verbatim: `{"type":"agent-turn-complete",
+ * "thread-id":"019f…","turn-id":"019f…","cwd":…}` (spike `verify-codex` C5). That
+ * uuid is exactly the one in the rollout filename the tracker has to find, and
+ * it CHANGES on `/new` and `/clear` — which is what makes it the one reliable
+ * key for a context reset (`verify-codex-rollout` R5/R6).
+ *
+ * The snake_case spelling is accepted too: nothing costs less than reading both,
+ * and a CLI renaming a hyphenated JSON key is exactly the kind of change that
+ * would otherwise degrade the gauge silently.
+ */
+function readThreadId(payload: Record<string, unknown> | null): string | null {
+  return readStringField(payload, 'thread-id', 'thread_id');
 }
 
 function safeEqualBytes(a: string, b: string): boolean {
@@ -196,8 +268,7 @@ export function createHooksRouter(
     }
     const message = typeof body.message === 'string' ? body.message : '';
     const kind = typeof body.kind === 'string' ? body.kind : 'session.waiting';
-    if (kind !== 'session.waiting') {
-      // Phase 4 only handles waiting today; future kinds can map here.
+    if (kind !== 'session.waiting' && kind !== 'session.transcript') {
       res.status(400).json({ error: `unsupported kind: ${kind}` });
       return;
     }
@@ -218,6 +289,68 @@ export function createHooksRouter(
     if (!session) {
       log.warn({ event: 'hooks.session_unknown', orchId: body.orch_id, sessionId: body.session_id });
       res.status(200).json({ ok: true, ignored: 'session_unknown' });
+      return;
+    }
+
+    // ---- Where does this agent write its transcript? -------------------
+    // Monitoring (docs/monitoring-agents.md, Lot 2). Belt-and-braces: EVERY
+    // payload is inspected, not just the `SessionStart` one, because a claude
+    // `Notification` payload carries `transcript_path` too — so an agent that
+    // somehow never fired `SessionStart` still gets its tracker pointed at the
+    // right file. `Session.setTranscriptPath` is the one place that decides
+    // whether a provider has a readable transcript at all; here we only hand
+    // over what we found. Guarded because this must never cost a 4xx (H6).
+    const payload = readHookPayload(message);
+    const transcriptPath = readTranscriptPath(payload);
+    let transcriptAdopted = false;
+    if (transcriptPath !== null) {
+      try {
+        session.setTranscriptPath(transcriptPath);
+        transcriptAdopted = true;
+      } catch (err) {
+        log.warn({
+          event: 'hooks.transcript_failed',
+          orchId: orch.id,
+          sessionId: session.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // ---- Which codex thread is this agent on? --------------------------
+    // Monitoring (docs/monitoring-agents.md, Lot 6). Same belt-and-braces
+    // treatment, same guard, same "never a 4xx": codex's `notify` fires once per
+    // completed turn and carries the `thread-id` whose uuid names the rollout
+    // file the tracker tails. `Session.setAgentThreadId` is the one place that
+    // decides which provider has threads at all.
+    const threadId = readThreadId(payload);
+    if (threadId !== null) {
+      try {
+        session.setAgentThreadId(threadId);
+      } catch (err) {
+        log.warn({
+          event: 'hooks.thread_id_failed',
+          orchId: orch.id,
+          sessionId: session.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    }
+
+    // ---- SessionStart: nothing else to do ------------------------------
+    // ALWAYS 200, even on a payload we could not read: this hook runs
+    // synchronously as the CLI boots, and its only job was to tell us a path.
+    // A body we cannot parse means one poll cycle without a gauge, never a
+    // failed agent startup.
+    if (kind === 'session.transcript') {
+      log.info({
+        event: 'hooks.transcript',
+        orchId: orch.id,
+        sessionId: session.id,
+        adopted: transcriptAdopted,
+        msgLen: message.length,
+      });
+      res.status(200).json({ ok: true, transcript: transcriptAdopted });
       return;
     }
 

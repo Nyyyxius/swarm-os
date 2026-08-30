@@ -3,11 +3,13 @@ import {
   api,
   apiErrorMessage,
   isDiscordConnectorView,
+  type BudgetAction,
   type ConnectorView,
   type RoleView,
   type SkillView,
   type SkillActivation,
 } from '../api/client';
+import { budgetFieldValue, parseCostBudget, toBudgetAction } from '../lib/budget';
 import { DiscordOnboarding } from './DiscordOnboarding';
 import { useProviders } from '../hooks/useProviders';
 import {
@@ -39,9 +41,30 @@ interface SubmitBody {
   scheduleMessage: string | null;
   /** Skills activated for this role (mode 'inject'). */
   skills: SkillActivation[];
+  /** Dead-worker reaper: soft-remove terminal workers after the delay. */
+  autoRemoveDeadWorkers: boolean;
+  autoRemoveDeadWorkersDelayMs: number;
+  /**
+   * Cost budget (Lot 14) — `null` = no budget. Always SENT, including as
+   * `null`, because clearing a budget has to be expressible: a field that is
+   * only sent when filled can set a ceiling and never remove one.
+   */
+  costBudgetUsd: number | null;
+  budgetAction: BudgetAction;
 }
 
 const INHERIT_LABEL = '(inherit global default)';
+
+/**
+ * The two budget outcomes, in the order they escalate. `PAUSE TEAM` rather
+ * than `PAUSE`: what is suspended is the whole team, lead included, and a
+ * two-letter saving here would be paid for by an operator who thought only
+ * the worker that overspent would stop.
+ */
+const BUDGET_ACTIONS: ReadonlyArray<{ value: BudgetAction; label: string }> = [
+  { value: 'notify', label: 'NOTIFY' },
+  { value: 'pause', label: 'PAUSE TEAM' },
+];
 
 interface Props {
   open: boolean;
@@ -85,6 +108,10 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
   const [discordBotToken, setDiscordBotToken] = useState<string>('');
   const [schedule, setSchedule] = useState<string>('');
   const [scheduleMessage, setScheduleMessage] = useState<string>('');
+  const [autoRemoveDead, setAutoRemoveDead] = useState<boolean>(false);
+  const [autoRemoveDelayMin, setAutoRemoveDelayMin] = useState<string>('10');
+  const [costBudget, setCostBudget] = useState<string>('');
+  const [budgetAction, setBudgetAction] = useState<BudgetAction>('notify');
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
   const [availableSkills, setAvailableSkills] = useState<SkillView[]>([]);
   const [submitting, setSubmitting] = useState(false);
@@ -129,6 +156,13 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
       setDiscordBotToken(discord?.botToken ?? '');
       setSchedule(initial.schedule ?? '');
       setScheduleMessage(initial.scheduleMessage ?? '');
+      setAutoRemoveDead(initial.autoRemoveDeadWorkers ?? false);
+      setAutoRemoveDelayMin(
+        String(Math.round((initial.autoRemoveDeadWorkersDelayMs ?? 600000) / 60000)),
+      );
+      // Absent on a server predating Lot 14 — read as "no budget", never as 0.
+      setCostBudget(budgetFieldValue(initial.costBudgetUsd));
+      setBudgetAction(toBudgetAction(initial.budgetAction));
       setSelectedSkills((initial.skills ?? []).map((s) => s.name));
     } else {
       setLabel('');
@@ -145,6 +179,10 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
       setDiscordBotToken('');
       setSchedule('');
       setScheduleMessage('');
+      setAutoRemoveDead(false);
+      setAutoRemoveDelayMin('10');
+      setCostBudget('');
+      setBudgetAction('notify');
       setSelectedSkills([]);
     }
   }, [open, initial]);
@@ -235,6 +273,18 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
       if (trimmedSchedule && !scheduleMessage.trim()) {
         throw new Error('Un message de tick est requis quand une cadence (cron) est définie.');
       }
+      let autoRemoveDelayMs = 600000;
+      if (autoRemoveDead) {
+        const n = Number.parseInt(autoRemoveDelayMin, 10);
+        if (!Number.isInteger(n) || n < 0) {
+          throw new Error('Le délai de retrait des workers morts doit être un entier de minutes ≥ 0.');
+        }
+        autoRemoveDelayMs = n * 60000;
+      }
+      // Rejected rather than coerced: a budget silently dropped on a typo
+      // leaves the operator believing a ceiling exists. See `parseCostBudget`.
+      const budget = parseCostBudget(costBudget);
+      if (!budget.ok) throw new Error(budget.error);
       await onSubmit({
         label: label.trim(),
         leadPrompt: leadPrompt.trim() ? leadPrompt : null,
@@ -250,6 +300,10 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
         schedule: trimmedSchedule || null,
         scheduleMessage: scheduleMessage.trim() ? scheduleMessage : null,
         skills: selectedSkills.map((name) => ({ name, mode: 'inject' as const })),
+        autoRemoveDeadWorkers: autoRemoveDead,
+        autoRemoveDeadWorkersDelayMs: autoRemoveDelayMs,
+        costBudgetUsd: budget.value,
+        budgetAction,
       });
       onClose();
     } catch (err) {
@@ -420,6 +474,83 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
               <code>{'{{window:6h}}'}</code>.
             </p>
           )}
+          <div className="col-span-2 mt-1">
+            <label className="flex items-center gap-2 text-sm text-slate-200">
+              <input
+                type="checkbox"
+                checked={autoRemoveDead}
+                onChange={(e) => setAutoRemoveDead(e.target.checked)}
+              />
+              <span>Retirer automatiquement les workers morts</span>
+            </label>
+          </div>
+          <Field label="délai (min) avant retrait">
+            <input
+              className={inputCls}
+              type="number"
+              min={0}
+              placeholder="10"
+              value={autoRemoveDelayMin}
+              disabled={!autoRemoveDead}
+              onChange={(e) => setAutoRemoveDelayMin(e.target.value)}
+            />
+            <p className="mt-1 text-[11px] text-slate-400">
+              Un worker terminé (killed / exited / failed) est retiré de l’affichage une fois ce
+              délai écoulé. Leads et sessions actives jamais touchés.
+            </p>
+          </Field>
+
+          {/* ── COST BUDGET (Lot 14) ──
+              Under the reaper on purpose: both are per-role guard rails the
+              server enforces on its own, and both are about a team that has
+              stopped being watched. The amount and its consequence sit side by
+              side because neither is readable alone — `$50` says nothing about
+              whether crossing it stops the swarm. */}
+          <div className="col-span-2 mt-2 border-t border-slate-700 pt-3">
+            <span className="block text-xs uppercase tracking-wide text-slate-400">
+              cost budget
+            </span>
+          </div>
+          <Field label="cost budget (usd)">
+            <input
+              className={inputCls}
+              type="number"
+              min={0}
+              step="0.01"
+              placeholder="50"
+              value={costBudget}
+              onChange={(e) => setCostBudget(e.target.value)}
+            />
+            <p className="mt-1 text-[11px] text-slate-400">
+              Cumulé par TEAM de ce rôle, workers retirés inclus. Vide = pas de budget.
+            </p>
+          </Field>
+          {/* NOT wrapped in `Field`: that renders a <label>, and a label around
+              buttons labels nothing while stealing their clicks. */}
+          <div>
+            <span className="block text-xs uppercase tracking-wide text-slate-400 mb-1">
+              on budget exceeded
+            </span>
+            <div className="seg-radio" role="radiogroup" aria-label="on budget exceeded">
+              {BUDGET_ACTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={budgetAction === opt.value}
+                  className={budgetAction === opt.value ? 'on' : ''}
+                  onClick={() => setBudgetAction(opt.value)}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+            <p className="mt-1 text-[11px] text-slate-400">
+              NOTIFY : toast + Discord (si webhook). PAUSE TEAM : SIGSTOP de toute l’équipe,
+              reprise manuelle.
+            </p>
+          </div>
+
           <div className="col-span-2 mt-2">
             <DiscordOnboarding
               webhookUrl={discordUrl}

@@ -55,6 +55,23 @@ export type TaskboardSwarmEventKind =
 export type ApprovalSwarmEventKind = 'approval.requested' | 'approval.resolved';
 
 /**
+ * Cost-budget event kind (docs/monitoring-agents.md, Lot 14). Emitted by the
+ * budget janitor (modules/orchestrator/budget-watch) via the event bus and
+ * rebroadcast on `/ws/events` so the web raises an actionable toast without a
+ * refetch. Per-team: the `orchestratorId` on the `SwarmEvent` is the team that
+ * crossed its budget.
+ *
+ * ONE-SHOT per crossing: the janitor keeps in-memory state and re-arms only if
+ * the team falls back UNDER its budget (i.e. the operator raised it). The web
+ * relies on that — its toast has no auto-dismiss, because a second frame is
+ * never coming.
+ *
+ * Named `session.*` rather than `team.*` for one reason: it is the wire name the
+ * shipped web half already listens for.
+ */
+export type BudgetSwarmEventKind = 'session.budget_exceeded';
+
+/**
  * Code-graph (Graphify integration) event kinds. Emitted by `GraphStore` via the
  * event bus and rebroadcast on `/ws/events` so the web code-graph page (P4) can
  * patch a scope row without a refetch. GLOBAL to the deployment (like memory) —
@@ -78,6 +95,7 @@ export type SwarmEventKind =
   | TaskboardSwarmEventKind
   | ApprovalSwarmEventKind
   | CodegraphSwarmEventKind
+  | BudgetSwarmEventKind
   | `plugin.${string}`;
 
 /** Payload of `memory.node_created` / `memory.node_updated` / `memory.node_deleted`. */
@@ -119,6 +137,26 @@ export interface ApprovalEventPayload {
   status: string;
   decision?: string | null;
   by?: string | null;
+}
+
+/**
+ * Payload of `session.budget_exceeded` (Lot 14).
+ *
+ * `costUsd` is the team's CUMULATIVE spend as the Lot 12 aggregate reports it —
+ * removed/reaped workers included, and a LOWER BOUND (a model with no published
+ * rate contributes 0, never a guess). `budgetUsd` is the role's ceiling at the
+ * moment of the crossing, `action` what the server did about it.
+ *
+ * Every field is a convenience for the toast, none is load-bearing: the web
+ * reads them defensively and renders the notice regardless, because the frame
+ * itself is the news.
+ */
+export interface BudgetExceededPayload {
+  /** The team's display name — the toast has no other way to name it. */
+  teamName: string;
+  costUsd: number;
+  budgetUsd: number;
+  action: 'notify' | 'pause';
 }
 
 export interface SwarmEvent {

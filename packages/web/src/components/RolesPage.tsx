@@ -33,6 +33,7 @@ import {
   api,
   apiErrorMessage,
   isDiscordConnectorView,
+  type BudgetAction,
   type ConnectorView,
   type ConnectorTypeInfo,
   type ConnectorSchema,
@@ -40,6 +41,9 @@ import {
   type RoleInput,
   type RoleApprovalSettings,
 } from '../api/client';
+import {
+  budgetFieldValue, budgetSummary, parseCostBudget, toBudgetAction,
+} from '../lib/budget';
 import { DiscordOnboarding } from './DiscordOnboarding';
 import { useShellMode } from '../hooks/useShellMode';
 import { useProviders } from '../hooks/useProviders';
@@ -81,7 +85,9 @@ type SectionId =
   | 'workerPreamble'
   | 'connectors'
   | 'cadence'
-  | 'approvals';
+  | 'approvals'
+  | 'autoCleanup'
+  | 'budget';
 
 export function RolesPage({ open, onClose }: Props) {
   const { roles, loading, error, create, update, destroy } = useRoles();
@@ -196,6 +202,12 @@ export function RolesPage({ open, onClose }: Props) {
         schedule: role.schedule,
         scheduleMessage: role.scheduleMessage,
         approval: role.approval ?? null,
+        autoRemoveDeadWorkers: role.autoRemoveDeadWorkers ?? false,
+        autoRemoveDeadWorkersDelayMs: role.autoRemoveDeadWorkersDelayMs ?? 600000,
+        // A copy of a budgeted role is budgeted too: the whole point of
+        // duplicating is to get the same guard rails on a variant.
+        costBudgetUsd: role.costBudgetUsd ?? null,
+        budgetAction: toBudgetAction(role.budgetAction),
       });
       setSelectedRoleId(r.id);
       setEditingSection(null);
@@ -385,6 +397,22 @@ export function RolesPage({ open, onClose }: Props) {
               role={role}
               editing={editingSection === 'approvals'}
               onEdit={() => setEditingSection('approvals')}
+              onCancel={() => setEditingSection(null)}
+              onSave={(body) => patchSelected(body)}
+            />
+
+            <AutoCleanupSection
+              role={role}
+              editing={editingSection === 'autoCleanup'}
+              onEdit={() => setEditingSection('autoCleanup')}
+              onCancel={() => setEditingSection(null)}
+              onSave={(body) => patchSelected(body)}
+            />
+
+            <BudgetSection
+              role={role}
+              editing={editingSection === 'budget'}
+              onEdit={() => setEditingSection('budget')}
               onCancel={() => setEditingSection(null)}
               onSave={(body) => patchSelected(body)}
             />
@@ -1143,6 +1171,264 @@ function ApprovalsSection({
     </div>
   );
 }
+
+// ─────────────────────── RETRAIT AUTO WORKERS MORTS ─────────────────────────
+/**
+ * Per-role dead-worker reaper toggle. When enabled, the server soft-removes
+ * terminal workers (killed/exited/failed) of this role's teams once they have
+ * been terminal longer than the delay — so killed workers stop piling up in the
+ * visual. OFF by default (strict retro-compat). Never affects leads or
+ * non-terminal sessions. The delay is edited in minutes; stored in ms.
+ */
+function autoCleanupSummary(
+  enabled: boolean | undefined,
+  delayMs: number | undefined,
+): string {
+  if (!enabled) return '— (désactivé : les workers morts restent affichés) —';
+  const min = Math.round((delayMs ?? 600000) / 60000);
+  return `Actif · retrait ${min} min après la fin du worker`;
+}
+
+function AutoCleanupSection({
+  role,
+  editing,
+  onEdit,
+  onCancel,
+  onSave,
+}: {
+  role: RoleView;
+  editing: boolean;
+  onEdit: () => void;
+  onCancel: () => void;
+  onSave: (body: Partial<RoleInput>) => Promise<void>;
+}) {
+  const [enabled, setEnabled] = useState(false);
+  const [delayMin, setDelayMin] = useState('10');
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setEnabled(role.autoRemoveDeadWorkers ?? false);
+    setDelayMin(String(Math.round((role.autoRemoveDeadWorkersDelayMs ?? 600000) / 60000)));
+    setError(null);
+  }, [role.id, editing]);
+
+  async function save() {
+    setError(null);
+    // Only validate the delay when the feature is on; a disabled role can carry
+    // any (unused) delay without blocking the save.
+    let delayMs = role.autoRemoveDeadWorkersDelayMs ?? 600000;
+    if (enabled) {
+      const n = Number.parseInt(delayMin, 10);
+      if (!Number.isInteger(n) || n < 0) {
+        setError('Le délai doit être un entier de minutes ≥ 0.');
+        return;
+      }
+      delayMs = n * 60000;
+    }
+    try {
+      await onSave({ autoRemoveDeadWorkers: enabled, autoRemoveDeadWorkersDelayMs: delayMs });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  return (
+    <div className="role-section">
+      <h3>
+        <span>RETRAIT AUTO WORKERS MORTS</span>
+        {editing ? (
+          <span style={{ display: 'flex', gap: 6 }}>
+            <button className="h-edit" onClick={onCancel}>
+              CANCEL
+            </button>
+            <button className="h-edit" onClick={() => void save()} style={{ color: 'var(--amber)' }}>
+              SAVE
+            </button>
+          </span>
+        ) : (
+          <button className="h-edit" onClick={onEdit}>
+            EDIT
+          </button>
+        )}
+      </h3>
+
+      {!editing ? (
+        <div className="cfg-pre">
+          {autoCleanupSummary(role.autoRemoveDeadWorkers, role.autoRemoveDeadWorkersDelayMs)}
+        </div>
+      ) : (
+        <>
+          <label style={{ display: 'flex', gap: 8, alignItems: 'center', marginBottom: 10 }}>
+            <input
+              type="checkbox"
+              checked={enabled}
+              onChange={(e) => setEnabled(e.target.checked)}
+            />
+            <span>Retirer automatiquement les workers morts</span>
+          </label>
+
+          <div className="field" style={{ opacity: enabled ? 1 : 0.5, maxWidth: 220 }}>
+            <label>DÉLAI (MIN)</label>
+            <input
+              type="number"
+              min={0}
+              value={delayMin}
+              disabled={!enabled}
+              onChange={(e) => setDelayMin(e.target.value)}
+              placeholder="10"
+            />
+          </div>
+
+          <div className="field-help" style={{ marginTop: 8 }}>
+            Un worker terminé (killed / exited / failed) est retiré de l’affichage (soft-delete,
+            comme le bouton « REMOVE ») une fois ce délai écoulé depuis sa fin. Les leads et les
+            sessions actives ne sont jamais touchés. Désactivé par défaut.
+          </div>
+          {error && (
+            <div
+              className="field-warn"
+              style={{ color: 'var(--bad)', borderLeftColor: 'var(--bad)' }}
+            >
+              {error}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ──────────────────────────── COST BUDGET ───────────────────────────────────
+/**
+ * Per-role cost budget (docs/monitoring-agents.md, Lot 14) — structurally the
+ * same section as `AutoCleanupSection` above, for the same kind of setting: a
+ * guard rail the server enforces on its own, on every team of this role, with
+ * no operator in the loop.
+ *
+ * The budget is cumulative and per TEAM, removed workers included — it is
+ * checked against the DB aggregate of Lot 12, not against the agents that
+ * happen to still be on screen. Empty = no budget (the default), which is
+ * deliberately distinct from zero.
+ */
+function BudgetSection({
+  role,
+  editing,
+  onEdit,
+  onCancel,
+  onSave,
+}: {
+  role: RoleView;
+  editing: boolean;
+  onEdit: () => void;
+  onCancel: () => void;
+  onSave: (body: Partial<RoleInput>) => Promise<void>;
+}) {
+  const [amount, setAmount] = useState('');
+  const [action, setAction] = useState<BudgetAction>('notify');
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setAmount(budgetFieldValue(role.costBudgetUsd));
+    setAction(toBudgetAction(role.budgetAction));
+    setError(null);
+  }, [role.id, editing]);
+
+  async function save() {
+    setError(null);
+    const parsed = parseCostBudget(amount);
+    if (!parsed.ok) {
+      setError(parsed.error);
+      return;
+    }
+    try {
+      // `action` goes with every save, budget or not: it is what the NEXT
+      // budget will do, and dropping it would silently reset a role to
+      // `notify` the first time its ceiling is cleared and re-set.
+      await onSave({ costBudgetUsd: parsed.value, budgetAction: action });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  return (
+    <div className="role-section">
+      <h3>
+        <span>COST BUDGET</span>
+        {editing ? (
+          <span style={{ display: 'flex', gap: 6 }}>
+            <button className="h-edit" onClick={onCancel}>
+              CANCEL
+            </button>
+            <button className="h-edit" onClick={() => void save()} style={{ color: 'var(--amber)' }}>
+              SAVE
+            </button>
+          </span>
+        ) : (
+          <button className="h-edit" onClick={onEdit}>
+            EDIT
+          </button>
+        )}
+      </h3>
+
+      {!editing ? (
+        <div className="cfg-pre">{budgetSummary(role.costBudgetUsd, role.budgetAction)}</div>
+      ) : (
+        <>
+          <div className="field" style={{ maxWidth: 220 }}>
+            <label>COST BUDGET (USD)</label>
+            <input
+              type="number"
+              min={0}
+              step="0.01"
+              value={amount}
+              onChange={(e) => setAmount(e.target.value)}
+              placeholder="50"
+            />
+          </div>
+          <div className="field-help" style={{ marginTop: 8 }}>
+            Cumulé par TEAM de ce rôle, workers retirés inclus. Vide = pas de budget.
+          </div>
+
+          <div className="field" style={{ marginTop: 12, maxWidth: 320 }}>
+            <label>ON BUDGET EXCEEDED</label>
+            <div className="seg-radio" role="radiogroup" aria-label="on budget exceeded">
+              {ROLE_BUDGET_ACTIONS.map((opt) => (
+                <button
+                  key={opt.value}
+                  type="button"
+                  role="radio"
+                  aria-checked={action === opt.value}
+                  className={action === opt.value ? 'on' : ''}
+                  onClick={() => setAction(opt.value)}
+                >
+                  {opt.label}
+                </button>
+              ))}
+            </div>
+          </div>
+          <div className="field-help" style={{ marginTop: 8 }}>
+            NOTIFY : toast + Discord (si webhook). PAUSE TEAM : SIGSTOP de toute l’équipe,
+            reprise manuelle.
+          </div>
+          {error && (
+            <div
+              className="field-warn"
+              style={{ color: 'var(--bad)', borderLeftColor: 'var(--bad)' }}
+            >
+              {error}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+/** Same two options as the RoleDialog's, in the same escalating order. */
+const ROLE_BUDGET_ACTIONS: ReadonlyArray<{ value: BudgetAction; label: string }> = [
+  { value: 'notify', label: 'NOTIFY' },
+  { value: 'pause', label: 'PAUSE TEAM' },
+];
 
 // ───────────────────────────── CONNECTORS ───────────────────────────────────
 /** Is a value present (non-empty)? Shared by the generic connector form. */
