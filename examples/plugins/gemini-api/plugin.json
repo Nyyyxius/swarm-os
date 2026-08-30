@@ -1,0 +1,93 @@
+{
+  "name": "gemini-api",
+  "version": "0.1.0",
+  "displayName": "Gemini API",
+  "description": "Expose l'API Gemini de Google aux agents du swarm : generation de texte, comprehension multimodale (vision, audio, video, PDF), synthese vocale (TTS), generation d'images, de musique (Lyria) et de video (Veo). Le texte revient dans la reponse de l'outil ; tout media genere est ecrit dans le workspace et son chemin est retourne. L'operateur saisit une seule cle d'API ; les agents ne voient jamais ni cle, ni URL, ni format binaire.",
+  "main": "index.js",
+  "apiVersion": 1,
+  "capabilities": [
+    "mcp-tools",
+    "agent-assets",
+    "db-kv",
+    "http-routes",
+    "notify",
+    "schedule"
+  ],
+  "agentAssets": {
+    "dir": "agent-assets"
+  },
+  "configSchema": {
+    "type": "object",
+    "properties": {
+      "apiKey": {
+        "type": "string",
+        "format": "password",
+        "title": "Cle d'API Gemini",
+        "description": "Cle obtenue sur https://aistudio.google.com/apikey (Google AI Studio -> Get API key). Une cle n'expire pas : elle est revoquee a la main. Elle porte le quota ET la facturation du projet Google Cloud associe."
+      },
+      "textModel": {
+        "type": "string",
+        "default": "gemini-3.7-flash",
+        "title": "Modele texte / multimodal",
+        "description": "Modele utilise par generate_text et analyze_media quand l'agent n'en precise pas. Liste deroulante remplie par le plugin lui-meme a partir des modeles que cette cle peut reellement appeler (rafraichie 15 s apres l'activation, puis chaque jour ; ?refresh=models sur la route /status force la mise a jour). Tant qu'aucune cle n'est valide, le champ reste en saisie libre."
+      },
+      "imageModel": {
+        "type": "string",
+        "default": "gemini-3.1-flash-image",
+        "title": "Modele image",
+        "description": "Modele de generation et d'edition d'images (famille Nano Banana). Liste deroulante maintenue par le plugin. Rapide : gemini-3.1-flash-image. Qualite max et 4K : gemini-3-pro-image. Le plus economique : gemini-3.1-flash-lite-image."
+      },
+      "ttsModel": {
+        "type": "string",
+        "default": "gemini-3.1-flash-tts-preview",
+        "title": "Modele voix (TTS)",
+        "description": "Modele de synthese vocale. Liste deroulante maintenue par le plugin."
+      },
+      "musicModel": {
+        "type": "string",
+        "default": "lyria-3-clip-preview",
+        "title": "Modele musique",
+        "description": "Modele de generation musicale. Liste deroulante maintenue par le plugin. lyria-3-clip-preview produit un clip de 30 s ; lyria-3-pro-preview produit un morceau complet de quelques minutes. Les modeles 'realtime' n'apparaissent pas : ils parlent un protocole WebSocket que ce plugin n'implemente pas."
+      },
+      "videoModel": {
+        "type": "string",
+        "default": "veo-3.1-generate-preview",
+        "title": "Modele video",
+        "description": "Modele Veo. Liste deroulante maintenue par le plugin. Moins cher / plus rapide : veo-3.1-fast-generate-preview, veo-3.1-lite-generate-preview. La video est FACTUREE a la seconde generee : c'est l'outil le plus couteux du plugin."
+      },
+      "defaultVoice": {
+        "type": "string",
+        "default": "Kore",
+        "title": "Voix par defaut",
+        "description": "Voix TTS utilisee quand l'agent n'en precise pas. 30 voix disponibles : Zephyr, Puck, Charon, Kore, Fenrir, Leda, Orus, Aoede, Callirrhoe, Autonoe, Enceladus, Iapetus, Umbriel, Algieba, Despina, Erinome, Algenib, Rasalgethi, Laomedeia, Achernar, Alnilam, Schedar, Gacrux, Pulcherrima, Achird, Zubenelgenubi, Vindemiatrix, Sadachbia, Sadaltager, Sulafat."
+      },
+      "outputDir": {
+        "type": "string",
+        "default": "gemini",
+        "title": "Repertoire de sortie",
+        "description": "Repertoire des medias generes, RELATIF a la racine du workspace. Un chemin absolu ou qui sort du workspace est refuse. Un .gitignore y est cree automatiquement (le workspace est un depot Git)."
+      },
+      "retentionDays": {
+        "type": "number",
+        "default": 7,
+        "title": "Retention (jours)",
+        "description": "Age au-dela duquel les medias generes sont purges. 0 = ne jamais purger. Le balayage passe au plus une fois par heure."
+      },
+      "requestTimeoutSec": {
+        "type": "number",
+        "default": 120,
+        "title": "Timeout des requetes (s)",
+        "description": "Delai maximal d'un appel HTTP a Gemini (borne a 10-600). La generation d'image et de musique est nettement plus lente que le texte. Ne concerne PAS la video, qui est un travail asynchrone suivi par gemini-api.video_status."
+      },
+      "maxConcurrent": {
+        "type": "number",
+        "default": 2,
+        "title": "Appels simultanes",
+        "description": "Nombre d'appels Gemini en vol en meme temps, tous agents confondus (borne a 1-8). Le quota Google se compte par MINUTE et par projet : au-dela, tout le swarm recolte des 429."
+      }
+    },
+    "required": [
+      "apiKey"
+    ]
+  }
+}

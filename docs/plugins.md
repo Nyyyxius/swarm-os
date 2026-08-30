@@ -577,6 +577,28 @@ every private `plugin_<name'>_*` table so a later reinstall starts clean.
   in the same modality (TTS, OGG/Opus, no ffmpeg). Exercises `connectors`,
   `teams`/`roles` (it provisions its own lead), a `/plugin-api/discord-agent/status`
   diagnostic route, and a fail-closed allow-list of Discord user IDs.
+- **`examples/plugins/gemini-api/`** — dependency-free Google Gemini bridge
+  exposing nine MCP tools over the unified `/v1beta/interactions` endpoint: text
+  (with Google Search grounding and JSON-schema output), multimodal
+  understanding (`analyze_media` — image/audio/video/PDF, with automatic Files
+  API upload past the inline cap), TTS, image generation *and* editing, music
+  (Lyria), and video (Veo) as an **asynchronous job pair** (`generate_video` →
+  `video_status`) whose record lives in KV so it survives a plugin reload. Shows
+  the container ⇄ agent path translation in BOTH directions (agents hand paths
+  back for vision), a concurrency semaphore rather than a serial queue, raw-PCM →
+  WAV wrapping decided on the bytes, and readers that tolerate all three response
+  schemas of an API mid-migration. It also demonstrates a **self-maintaining
+  config form**: the plugin rewrites the `enum` of its own `plugin.json` from the
+  provider's live model list, so five free-text fields render as always-current
+  dropdowns. That works because `GET /plugins/:name` re-reads the manifest from
+  disk on every request (`http/routes/plugins.ts:294-305`) — no rescan, no
+  reload. If you copy the technique, copy its four invariants too (see the
+  plugin's README): never write an EMPTY `enum` (the web form renders an
+  unsettable `<select>`, even though the server ignores it), always keep the
+  currently-stored value in the list (`validateConfig` rejects anything else and
+  a config PUT carries every field), write the file atomically after re-parsing
+  it (a truncated manifest takes the plugin down), and treat a read-only plugin
+  directory as a supported opt-out rather than an error.
 - **`examples/plugins/novelai/`** — dependency-free NovelAI bridge: a
   `novelai.generate_text` MCP tool returning Erato prose inline and a
   `novelai.generate_voice` tool writing TTS audio **into the workspace**. Shows
