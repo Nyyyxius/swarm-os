@@ -1,6 +1,6 @@
 {
   "name": "swarm-os",
-  "version": "0.7.0",
+  "version": "0.8.0",
   "private": true,
   "type": "module",
   "description": "Plateforme web pour orchestrer des equipes de sessions Claude Code en mode autonome.",
