@@ -169,13 +169,14 @@ Ordre : 0 → 1 → 2 → 3 → 4 → 5 → (6 ∥ 7) → 8. Chaque lot livrable
 | Env | Défaut | Effet |
 |---|---|---|
 | `SWARM_OS_CONTEXT_USAGE_TTL_MS` | `15000` | Fraîcheur du tracker de contexte (0 = trackers désactivés, l'UI rend `—`). |
+| `SWARM_OS_HOOK_URL` | `http://127.0.0.1:<port>` | Base des POST des hooks agents (`<base>/hooks/notification`). **Obligatoire sous `SWARM_OS_AGENT_TRANSPORT=ssh`** : le curl du hook tourne sur l'hôte, où `127.0.0.1:8787` est un autre processus (chez nous, le conteneur *test* — les hooks y mouraient en `hooks.auth_fail token-mismatch`, cassant silencieusement *waiting* ET context usage). Pointer sur le port hôte mappé du déploiement (stiix `:8789`, storyforge `:8093`, trader `:8091`). |
 | `SWARM_OS_MAX_INBOX_SIZE` | `100` | (existant) cap d'inbox — les évictions ne comptent jamais comme « traités ». |
 | `SWARM_OS_AUTO_COMPACT_BYTES` | `0` | (existant) backstop volumétrique, inchangé par cette feature. |
 | `SWARM_OS_COST_ROLLUP_INTERVAL_MS` | `3600000` | Cadence du janitor de rollup quotidien (Lot 15) qui alimente `session_token_daily`. `0` = off (l'export ne sert plus que l'historique déjà écrit). Rien n'est perdu à cette cadence : chaque tick classe ce que le précédent n'a pas classé, le repère étant en SQLite. |
 
 ## Cas limites
 
-- SSH : tail via hostExec (jamais de throw) ; échec → snapshot précédent + `stale`.
+- SSH : tail via hostExec (jamais de throw) ; échec → snapshot précédent + `stale`. Les hooks postent depuis l'HÔTE → `SWARM_OS_HOOK_URL` requis (voir knobs), sinon aucun `transcript_path` n'arrive jamais et les CTX restent `—`.
 - Restart serveur / redeploy Docker : relance à froid de tous les CLIs → `prepareSessionConfig` (constructeur de Session) réécrit les settings avec le hook → aucune session « sans hook » ne survit à un déploiement ; fenêtre `—` couverte.
 - `/clear` : stale, puis retombe au premier tour suivant ; préambule restitué par le canal durable, inbox re-signalée.
 - Gemini : pas de tracker → `—` ; boutons compact/clear actifs.

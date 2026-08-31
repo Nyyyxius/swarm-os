@@ -57,6 +57,11 @@ services:
       # Keep it distinct from SWARM_OS_IDE_PORT (8790 default) too: those two
       # share the container's loopback.
       SWARM_OS_MCP_PORT: 8794
+      # Hook POST base URL — REQUIRED under the ssh transport: the agents'
+      # hooks curl from the HOST, where 127.0.0.1:8787 is the *test* container
+      # (posts died there on `hooks.auth_fail token-mismatch`). Point at this
+      # deployment's host-mapped port. See docker-compose.stiix.yml.
+      SWARM_OS_HOOK_URL: http://127.0.0.1:8093
       # SSH transport: claude runs on the host, container only orchestrates.
       SWARM_OS_AGENT_TRANSPORT: ssh
       SWARM_OS_SSH_TARGET: ubuntu@host.docker.internal

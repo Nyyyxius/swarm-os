@@ -807,6 +807,7 @@ export class GeminiProvider implements AgentProvider {
         sessionId: req.sessionId,
         hookToken: req.hookToken,
         mainHttpPort: req.mainHttpPort,
+        hookUrl: req.hookUrl,
       });
       // `AfterAgent`, not `Notification` — see the module header. Same
       // `{ matcher, hooks[] }` schema as Claude Code (verified against

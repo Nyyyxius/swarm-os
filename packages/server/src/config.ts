@@ -37,6 +37,16 @@ export interface Config {
   port: number;
   host: string;
   /**
+   * Base URL the agents' hooks POST back to (`<hookUrl>/hooks/notification`).
+   * Default `http://127.0.0.1:<port>` — correct under the local transport where
+   * agent and server share a loopback. Under `agentTransport=ssh` the hook curl
+   * runs on the HOST, whose `127.0.0.1:<port>` is NOT this server (it can even
+   * be another swarm-os instance, whose /hooks rejects the post with
+   * `token-mismatch`). Each ssh deployment must point this at its host-mapped
+   * port, e.g. `http://127.0.0.1:8789`. Env: `SWARM_OS_HOOK_URL`.
+   */
+  hookUrl: string;
+  /**
    * MCP HTTP listener port — separate from `port`. The MCP server binds to
    * the loopback interface ONLY (hardcoded `127.0.0.1`, see plan §14): no
    * env var lets it leak onto the network. The port is configurable via
@@ -632,6 +642,10 @@ export function loadConfig(): Config {
   const port = intEnv('SWARM_OS_PORT', 8787);
   const host = process.env.SWARM_OS_HOST ?? '127.0.0.1';
   const mcpPort = intEnv('SWARM_OS_MCP_PORT', 8788);
+  // Where the agents' hooks POST back. Under the ssh transport the hook curl
+  // runs on the host, so the container-internal `127.0.0.1:<port>` default is
+  // wrong there — the ssh compose files must point this at the host-mapped port.
+  const hookUrl = (process.env.SWARM_OS_HOOK_URL ?? `http://127.0.0.1:${port}`).replace(/\/+$/, '');
 
   // Project name is technically required, but for `pnpm dev` convenience we default to 'dev'.
   const projectName = process.env.SWARM_OS_PROJECT_NAME ?? 'dev';
@@ -938,6 +952,7 @@ export function loadConfig(): Config {
   cached = {
     port,
     host,
+    hookUrl,
     mcpPort,
     projectName,
     defaultModel,

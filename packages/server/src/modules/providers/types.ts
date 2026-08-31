@@ -202,6 +202,12 @@ export interface SessionConfigRequest {
   /** Main HTTP port the notification hook POSTs back to. */
   mainHttpPort?: number | undefined;
   /**
+   * Base URL the hook curl targets instead of `http://127.0.0.1:<mainHttpPort>`
+   * (`config.hookUrl` — required under the ssh transport, where the hook runs
+   * on the host and the container-internal loopback port is not this server).
+   */
+  hookUrl?: string | undefined;
+  /**
    * Writable per-container runtime root holding the shared agent state
    * (`<dataDir>/.claude-runtime`). Absent ⇒ no per-session config dir.
    */

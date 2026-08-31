@@ -142,6 +142,15 @@ export interface HookCommandOptions {
   sessionId: string;
   hookToken: string;
   mainHttpPort: number;
+  /**
+   * Base URL override for the POST (`config.hookUrl`). The hook curl runs on
+   * the AGENT'S host: under the local transport that loopback is this server,
+   * but under the ssh transport `127.0.0.1:<mainHttpPort>` on the host is a
+   * different process (possibly another swarm-os, which rejects the post with
+   * `hooks.auth_fail token-mismatch`). Absent ⇒ the historical
+   * `http://127.0.0.1:<mainHttpPort>`.
+   */
+  hookUrl?: string | undefined;
 }
 
 /**
@@ -177,7 +186,10 @@ export interface HookCommandOptions {
  * budget.
  */
 export function buildHookCommand(opts: HookCommandOptions & { kind: SessionHookKind }): string {
-  const hookUrl = `http://127.0.0.1:${opts.mainHttpPort}/hooks/notification`;
+  const hookBase = opts.hookUrl
+    ? opts.hookUrl.replace(/\/+$/, '')
+    : `http://127.0.0.1:${opts.mainHttpPort}`;
+  const hookUrl = `${hookBase}/hooks/notification`;
   const curlFlags = opts.kind === 'session.transcript' ? '-sS -m 5 -o /dev/null' : '-s';
   return (
     `payload=$(cat); ` +

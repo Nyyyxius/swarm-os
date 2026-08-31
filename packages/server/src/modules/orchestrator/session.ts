@@ -264,6 +264,8 @@ export interface SessionInit {
    */
   hookToken?: string;
   mainHttpPort?: number;
+  /** Hook POST base URL override (`config.hookUrl`) — see `SessionConfigRequest`. */
+  hookUrl?: string;
   /**
    * Phase 5: writable runtime root for the per-container agent state. The
    * per-session config dir is `<runtimeRoot>/sessions/<id>`, with the CLI's
@@ -709,6 +711,7 @@ export class Session extends EventEmitter {
       preamble: init.preamble,
       hookToken: init.hookToken,
       mainHttpPort: init.mainHttpPort,
+      hookUrl: init.hookUrl,
       runtimeRoot: init.runtimeRoot,
       sourceDir: init.sourceDir,
       siblingSource: init.siblingSource,

@@ -283,6 +283,7 @@ export function buildCodexNotifyScript(opts: {
   sessionId: string;
   hookToken: string;
   mainHttpPort: number;
+  hookUrl?: string | undefined;
 }): string {
   const post = buildNotificationHookCommand(opts);
   return [
@@ -485,6 +486,7 @@ export class CodexProvider implements AgentProvider {
         sessionId: req.sessionId,
         hookToken: req.hookToken,
         mainHttpPort: req.mainHttpPort,
+        hookUrl: req.hookUrl,
       }),
       SESSION_EXEC_MODE,
     );

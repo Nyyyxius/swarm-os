@@ -634,6 +634,7 @@ export class Orchestrator {
       // hookToken + main HTTP port so the hook command can POST back.
       hookToken: this.config.hookToken,
       mainHttpPort: this.config.port,
+      hookUrl: this.config.hookUrl,
       runtimeRoot: this.config.claudeRuntimeDir,
       sourceDir: this.config.claudeSourceDir,
       siblingSource: this.config.claudeJsonSource,
@@ -780,6 +781,7 @@ export class Orchestrator {
       autoCompactBytes: this.config.contextAutoCompactBytes,
       hookToken: this.config.hookToken,
       mainHttpPort: this.config.port,
+      hookUrl: this.config.hookUrl,
       runtimeRoot: this.config.claudeRuntimeDir,
       sourceDir: this.config.claudeSourceDir,
       siblingSource: this.config.claudeJsonSource,
@@ -959,6 +961,7 @@ export class Orchestrator {
       autoCompactBytes: this.config.contextAutoCompactBytes,
       hookToken: this.config.hookToken,
       mainHttpPort: this.config.port,
+      hookUrl: this.config.hookUrl,
       runtimeRoot: this.config.claudeRuntimeDir,
       sourceDir: this.config.claudeSourceDir,
       siblingSource: this.config.claudeJsonSource,

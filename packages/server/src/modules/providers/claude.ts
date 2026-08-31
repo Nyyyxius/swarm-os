@@ -352,6 +352,7 @@ export class ClaudeProvider implements AgentProvider {
         sessionId: req.sessionId,
         hookToken: req.hookToken,
         mainHttpPort: req.mainHttpPort,
+        hookUrl: req.hookUrl,
       });
       // Monitoring (docs/monitoring-agents.md, Lot 2) — `SessionStart` is the
       // only thing that ever tells us WHERE this agent's transcript is, and it
@@ -362,6 +363,7 @@ export class ClaudeProvider implements AgentProvider {
         sessionId: req.sessionId,
         hookToken: req.hookToken,
         mainHttpPort: req.mainHttpPort,
+        hookUrl: req.hookUrl,
       });
       // Pre-accept the "bypass permissions mode" disclaimer at the
       // user-settings level. claude-code 2.1.143 migrates the legacy
