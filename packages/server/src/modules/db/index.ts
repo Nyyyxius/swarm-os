@@ -877,7 +877,12 @@ export class SwarmDb {
       { table: 'mailbox_messages', column: 'source_message_id', ddl: 'ALTER TABLE mailbox_messages ADD COLUMN source_message_id TEXT' },
       { table: 'mailbox_messages', column: 'thread_id',         ddl: 'ALTER TABLE mailbox_messages ADD COLUMN thread_id TEXT' },
       { table: 'mailbox_messages', column: 'thread_name',       ddl: 'ALTER TABLE mailbox_messages ADD COLUMN thread_name TEXT' },
-      // Per-role cadence (modules/schedule) — additive nullable columns.
+      // LEGACY per-role cadence — additive nullable columns, superseded by the
+      // `crons` table (modules/crons). They MUST stay: they are the only path
+      // that creates the columns in an image built from tsc output (INLINE_SCHEMA
+      // no longer declares them), and the boot-time migration that converts a
+      // legacy cadence into a cron SELECTs them. Both are forced to NULL by
+      // RoleStore on every write, so nothing new ever lands in them.
       { table: 'roles', column: 'schedule',         ddl: 'ALTER TABLE roles ADD COLUMN schedule TEXT' },
       { table: 'roles', column: 'schedule_message', ddl: 'ALTER TABLE roles ADD COLUMN schedule_message TEXT' },
       // Update detection — the version the operator chose to ignore. Declared

@@ -2,13 +2,13 @@
 import { useEffect, useRef, useState } from 'react';
 import type { KeyboardEvent } from 'react';
 import { ICON } from './icons';
-import ConfigTab, { type ConfigTabTeam } from './ConfigTab';
+import ConfigTab, { type ConfigTabCron, type ConfigTabTeam } from './ConfigTab';
 import Composer, { type ComposerAudience, type ComposerMode } from './Composer';
 import ConfirmModal, { type ConfirmModalVariant } from './ConfirmModal';
 import ConsoleOverlay from './ConsoleOverlay';
 import { Terminal } from '../Terminal';
 import {
-  formatUptime, formatClockShort, formatRelative,
+  formatUptime, formatClockShort, formatCronWhen, formatRelative,
   statusChipClass, statusLabel,
 } from '../../lib/format';
 import {
@@ -68,6 +68,12 @@ export interface RightPanelAgent {
 export interface RightPanelTeam extends ConfigTabTeam {
   id: string;
   name: string;
+  /**
+   * Durable role of the team, or `null` for a team created with a free-form
+   * `role` string. Crons target a role, so `null` here means this team can
+   * hold no cadence at all — the CRONS line and section stay hidden.
+   */
+  roleId: string | null;
   leadId: string;
   workerCount: number;
   discordWebhook?: string | null;
@@ -110,6 +116,20 @@ interface Props {
   ) => void;
   onSpawnWorker: (team: RightPanelTeam) => void;
   onEditConfig: (team: RightPanelTeam) => void;
+  /**
+   * Cadences of the selected team's role (docs/crons-agents.md §2.4), already
+   * filtered by the controller.
+   *
+   * A SEPARATE prop on purpose — deliberately NOT merged into `team`: the
+   * crons poll every 5 s, and folding them into the `selectedTeam` memo would
+   * hand a fresh object to ConfigTab (and to every `team`-keyed consumer) on
+   * every poll, for a header line that changes once an hour.
+   */
+  crons?: readonly ConfigTabCron[];
+  /** `ALL →` — open the crons screen filtered on this team's role. */
+  onOpenCrons?: (roleId?: string) => void;
+  /** CONFIG tab row → deep-link one cron (`#/crons/<id>`). */
+  onOpenCron?: (cronId: string) => void;
   /** Step 7 — callbacks Terminal.tsx → DesktopShell pour writer + logLines. */
   onTerminalRoleChange?: (role: 'writer' | 'reader') => void;
   onTerminalDataFrame?: () => void;
@@ -119,6 +139,7 @@ export default function RightPanel({
   selected, team, isLead, messages,
   activeTab, setActiveTab,
   onClose, onAction, onSend, onSpawnWorker, onEditConfig,
+  crons, onOpenCrons, onOpenCron,
   onTerminalRoleChange, onTerminalDataFrame,
 }: Props) {
   const consoleRef = useRef<HTMLDivElement | null>(null);
@@ -271,6 +292,31 @@ export default function RightPanel({
     const ctxTitle = usage
       ? `context ${ctxPct} of window · ${ctxTokens ?? '—'} tokens · read from ${usage.basis} ${formatRelative(usage.updatedAt)}${ctxStale ? ' · STALE: awaiting the next turn after a reset' : ''}`
       : 'no context telemetry for this agent (provider without a readable transcript, or session not running)';
+
+    // ── CRONS (docs/crons-agents.md §2.4) ────────────────────────────────
+    // A cron targets a ROLE: a team created with a free-form `role` string
+    // has no `roleId` and can therefore hold none — hence the gate here, and
+    // not merely "the list came back empty".
+    const roleCrons = team.roleId != null ? (crons ?? []) : [];
+    // The header line is LEAD-ONLY: a tick is delivered into the lead's
+    // inbox, so advertising "NEXT 14:15" on a worker panel would name an
+    // event that never reaches this agent. (The controller also gates its
+    // poll on `isLead`, so a worker panel holds no cron data at all.)
+    const headCrons = isLead ? roleCrons : [];
+    // Earliest upcoming fire. A paused cron carries `nextRun: null` from the
+    // server, so it can never win here; the loop re-checks `paused` anyway
+    // because the two facts are stored independently.
+    let nextCron: ConfigTabCron | null = null;
+    let nextCronAt = Number.POSITIVE_INFINITY;
+    for (const c of headCrons) {
+      if (c.paused || !c.nextRun) continue;
+      const at = Date.parse(c.nextRun);
+      if (Number.isFinite(at) && at < nextCronAt) {
+        nextCronAt = at;
+        nextCron = c;
+      }
+    }
+    const pausedCrons = headCrons.filter((c) => c.paused).length;
 
     // ── COMPACT / CLEAR gating ───────────────────────────────────────────
     // A paused agent will never reach the idle point the reset fires at, and
@@ -429,6 +475,43 @@ export default function RightPanel({
             {selected.lastActivityAt ? formatRelative(selected.lastActivityAt) : '—'}
           </span>
         </div>
+
+        {/* One non-wrapping line, never a bullet list: `pr-head` does not
+            scroll and the panel is 400 px wide (docs/crons-agents.md §2.4).
+            The detailed rows live in the CONFIG tab. */}
+        {headCrons.length > 0 && (
+          <div className="pr-crons">
+            <span className="lbl">CRONS ::</span>
+            <span>{headCrons.length}</span>
+            {nextCron && (
+              <>
+                <span className="sep">·</span>
+                <span className="next">NEXT {formatCronWhen(nextCron.nextRun)}</span>
+                <span
+                  className="nm"
+                  title={`${nextCron.name} — ${nextCron.schedule}`}
+                >
+                  {nextCron.name.toUpperCase()}
+                </span>
+              </>
+            )}
+            {pausedCrons > 0 && (
+              <>
+                <span className="sep">·</span>
+                <span className="paused">{pausedCrons} PAUSED</span>
+              </>
+            )}
+            {onOpenCrons && (
+              <button
+                className="all"
+                title="open the CRONS screen, filtered on this team's role"
+                onClick={() => onOpenCrons(team.roleId ?? undefined)}
+              >
+                ALL →
+              </button>
+            )}
+          </div>
+        )}
       </div>
 
       <div className="pr-actions">
@@ -563,6 +646,8 @@ export default function RightPanel({
             agent={selected}
             isLead={isLead}
             onEdit={() => onEditConfig(team)}
+            crons={roleCrons}
+            onOpenCron={onOpenCron}
           />
         )}
 

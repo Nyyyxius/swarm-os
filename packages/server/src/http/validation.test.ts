@@ -2,7 +2,11 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { normalizeWorkspaceRelativeCwd, validateCwdUnderWorkspace } from './validation.js';
+import {
+  normalizeWorkspaceRelativeCwd,
+  resolveUnderRoots,
+  validateCwdUnderWorkspace,
+} from './validation.js';
 
 /**
  * Phase 7 — `cwd` validation.
@@ -103,6 +107,42 @@ describe('validateCwdUnderWorkspace', () => {
     await expect(validateCwdUnderWorkspace(outsideRoot, workspaceRoot)).rejects.toThrow(
       /not under workspace root/,
     );
+  });
+});
+
+describe('resolveUnderRoots (the generalisation the cron runner uses)', () => {
+  it('accepts a path under ANY of the roots', async () => {
+    const second = path.join(tmpRoot, 'data');
+    fs.mkdirSync(second, { recursive: true });
+    const file = path.join(second, 'crons');
+    fs.mkdirSync(file);
+    expect(await resolveUnderRoots(file, [workspaceRoot, second])).toBe(fs.realpathSync(file));
+    const inWorkspace = path.join(workspaceRoot, 'proj');
+    fs.mkdirSync(inWorkspace);
+    expect(await resolveUnderRoots(inWorkspace, [workspaceRoot, second])).toBe(
+      fs.realpathSync(inWorkspace),
+    );
+  });
+
+  it('rejects a path under none of them, naming every root it tried', async () => {
+    const second = path.join(tmpRoot, 'data');
+    fs.mkdirSync(second, { recursive: true });
+    await expect(resolveUnderRoots(outsideRoot, [workspaceRoot, second])).rejects.toThrow(
+      /is not under/,
+    );
+  });
+
+  it('skips an unresolvable root rather than failing over it', async () => {
+    const missing = path.join(tmpRoot, 'never-created');
+    const sub = path.join(workspaceRoot, 'proj');
+    fs.mkdirSync(sub);
+    expect(await resolveUnderRoots(sub, [missing, workspaceRoot])).toBe(fs.realpathSync(sub));
+  });
+
+  it('fails when NO root resolves', async () => {
+    await expect(
+      resolveUnderRoots(workspaceRoot, [path.join(tmpRoot, 'nope')]),
+    ).rejects.toThrow(/cannot be resolved/);
   });
 });
 

@@ -243,17 +243,15 @@ export interface Role {
   defaultProvider: string | null;
   connectors: Connector[];
   /**
-   * 5-field cron expression. When set, the in-process RoleScheduler
-   * (modules/schedule) delivers `scheduleMessage` to the lead inbox of every
-   * live orchestrator of this role at each tick (TZ = SWARM_OS_SCHEDULE_TZ,
-   * default UTC). NULL = no cadence.
+   * @deprecated Cadence moved to the `crons` entity (docs/crons-agents.md).
+   * ALWAYS `null`: existing values were migrated into `crons` at the boot that
+   * shipped Lot 1, and `create`/`update` below force the column back to NULL.
+   * Kept on the type (and in the table) so a downgrade still reads, and so the
+   * plugin SDK's `Role` shape does not break.
    */
   schedule: string | null;
   /**
-   * Message template delivered to the lead at each cron tick. Supports
-   * `{{fire}}` (fire time truncated to the minute, e.g. `2026-06-18T20:00Z`),
-   * `{{now}}` (full ISO), and `{{window:Nh}}`/`{{window:Nm}}`. Required when
-   * `schedule` is set (route-enforced).
+   * @deprecated Moved to `crons.message` — see `schedule` above. Always `null`.
    */
   scheduleMessage: string | null;
   /**
@@ -309,7 +307,9 @@ export interface RoleInit {
   defaultPermissionMode?: PermissionMode | null;
   defaultProvider?: string | null;
   connectors?: Connector[];
+  /** @deprecated Ignored — forced to NULL by the store (docs/crons-agents.md §2.1.1). */
   schedule?: string | null;
+  /** @deprecated Ignored — forced to NULL by the store (docs/crons-agents.md §2.1.1). */
   scheduleMessage?: string | null;
   approval?: RoleApprovalSettings | null;
   skills?: RoleSkillRef[];
@@ -418,8 +418,14 @@ export class RoleStore {
       defaultPermissionMode: init.defaultPermissionMode ?? null,
       defaultProvider: init.defaultProvider ?? null,
       connectors: init.connectors ?? [],
-      schedule: init.schedule ?? null,
-      scheduleMessage: init.scheduleMessage ?? null,
+      // NEUTRALISED (docs/crons-agents.md §2.1.1). The 400 on the roles route
+      // is not enough: the plugin façade hands its `RoleInit` straight to this
+      // store (`plugins/api.ts`), so a plugin writing a `schedule` would
+      // re-feed the legacy-migration source at every boot — a cadence that
+      // keeps resurrecting as a duplicate cron. The column is dead here, in the
+      // one place every writer goes through.
+      schedule: null,
+      scheduleMessage: null,
       approval: init.approval ?? null,
       skills: init.skills ?? [],
       autoRemoveDeadWorkers: init.autoRemoveDeadWorkers ?? false,
@@ -462,9 +468,10 @@ export class RoleStore {
       defaultProvider:
         patch.defaultProvider !== undefined ? patch.defaultProvider : existing.defaultProvider,
       connectors: patch.connectors !== undefined ? patch.connectors : existing.connectors,
-      schedule: patch.schedule !== undefined ? patch.schedule : existing.schedule,
-      scheduleMessage:
-        patch.scheduleMessage !== undefined ? patch.scheduleMessage : existing.scheduleMessage,
+      // NEUTRALISED — see `create`. A patch can never set a cadence back on a
+      // role, whichever door it came through (route, plugin façade, test).
+      schedule: null,
+      scheduleMessage: null,
       approval: patch.approval !== undefined ? patch.approval : existing.approval,
       skills: patch.skills !== undefined ? patch.skills : existing.skills,
       autoRemoveDeadWorkers:

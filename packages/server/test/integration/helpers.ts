@@ -25,6 +25,9 @@ import { SettingsStore } from '../../src/modules/settings/index.js';
 import { MessagesAggregator } from '../../src/modules/metrics/aggregator.js';
 import { BusMetricsCollector } from '../../src/modules/metrics/busMetrics.js';
 import { BackupScheduler } from '../../src/modules/backup/index.js';
+import { CronStore } from '../../src/modules/crons/store.js';
+import { CronScheduler } from '../../src/modules/crons/scheduler.js';
+import { CronScriptRunner } from '../../src/modules/crons/runner.js';
 import { PluginStore } from '../../src/modules/plugins/store.js';
 import { PluginHost } from '../../src/modules/plugins/host.js';
 import { PluginToolRegistry } from '../../src/modules/plugins/mcp-registry.js';
@@ -101,6 +104,11 @@ export interface TestStack {
   aggregator: MessagesAggregator;
   /** S8 — exposed so integration tests can call `tick()` / `snapshot()`. */
   busMetrics: BusMetricsCollector;
+  /** Crons (docs/crons-agents.md) — exposed so tests can seed rows / fire. */
+  cronStore: CronStore;
+  cronScheduler: CronScheduler;
+  /** The live script runner — exposed so tests can assert in-flight children. */
+  cronRunner: CronScriptRunner;
   workspaceRoot: string;
   dataDir: string;
   /** Tear everything down. Must be called from afterEach. */
@@ -202,7 +210,6 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
     toolRegistry: pluginToolRegistry,
     httpRegistry: pluginHttpRegistry,
     connectorRegistry,
-    onRolesChanged: () => undefined,
     broadcastToLeads: (from, content) => {
       try {
         broadcastToLeadsFromExternal(spawner, from, content, {
@@ -238,6 +245,33 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
     keep: config.backupKeep,
   });
 
+  // Agent crons — the store owns its tables on the raw Db handle and runs the
+  // legacy migration in its constructor. The scheduler is instantiated so
+  // `/crons` resolves (a route without one cannot report `nextRun`), and
+  // `start()` IS called: the armed set is what the pause/nextRun assertions
+  // read, and no test cadence is frequent enough to fire during a test.
+  const cronStore = new CronStore(db);
+  // The script runner is wired for real (against the test tmpdirs) so the
+  // integration tests exercise the same containment rules production uses.
+  const cronRunner = new CronScriptRunner({
+    workspaceRoot,
+    dataDir,
+    timezone: config.scheduleTimezone,
+    transport: config.agentTransport === 'ssh' ? 'ssh' : 'local',
+  });
+  const cronScheduler = new CronScheduler({
+    store: cronStore,
+    spawner,
+    defaults: {
+      maxMessageSizeBytes: config.maxMessageSizeBytes,
+      idleThresholdMs: config.idleThresholdMs,
+    },
+    timezone: config.scheduleTimezone,
+    enabled: config.scheduleEnabled,
+    runner: cronRunner,
+  });
+  cronScheduler.start();
+
   let mcp: McpServer | null = null;
   if (!opts.skipMcp) {
     mcp = new McpServer(spawner, config.mcpPort, config, busMetrics, pluginToolRegistry);
@@ -255,7 +289,7 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
       backup,
       busMetrics,
       opts.bootGate,
-      undefined,
+      { store: cronStore, scheduler: cronScheduler, runner: cronRunner },
       pluginHost,
       pluginHttpRegistry,
       pluginInstaller,
@@ -287,11 +321,15 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
       connectorRegistry,
       aggregator,
       busMetrics,
+      cronStore,
+      cronScheduler,
+      cronRunner,
       workspaceRoot,
       dataDir,
       teardown: async () => {
         aggregator.stop();
         busMetrics.stop();
+        cronScheduler.stop();
         await pluginHost.deactivateAll();
         spawner.shutdownAll('test-shutdown');
         await new Promise((r) => setTimeout(r, 50));
@@ -324,11 +362,15 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
     connectorRegistry,
     aggregator,
     busMetrics,
+    cronStore,
+    cronScheduler,
+    cronRunner,
     workspaceRoot,
     dataDir,
     teardown: async () => {
       aggregator.stop();
       busMetrics.stop();
+      cronScheduler.stop();
       await pluginHost.deactivateAll();
       spawner.shutdownAll('test-shutdown');
       await new Promise((r) => setTimeout(r, 50));

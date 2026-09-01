@@ -357,12 +357,13 @@ export interface RoleView {
    */
   defaultProvider?: string | null;
   connectors: ConnectorView[];
-  /** 5-field cron expression, or null. When set, the server's in-process
-   * scheduler pokes the lead inbox of every live instance of this role. */
-  schedule: string | null;
-  /** Message template delivered at each cron tick ({{fire}}, {{now}},
-   * {{window:Nh}}). Required when `schedule` is set. */
-  scheduleMessage: string | null;
+  /**
+   * How many crons target this role (docs/crons-agents.md). READ-ONLY: computed
+   * by `GET /roles` and ignored on write — the cadence itself lives in the
+   * `crons` collection, not on the role. Optional so fixtures and older servers
+   * that never sent the field keep type-checking; absent reads as 0.
+   */
+  cronCount?: number;
   /**
    * Approval gate (docs/garde-fous-approbation.md, P5) — OPTIONAL per-role
    * override of the human-in-the-loop guard. `null`/absent = no override: the
@@ -425,6 +426,83 @@ export interface RoleApprovalSettings {
 }
 
 export type RoleInput = Omit<RoleView, 'id' | 'createdAt' | 'updatedAt'>;
+
+// ---- Agent crons (docs/crons-agents.md) ------------------------------------
+// Wire mirror of `modules/crons/store.ts` + the `view()` enrichment of
+// `http/routes/crons.ts`. Nothing here is inferred: every field name below
+// exists verbatim in one of those two files.
+
+/** What a tick does: deliver a template, or run a local script that decides. */
+export type CronAction = 'message' | 'script';
+
+/** Why a run happened: the cadence fired, or an operator pressed RUN NOW. */
+export type CronRunKind = 'tick' | 'manual';
+
+/** How a run ended (`overlap` = the previous run was still in flight). */
+export type CronRunOutcome = 'wake' | 'skip' | 'noop' | 'overlap' | 'error';
+
+/** Interpreters a script cron may declare. No `+x` fallback, server-side. */
+export const CRON_INTERPRETERS = ['python3', 'bash', 'node'] as const;
+
+/** One row of a cron's bounded history (20 kept per cron, server-side). */
+export interface CronRunView {
+  id: string;
+  cronId: string;
+  firedAt: string;
+  kind: CronRunKind;
+  outcome: CronRunOutcome;
+  /** action=script only. */
+  exitCode: number | null;
+  durationMs: number | null;
+  /** Truncated stdout/stderr, or the reason of an `error` outcome. */
+  outputExcerpt: string | null;
+  /** Orchestrator ids the message reached. */
+  deliveredTo: string[];
+}
+
+export interface CronView {
+  id: string;
+  /** Display slug, UNIQUE — also the `cron:<name>` sender of its messages. */
+  name: string;
+  /** Target role. A deleted role leaves an ORPHAN cron, not a cascade. */
+  roleId: string;
+  /** 5-field cron expression, evaluated in the server's schedule timezone. */
+  schedule: string;
+  action: CronAction;
+  message: string | null;
+  scriptPath: string | null;
+  scriptArgs: string[] | null;
+  interpreter: string | null;
+  /** `null` = the server default budget. */
+  timeoutMs: number | null;
+  paused: boolean;
+  createdAt: string;
+  updatedAt: string;
+  /**
+   * Read off the ARMED croner job, never recomputed client-side (a local
+   * `new Cron(expr)` would evaluate in the browser's timezone, not the
+   * server's). `null` when the cron is paused or cadence is disabled
+   * instance-wide — the UI must never advertise a fire that will not happen.
+   */
+  nextRun: string | null;
+  lastRun: CronRunView | null;
+  /** A run is in flight right now — a manual fire would answer 409. */
+  running: boolean;
+}
+
+/** Body of `POST /crons`. `PATCH` takes a `Partial<CronInput>`. */
+export interface CronInput {
+  name: string;
+  roleId: string;
+  schedule: string;
+  action: CronAction;
+  message?: string | null;
+  scriptPath?: string | null;
+  scriptArgs?: string[] | null;
+  interpreter?: string | null;
+  timeoutMs?: number | null;
+  paused?: boolean;
+}
 
 export type PluginStatus = 'disabled' | 'enabled' | 'error' | 'crashed' | 'quarantined';
 
@@ -1691,6 +1769,30 @@ export const api = {
   updateRole: (id: string, body: Partial<RoleInput>) =>
     request<{ role: RoleView }>('PATCH', `/roles/${id}`, body),
   deleteRole: (id: string) => request<void>('DELETE', `/roles/${id}`),
+
+  // ---- Agent crons (docs/crons-agents.md §2.3) ------------------------------
+  // `schedulingEnabled` is a GLOBAL flag carried by the list response (not a
+  // per-cron field): when false nothing is armed and every `nextRun` is null.
+  listCrons: () =>
+    request<{ crons: CronView[]; schedulingEnabled: boolean }>('GET', '/crons'),
+  createCron: (body: CronInput) => request<{ cron: CronView }>('POST', '/crons', body),
+  getCron: (id: string) =>
+    request<{ cron: CronView }>('GET', `/crons/${encodeURIComponent(id)}`),
+  updateCron: (id: string, body: Partial<CronInput>) =>
+    request<{ cron: CronView }>('PATCH', `/crons/${encodeURIComponent(id)}`, body),
+  deleteCron: (id: string) => request<void>('DELETE', `/crons/${encodeURIComponent(id)}`),
+  /** Manual fire: 202 + the pre-allocated run id, never synchronous. 409 if in
+   *  flight. `run` is the recorded row for a message cron (delivery is
+   *  synchronous) and `null` for a script cron, whose row lands only when the
+   *  child process settles — poll `listCronRuns` for it. */
+  fireCron: (id: string) =>
+    request<{ runId: string; run: CronRunView | null }>(
+      'POST',
+      `/crons/${encodeURIComponent(id)}/fire`,
+    ),
+  listCronRuns: (id: string) =>
+    request<{ runs: CronRunView[] }>('GET', `/crons/${encodeURIComponent(id)}/runs`),
+
   // ---- Skills (Lot 1b) -------------------------------------------------------
   listSkills: () => request<{ skills: SkillView[] }>('GET', '/skills'),
   getSkill: (name: string) => request<{ skill: SkillView; body: string }>('GET', `/skills/${name}`),

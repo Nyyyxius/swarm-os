@@ -32,6 +32,9 @@ export const ICON: Record<string, ReactElement> = {
   memory:   <svg viewBox="0 0 24 24"><path d="M9 3 a3 3 0 0 0 -3 3 v3 a3 3 0 0 1 -3 3 a3 3 0 0 1 3 3 v3 a3 3 0 0 0 3 3"/><path d="M15 3 a3 3 0 0 1 3 3 v3 a3 3 0 0 0 3 3 a3 3 0 0 0 -3 3 v3 a3 3 0 0 1 -3 3"/></svg>,
   sun:      <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="4"/><path d="M12 2 V4 M12 20 V22 M2 12 H4 M20 12 H22 M4.9 4.9 L6.3 6.3 M17.7 17.7 L19.1 19.1 M4.9 19.1 L6.3 17.7 M17.7 6.3 L19.1 4.9"/></svg>,
   search:   <svg viewBox="0 0 24 24"><circle cx="11" cy="11" r="6"/><path d="M15.5 15.5 L20 20"/></svg>,
+  // Agent crons (docs/crons-agents.md) — hands at 10:10 so the two strokes stay
+  // distinguishable at the 14px the launcher renders icons at.
+  clock:    <svg viewBox="0 0 24 24"><circle cx="12" cy="12" r="8"/><path d="M12 7 V12 L15.5 14"/></svg>,
 };
 
 export type IconName = keyof typeof ICON;

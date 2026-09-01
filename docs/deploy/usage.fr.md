@@ -12,8 +12,9 @@ Comment opérer une instance en marche. Pour l'install / l'accès distant, voir
   les workers exécutent les tâches et rapportent via une mailbox en mémoire et un
   serveur MCP. Les workers sont des feuilles — ils ne créent pas de sous-équipes.
 - **Rôles** — définitions réutilisables : prompts système lead/worker (preambles),
-  modèle et effort par défaut, connecteur Discord optionnel, cadence cron
-  optionnelle.
+  modèle et effort par défaut, connecteur Discord optionnel.
+- **Crons** — réveils programmés, visant un **rôle**. Un rôle peut en porter
+  autant qu'il veut ; voir [Crons](#crons) plus bas.
 - Toutes les sessions tournent en `bypassPermissions`. **L'isolation vient du
   conteneur, pas du runtime — ne jamais lancer swarm-os hors Docker.**
 
@@ -44,11 +45,65 @@ simplement journalisées.
 
 ---
 
-## Planificateur (cron par rôle)
+## Crons
 
-Un rôle peut porter une cadence cron pour réveiller un agent selon un horaire.
-Contrôlé par `SWARM_OS_SCHEDULE_ENABLED` (actif par défaut) et `SWARM_OS_SCHEDULE_TZ`
-(UTC par défaut).
+Un **cron** réveille un rôle selon un horaire. Il a son écran dédié —
+`#/crons`, accessible depuis le launcher ⌘K (WORKSPACE ▸ CRONS), le badge
+`🕐 N CRONS` d'un rôle, ou la ligne CRONS du panneau d'un agent. En mobile,
+l'accès est dans la feuille STATS.
+
+Chaque cron vise un **rôle**, pas une session : au tir, il est livré au lead de
+**chaque instance vivante** de ce rôle. Aucune instance vivante → un `noop`
+journalisé — un cron ne redémarre jamais une équipe éteinte.
+
+Depuis l'écran : **+ NEW CRON**, **PAUSE / RESUME**, édition de la cadence ou de
+l'action en place, **DELETE**, et **RUN NOW** (autorisé même sur un cron en
+pause, ou avec la planification désactivée globalement — c'est un geste
+opérateur explicite). **LAST RUNS** conserve les 20 derniers tirs de chaque
+cron avec leur issue, code de sortie, durée et un extrait de sortie tronqué.
+
+Deux actions possibles :
+
+- **MESSAGE** — livrer un template dans l'inbox du lead à chaque tick. Mêmes
+  tokens qu'avant : `{{fire}}`, `{{now}}`, `{{window:6h}}`.
+- **SCRIPT** — exécuter un script dans le conteneur ; **c'est le script qui
+  décide** s'il faut réveiller quelqu'un. La dernière ligne non vide de son
+  stdout doit être du JSON : `{"wake": true, "message": "…"}` livre ce message,
+  `{"wake": false}` ne dérange personne. Un exit ≠ 0, une dernière ligne
+  illisible ou un timeout donnent un run `error` et ne réveillent personne.
+
+Un script reçoit un environnement explicite et minimal (`SWARM_OS_CRON_ID`,
+`SWARM_OS_CRON_NAME`, `SWARM_OS_FIRE`, `TZ`, `UV_CACHE_DIR`, proxies — **ni
+token serveur, ni clé provider**), un interpréteur explicite (`python3`, `bash`
+ou `node`), un timeout dur (60 s par défaut, 240 s au maximum), et doit vivre
+sous `/workspace` ou `/data` — des chemins **conteneur**.
+
+> Préfère `/data/crons/` pour tout ce qui porte un secret. Les agents écrivent
+> `/workspace` : un script qui s'y trouve peut être réécrit par les agents-mêmes
+> que le cron réveille — soit une exécution récurrente sans supervision de
+> session.
+
+Autrement dit, quiconque possède le `X-Auth-Token` peut exécuter du code
+arbitraire **dans le conteneur**. C'est le pouvoir que ce token donne déjà par
+ailleurs (une équipe `bypassPermissions` sur `/workspace` exécute aussi du code
+arbitraire), mais ça mérite d'être dit.
+
+Exemple complet, contrat de sortie détaillé et variante `uv run --with
+requests` : [examples/crons/](../../examples/crons/).
+
+`SWARM_OS_SCHEDULE_ENABLED` (actif par défaut) et `SWARM_OS_SCHEDULE_TZ` (UTC
+par défaut) ne changent pas — ce sont désormais l'interrupteur général et la
+timezone de tous les crons. Planification désactivée : les crons ne tictaquent
+plus (l'écran le dit), mais RUN NOW fonctionne toujours.
+
+**Note de migration.** La cadence par rôle a disparu : les champs `schedule` /
+`scheduleMessage` d'un rôle n'existent plus, et la section cadence de l'éditeur
+de rôle avec eux. Au premier démarrage après la mise à jour, chaque rôle qui
+portait une cadence est converti en cron `message` nommé `<rôle>-cadence`, et
+les colonnes du rôle sont vidées — rien à faire à la main, et rien ne tire deux
+fois. `POST` / `PATCH /roles` avec un `schedule` ou un `scheduleMessage` **non
+nul** répond désormais **400** (`SCHEDULE_MOVED`) ; les clés envoyées à `null`
+restent acceptées, donc les clients existants continuent de marcher.
 
 ---
 

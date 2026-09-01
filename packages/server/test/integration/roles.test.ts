@@ -135,59 +135,69 @@ describe('REST: /roles CRUD', () => {
     expect(gone.status).toBe(404);
   });
 
-  it('persists a per-role schedule + message and round-trips it', async () => {
+  // ── Cadence moved to /crons (docs/crons-agents.md) ────────────────────────
+  // These four cases used to assert the per-role cadence round-trip. The
+  // behaviour is gone: the cadence is a first-class `crons` row now, and the
+  // roles route only has to (a) keep accepting the NULL keys every deployed web
+  // bundle still posts, and (b) refuse an actual value loudly rather than
+  // storing something no scheduler reads.
+
+  it('still accepts schedule/scheduleMessage sent as null (existing clients post the keys)', async () => {
     const created = await postRole({
-      label: 'market-analysis',
-      schedule: '0 6,12,20 * * *',
-      scheduleMessage: 'run cycle cycle_window_id={{fire}}',
+      label: 'no-cadence',
+      schedule: null,
+      scheduleMessage: null,
     });
     expect(created.status).toBe(201);
-    expect(created.body.role.schedule).toBe('0 6,12,20 * * *');
-    expect(created.body.role.scheduleMessage).toBe('run cycle cycle_window_id={{fire}}');
-
-    const id = created.body.role.id as string;
-    const got = await fetch(`http://127.0.0.1:${stack.mainPort}/roles/${id}`, {
-      headers: authHeaders(stack.config.token),
-    });
-    const gotBody = (await got.json()) as { role: { schedule: string; scheduleMessage: string } };
-    expect(gotBody.role.schedule).toBe('0 6,12,20 * * *');
-    expect(gotBody.role.scheduleMessage).toBe('run cycle cycle_window_id={{fire}}');
+    expect(created.body.role.schedule).toBeNull();
+    expect(created.body.role.scheduleMessage).toBeNull();
   });
 
-  it('rejects an invalid cron expression', async () => {
-    const r = await postRole({ label: 'bad-cron', schedule: 'not a cron', scheduleMessage: 'x' });
+  it('rejects a non-null schedule with 400 SCHEDULE_MOVED', async () => {
+    const r = await postRole({ label: 'cadenced', schedule: '0 6,12,20 * * *', scheduleMessage: 'x' });
     expect(r.status).toBe(400);
+    expect(r.body.code).toBe('SCHEDULE_MOVED');
+    expect(String(r.body.error)).toContain('/crons');
   });
 
-  it('rejects a schedule without a scheduleMessage', async () => {
-    const r = await postRole({ label: 'no-msg', schedule: '*/5 * * * *' });
+  it('rejects a non-null scheduleMessage even without a schedule', async () => {
+    const r = await postRole({ label: 'msg-only', schedule: null, scheduleMessage: 'tick' });
     expect(r.status).toBe(400);
+    expect(r.body.code).toBe('SCHEDULE_MOVED');
   });
 
-  it('rejects clearing the message via PATCH while the schedule remains', async () => {
-    const created = await postRole({
-      label: 'cadenced',
-      schedule: '*/5 * * * *',
-      scheduleMessage: 'tick',
-    });
+  it('PATCH refuses a non-null schedule but accepts the null keys', async () => {
+    const created = await postRole({ label: 'patchable' });
     expect(created.status).toBe(201);
     const id = created.body.role.id as string;
-    const patched = await fetch(`http://127.0.0.1:${stack.mainPort}/roles/${id}`, {
-      method: 'PATCH',
-      headers: authHeaders(stack.config.token),
-      body: JSON.stringify({ scheduleMessage: null }),
-    });
-    expect(patched.status).toBe(400);
 
-    // But clearing BOTH (schedule:null) is allowed.
-    const cleared = await fetch(`http://127.0.0.1:${stack.mainPort}/roles/${id}`, {
+    const refused = await fetch(`http://127.0.0.1:${stack.mainPort}/roles/${id}`, {
       method: 'PATCH',
       headers: authHeaders(stack.config.token),
-      body: JSON.stringify({ schedule: null, scheduleMessage: null }),
+      body: JSON.stringify({ schedule: '*/5 * * * *', scheduleMessage: 'tick' }),
     });
-    expect(cleared.status).toBe(200);
-    const clearedBody = (await cleared.json()) as { role: { schedule: string | null } };
-    expect(clearedBody.role.schedule).toBeNull();
+    expect(refused.status).toBe(400);
+
+    const accepted = await fetch(`http://127.0.0.1:${stack.mainPort}/roles/${id}`, {
+      method: 'PATCH',
+      headers: authHeaders(stack.config.token),
+      body: JSON.stringify({ schedule: null, scheduleMessage: null, workerCount: 2 }),
+    });
+    expect(accepted.status).toBe(200);
+    const body = (await accepted.json()) as { role: { schedule: string | null; workerCount: number } };
+    expect(body.role.schedule).toBeNull();
+    expect(body.role.workerCount).toBe(2);
+  });
+
+  it('GET /roles reports a cronCount per role (0 when no cron targets it)', async () => {
+    const created = await postRole({ label: 'counted' });
+    expect(created.status).toBe(201);
+    const res = await fetch(`http://127.0.0.1:${stack.mainPort}/roles`, {
+      headers: authHeaders(stack.config.token),
+    });
+    const body = (await res.json()) as { roles: Array<{ id: string; cronCount: number }> };
+    const row = body.roles.find((r) => r.id === created.body.role.id);
+    expect(row?.cronCount).toBe(0);
   });
 });
 

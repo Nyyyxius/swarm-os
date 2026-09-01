@@ -231,15 +231,18 @@ function isSenderTerminal(
   liveSessionStatuses: Map<string, string>,
   db: SwarmDb,
 ): boolean {
-  // 'system'/'human' senders, and any plugin-origin message (`plugin:<name>`),
-  // are never sender-terminal: a plugin has no session row, so without this
-  // exemption every pending `from='plugin:x'` message would be classified
-  // terminal (unknown session → terminal) and silently destroyed at each boot
-  // (plan §J2 fix B-1).
+  // 'system'/'human' senders, and any plugin-origin (`plugin:<name>`) or
+  // cron-origin (`cron:<name>`) message, are never sender-terminal: neither a
+  // plugin nor a cron has a session row, so without this exemption every
+  // pending message from one would be classified terminal (unknown session →
+  // terminal) and silently destroyed at each boot (plan §J2 fix B-1 — the
+  // exact bug the crons `from` would otherwise replay,
+  // docs/crons-agents.md §2.1.5).
   if (
     row.from_id === 'system' ||
     row.from_id === 'human' ||
-    row.from_id.startsWith('plugin:')
+    row.from_id.startsWith('plugin:') ||
+    row.from_id.startsWith('cron:')
   ) {
     return false;
   }

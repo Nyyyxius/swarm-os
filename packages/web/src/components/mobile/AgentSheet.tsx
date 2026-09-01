@@ -21,6 +21,7 @@ import ConfigTab from '../desktop/ConfigTab';
 import { Terminal } from '../Terminal';
 import {
   statusChipClass, statusLabel, formatUptime, formatClockShort, formatRelative,
+  formatCronWhen,
 } from '../../lib/format';
 import {
   contextBarWidth, contextColorVar, contextLevel,
@@ -28,6 +29,7 @@ import {
 } from '../../lib/contextPercent';
 import { useSwarmController } from '../../controller/SwarmController';
 import type { AgentAction, RightPanelAgent, RightPanelTeam } from '../desktop/RightPanel';
+import type { ConfigTabCron } from '../desktop/ConfigTab';
 
 type Tab = 'console' | 'chat' | 'config';
 
@@ -67,6 +69,20 @@ export default function AgentSheet() {
       e.preventDefault();
       doSend();
     }
+  }
+
+  // ── CRONS navigation (docs/crons-agents.md §2.4) ───────────────────────
+  // The sheet is z-index 81, the crons overlay 60: navigating without
+  // dismissing the sheet first would open the screen UNDERNEATH it and look
+  // like a dead tap. Desktop has no equivalent step — its RightPanel is a
+  // column, not a layer over the whole viewport.
+  function openCronsScreen(roleId: string | null) {
+    c.closeRightPanel();
+    c.onOpenCrons(roleId ?? undefined);
+  }
+  function openCron(cronId: string) {
+    c.closeRightPanel();
+    c.onOpenCron(cronId);
   }
 
   function askConfirm(action: AgentAction) {
@@ -147,6 +163,30 @@ export default function AgentSheet() {
     const ctxActionTitle = resetPending
       ? 'reset armed — fires at next idle'
       : undefined;
+
+    // ── CRONS (docs/crons-agents.md §2.4) — mobile twin of `pr-crons`, with
+    //    the SAME three gates as RightPanel: a durable `roleId` (a cron
+    //    targets a role, so a free-form-role team can hold none), the LEAD
+    //    panel (a tick is delivered to the lead's inbox — naming "NEXT 14:15"
+    //    on a worker would announce an event that never reaches it), and a
+    //    non-empty list. The controller also gates its poll on `isLead`.
+    const roleCrons: readonly ConfigTabCron[] =
+      team.roleId != null ? c.selectedTeamCrons : [];
+    const headCrons = isLead ? roleCrons : [];
+    // Earliest upcoming fire. A paused cron carries `nextRun: null` from the
+    // server so it can never win, but `paused` is re-checked because the two
+    // facts are stored independently.
+    let nextCron: ConfigTabCron | null = null;
+    let nextCronAt = Number.POSITIVE_INFINITY;
+    for (const cron of headCrons) {
+      if (cron.paused || !cron.nextRun) continue;
+      const at = Date.parse(cron.nextRun);
+      if (Number.isFinite(at) && at < nextCronAt) {
+        nextCronAt = at;
+        nextCron = cron;
+      }
+    }
+    const pausedCrons = headCrons.filter((cron) => cron.paused).length;
 
     return (
       <>
@@ -270,6 +310,39 @@ export default function AgentSheet() {
             <span className="m-as-cfg-sep">·</span>
             <span><b>act</b>={selected.lastActivityAt ? formatRelative(selected.lastActivityAt) : '—'}</span>
           </div>
+
+          {/* One non-wrapping line, never a bullet list — `m-sheet-head` is a
+              fixed block above the tabs, so a second line eats the console.
+              The per-cron rows live in the CONFIG tab, as on desktop. */}
+          {headCrons.length > 0 && (
+            <div className="m-as-crons">
+              <span className="lbl">CRONS ::</span>
+              <span>{headCrons.length}</span>
+              {nextCron && (
+                <>
+                  <span className="sep">·</span>
+                  <span className="next">NEXT {formatCronWhen(nextCron.nextRun)}</span>
+                  <span className="nm" title={`${nextCron.name} — ${nextCron.schedule}`}>
+                    {nextCron.name.toUpperCase()}
+                  </span>
+                </>
+              )}
+              {pausedCrons > 0 && (
+                <>
+                  <span className="sep">·</span>
+                  <span className="paused">{pausedCrons} PAUSED</span>
+                </>
+              )}
+              <button
+                type="button"
+                className="all"
+                title="open the CRONS screen, filtered on this team's role"
+                onClick={() => openCronsScreen(team.roleId)}
+              >
+                ALL →
+              </button>
+            </div>
+          )}
         </div>
 
         {/* ── Action bar (mirrors RightPanel's 7-action matrix) ── */}
@@ -353,6 +426,8 @@ export default function AgentSheet() {
               agent={selected}
               isLead={isLead}
               onEdit={() => c.handleEditConfig(team)}
+              crons={roleCrons}
+              onOpenCron={openCron}
             />
           )}
 

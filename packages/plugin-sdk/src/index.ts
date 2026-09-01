@@ -258,7 +258,14 @@ export interface Role {
   defaultEffort: EffortLevel | null;
   defaultPermissionMode: PermissionMode | null;
   connectors: Connector[];
+  /**
+   * @deprecated The per-role cadence moved to the first-class `crons` entity
+   * (docs/crons-agents.md). ALWAYS reads back `null`: existing values were
+   * migrated into `crons`, and the role store forces the column to NULL on
+   * every write. Kept on the type so an existing plugin still compiles.
+   */
   schedule: string | null;
+  /** @deprecated Moved to `crons.message` — see `schedule`. Always `null`. */
   scheduleMessage: string | null;
   createdAt: string;
   updatedAt: string;
@@ -274,7 +281,9 @@ export interface RoleInit {
   defaultEffort?: EffortLevel | null;
   defaultPermissionMode?: PermissionMode | null;
   connectors?: Connector[];
+  /** @deprecated Ignored — the role store writes NULL (docs/crons-agents.md). */
   schedule?: string | null;
+  /** @deprecated Ignored — the role store writes NULL (docs/crons-agents.md). */
   scheduleMessage?: string | null;
 }
 

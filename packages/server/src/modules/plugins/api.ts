@@ -102,8 +102,6 @@ export interface PluginApiDeps {
   settingsStore?: SettingsStore;
   notifier?: Notifier;
   config?: Config;
-  /** = () => scheduler.reload(); fired after every role mutation. */
-  onRolesChanged?: () => void;
   toolRegistry?: PluginToolRegistry;
   httpRegistry?: PluginHttpRegistry;
   /** J4 — connector registry backing api.connectors.register. */
@@ -472,23 +470,19 @@ export function buildPluginApi(
       create(init) {
         requireCap('roles');
         ensureLive();
-        const role = need(deps.roleStore, 'roles').create(init);
-        deps.onRolesChanged?.();
-        return role;
+        return need(deps.roleStore, 'roles').create(init);
       },
       update(id, patch) {
         requireCap('roles');
         ensureLive();
         const role = need(deps.roleStore, 'roles').update(id, patch);
         if (!role) throw new Error(`role ${id} not found`);
-        deps.onRolesChanged?.();
         return role;
       },
       delete(id: string) {
         requireCap('roles');
         ensureLive();
         need(deps.roleStore, 'roles').delete(id);
-        deps.onRolesChanged?.();
       },
     },
 

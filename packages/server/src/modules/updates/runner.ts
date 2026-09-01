@@ -472,7 +472,7 @@ export class UpdateRunner {
 
   /**
    * Lot E — a **one-shot** `setTimeout`, re-armed at boot from the store.
-   * Deliberately not `RoleScheduler`/croner: a cron models a recurring cadence
+   * Deliberately not `CronScheduler`/croner: a cron models a recurring cadence
    * read from a table, and an update is a single decision at a single datetime.
    */
   schedule(input: ScheduleInput): { runId: string; at: string } {

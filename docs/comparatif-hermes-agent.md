@@ -75,7 +75,7 @@
 |---|---|---|
 | Extensibilité | **Plugins ESM in-process**, hot enable/disable, install depuis dossier/tgz/npm/git, capabilities accordées par l'opérateur, panels UI iframe, routes HTTP, connectors, `host-exec` SSH, isolation de crash (5 crashes/60 s → quarantaine) | Skills + serveurs MCP + plugins dashboard |
 | Templates | **Rôles** = presets versionnés (prompt lead, préambules, modèle, nb workers, connectors) | Profils d'agent |
-| Scheduling | Cron par rôle, in-process, livré dans la mailbox du lead | Cron natif, définition en langage naturel, jobs chaînés |
+| Scheduling | **Crons de première classe** (écran dédié, N par rôle, pause/tir manuel, historique des runs), in-process, action `message` livrée dans la mailbox du lead ou action `script` qui décide du réveil | Cron natif, définition en langage naturel, jobs chaînés |
 | Persistance | SQLite + **backup à chaud** (online backup API) sur `/data`, recovery au boot | SQLite (Kanban, sessions) |
 | Déploiement | Docker obligatoire, image GHCR, `install.sh`, 1 container par projet | Installeurs one-line (Linux/macOS/WSL2/Windows/Termux), Docker, Python 3.11+/uv, cloud |
 | Mise à jour | **Update 1-clic** : détection GitHub Release, **préavis aux équipes ≥ 120 s**, réécriture de `SWARM_OS_IMAGE`, vérif `/health`, rollback auto | `/update` (self-host) |

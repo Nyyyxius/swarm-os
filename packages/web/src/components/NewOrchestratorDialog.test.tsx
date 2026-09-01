@@ -407,8 +407,6 @@ describe('NewOrchestratorDialog — role auto-fill is provider-scoped', () => {
       defaultPermissionMode: null,
       defaultProvider: null,
       connectors: [],
-      schedule: null,
-      scheduleMessage: null,
       createdAt: new Date().toISOString(),
       updatedAt: new Date().toISOString(),
       ...over,

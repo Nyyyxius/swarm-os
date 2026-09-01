@@ -327,7 +327,8 @@ post-MAJ et son bouton « Redémarrer les équipes » (démarrage frais en place
 # Lot E — planification
 
 `POST /updates/schedule { at: <ISO> }` : **un `setTimeout` one-shot**, ré-armé au
-boot depuis la base. Pas de croner : `RoleScheduler` (`schedule/index.ts:103`)
+boot depuis la base. Pas de croner : le scheduler de cadences (aujourd'hui
+`CronScheduler`, `modules/crons/scheduler.ts`)
 modélise une cadence *récurrente* lue en table, alors qu'une mise à jour est un
 one-shot à une date — chaque version est une décision distincte.
 

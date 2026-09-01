@@ -11,7 +11,6 @@ import type {
 import { isDiscordConnector, BUDGET_ACTIONS } from '../../modules/roles/index.js';
 import type { BudgetAction } from '../../modules/roles/index.js';
 import type { Config, EffortLevel, PermissionMode } from '../../config.js';
-import { isValidCron } from '../../modules/schedule/index.js';
 import {
   PASSWORD_SENTINEL,
   redactConfigForRead,
@@ -127,21 +126,27 @@ function parseNullableString(
 }
 
 /**
- * A 5/6-field cron expression, or null/'' (= no cadence). Validated with the
- * same croner parser the scheduler uses, so the UI can't store a pattern the
- * scheduler would later reject at reload.
+ * The per-role cadence is GONE — it lives in the `crons` entity now
+ * (docs/crons-agents.md). A caller that still sends `schedule` /
+ * `scheduleMessage` gets a 400 pointing at the new route.
+ *
+ * The check is on the VALUE, not on the key's presence: every existing web
+ * call-site (role duplication, the role dialog) still posts both keys as
+ * `null`, and rejecting those would break role creation from an un-upgraded
+ * bundle for nothing. `null` / `''` = "no cadence" = exactly what the server
+ * now stores anyway, so it passes; a real value is a request the server can no
+ * longer honour, and silence would be worse than a 400.
  */
-function parseCron(
+function rejectLegacySchedule(
   x: unknown,
-): { ok: true; value: string | null } | { ok: false; error: string } {
-  if (x == null) return { ok: true, value: null };
-  if (typeof x !== 'string') return { ok: false, error: 'schedule must be a string or null' };
-  const trimmed = x.trim();
-  if (trimmed === '') return { ok: true, value: null };
-  if (!isValidCron(trimmed)) {
-    return { ok: false, error: 'schedule must be a valid cron expression (e.g. "0 6,12,20 * * *")' };
-  }
-  return { ok: true, value: trimmed };
+  field: string,
+): { ok: true } | { ok: false; error: string } {
+  if (x == null) return { ok: true };
+  if (typeof x === 'string' && x.trim() === '') return { ok: true };
+  return {
+    ok: false,
+    error: `${field} moved to /crons — create a cron targeting this role instead (docs/crons-agents.md)`,
+  };
 }
 
 /**
@@ -438,12 +443,6 @@ export function createRolesRouter(
   store: RoleStore,
   config: Config,
   /**
-   * Invoked after any successful role create/update/delete so the in-process
-   * RoleScheduler can re-arm its crons (there is no role-change event bus, so
-   * the mutating route is the re-arm trigger). Optional — tests omit it.
-   */
-  onRolesChanged?: () => void,
-  /**
    * J4 — connector-type registry: gates unknown connector types (422) and drives
    * password masking + form generation. Optional (discord stays built-in either
    * way; without it, non-discord types are rejected as unknown).
@@ -456,6 +455,13 @@ export function createRolesRouter(
    * team-creation time.
    */
   providerRegistry?: ProviderIdLookup,
+  /**
+   * How many crons target each role, counted by SQLite in one pass
+   * (docs/crons-agents.md §2.3). Feeds the `🕐 N CRONS` badge of the roles
+   * screen without a second poll. Optional: absent (a boot where the cron store
+   * failed, or a test that does not wire it) reads as 0 everywhere.
+   */
+  cronCounts?: () => Map<string, number>,
 ): Router {
   const router = Router();
 
@@ -498,7 +504,13 @@ export function createRolesRouter(
   }
 
   router.get('/roles', (_req: Request, res: Response) => {
-    res.json({ roles: store.list().map((r) => maskRole(r, connectorRegistry)) });
+    const counts = cronCounts?.() ?? new Map<string, number>();
+    res.json({
+      roles: store.list().map((r) => ({
+        ...maskRole(r, connectorRegistry),
+        cronCount: counts.get(r.id) ?? 0,
+      })),
+    });
   });
 
   // J4 — connector types available for role connectors (built-in `discord` +
@@ -558,15 +570,10 @@ export function createRolesRouter(
         .status(cn.status ?? 400)
         .json({ error: cn.error, ...(cn.code ? { code: cn.code } : {}) });
     }
-    const sch = parseCron(body.schedule);
-    if (!sch.ok) return res.status(400).json({ error: sch.error });
-    const smsg = parseNullableString(body.scheduleMessage, 'scheduleMessage');
-    if (!smsg.ok) return res.status(400).json({ error: smsg.error });
-    if (sch.value != null && smsg.value == null) {
-      return res
-        .status(400)
-        .json({ error: 'scheduleMessage is required when schedule is set' });
-    }
+    const sch = rejectLegacySchedule(body.schedule, 'schedule');
+    if (!sch.ok) return res.status(400).json({ error: sch.error, code: 'SCHEDULE_MOVED' });
+    const smsg = rejectLegacySchedule(body.scheduleMessage, 'scheduleMessage');
+    if (!smsg.ok) return res.status(400).json({ error: smsg.error, code: 'SCHEDULE_MOVED' });
     const appr = parseApprovalBody(body.approval);
     if (!appr.ok) return res.status(400).json({ error: appr.error });
 
@@ -615,8 +622,6 @@ export function createRolesRouter(
       defaultPermissionMode: perm,
       defaultProvider: dp.value,
       connectors: cn.value,
-      schedule: sch.value,
-      scheduleMessage: smsg.value,
       approval: appr.value,
       skills: coerceSkills(body.skills),
       ...(autoRemove !== undefined ? { autoRemoveDeadWorkers: autoRemove } : {}),
@@ -625,7 +630,6 @@ export function createRolesRouter(
       ...(budgetAction !== undefined ? { budgetAction } : {}),
     };
     const role = store.create(init);
-    onRolesChanged?.();
     res.status(201).json({ role: maskRole(role, connectorRegistry) });
   });
 
@@ -724,14 +728,12 @@ export function createRolesRouter(
       patch.connectors = r.value;
     }
     if (body.schedule !== undefined) {
-      const r = parseCron(body.schedule);
-      if (!r.ok) return res.status(400).json({ error: r.error });
-      patch.schedule = r.value;
+      const r = rejectLegacySchedule(body.schedule, 'schedule');
+      if (!r.ok) return res.status(400).json({ error: r.error, code: 'SCHEDULE_MOVED' });
     }
     if (body.scheduleMessage !== undefined) {
-      const r = parseNullableString(body.scheduleMessage, 'scheduleMessage');
-      if (!r.ok) return res.status(400).json({ error: r.error });
-      patch.scheduleMessage = r.value;
+      const r = rejectLegacySchedule(body.scheduleMessage, 'scheduleMessage');
+      if (!r.ok) return res.status(400).json({ error: r.error, code: 'SCHEDULE_MOVED' });
     }
     if (body.approval !== undefined) {
       const r = parseApprovalBody(body.approval);
@@ -764,30 +766,16 @@ export function createRolesRouter(
       if (!r.ok) return res.status(400).json({ error: r.error });
       patch.budgetAction = r.value;
     }
-    // Enforce the schedule⇒message invariant against the MERGED role: a patch
-    // can set a schedule without a message, or clear the message while the
-    // schedule stays — both would leave a cron with nothing to deliver.
-    const effSchedule = patch.schedule !== undefined ? patch.schedule : existing.schedule;
-    const effMessage =
-      patch.scheduleMessage !== undefined ? patch.scheduleMessage : existing.scheduleMessage;
-    if (effSchedule != null && effMessage == null) {
-      return res
-        .status(400)
-        .json({ error: 'scheduleMessage is required when schedule is set' });
-    }
-
     const updated = store.update(req.params.id, patch);
     if (!updated) {
       res.status(404).json({ error: 'not found' });
       return;
     }
-    onRolesChanged?.();
     res.json({ role: maskRole(updated, connectorRegistry) });
   });
 
   router.delete('/roles/:id', (req: Request<{ id: string }>, res: Response) => {
     store.delete(req.params.id);
-    onRolesChanged?.();
     res.status(204).end();
   });
 

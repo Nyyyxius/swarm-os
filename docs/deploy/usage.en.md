@@ -12,8 +12,9 @@ How to operate a running instance. For install/remote access see
   decisions; workers execute tasks and report back through an in-memory mailbox and
   an MCP server. Workers are leaves — they don't spawn sub-teams.
 - **Roles** — reusable definitions: the lead/worker system prompts (preambles),
-  default model and effort, an optional Discord connector, and an optional cron
-  cadence.
+  default model and effort, and an optional Discord connector.
+- **Crons** — scheduled wake-ups, targeting a **role**. A role can carry any
+  number of them; see [Crons](#crons) below.
 - All sessions run in `bypassPermissions`. **Isolation comes from the container,
   not the runtime — never run swarm-os outside Docker.**
 
@@ -43,10 +44,62 @@ webhook configured, notifications are simply logged.
 
 ---
 
-## Scheduler (cron per role)
+## Crons
 
-A role can carry a cron cadence to wake an agent on a schedule. Controlled by
-`SWARM_OS_SCHEDULE_ENABLED` (default on) and `SWARM_OS_SCHEDULE_TZ` (default UTC).
+A **cron** wakes a role on a schedule. It has its own screen — `#/crons`, from
+the ⌘K launcher (WORKSPACE ▸ CRONS), the `🕐 N CRONS` badge on a role, or the
+CRONS line in an agent's panel. On mobile it is reached from the STATS sheet.
+
+Every cron targets a **role**, not a session: when it fires, it is delivered to
+the lead of **every live instance** of that role. No live instance means a
+logged `noop` — a cron never restarts a team that is off.
+
+From the screen: **+ NEW CRON**, **PAUSE / RESUME**, edit the cadence or the
+action inline, **DELETE**, and **RUN NOW** (allowed even when the cron is
+paused, or when scheduling is off instance-wide — it is an explicit operator
+gesture). **LAST RUNS** keeps the 20 most recent fires of each cron with their
+outcome, exit code, duration and a truncated output excerpt.
+
+Two actions:
+
+- **MESSAGE** — deliver a template into the lead's inbox at each tick. Same
+  tokens as before: `{{fire}}`, `{{now}}`, `{{window:6h}}`.
+- **SCRIPT** — run a script inside the container; **the script decides** whether
+  to wake anyone. The last non-empty line of its stdout must be JSON:
+  `{"wake": true, "message": "…"}` delivers that message,
+  `{"wake": false}` disturbs nobody. A non-zero exit, an unreadable last line or
+  a timeout is recorded as an `error` run and wakes nobody.
+
+Scripts get an explicit, minimal environment (`SWARM_OS_CRON_ID`,
+`SWARM_OS_CRON_NAME`, `SWARM_OS_FIRE`, `TZ`, `UV_CACHE_DIR`, proxies — **no
+server token, no provider key**), an explicit interpreter (`python3`, `bash` or
+`node`), a hard timeout (60 s default, 240 s max) and must live under
+`/workspace` or `/data` — **container** paths.
+
+> Prefer `/data/crons/` for anything carrying a secret. Agents write
+> `/workspace`, so a script sitting there can be rewritten by the very agents
+> the cron wakes — a recurring execution with no session supervision.
+
+Anyone holding the `X-Auth-Token` can therefore run arbitrary code **in the
+container**. That is the power the token already grants (a `bypassPermissions`
+team on `/workspace` runs arbitrary code too), but it is worth saying out loud.
+
+Worked example, the full output contract and the `uv run --with requests`
+variant: [examples/crons/](../../examples/crons/).
+
+`SWARM_OS_SCHEDULE_ENABLED` (default on) and `SWARM_OS_SCHEDULE_TZ` (default
+UTC) are unchanged — they are now the master switch and timezone for all crons.
+With scheduling off, crons stop ticking (the screen says so) but RUN NOW still
+works.
+
+**Migration note.** The per-role cadence is gone: the `schedule` /
+`scheduleMessage` fields of a role no longer exist, and the cadence section of
+the role editor with them. On the first boot after the upgrade, every role that
+carried a cadence is converted into a `message` cron named `<role>-cadence` and
+the role columns are cleared — nothing to do by hand, and nothing fires twice.
+`POST` / `PATCH /roles` with a **non-null** `schedule` or `scheduleMessage` now
+answers **400** (`SCHEDULE_MOVED`); the keys sent at `null` are still accepted,
+so existing clients keep working.
 
 ---
 

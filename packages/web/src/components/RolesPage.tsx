@@ -68,6 +68,13 @@ interface Props {
   /** Called when the user clicks "← BACK TO MAP" or otherwise asks to close.
    *  The parent flips the hash back to `#/`. */
   onClose: () => void;
+  /**
+   * Open `#/crons` filtered on one role (the `🕐 N CRONS` badge). Passed down
+   * from `App.tsx` rather than read off the controller: this page has never
+   * consumed `useSwarmController`, and a context read here would make every
+   * existing render site of `RolesPage` require a provider.
+   */
+  onOpenCrons?: (roleId: string) => void;
 }
 
 /**
@@ -84,12 +91,11 @@ type SectionId =
   | 'leadPreamble'
   | 'workerPreamble'
   | 'connectors'
-  | 'cadence'
   | 'approvals'
   | 'autoCleanup'
   | 'budget';
 
-export function RolesPage({ open, onClose }: Props) {
+export function RolesPage({ open, onClose, onOpenCrons }: Props) {
   const { roles, loading, error, create, update, destroy } = useRoles();
   const { isMobile } = useShellMode();
   const [selectedRoleId, setSelectedRoleId] = useState<string | null>(null);
@@ -199,8 +205,9 @@ export function RolesPage({ open, onClose }: Props) {
         defaultPermissionMode: role.defaultPermissionMode,
         defaultProvider: role.defaultProvider,
         connectors: role.connectors,
-        schedule: role.schedule,
-        scheduleMessage: role.scheduleMessage,
+        // The role's CRONS are deliberately not copied (docs/crons-agents.md
+        // §5): they carry unique names and their own history, and silently
+        // duplicating a cadence would double every scheduled wake-up.
         approval: role.approval ?? null,
         autoRemoveDeadWorkers: role.autoRemoveDeadWorkers ?? false,
         autoRemoveDeadWorkersDelayMs: role.autoRemoveDeadWorkersDelayMs ?? 600000,
@@ -294,7 +301,29 @@ export function RolesPage({ open, onClose }: Props) {
                   <span className="tag-pill discord">DISCORD</span>
                 )}
                 {r.leadPrompt && <span className="tag-pill">LEAD-PROMPT</span>}
-                {r.schedule && <span className="tag-pill">🕐 {r.schedule}</span>}
+                {/* Cadence lives in the `crons` entity now (docs/crons-agents.md).
+                    The badge counts them from `cronCount`, which `GET /roles`
+                    already carries — no second poll. `stopPropagation` is not
+                    cosmetic: the badge sits inside a clickable `.role-item`,
+                    so without it a click would also select the role behind. */}
+                {(r.cronCount ?? 0) > 0 && (
+                  onOpenCrons ? (
+                    <button
+                      type="button"
+                      className="tag-pill"
+                      style={{ background: 'none', cursor: 'pointer' }}
+                      title={`Voir les ${r.cronCount} crons de ce rôle`}
+                      onClick={(e) => {
+                        e.stopPropagation();
+                        onOpenCrons(r.id);
+                      }}
+                    >
+                      🕐 {r.cronCount} CRONS
+                    </button>
+                  ) : (
+                    <span className="tag-pill">🕐 {r.cronCount} CRONS</span>
+                  )
+                )}
               </div>
             </div>
           ))}
@@ -381,14 +410,6 @@ export function RolesPage({ open, onClose }: Props) {
               role={role}
               editing={editingSection === 'connectors'}
               onEdit={() => setEditingSection('connectors')}
-              onCancel={() => setEditingSection(null)}
-              onSave={(body) => patchSelected(body)}
-            />
-
-            <CadenceSection
-              role={role}
-              editing={editingSection === 'cadence'}
-              onEdit={() => setEditingSection('cadence')}
               onCancel={() => setEditingSection(null)}
               onSave={(body) => patchSelected(body)}
             />
@@ -865,108 +886,6 @@ function PreambleSection({
             }
             style={{ width: '100%', minHeight: 140, resize: 'vertical' }}
           />
-          {error && (
-            <div
-              className="field-warn"
-              style={{ color: 'var(--bad)', borderLeftColor: 'var(--bad)' }}
-            >
-              {error}
-            </div>
-          )}
-        </>
-      )}
-    </div>
-  );
-}
-
-// ───────────────────────────── CADENCE ──────────────────────────────────────
-function CadenceSection({
-  role,
-  editing,
-  onEdit,
-  onCancel,
-  onSave,
-}: {
-  role: RoleView;
-  editing: boolean;
-  onEdit: () => void;
-  onCancel: () => void;
-  onSave: (body: Partial<RoleInput>) => Promise<void>;
-}) {
-  const [schedule, setSchedule] = useState(role.schedule ?? '');
-  const [message, setMessage] = useState(role.scheduleMessage ?? '');
-  const [error, setError] = useState<string | null>(null);
-
-  useEffect(() => {
-    setSchedule(role.schedule ?? '');
-    setMessage(role.scheduleMessage ?? '');
-    setError(null);
-  }, [role.id, editing]);
-
-  async function save() {
-    setError(null);
-    const sch = schedule.trim();
-    if (sch && !message.trim()) {
-      setError('Un message de tick est requis quand une cadence (cron) est définie.');
-      return;
-    }
-    try {
-      await onSave({
-        schedule: sch || null,
-        scheduleMessage: message.trim() ? message : null,
-      });
-    } catch (e) {
-      setError(e instanceof Error ? e.message : String(e));
-    }
-  }
-
-  return (
-    <div className="role-section">
-      <h3>
-        <span>CADENCE</span>
-        {editing ? (
-          <span style={{ display: 'flex', gap: 6 }}>
-            <button className="h-edit" onClick={onCancel}>
-              CANCEL
-            </button>
-            <button className="h-edit" onClick={() => void save()} style={{ color: 'var(--amber)' }}>
-              SAVE
-            </button>
-          </span>
-        ) : (
-          <button className="h-edit" onClick={onEdit}>
-            EDIT
-          </button>
-        )}
-      </h3>
-
-      {!editing ? (
-        <div className="cfg-pre">
-          {role.schedule ? `🕐 ${role.schedule}  →  ${role.scheduleMessage ?? ''}` : '— (no cadence) —'}
-        </div>
-      ) : (
-        <>
-          <label className="field-help" style={{ display: 'block', marginBottom: 4 }}>
-            cron (5 champs, TZ serveur — défaut UTC)
-          </label>
-          <input
-            value={schedule}
-            onChange={(e) => setSchedule(e.target.value)}
-            placeholder="0 6,12,20 * * *"
-            style={{ width: '100%' }}
-          />
-          <label className="field-help" style={{ display: 'block', margin: '10px 0 4px' }}>
-            message du tick — tokens {'{{fire}}'} / {'{{now}}'} / {'{{window:6h}}'}
-          </label>
-          <input
-            value={message}
-            onChange={(e) => setMessage(e.target.value)}
-            placeholder="run cycle cycle_window_id={{fire}}"
-            style={{ width: '100%' }}
-          />
-          <div className="field-help" style={{ marginTop: 8 }}>
-            Déposé dans l’inbox du lead de chaque instance vivante de ce rôle à chaque tic.
-          </div>
           {error && (
             <div
               className="field-warn"

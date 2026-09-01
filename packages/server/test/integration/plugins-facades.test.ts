@@ -43,11 +43,9 @@ const identityGuard: PluginGuard = <A extends unknown[]>(
 function buildApi(caps: PluginCapability[], notifier?: Notifier): {
   api: SwarmPluginApi;
   disposables: DisposableStore;
-  rolesChanged: { count: number };
 } {
   const store = new PluginStore(stack.db);
   const disposables = new DisposableStore();
-  const rolesChanged = { count: 0 };
   const api = buildPluginApi(
     {
       store,
@@ -63,9 +61,6 @@ function buildApi(caps: PluginCapability[], notifier?: Notifier): {
       settingsStore: stack.settingsStore,
       notifier: notifier ?? stack.spawner.notifier,
       config: stack.config,
-      onRolesChanged: () => {
-        rolesChanged.count += 1;
-      },
       toolRegistry: stack.pluginToolRegistry,
       httpRegistry: stack.pluginHttpRegistry,
       scheduleTimezone: 'UTC',
@@ -75,7 +70,7 @@ function buildApi(caps: PluginCapability[], notifier?: Notifier): {
     disposables,
     0,
   );
-  return { api, disposables, rolesChanged };
+  return { api, disposables };
 }
 
 function createOrch(name: string) {
@@ -138,12 +133,29 @@ describe('messaging façade', () => {
 });
 
 describe('roles façade', () => {
-  it('create fires onRolesChanged and persists the role', () => {
-    const { api, rolesChanged } = buildApi(['roles']);
+  it('create persists the role', () => {
+    const { api } = buildApi(['roles']);
     const role = api.roles.create({ label: 'from-plugin' });
     expect(role.label).toBe('from-plugin');
-    expect(rolesChanged.count).toBe(1);
     expect(roleStore.get(role.id)?.label).toBe('from-plugin');
+  });
+
+  // Neutralisation (docs/crons-agents.md §2.1.1): the façade hands its RoleInit
+  // straight to the store, so this is the door the 400 on the roles route does
+  // NOT cover. A cadence written here must not come back — otherwise it would
+  // re-feed the legacy migration at every boot.
+  it('never persists a legacy cadence, whatever the plugin sends', () => {
+    const { api } = buildApi(['roles']);
+    const role = api.roles.create({
+      label: 'cadenced-from-plugin',
+      schedule: '*/5 * * * *',
+      scheduleMessage: 'tick',
+    });
+    expect(role.schedule).toBeNull();
+    expect(role.scheduleMessage).toBeNull();
+    const patched = api.roles.update(role.id, { schedule: '0 * * * *', scheduleMessage: 'x' });
+    expect(patched.schedule).toBeNull();
+    expect(roleStore.get(role.id)?.schedule).toBeNull();
   });
 });
 

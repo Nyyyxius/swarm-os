@@ -47,10 +47,12 @@ CREATE INDEX IF NOT EXISTS idx_orchestrators_ended_at ON orchestrators(ended_at)
 -- optional; when present it pre-fills / overrides the corresponding orch field.
 -- `connectors_json` is a JSON array of {type, ...config}. Only `type:"discord"`
 -- with `webhookUrl` is supported today.
--- `schedule` is a 5-field cron expression; when set, the in-process
--- RoleScheduler (modules/schedule) delivers `schedule_message` (a template,
--- see modules/schedule/template) to the lead inbox of every live orchestrator
--- of this role at each cron tick. NULL = role has no cadence.
+-- `schedule` / `schedule_message` are LEGACY and always NULL on a live
+-- instance: cadence moved to the first-class `crons` table (modules/crons),
+-- which supports N crons per role and a `script` action. The columns are kept
+-- only so the boot-time migration in modules/crons/store.ts can read a cadence
+-- written by an older version, convert it into a cron and clear it; RoleStore
+-- forces both to NULL on every create/update, so nothing new lands here.
 CREATE TABLE IF NOT EXISTS roles (
   id TEXT PRIMARY KEY,
   label TEXT NOT NULL,

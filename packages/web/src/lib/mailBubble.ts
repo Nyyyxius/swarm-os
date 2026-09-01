@@ -43,6 +43,16 @@ export interface BubbleClassification {
 export const SYSTEM_FROM_VALUES: ReadonlySet<string> = new Set(['system']);
 
 /**
+ * Server-side senders that are a PREFIX plus a free-form name rather than a
+ * fixed sentinel — they cannot live in `SYSTEM_FROM_VALUES`, which matches by
+ * equality. `cron:<name>` is emitted by the cron delivery primitive
+ * (docs/crons-agents.md §2.1.5); without this branch a scheduled wake-up
+ * falls through to the intra-team case and is painted as a peer agent whose
+ * "session id" is the literal string `cron:daily-standup`.
+ */
+const PREFIXED_SYSTEM_FROM: readonly string[] = ['cron:'];
+
+/**
  * Short, human-friendlier handle derived from a session-id. The wire
  * format for intra-team peer messages does not (yet) include a session
  * name, so we expose a stable suffix of the id rather than the full
@@ -81,6 +91,19 @@ export function classifyBubble(
   // 2. System sentinel(s). Extensible via `SYSTEM_FROM_VALUES`.
   if (SYSTEM_FROM_VALUES.has(msg.from)) {
     return { kind: 'system', authorLabel: 'SYSTEM' };
+  }
+
+  // 2b. Prefixed system senders (`cron:<name>`). Same bucket, but the label
+  //     keeps the name: "which cadence woke me up" is the whole question an
+  //     operator asks of one of these bubbles.
+  for (const prefix of PREFIXED_SYSTEM_FROM) {
+    if (msg.from.startsWith(prefix)) {
+      const name = msg.from.slice(prefix.length);
+      return {
+        kind: 'system',
+        authorLabel: `CRON · ${(name || 'UNNAMED').toUpperCase()}`,
+      };
+    }
   }
 
   // 3. Cross-team: signed by the presence of `fromOrchestratorId`. We do

@@ -8,6 +8,7 @@ import { ApprovalsPage } from './components/ApprovalsPage';
 import { MonitoringPage } from './components/MonitoringPage';
 import { PluginsPage } from './components/PluginsPage';
 import { SkillsPage } from './components/SkillsPage';
+import { CronsPage } from './components/CronsPage';
 import { CodeGraphPage } from './components/CodeGraphPage';
 import IdeOverlay from './components/desktop/IdeOverlay';
 import PluginPanelHost from './components/desktop/PluginPanelHost';
@@ -25,6 +26,8 @@ type Route =
   | { kind: 'graph' }
   | { kind: 'plugins' }
   | { kind: 'skills' }
+  /** `#/crons` (id null) or the deep link `#/crons/<cronId>`. */
+  | { kind: 'crons'; id: string | null }
   | { kind: 'ide' }
   | { kind: 'panel'; plugin: string; panel: string };
 
@@ -43,6 +46,12 @@ function parseHash(): Route {
   // Feature B.3 — plugin UI panel: `#/panel/<plugin>/<panelId>`.
   const p = /^#\/panel\/([a-z][a-z0-9-]{1,40})\/([a-z][a-z0-9-]*)$/.exec(h);
   if (p && p[1] && p[2]) return { kind: 'panel', plugin: p[1], panel: p[2] };
+  // Cron deep link. The class MUST include `_`: ids are `cron_<8 hex>` (and
+  // `cron_role_<roleId>` for the migrated ones), so the orchestrator route's
+  // `[a-zA-Z0-9-]` would silently drop every one of them back to the list.
+  const cr = /^#\/crons\/([a-zA-Z0-9_-]+)$/.exec(h);
+  if (cr && cr[1]) return { kind: 'crons', id: cr[1] };
+  if (h === '#/crons') return { kind: 'crons', id: null };
   if (h === '#/roles') return { kind: 'roles' };
   if (h === '#/memory') return { kind: 'memory' };
   if (h === '#/board') return { kind: 'board' };
@@ -66,6 +75,7 @@ function setHashRoute(route: Route): void {
   else if (route.kind === 'graph') target = '#/graph';
   else if (route.kind === 'plugins') target = '#/plugins';
   else if (route.kind === 'skills') target = '#/skills';
+  else if (route.kind === 'crons') target = route.id ? `#/crons/${route.id}` : '#/crons';
   else if (route.kind === 'ide') target = '#/ide';
   else if (route.kind === 'panel') target = `#/panel/${route.plugin}/${route.panel}`;
   else target = `#/orchestrators/${route.id}`;
@@ -88,6 +98,10 @@ function setHashRoute(route: Route): void {
 export default function App() {
   const [route, setRoute] = useState<Route>(() => parseHash());
   const { isMobile, mode: shellMode, setMode: setShellMode } = useShellMode();
+  // Role filter of the crons screen. Deliberately NOT in the hash: the router
+  // above compares hashes by strict equality, so `#/crons?role=x` would be
+  // rewritten to `#/` on the next sync (docs/crons-agents.md §2.4).
+  const [cronsRoleFilter, setCronsRoleFilter] = useState<string | null>(null);
 
   // Keep the hash in sync with state, AND honour back/forward navigation.
   useEffect(() => {
@@ -125,6 +139,17 @@ export default function App() {
           onOpenGraph={() => setRoute({ kind: 'graph' })}
           onOpenPlugins={() => setRoute({ kind: 'plugins' })}
           onOpenSkills={() => setRoute({ kind: 'skills' })}
+          onOpenCrons={(roleId) => {
+            setCronsRoleFilter(roleId ?? null);
+            setRoute({ kind: 'crons', id: null });
+          }}
+          onOpenCron={(cronId) => {
+            // Deep link from the RightPanel CONFIG tab. The role filter is
+            // CLEARED, not inherited: a filter left over from an earlier visit
+            // could hide the very cron this link selects.
+            setCronsRoleFilter(null);
+            setRoute({ kind: 'crons', id: cronId });
+          }}
           onOpenIde={() => setRoute({ kind: 'ide' })}
           onOpenPanel={(plugin, panel) => setRoute({ kind: 'panel', plugin, panel })}
           onCloseRightPanel={() => {
@@ -140,6 +165,10 @@ export default function App() {
           <RolesPage
             open={route.kind === 'roles'}
             onClose={() => setRoute({ kind: 'list' })}
+            onOpenCrons={(roleId) => {
+              setCronsRoleFilter(roleId);
+              setRoute({ kind: 'crons', id: null });
+            }}
           />
 
           {/* MemoryPage overlay — shared knowledge graph. Responsive, safe to
@@ -190,6 +219,20 @@ export default function App() {
               mounted gated by `open`, same pattern as BoardPage. */}
           <CodeGraphPage
             open={route.kind === 'graph'}
+            onClose={() => setRoute({ kind: 'list' })}
+          />
+
+          {/* CronsPage overlay — agent cadences (docs/crons-agents.md). Always
+              mounted gated by `open`; the poll of `useCrons` is gated by the
+              same flag, so a closed screen issues no request. The selected
+              cron is carried BY THE ROUTE (`#/crons/<id>` is a deep link),
+              while the role filter is component state fed by `onOpenCrons`. */}
+          <CronsPage
+            open={route.kind === 'crons'}
+            cronId={route.kind === 'crons' ? route.id : null}
+            roleFilter={cronsRoleFilter}
+            onClearRoleFilter={() => setCronsRoleFilter(null)}
+            onSelectCron={(id) => setRoute({ kind: 'crons', id })}
             onClose={() => setRoute({ kind: 'list' })}
           />
 
