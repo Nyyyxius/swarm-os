@@ -189,6 +189,33 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
     connectorRegistry,
     ...(opts.providerRegistry ? { providerRegistry: opts.providerRegistry } : {}),
   });
+  // Agent crons — the store owns its tables on the raw Db handle and runs the
+  // legacy migration in its constructor. The scheduler is instantiated so
+  // `/crons` resolves (a route without one cannot report `nextRun`), and
+  // `start()` IS called: the armed set is what the pause/nextRun assertions
+  // read, and no test cadence is frequent enough to fire during a test.
+  const cronStore = new CronStore(db);
+  // The script runner is wired for real (against the test tmpdirs) so the
+  // integration tests exercise the same containment rules production uses.
+  const cronRunner = new CronScriptRunner({
+    workspaceRoot,
+    dataDir,
+    timezone: config.scheduleTimezone,
+    transport: config.agentTransport === 'ssh' ? 'ssh' : 'local',
+  });
+  const cronScheduler = new CronScheduler({
+    store: cronStore,
+    spawner,
+    defaults: {
+      maxMessageSizeBytes: config.maxMessageSizeBytes,
+      idleThresholdMs: config.idleThresholdMs,
+    },
+    timezone: config.scheduleTimezone,
+    enabled: config.scheduleEnabled,
+    runner: cronRunner,
+  });
+  cronScheduler.start();
+
   // Plugins — own tables on the raw Db handle + host over `<dataDir>/plugins`.
   // J2 wires the full façade deps (spawner/roles/settings/config) + the MCP and
   // HTTP registries so the integration tests exercise the real dynamic surface.
@@ -210,6 +237,8 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
     toolRegistry: pluginToolRegistry,
     httpRegistry: pluginHttpRegistry,
     connectorRegistry,
+    // Backs `api.crons` — same trio the /crons routes get below.
+    crons: { store: cronStore, scheduler: cronScheduler, runner: cronRunner },
     broadcastToLeads: (from, content) => {
       try {
         broadcastToLeadsFromExternal(spawner, from, content, {
@@ -244,33 +273,6 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
     intervalMs: config.backupIntervalMs,
     keep: config.backupKeep,
   });
-
-  // Agent crons — the store owns its tables on the raw Db handle and runs the
-  // legacy migration in its constructor. The scheduler is instantiated so
-  // `/crons` resolves (a route without one cannot report `nextRun`), and
-  // `start()` IS called: the armed set is what the pause/nextRun assertions
-  // read, and no test cadence is frequent enough to fire during a test.
-  const cronStore = new CronStore(db);
-  // The script runner is wired for real (against the test tmpdirs) so the
-  // integration tests exercise the same containment rules production uses.
-  const cronRunner = new CronScriptRunner({
-    workspaceRoot,
-    dataDir,
-    timezone: config.scheduleTimezone,
-    transport: config.agentTransport === 'ssh' ? 'ssh' : 'local',
-  });
-  const cronScheduler = new CronScheduler({
-    store: cronStore,
-    spawner,
-    defaults: {
-      maxMessageSizeBytes: config.maxMessageSizeBytes,
-      idleThresholdMs: config.idleThresholdMs,
-    },
-    timezone: config.scheduleTimezone,
-    enabled: config.scheduleEnabled,
-    runner: cronRunner,
-  });
-  cronScheduler.start();
 
   let mcp: McpServer | null = null;
   if (!opts.skipMcp) {

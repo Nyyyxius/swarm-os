@@ -1,5 +1,6 @@
 /**
- * J2 — plugin API façades (messaging / roles / teams / schedule.cron / notify).
+ * J2 — plugin API façades (messaging / roles / crons / teams / schedule.cron /
+ * notify).
  *
  * Builds the real `SwarmPluginApi` via `buildPluginApi` wired to a booted stack
  * (spawner + roleStore + settings + config) and drives the façades directly.
@@ -40,7 +41,18 @@ const identityGuard: PluginGuard = <A extends unknown[]>(
   fn: (...a: A) => unknown,
 ) => (...a: A): unknown => fn(...a);
 
-function buildApi(caps: PluginCapability[], notifier?: Notifier): {
+/**
+ * Build the real façade against the booted stack.
+ *
+ * `opts.withoutCrons` reproduces a DEGRADED boot: the crons store failed to open
+ * (`boot.cron_store_unavailable`) and `index.ts` hands the host no crons trio.
+ * The façade must then refuse loudly rather than pretend to work.
+ */
+function buildApi(
+  caps: PluginCapability[],
+  notifier?: Notifier,
+  opts: { withoutCrons?: boolean } = {},
+): {
   api: SwarmPluginApi;
   disposables: DisposableStore;
 } {
@@ -65,6 +77,15 @@ function buildApi(caps: PluginCapability[], notifier?: Notifier): {
       httpRegistry: stack.pluginHttpRegistry,
       scheduleTimezone: 'UTC',
       agentAssetsBasePath: null,
+      ...(opts.withoutCrons
+        ? {}
+        : {
+            crons: {
+              store: stack.cronStore,
+              scheduler: stack.cronScheduler,
+              runner: stack.cronRunner,
+            },
+          }),
     },
     PLUGIN,
     disposables,
@@ -294,5 +315,216 @@ describe('host façade — exec', () => {
     await expect(
       api.host.exec({ argv: ['echo'], maxOutputBytes: 999_999_999 }),
     ).rejects.toThrow();
+  });
+});
+
+describe('crons façade', () => {
+  /**
+   * A cadence that cannot fire during the test run (1 January, 03:00) — same
+   * trick as crons.test.ts, so a real tick can never slip a run row (or a
+   * message into a lead's inbox) under an assertion.
+   */
+  const NEVER = '0 3 1 1 *';
+
+  function targetRole(label = 'cron-target'): string {
+    return roleStore.create({ label }).id;
+  }
+
+  it('create validates, persists and re-arms the scheduler', async () => {
+    const roleId = targetRole();
+    const { api } = buildApi(['crons']);
+    const reload = vi.spyOn(stack.cronScheduler, 'reload');
+
+    const cron = await api.crons.create({
+      name: 'facade-daily',
+      roleId,
+      schedule: NEVER,
+      action: 'message',
+      message: 'wake up: {{now}}',
+    });
+
+    expect(cron.id).toMatch(/^cron_/);
+    expect(cron.name).toBe('facade-daily');
+    expect(cron.paused).toBe(false);
+    // Read off the ARMED job: a created, non-paused cron knows its next fire.
+    expect(cron.nextRun).not.toBeNull();
+    expect(reload).toHaveBeenCalled();
+    // Persisted where the REST surface and the UI read it, not in a plugin table.
+    expect(stack.cronStore.getByName('facade-daily')?.roleId).toBe(roleId);
+  });
+
+  it('supports the documented upsert-by-name (getByName → create/update)', async () => {
+    const roleId = targetRole();
+    const { api } = buildApi(['crons']);
+
+    expect(api.crons.getByName('facade-upsert')).toBeNull();
+    const created = await api.crons.create({
+      name: 'facade-upsert',
+      roleId,
+      schedule: NEVER,
+      action: 'message',
+      message: 'v1',
+    });
+
+    // Second activation: the name is found, so the plugin patches instead of
+    // creating a duplicate.
+    const found = api.crons.getByName('facade-upsert');
+    expect(found?.id).toBe(created.id);
+    const updated = await api.crons.update(found!.id, { message: 'v2', paused: true });
+    expect(updated.message).toBe('v2');
+    expect(updated.paused).toBe(true);
+    // Paused ⇒ nothing is armed, so there is no next fire to advertise.
+    expect(updated.nextRun).toBeNull();
+    expect(stack.cronStore.list().filter((c) => c.name === 'facade-upsert')).toHaveLength(1);
+  });
+
+  it('refuses a duplicate name rather than adopting the existing cron', async () => {
+    const roleId = targetRole();
+    const { api } = buildApi(['crons']);
+    const init = {
+      name: 'facade-dup',
+      roleId,
+      schedule: NEVER,
+      action: 'message' as const,
+      message: 'x',
+    };
+    await api.crons.create(init);
+    await expect(api.crons.create(init)).rejects.toThrow(/already exists/);
+  });
+
+  it('list/get expose the same crons the REST surface serves', async () => {
+    const roleId = targetRole();
+    const { api } = buildApi(['crons']);
+    const cron = await api.crons.create({
+      name: 'facade-list',
+      roleId,
+      schedule: NEVER,
+      action: 'message',
+      message: 'x',
+    });
+
+    expect(api.crons.list().map((c) => c.name)).toContain('facade-list');
+    expect(api.crons.get(cron.id)?.id).toBe(cron.id);
+    expect(api.crons.get('cron_missing')).toBeNull();
+    expect(api.crons.getByName('nope')).toBeNull();
+  });
+
+  it('delete removes the cron and re-arms', async () => {
+    const roleId = targetRole();
+    const { api } = buildApi(['crons']);
+    const cron = await api.crons.create({
+      name: 'facade-gone',
+      roleId,
+      schedule: NEVER,
+      action: 'message',
+      message: 'x',
+    });
+    const reload = vi.spyOn(stack.cronScheduler, 'reload');
+
+    api.crons.delete(cron.id);
+
+    expect(stack.cronStore.get(cron.id)).toBeNull();
+    expect(reload).toHaveBeenCalled();
+    // Idempotent: deleting an unknown id is a no-op, not a throw.
+    expect(() => api.crons.delete(cron.id)).not.toThrow();
+  });
+
+  it('update throws on an unknown id', async () => {
+    const { api } = buildApi(['crons']);
+    await expect(api.crons.update('cron_missing', { paused: true })).rejects.toThrow(
+      /cron cron_missing not found/,
+    );
+  });
+
+  // The whole point of sharing `modules/crons/validate.ts` with the route: a
+  // plugin must not be able to store a cron the operator's own form refuses.
+  it('applies the same validation rules as the REST route', async () => {
+    const roleId = targetRole();
+    const { api } = buildApi(['crons']);
+    const base = { roleId, schedule: NEVER, action: 'message' as const, message: 'x' };
+
+    await expect(api.crons.create({ ...base, name: 'bad name' })).rejects.toThrow(/name must be/);
+    await expect(
+      api.crons.create({ ...base, name: 'facade-persec', schedule: '* * * * * *' }),
+    ).rejects.toThrow(/exactly 5 fields/);
+    await expect(
+      // 5 fields, but croner cannot parse it — the second half of the check.
+      api.crons.create({ ...base, name: 'facade-badcron', schedule: '99 * * * *' }),
+    ).rejects.toThrow(/valid cron expression/);
+    await expect(
+      api.crons.create({ ...base, name: 'facade-norole', roleId: 'role_missing' }),
+    ).rejects.toThrow(/unknown role/);
+    await expect(
+      api.crons.create({ name: 'facade-nomsg', roleId, schedule: NEVER, action: 'message' }),
+    ).rejects.toThrow(/message is required/);
+    await expect(
+      api.crons.create({ name: 'facade-noscript', roleId, schedule: NEVER, action: 'script' }),
+    ).rejects.toThrow(/scriptPath is required/);
+    await expect(
+      api.crons.create({
+        name: 'facade-nointerp',
+        roleId,
+        schedule: NEVER,
+        action: 'script',
+        scriptPath: `${stack.workspaceRoot}/tick.py`,
+      }),
+    ).rejects.toThrow(/interpreter is required/);
+    // Containment: a path outside the workspace / data roots is refused here,
+    // exactly as the form refuses it.
+    await expect(
+      api.crons.create({
+        name: 'facade-escape',
+        roleId,
+        schedule: NEVER,
+        action: 'script',
+        scriptPath: '/etc/passwd',
+        interpreter: 'bash',
+      }),
+    ).rejects.toThrow();
+    expect(stack.cronStore.list().filter((c) => c.name.startsWith('facade-'))).toHaveLength(0);
+  });
+
+  it('enforces the merged invariants on a patch', async () => {
+    const roleId = targetRole();
+    const { api } = buildApi(['crons']);
+    const cron = await api.crons.create({
+      name: 'facade-patch',
+      roleId,
+      schedule: NEVER,
+      action: 'message',
+      message: 'x',
+    });
+    // Clearing the template of a `message` cron would leave a cadence with
+    // nothing to deliver.
+    await expect(api.crons.update(cron.id, { message: null })).rejects.toThrow(
+      /message is required/,
+    );
+    expect(stack.cronStore.get(cron.id)?.message).toBe('x');
+  });
+
+  it('requires the crons capability on every method', async () => {
+    const { api } = buildApi([]); // no caps granted
+    expect(() => api.crons.list()).toThrow(/'crons' capability/);
+    expect(() => api.crons.get('x')).toThrow(/'crons' capability/);
+    expect(() => api.crons.getByName('x')).toThrow(/'crons' capability/);
+    expect(() => api.crons.delete('x')).toThrow(/'crons' capability/);
+    await expect(
+      api.crons.create({ name: 'nope', roleId: 'r', schedule: NEVER, action: 'message' }),
+    ).rejects.toThrow(/'crons' capability/);
+    await expect(api.crons.update('x', {})).rejects.toThrow(/'crons' capability/);
+  });
+
+  it('fails loudly when the crons subsystem did not start (degraded boot)', async () => {
+    const roleId = targetRole();
+    const { api } = buildApi(['crons'], undefined, { withoutCrons: true });
+    const boom = /crons subsystem did not start/;
+    expect(() => api.crons.list()).toThrow(boom);
+    expect(() => api.crons.get('x')).toThrow(boom);
+    expect(() => api.crons.getByName('x')).toThrow(boom);
+    expect(() => api.crons.delete('x')).toThrow(boom);
+    await expect(
+      api.crons.create({ name: 'facade-degraded', roleId, schedule: NEVER, action: 'message', message: 'x' }),
+    ).rejects.toThrow(boom);
+    await expect(api.crons.update('x', {})).rejects.toThrow(boom);
   });
 });

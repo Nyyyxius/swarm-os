@@ -22,6 +22,7 @@ import type { ApprovalReplyResolver } from '../approvals/reply.js';
 import type { ApprovalReactionResolver } from '../approvals/reaction.js';
 import type { SwarmEvent, SwarmEventKind } from '../../events.js';
 import type { Role, RoleInit, RolePatch } from '../roles/index.js';
+import type { CronInit, CronPatch, CronRecord } from '../crons/store.js';
 import type {
   SendOutcome,
   BroadcastOutcome,
@@ -71,6 +72,7 @@ export const PLUGIN_CAPABILITIES = [
   'connectors',
   'settings-read',
   'host-exec',
+  'crons',
 ] as const;
 
 export type PluginCapability = (typeof PLUGIN_CAPABILITIES)[number];
@@ -334,6 +336,26 @@ export interface TeamView {
 }
 
 // ---------------------------------------------------------------------------
+// CronView — a cron plus its live scheduling state (api.crons.*)
+// ---------------------------------------------------------------------------
+
+export type { CronAction, CronInit, CronPatch, CronRecord } from '../crons/store.js';
+
+/**
+ * What every `api.crons.*` method returns: the stored record plus the one piece
+ * of state that is NOT in the table — when it will actually fire next.
+ *
+ * `nextRun` is read off the `Cron` the scheduler already armed, never recomputed
+ * from a bare `new Cron(expr)` (a fresh probe would evaluate in the process's
+ * local timezone instead of `SWARM_OS_SCHEDULE_TZ`). It is `null` whenever no
+ * fire is coming: the cron is `paused`, cadence is disabled instance-wide
+ * (`SWARM_OS_SCHEDULE_ENABLED=false`), or the row was just written and the
+ * re-arm has not happened yet. A plugin must therefore read `paused` — not a
+ * null `nextRun` — to decide whether a cron is switched off.
+ */
+export type CronView = CronRecord & { nextRun: string | null };
+
+// ---------------------------------------------------------------------------
 // Notify — plugin custom notifications (api.notify.custom)
 // ---------------------------------------------------------------------------
 
@@ -420,6 +442,48 @@ export interface SwarmPluginApi {
     get(id: string): Role | null;
     create(init: RoleInit): Role;
     update(id: string, patch: RolePatch): Role;
+    delete(id: string): void;
+  };
+
+  /**
+   * Agent crons (capability `crons`, docs/crons-agents.md) — the same entity the
+   * `#/crons` screen and `/crons` REST surface drive, with the same validation.
+   * This is how a plugin PROVISIONS the cadences it needs instead of asking the
+   * operator to type them in.
+   *
+   * The intended pattern is an idempotent UPSERT BY NAME, run at every
+   * `activate()`, so a redeploy reconciles rather than duplicates:
+   *
+   * ```ts
+   * const wanted = { name: 'trader-open', roleId, schedule: '30 9 * * 1-5',
+   *                  action: 'message' as const, message: 'market open: {{now}}' };
+   * const found = api.crons.getByName(wanted.name);
+   * if (!found) await api.crons.create(wanted);
+   * else if (found.schedule !== wanted.schedule || found.message !== wanted.message) {
+   *   await api.crons.update(found.id, { schedule: wanted.schedule, message: wanted.message });
+   * }
+   * ```
+   *
+   * Diff BEFORE calling `update`: every mutation re-arms the whole scheduler and
+   * bumps `updatedAt`, so an unconditional write on every activation makes the
+   * cron look permanently edited. `name` is UNIQUE (it is also the `cron:<name>`
+   * sender of the delivered messages): creating one that already exists throws
+   * rather than silently adopting the existing row.
+   *
+   * Every call throws when the crons subsystem did not start on this boot (a
+   * degraded boot leaves the tables unreadable) — the same failure the `/crons`
+   * route reports by not being mounted at all.
+   */
+  readonly crons: {
+    list(): CronView[];
+    get(id: string): CronView | null;
+    /** `null` when no cron carries that name — the read half of an upsert. */
+    getByName(name: string): CronView | null;
+    /** Async: a `script` cron's path is realpath-checked before it is stored. */
+    create(init: CronInit): Promise<CronView>;
+    /** Partial edit. Throws when `id` is unknown. */
+    update(id: string, patch: CronPatch): Promise<CronView>;
+    /** Idempotent — deleting an unknown id is a no-op. Run history cascades. */
     delete(id: string): void;
   };
 

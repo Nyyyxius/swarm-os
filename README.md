@@ -261,6 +261,7 @@ sandbox**: plugins run in-process as trusted code.
 | `notify` / `schedule` | push operator notifications (incl. free-form `notify.custom` alerts) / cron expressions + intervals |
 | `connectors` | provide channel connector types (Slack/Telegram-style bridges) roles can use |
 | `settings-read` | read instance settings |
+| `crons` | CRUD on the agent crons (same entity as the `#/crons` screen) — a plugin provisions its own cadences, upserting by `name` |
 | `host-exec` | run arbitrary commands on the **host** over SSH — short (`api.host.exec`) or a detached long-running job (`api.host.spawnJob`/`jobStatus`/`killJob`) — the most powerful capability: full trust, `ssh` agent transport only |
 
 ### Installing & managing

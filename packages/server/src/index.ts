@@ -696,6 +696,10 @@ const pluginHost = pluginStore === null ? null : new PluginHost({
   toolRegistry: pluginToolRegistry,
   httpRegistry: pluginHttpRegistry,
   connectorRegistry,
+  // `api.crons` — the same store/scheduler/runner trio the /crons routes drive.
+  // `undefined` on a degraded boot (no crons store): the façade then throws a
+  // named error, mirroring the route simply not being mounted.
+  crons,
   // Signal leads of a plugin tool-set change via the external-origin broadcast
   // path (mailbox.push + emit + idle wake). Best-effort — never throws into
   // the enable/disable path.

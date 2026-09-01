@@ -26,7 +26,7 @@ import type { SwarmEventBus } from '../../events.js';
 import { PluginStore, type PluginRow } from './store.js';
 import { loadManifest, HOST_API_VERSION, type PluginManifest, type UiPanel } from './manifest.js';
 import { loadPluginModule } from './loader.js';
-import { buildPluginApi, type PluginGuard } from './api.js';
+import { buildPluginApi, type PluginApiDeps, type PluginGuard } from './api.js';
 import { withTimeout, isThenable, swapPluginDir } from './util.js';
 import type { PluginToolRegistry } from './mcp-registry.js';
 import type { PluginHttpRegistry } from './http-registry.js';
@@ -171,6 +171,13 @@ export interface PluginHostDeps {
   /** J4 — connector registry backing api.connectors.register + wireConnectors. */
   connectorRegistry?: ConnectorRegistry;
   /**
+   * Agent crons — store + scheduler + script runner, backing the `api.crons`
+   * façade (docs/crons-agents.md §5). Absent on a boot where the crons store
+   * could not be opened; the façade then throws a named error instead of
+   * silently doing nothing.
+   */
+  crons?: PluginApiDeps['crons'];
+  /**
    * Broadcast an informative line to every active team's lead — used to signal
    * a plugin's MCP tool set changed (already-running sessions only see new
    * tools at restart; transport is stateless). Wired in index.ts to the
@@ -200,6 +207,7 @@ export class PluginHost {
   private readonly toolRegistry?: PluginToolRegistry;
   private readonly httpRegistry?: PluginHttpRegistry;
   private readonly connectorRegistry?: ConnectorRegistry;
+  private readonly crons?: PluginApiDeps['crons'];
   private readonly broadcastToLeads?: (from: string, content: string) => void;
   private readonly locks: PluginLockRegistry;
   private readonly clock: () => number;
@@ -229,6 +237,7 @@ export class PluginHost {
     this.toolRegistry = deps.toolRegistry;
     this.httpRegistry = deps.httpRegistry;
     this.connectorRegistry = deps.connectorRegistry;
+    this.crons = deps.crons;
     this.broadcastToLeads = deps.broadcastToLeads;
     this.locks = deps.locks ?? new PluginLockRegistry();
     this.clock = deps.now ?? Date.now;
@@ -405,6 +414,7 @@ export class PluginHost {
         httpRegistry: this.httpRegistry,
         connectorRegistry: this.connectorRegistry,
         connectorDecls: manifest.connectors,
+        crons: this.crons,
         scheduleTimezone: this.config?.scheduleTimezone,
         agentAssetsBasePath: assetsBasePath,
       },

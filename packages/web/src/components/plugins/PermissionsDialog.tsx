@@ -40,6 +40,7 @@ const CAP_HELP: Record<string, string> = {
   connectors: 'register channel connectors',
   'settings-read': 'read instance settings',
   'host-exec': 'run commands on the host (ssh) — full trust',
+  crons: 'read and mutate agent crons',
 };
 
 export function PermissionsDialog({

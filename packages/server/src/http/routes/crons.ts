@@ -36,124 +36,30 @@
  * required, and the path must realpath under the workspace or data root. That
  * check is a UX affordance, not the security boundary — the runner repeats it
  * at every fire, on the resolved path it then actually executes.
+ *
+ * The field rules themselves live in `modules/crons/validate.ts`, NOT here: the
+ * plugin façade (`api.crons.*`) is a second write surface onto the same table
+ * and has to refuse exactly the same inputs. This router owns the HTTP shape
+ * (status codes, envelope) and nothing else.
  */
 
 import { Router, type Request, type Response } from 'express';
-import {
-  CRON_INTERPRETERS,
-  CronStoreError,
-  DEFAULT_CRON_TIMEOUT_MS,
-  MAX_CRON_TIMEOUT_MS,
-  CRON_NAME_RE,
-  type CronAction,
-  type CronInit,
-  type CronPatch,
-  type CronRecord,
-  type CronStore,
-} from '../../modules/crons/store.js';
-import { isValidCron, type CronScheduler } from '../../modules/crons/scheduler.js';
+import { CronStoreError, type CronRecord, type CronStore } from '../../modules/crons/store.js';
+import type { CronScheduler } from '../../modules/crons/scheduler.js';
 import type { CronScriptRunner } from '../../modules/crons/runner.js';
+import {
+  validateCronInit,
+  validateCronPatch,
+  type CronInput,
+  type CronParsed,
+  type CronValidationDeps,
+  type RoleExistsLookup,
+} from '../../modules/crons/validate.js';
 import { withModule } from '../../logger.js';
 
+export type { RoleExistsLookup } from '../../modules/crons/validate.js';
+
 const log = withModule('crons.route');
-
-/**
- * The slice of the role store this router needs: "does this role exist". A cron
- * pointing at a role id that never existed is a typo worth reporting at the
- * form; a role deleted LATER leaves an orphan cron on purpose (§6.2 — operator
- * config is not cascade-deleted).
- */
-export interface RoleExistsLookup {
-  get(id: string): unknown | null;
-}
-
-type Parsed<T> = { ok: true; value: T } | { ok: false; error: string };
-
-function parseName(x: unknown): Parsed<string> {
-  if (typeof x !== 'string') return { ok: false, error: 'name must be a string' };
-  const trimmed = x.trim();
-  if (!CRON_NAME_RE.test(trimmed)) {
-    return {
-      ok: false,
-      error:
-        'name must be a slug of 1-64 chars: letters, digits, dot, dash, underscore (it is also the `cron:<name>` sender of the messages)',
-    };
-  }
-  return { ok: true, value: trimmed };
-}
-
-/**
- * A cron expression, restricted to FIVE fields (§2.2). croner itself accepts a
- * 6-field, to-the-second form — refused here: a per-second script cron is a
- * fork bomb bounded only by the overlap guard, and no operator asks for one on
- * purpose from this form.
- */
-function parseSchedule(x: unknown): Parsed<string> {
-  if (typeof x !== 'string') return { ok: false, error: 'schedule must be a string' };
-  const trimmed = x.trim();
-  if (trimmed === '') return { ok: false, error: 'schedule is required' };
-  if (trimmed.split(/\s+/).length !== 5) {
-    return {
-      ok: false,
-      error: 'schedule must have exactly 5 fields (minute hour day month weekday) — per-second expressions are refused',
-    };
-  }
-  if (!isValidCron(trimmed)) {
-    return { ok: false, error: 'schedule must be a valid cron expression (e.g. "0 6,12,20 * * *")' };
-  }
-  return { ok: true, value: trimmed };
-}
-
-function parseAction(x: unknown): Parsed<CronAction> {
-  if (x === 'message' || x === 'script') return { ok: true, value: x };
-  return { ok: false, error: "action must be 'message' or 'script'" };
-}
-
-function parseNullableString(x: unknown, field: string): Parsed<string | null> {
-  if (x == null) return { ok: true, value: null };
-  if (typeof x !== 'string') return { ok: false, error: `${field} must be a string or null` };
-  return { ok: true, value: x.length === 0 ? null : x };
-}
-
-function parseScriptArgs(x: unknown): Parsed<string[] | null> {
-  if (x == null) return { ok: true, value: null };
-  if (!Array.isArray(x) || x.some((v) => typeof v !== 'string')) {
-    return { ok: false, error: 'scriptArgs must be an array of strings or null' };
-  }
-  return { ok: true, value: x as string[] };
-}
-
-function parseInterpreter(x: unknown): Parsed<string | null> {
-  if (x == null) return { ok: true, value: null };
-  if (typeof x !== 'string' || !CRON_INTERPRETERS.includes(x)) {
-    return { ok: false, error: `interpreter must be one of ${CRON_INTERPRETERS.join('|')}` };
-  }
-  return { ok: true, value: x };
-}
-
-function parseTimeoutMs(x: unknown): Parsed<number | null> {
-  if (x == null) return { ok: true, value: null };
-  if (typeof x !== 'number' || !Number.isInteger(x) || x < 1000 || x > MAX_CRON_TIMEOUT_MS) {
-    return {
-      ok: false,
-      error: `timeoutMs must be an integer between 1000 and ${MAX_CRON_TIMEOUT_MS}, or null`,
-    };
-  }
-  return { ok: true, value: x };
-}
-
-interface CronBody {
-  name?: unknown;
-  roleId?: unknown;
-  schedule?: unknown;
-  action?: unknown;
-  message?: unknown;
-  scriptPath?: unknown;
-  scriptArgs?: unknown;
-  interpreter?: unknown;
-  timeoutMs?: unknown;
-  paused?: unknown;
-}
 
 export function createCronsRouter(
   store: CronStore,
@@ -163,27 +69,22 @@ export function createCronsRouter(
 ): Router {
   const router = Router();
 
+  // Role existence + script containment, wired once for both write routes. A
+  // server booted without a script runner simply refuses `action: 'script'`.
+  const validation: CronValidationDeps = {
+    ...(roles ? { roles } : {}),
+    ...(runner ? { resolveScriptPath: (p: string) => runner.resolveScriptPath(p) } : {}),
+  };
+
   /**
-   * Containment check for a script cron, at CREATION time. The runner re-runs
-   * exactly this at every fire (the path may have been swapped since), so this
-   * call buys no security — it buys an operator a refusal in the form instead
-   * of a silent `error` run three hours later.
-   *
-   * Returns an error string, or `null` when the path is acceptable.
+   * 400 for a refused write. The `code` is emitted only when it says something
+   * the message does not (`UNKNOWN_ROLE`, `INVALID_SCRIPT`) — a plain field
+   * error keeps the bare `{ error }` envelope the UI already parses.
    */
-  async function checkScript(
-    scriptPath: string | null,
-    interpreter: string | null,
-  ): Promise<string | null> {
-    if (!scriptPath) return "scriptPath is required when action is 'script'";
-    if (!interpreter) return "interpreter is required when action is 'script'";
-    if (!runner) return 'script crons are unavailable on this server (no script runner configured)';
-    try {
-      await runner.resolveScriptPath(scriptPath);
-      return null;
-    } catch (err) {
-      return err instanceof Error ? err.message : String(err);
-    }
+  function rejected(res: Response, r: Extract<CronParsed<unknown>, { ok: false }>): Response {
+    return res
+      .status(400)
+      .json(r.code === 'INVALID' ? { error: r.error } : { error: r.error, code: r.code });
   }
 
   /** Serialise a cron for a response: the record + its live scheduling state. */
@@ -213,10 +114,6 @@ export function createCronsRouter(
     res.status(500).json({ error: message, code: 'STORE_FAILED' });
   }
 
-  function checkRole(roleId: string): boolean {
-    return !roles || roles.get(roleId) != null;
-  }
-
   router.get('/crons', (_req: Request, res: Response) => {
     res.json({
       crons: store.list().map(view),
@@ -229,63 +126,10 @@ export function createCronsRouter(
 
   // async: a script cron's path is realpath-checked before it is stored.
   router.post('/crons', async (req: Request, res: Response) => {
-    const body = (req.body ?? {}) as CronBody;
-
-    const name = parseName(body.name);
-    if (!name.ok) return res.status(400).json({ error: name.error });
-    if (typeof body.roleId !== 'string' || body.roleId.length === 0) {
-      return res.status(400).json({ error: 'roleId is required and must be a non-empty string' });
-    }
-    if (!checkRole(body.roleId)) {
-      return res.status(400).json({ error: `unknown role '${body.roleId}'`, code: 'UNKNOWN_ROLE' });
-    }
-    const schedule = parseSchedule(body.schedule);
-    if (!schedule.ok) return res.status(400).json({ error: schedule.error });
-    const action = parseAction(body.action);
-    if (!action.ok) return res.status(400).json({ error: action.error });
-    const message = parseNullableString(body.message, 'message');
-    if (!message.ok) return res.status(400).json({ error: message.error });
-    const scriptPath = parseNullableString(body.scriptPath, 'scriptPath');
-    if (!scriptPath.ok) return res.status(400).json({ error: scriptPath.error });
-    const scriptArgs = parseScriptArgs(body.scriptArgs);
-    if (!scriptArgs.ok) return res.status(400).json({ error: scriptArgs.error });
-    const interpreter = parseInterpreter(body.interpreter);
-    if (!interpreter.ok) return res.status(400).json({ error: interpreter.error });
-    const timeoutMs = parseTimeoutMs(body.timeoutMs);
-    if (!timeoutMs.ok) return res.status(400).json({ error: timeoutMs.error });
-    if (body.paused !== undefined && typeof body.paused !== 'boolean') {
-      return res.status(400).json({ error: 'paused must be a boolean' });
-    }
-    // §2.2 invariants, checked here so the operator gets a field-level message
-    // (the store re-checks them — the plugin façade and the migration write
-    // there too).
-    if (action.value === 'message' && message.value == null) {
-      return res.status(400).json({ error: "message is required when action is 'message'" });
-    }
-    if (action.value === 'script') {
-      const reason = await checkScript(scriptPath.value, interpreter.value);
-      if (reason) return res.status(400).json({ error: reason, code: 'INVALID_SCRIPT' });
-    }
-
-    const init: CronInit = {
-      name: name.value,
-      roleId: body.roleId,
-      schedule: schedule.value,
-      action: action.value,
-      message: message.value,
-      scriptPath: scriptPath.value,
-      scriptArgs: scriptArgs.value,
-      interpreter: interpreter.value,
-      // A script cron stores its budget explicitly rather than leaning on the
-      // store's `null`-means-default: the number an operator is going to be
-      // judged by (and will want to raise) should be visible in the UI, not
-      // implied. Message crons keep `null` — they have no timeout.
-      timeoutMs:
-        action.value === 'script' ? (timeoutMs.value ?? DEFAULT_CRON_TIMEOUT_MS) : timeoutMs.value,
-      paused: body.paused === true,
-    };
+    const parsed = await validateCronInit((req.body ?? {}) as CronInput, validation);
+    if (!parsed.ok) return rejected(res, parsed);
     try {
-      const cron = store.create(init);
+      const cron = store.create(parsed.value);
       scheduler.reload();
       log.info({ event: 'crons.created', cronId: cron.id, name: cron.name, roleId: cron.roleId });
       return res.status(201).json({ cron: view(cron) });
@@ -306,87 +150,10 @@ export function createCronsRouter(
   router.patch('/crons/:id', async (req: Request<{ id: string }>, res: Response) => {
     const existing = store.get(req.params.id);
     if (!existing) return res.status(404).json({ error: 'not found', code: 'NOT_FOUND' });
-    const body = (req.body ?? {}) as CronBody;
-    const patch: CronPatch = {};
-
-    if (body.name !== undefined) {
-      const r = parseName(body.name);
-      if (!r.ok) return res.status(400).json({ error: r.error });
-      patch.name = r.value;
-    }
-    if (body.roleId !== undefined) {
-      if (typeof body.roleId !== 'string' || body.roleId.length === 0) {
-        return res.status(400).json({ error: 'roleId must be a non-empty string' });
-      }
-      if (!checkRole(body.roleId)) {
-        return res.status(400).json({ error: `unknown role '${body.roleId}'`, code: 'UNKNOWN_ROLE' });
-      }
-      patch.roleId = body.roleId;
-    }
-    if (body.schedule !== undefined) {
-      const r = parseSchedule(body.schedule);
-      if (!r.ok) return res.status(400).json({ error: r.error });
-      patch.schedule = r.value;
-    }
-    if (body.action !== undefined) {
-      const r = parseAction(body.action);
-      if (!r.ok) return res.status(400).json({ error: r.error });
-      patch.action = r.value;
-    }
-    if (body.message !== undefined) {
-      const r = parseNullableString(body.message, 'message');
-      if (!r.ok) return res.status(400).json({ error: r.error });
-      patch.message = r.value;
-    }
-    if (body.scriptPath !== undefined) {
-      const r = parseNullableString(body.scriptPath, 'scriptPath');
-      if (!r.ok) return res.status(400).json({ error: r.error });
-      patch.scriptPath = r.value;
-    }
-    if (body.scriptArgs !== undefined) {
-      const r = parseScriptArgs(body.scriptArgs);
-      if (!r.ok) return res.status(400).json({ error: r.error });
-      patch.scriptArgs = r.value;
-    }
-    if (body.interpreter !== undefined) {
-      const r = parseInterpreter(body.interpreter);
-      if (!r.ok) return res.status(400).json({ error: r.error });
-      patch.interpreter = r.value;
-    }
-    if (body.timeoutMs !== undefined) {
-      const r = parseTimeoutMs(body.timeoutMs);
-      if (!r.ok) return res.status(400).json({ error: r.error });
-      patch.timeoutMs = r.value;
-    }
-    if (body.paused !== undefined) {
-      if (typeof body.paused !== 'boolean') {
-        return res.status(400).json({ error: 'paused must be a boolean' });
-      }
-      patch.paused = body.paused;
-    }
-
-    // Invariants are enforced against the MERGED cron: a patch can clear the
-    // message while the action stays `message`, which would leave a cadence
-    // with nothing to deliver.
-    const effAction = patch.action ?? existing.action;
-    const effMessage = patch.message !== undefined ? patch.message : existing.message;
-    if (effAction === 'message' && effMessage == null) {
-      return res.status(400).json({ error: "message is required when action is 'message'" });
-    }
-    if (effAction === 'script') {
-      const effScriptPath = patch.scriptPath !== undefined ? patch.scriptPath : existing.scriptPath;
-      const effInterpreter =
-        patch.interpreter !== undefined ? patch.interpreter : existing.interpreter;
-      const reason = await checkScript(effScriptPath, effInterpreter);
-      if (reason) return res.status(400).json({ error: reason, code: 'INVALID_SCRIPT' });
-      // Same reasoning as POST: materialise the budget so it is visible. Only
-      // when the merged cron has none — never overwriting an explicit value.
-      const effTimeout = patch.timeoutMs !== undefined ? patch.timeoutMs : existing.timeoutMs;
-      if (effTimeout == null) patch.timeoutMs = DEFAULT_CRON_TIMEOUT_MS;
-    }
-
+    const parsed = await validateCronPatch(existing, (req.body ?? {}) as CronInput, validation);
+    if (!parsed.ok) return rejected(res, parsed);
     try {
-      const updated = store.update(req.params.id, patch);
+      const updated = store.update(req.params.id, parsed.value);
       if (!updated) return res.status(404).json({ error: 'not found', code: 'NOT_FOUND' });
       scheduler.reload();
       log.info({ event: 'crons.updated', cronId: updated.id, paused: updated.paused });
