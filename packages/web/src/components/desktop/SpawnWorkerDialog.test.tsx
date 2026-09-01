@@ -90,8 +90,6 @@ function mkRole(p: Partial<RoleView> = {}): RoleView {
     defaultModel: null,
     defaultEffort: null,
     defaultPermissionMode: null,
-    schedule: null,
-    scheduleMessage: null,
     connectors: [],
     createdAt: '2026-01-01T00:00:00Z',
     updatedAt: '2026-01-01T00:00:00Z',

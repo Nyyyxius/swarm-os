@@ -35,6 +35,10 @@ export function deriveKind(ev: MailboxMessageEvent): MapPulse['kind'] {
   //    non-'intra' kind so SwarmController maps its source to '__center__'
   //    (an intra kind would look for a session position that doesn't exist).
   if (typeof ev.from === 'string' && ev.from.startsWith('plugin:')) return 'human';
+  // 1.6) Cron-origin message (`from='cron:<name>'`, docs/crons-agents.md). Same
+  //    reasoning as `plugin:` above: the sender has no node on the map, so an
+  //    'intra' kind would look up `positions['cron:daily']` and drop the pulse.
+  if (typeof ev.from === 'string' && ev.from.startsWith('cron:')) return 'human';
   // 2) Cross-team: comes from another orchestrator's lead via
   //    `swarm.send_to_lead`. We detect it by comparing the source orch
   //    id to the destination orch id.

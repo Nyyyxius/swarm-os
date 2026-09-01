@@ -47,6 +47,24 @@ export function formatClockShort(ts: number | string): string {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}`;
 }
 
+/**
+ * Instant d'un tir de cron en heure locale du navigateur : `HH:MM` quand
+ * c'est aujourd'hui, `MMM D · HH:MM` sinon (docs/crons-agents.md §2.4).
+ *
+ * La distinction jour est délibérée malgré la place comptée dans la ligne
+ * `pr-crons` : un `09:00` seul pour un tir de demain se lit comme imminent.
+ * Ne calcule jamais le prochain tir — il vient du job armé côté serveur.
+ */
+export function formatCronWhen(iso: string | null): string {
+  if (!iso) return '—';
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return iso;
+  const time = d.toLocaleTimeString(undefined, { hour: '2-digit', minute: '2-digit' });
+  const sameDay = new Date().toDateString() === d.toDateString();
+  if (sameDay) return time;
+  return `${d.toLocaleDateString(undefined, { month: 'short', day: 'numeric' })} · ${time}`;
+}
+
 /** "HH:MM:SS" — clock long (pour TopBar). */
 export function formatClock(d: Date): string {
   return `${pad(d.getHours())}:${pad(d.getMinutes())}:${pad(d.getSeconds())}`;

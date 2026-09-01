@@ -71,7 +71,7 @@ Trois genres dans une seule table, discriminés par `kind` :
 | `session` (filet hors carte, workers seulement) | `sessions.id` | `session.created` | `session.exited` |
 | `orchestration` (conteneur, `parent_episode_id` des autres) | `orchestrators.id` | `orchestrator.created` | `orchestrator.destroyed` |
 
-Corollaire : comme les équipes ne meurent presque jamais, **la rétro ne peut pas être déclenchée par `orchestrator.destroyed` seul**. Elle opère sur une fenêtre — « les épisodes fermés et scorés depuis la dernière rétro de cette équipe » — déclenchée par l'un de : destruction, cron (patron `RoleScheduler`, `modules/schedule/index.ts:59`), seuil de N épisodes non distillés, ou appel manuel.
+Corollaire : comme les équipes ne meurent presque jamais, **la rétro ne peut pas être déclenchée par `orchestrator.destroyed` seul**. Elle opère sur une fenêtre — « les épisodes fermés et scorés depuis la dernière rétro de cette équipe » — déclenchée par l'un de : destruction, cron (patron `CronScheduler`, `modules/crons/scheduler.ts`), seuil de N épisodes non distillés, ou appel manuel.
 
 ---
 

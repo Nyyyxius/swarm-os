@@ -454,6 +454,42 @@
 }
 .m-as-meta b { color: var(--text-dim); font-weight: 600; }
 
+/* Agent crons (docs/crons-agents.md §2.4) — mobile twin of the desktop
+   `.pr-crons`. ONE line that never wraps: `m-sheet-head` is a fixed block
+   above the tabs, so a second line would be taken straight out of the
+   console below. Overflow is clipped rather than ellipsised on the row: the
+   count and the next fire sit on the left and always survive; the cron NAME
+   is the part allowed to be cut (its full text is in the `title`), and the
+   ALL button is pinned right by `margin-left: auto` and `flex: none`. */
+.m-as-crons {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: 10px;
+  white-space: nowrap;
+  overflow: hidden;
+  font-size: 10px;
+  color: var(--text-dim);
+}
+.m-as-crons .lbl { color: var(--text-mute); letter-spacing: 0.1em; }
+.m-as-crons .sep { color: var(--text-mute); opacity: 0.5; }
+.m-as-crons .next { color: var(--amber); }
+.m-as-crons .nm { color: var(--text-mute); overflow: hidden; text-overflow: ellipsis; }
+.m-as-crons .paused { color: var(--stopped); }
+.m-as-crons .all {
+  margin-left: auto;
+  flex: none;
+  border-radius: 6px;
+  border: 1px solid var(--border);
+  background: transparent;
+  color: var(--text-dim);
+  font-family: inherit;
+  font-size: 9px;
+  letter-spacing: 0.12em;
+  padding: 6px 10px;
+}
+.m-as-crons .all:active { background: var(--panel-elev); color: var(--amber); }
+
 .m-as-actions {
   display: grid;
   grid-template-columns: repeat(auto-fit, minmax(64px, 1fr));

@@ -37,8 +37,6 @@ interface SubmitBody {
   /** `null` = inherit the instance default, same convention as `defaultModel`. */
   defaultProvider: string | null;
   connectors: ConnectorView[];
-  schedule: string | null;
-  scheduleMessage: string | null;
   /** Skills activated for this role (mode 'inject'). */
   skills: SkillActivation[];
   /** Dead-worker reaper: soft-remove terminal workers after the delay. */
@@ -106,8 +104,6 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
   const [discordUrl, setDiscordUrl] = useState<string>('');
   const [discordChannelId, setDiscordChannelId] = useState<string>('');
   const [discordBotToken, setDiscordBotToken] = useState<string>('');
-  const [schedule, setSchedule] = useState<string>('');
-  const [scheduleMessage, setScheduleMessage] = useState<string>('');
   const [autoRemoveDead, setAutoRemoveDead] = useState<boolean>(false);
   const [autoRemoveDelayMin, setAutoRemoveDelayMin] = useState<string>('10');
   const [costBudget, setCostBudget] = useState<string>('');
@@ -154,8 +150,6 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
       setDiscordUrl(discord?.webhookUrl ?? '');
       setDiscordChannelId(discord?.channelId ?? '');
       setDiscordBotToken(discord?.botToken ?? '');
-      setSchedule(initial.schedule ?? '');
-      setScheduleMessage(initial.scheduleMessage ?? '');
       setAutoRemoveDead(initial.autoRemoveDeadWorkers ?? false);
       setAutoRemoveDelayMin(
         String(Math.round((initial.autoRemoveDeadWorkersDelayMs ?? 600000) / 60000)),
@@ -177,8 +171,6 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
       setDiscordUrl('');
       setDiscordChannelId('');
       setDiscordBotToken('');
-      setSchedule('');
-      setScheduleMessage('');
       setAutoRemoveDead(false);
       setAutoRemoveDelayMin('10');
       setCostBudget('');
@@ -269,10 +261,6 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
         }
         parsedCount = n;
       }
-      const trimmedSchedule = schedule.trim();
-      if (trimmedSchedule && !scheduleMessage.trim()) {
-        throw new Error('Un message de tick est requis quand une cadence (cron) est définie.');
-      }
       let autoRemoveDelayMs = 600000;
       if (autoRemoveDead) {
         const n = Number.parseInt(autoRemoveDelayMin, 10);
@@ -297,8 +285,6 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
         // `null` = inherit `config.defaultProvider` (nullable server-side).
         defaultProvider: provider || null,
         connectors,
-        schedule: trimmedSchedule || null,
-        scheduleMessage: scheduleMessage.trim() ? scheduleMessage : null,
         skills: selectedSkills.map((name) => ({ name, mode: 'inject' as const })),
         autoRemoveDeadWorkers: autoRemoveDead,
         autoRemoveDeadWorkersDelayMs: autoRemoveDelayMs,
@@ -450,30 +436,6 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
               <p className="mt-1 text-[11px] text-slate-400">{permissionNote(effectiveProvider)}</p>
             )}
           </Field>
-          <Field label="cadence — cron (optional)">
-            <input
-              className={inputCls}
-              placeholder="0 6,12,20 * * *"
-              value={schedule}
-              onChange={(e) => setSchedule(e.target.value)}
-            />
-          </Field>
-          <Field label="tick message (required if cadence set)">
-            <input
-              className={inputCls}
-              placeholder="run cycle cycle_window_id={{fire}}"
-              value={scheduleMessage}
-              onChange={(e) => setScheduleMessage(e.target.value)}
-            />
-          </Field>
-          {schedule.trim() && (
-            <p className="col-span-2 -mt-1 text-[11px] text-slate-400">
-              Tic horloge-murale (TZ serveur, défaut UTC) → déposé dans l’inbox du lead de chaque
-              instance vivante. Tokens : <code>{'{{fire}}'}</code> (clé idempotente,
-              ex. <code>2026-06-18T20:00Z</code>), <code>{'{{now}}'}</code>,{' '}
-              <code>{'{{window:6h}}'}</code>.
-            </p>
-          )}
           <div className="col-span-2 mt-1">
             <label className="flex items-center gap-2 text-sm text-slate-200">
               <input

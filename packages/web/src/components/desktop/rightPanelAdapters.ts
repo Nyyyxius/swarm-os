@@ -41,6 +41,11 @@ export function buildRightPanelTeam(
   return {
     id: orch.id,
     name: orch.name,
+    // Agent crons target a ROLE, not a session (docs/crons-agents.md §2.1.2):
+    // sessions are ephemeral, the role is the durable identity. Carried here
+    // as static data so the panel can decide whether to show its CRONS line —
+    // a free-form-`role` team has no roleId and therefore no cadences.
+    roleId: orch.roleId,
     leadId: orch.leadSessionId ?? '',
     workerCount: orch.sessions.filter((s) => s.type === 'worker').length,
     model: orch.defaultModel,

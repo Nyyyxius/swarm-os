@@ -99,7 +99,7 @@ plugin `novelai` **est déjà** un « skill » dans tout sauf le nom.
 
 - **Rôle = preset versionné** : `RoleStore` sur la table `roles` avec
   `leadPrompt`, **`leadPreamble`**, **`workerPreamble`**, `defaultModel`/`Effort`/
-  `PermissionMode`/`Provider`, `workerCount`, `connectors[]`, `schedule`, `approval`
+  `PermissionMode`/`Provider`, `workerCount`, `connectors[]`, `approval`
   (`roles/index.ts:165-202`, `277-345`). Connecteurs sérialisés en JSON dans une
   colonne unique `connectors_json` (`schema.sql:65`) — **patron directement
   réutilisable** pour un futur `skills_json`.

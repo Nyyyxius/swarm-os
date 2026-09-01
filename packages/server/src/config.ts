@@ -246,16 +246,20 @@ export interface Config {
    */
   costRollupIntervalMs: number;
   /**
-   * Per-role cron scheduler (modules/schedule): master switch. When `true`
-   * (default), a role carrying a `schedule` gets an in-process cron that
-   * delivers its `scheduleMessage` to the lead inbox of every live instance.
-   * Env: `SWARM_OS_SCHEDULE_ENABLED`.
+   * Cron scheduler (modules/crons): master switch. When `true` (default),
+   * every non-paused row of the `crons` table gets an in-process croner job
+   * that delivers a message — or runs a script that decides — to the lead
+   * inbox of every live instance of the cron's role. `false` disarms every
+   * job; a manual fire (`POST /crons/:id/fire`) still works, being an explicit
+   * operator gesture. Env: `SWARM_OS_SCHEDULE_ENABLED` (name kept for
+   * compatibility — renaming it would break existing deployments).
    */
   scheduleEnabled: boolean;
   /**
-   * IANA timezone the per-role cron expressions are evaluated in. Default
-   * `UTC` — explicit so cadence does not drift with the container's TZ.
-   * Env: `SWARM_OS_SCHEDULE_TZ`.
+   * IANA timezone every cron expression is evaluated in. Default `UTC` —
+   * explicit so cadence does not drift with the container's TZ. Also exported
+   * to script crons as `TZ`, so a script computing "today" agrees with the
+   * schedule that woke it. Env: `SWARM_OS_SCHEDULE_TZ`.
    */
   scheduleTimezone: string;
   /**
@@ -749,7 +753,8 @@ export function loadConfig(): Config {
   // next (the watermark lives in SQLite). `0` disables it.
   const costRollupIntervalMs = intEnv('SWARM_OS_COST_ROLLUP_INTERVAL_MS', 60 * 60 * 1000);
 
-  // Per-role cron scheduler (in-process; modules/schedule).
+  // Cron scheduler (in-process; modules/crons). Env names predate the move
+  // from a per-role cadence to first-class crons and are kept as-is.
   const scheduleEnabled = boolEnv('SWARM_OS_SCHEDULE_ENABLED', true);
   const scheduleTimezone = process.env.SWARM_OS_SCHEDULE_TZ ?? 'UTC';
 

@@ -40,6 +40,7 @@ export default function DesktopShell() {
         onOpenMonitoring={c.onOpenMonitoring}
         onOpenPlugins={c.onOpenPlugins}
         onOpenSkills={c.onOpenSkills}
+        onOpenCrons={c.onOpenCrons}
         onOpenIde={c.onOpenIde}
         onOpenSettings={() => c.setSettingsOpen(true)}
         onOpenUpdates={c.openUpdates}
@@ -80,6 +81,12 @@ export default function DesktopShell() {
           onSend={c.onSend}
           onSpawnWorker={c.handleSpawnWorker}
           onEditConfig={c.handleEditConfig}
+          // Crons of the selected team's role — a SEPARATE prop, never folded
+          // into `selectedTeam` (docs/crons-agents.md §2.4): the list repolls
+          // every 5 s, the team object must not.
+          crons={c.selectedTeamCrons}
+          onOpenCrons={c.onOpenCrons}
+          onOpenCron={c.onOpenCron}
           onTerminalRoleChange={c.onTerminalRoleChange}
           onTerminalDataFrame={c.onTerminalDataFrame}
         />

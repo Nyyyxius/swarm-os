@@ -73,6 +73,9 @@ interface Props {
   onOpenPlugins: () => void;
   /** Open the skills library management overlay (`#/skills`). */
   onOpenSkills?: () => void;
+  /** Open the agent-crons overlay (`#/crons`). Optional for backward
+   *  compatibility with existing call sites. */
+  onOpenCrons?: () => void;
   /** Open the VS Code web IDE on the deployment workspace (fullscreen overlay). */
   onOpenIde: () => void;
   onOpenSettings: () => void;
@@ -89,7 +92,7 @@ const EMPTY_FLASH_SET: ReadonlySet<string> = new Set();
 
 export default function TopBar({
   teams, selectedTeamId, flashTeamIds, totalAgents, info,
-  onSelectTeam, onNewTeam, onOpenRoles, onOpenMemory, onOpenBoard, onOpenApprovals, onOpenGraph, onOpenMonitoring, onOpenPlugins, onOpenSkills, onOpenIde, onOpenSettings,
+  onSelectTeam, onNewTeam, onOpenRoles, onOpenMemory, onOpenBoard, onOpenApprovals, onOpenGraph, onOpenMonitoring, onOpenPlugins, onOpenSkills, onOpenCrons, onOpenIde, onOpenSettings,
   onOpenUpdates, onOpenAppearance, menuBlocked,
 }: Props) {
   const flashSet = flashTeamIds ?? EMPTY_FLASH_SET;
@@ -138,6 +141,7 @@ export default function TopBar({
       case 'skills':     onOpenSkills?.(); return;
       case 'plugins':    onOpenPlugins(); return;
       case 'ide':        onOpenIde(); return;
+      case 'crons':      onOpenCrons?.(); return;
       case 'update':     onOpenUpdates(); return;
       case 'settings':   onOpenSettings(); return;
       case 'appearance': onOpenAppearance?.(); return;

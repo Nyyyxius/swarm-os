@@ -1,5 +1,5 @@
 /**
- * Tiny template renderer for role schedule messages (modules/schedule).
+ * Tiny template renderer for `action='message'` cron templates (modules/crons).
  *
  * Tokens (case-insensitive):
  *  - {{fire}}      → fire time truncated to the minute, e.g. `2026-06-18T20:00Z`.
@@ -13,7 +13,7 @@
  *                    wall-clock boundaries (e.g. 6h → 00,06,12,18 UTC).
  *
  * Unknown / malformed tokens are left verbatim — rendering never throws, so a
- * typo in a role's message can't take the scheduler down.
+ * typo in a cron's message can't take the scheduler down.
  */
 
 const TOKEN_RE = /\{\{\s*([a-z]+)(?::(\d+)([hm]))?\s*\}\}/gi;

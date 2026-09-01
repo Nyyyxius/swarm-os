@@ -149,7 +149,7 @@ for `manifest ∩ granted`.
 | `storage.defineTable(ddl)` / `prepare(sql)` | `db-tables` | Private SQLite tables — names must start `plugin_<name'>_` (`name'` = name with `-`→`_`). |
 | `events.on(kind, cb)` / `events.emit(subKind, payload)` | `events` / `events-emit` | Handlers dispatched async (off the emit path). Emitted kind is forced to `plugin.<name>.<subKind>` — you can't forge a core kind. |
 | `teams` | `teams` | `list/get/create/destroy/spawnWorker/killWorker` — snapshots only, never `session_secret`. |
-| `roles` | `roles` | `list/get/create/update/delete` (re-arms the scheduler on mutation). |
+| `roles` | `roles` | `list/get/create/update/delete`. `schedule`/`scheduleMessage` are deprecated and forced to NULL — cadence lives in the `crons` entity (docs/crons-agents.md), which has no plugin façade yet. |
 | `messaging` | `messaging` | `sendToSession/sendToLead/broadcast/broadcastToLeads/readInbox`. `from` shows as `plugin:<name>`. |
 | `mcp.registerTool(def)` | `mcp-tools` | Exposes `<name>.<tool>` to agents (see §5). |
 | `http.registerRouter` / `registerPublicRouter` | `http-routes` / `http-public` | Dynamic Express routes (see §5). |

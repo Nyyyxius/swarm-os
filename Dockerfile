@@ -96,6 +96,10 @@ FROM node:24-bookworm-slim AS runtime
 #              fallback exists but loses unicode fidelity.
 #   - git    → some npm post-install scripts call git; harmless to keep.
 #              ~14 MB but it's also useful for in-container cwd inspection.
+#   - bash   → one of the three interpreters a SCRIPT cron may declare
+#              (docs/crons-agents.md §2.5, with python3 and node). Present by
+#              Debian inheritance today, pinned here so a future slimmer base
+#              cannot silently break every bash cron.
 #   - ca-certificates → curl HTTPS + node fetch outbound.
 #
 # We deliberately do NOT install make / g++ / build-essential in runtime —
@@ -107,6 +111,7 @@ RUN apt-get update \
       curl \
       python3 \
       git \
+      bash \
       ca-certificates \
       openssh-client \
       libatomic1 \

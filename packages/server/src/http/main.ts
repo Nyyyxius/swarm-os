@@ -28,6 +28,10 @@ import { createMemoryRouter } from './routes/memory.js';
 import { createTaskboardRouter } from './routes/taskboard.js';
 import { createApprovalsRouter } from './routes/approvals.js';
 import { createCodegraphRouter } from './routes/codegraph.js';
+import { createCronsRouter } from './routes/crons.js';
+import type { CronStore } from '../modules/crons/store.js';
+import type { CronScheduler } from '../modules/crons/scheduler.js';
+import type { CronScriptRunner } from '../modules/crons/runner.js';
 import type { MemoryStore } from '../modules/memory/store.js';
 import type { TaskboardStore } from '../modules/taskboard/store.js';
 import type { GraphStore } from '../modules/codegraph/store.js';
@@ -97,6 +101,25 @@ export interface BootGate {
 }
 
 /**
+ * The crons subsystem, when it came up (docs/crons-agents.md). Handed in as one
+ * object because its two halves are inseparable: the routes need the store to
+ * read/write and the scheduler both to re-arm after a mutation and to report a
+ * `nextRun` read off the LIVE cron. `undefined` = this boot has no crons (the
+ * store failed to open, or a test did not wire it): `/crons` is simply not
+ * mounted and `GET /roles` reports `cronCount: 0`.
+ */
+export interface CronsWiring {
+  store: CronStore;
+  scheduler: CronScheduler;
+  /**
+   * The script executor (§2.5). The route uses it only to REFUSE a script path
+   * that does not resolve under the workspace/data roots at creation time; the
+   * scheduler holds the same instance to actually run and to kill on shutdown.
+   */
+  runner?: CronScriptRunner;
+}
+
+/**
  * The update projection `/info` may carry, or `undefined` when detection isn't
  * wired (dev, tests, or a boot where the service failed to come up).
  *
@@ -128,7 +151,7 @@ export function createApp(
   backup: BackupScheduler,
   busMetrics?: BusMetricsCollector,
   bootGate?: BootGate,
-  onRolesChanged?: () => void,
+  crons?: CronsWiring,
   pluginHost?: PluginHost,
   pluginHttpRegistry?: PluginHttpRegistry,
   pluginInstaller?: PluginInstaller,
@@ -326,11 +349,17 @@ export function createApp(
     createRolesRouter(
       roleStore,
       config,
-      onRolesChanged,
       connectorRegistry,
       spawner.providerRegistry,
+      crons ? () => crons.store.countsByRole() : undefined,
     ),
   );
+
+  // Agent crons (docs/crons-agents.md §2.3) — `/crons/*`. Behind the same
+  // X-Auth-Token gate as the roles routes it replaces the cadence of. Mounted
+  // only when the store came up: a boot where it failed leaves every other
+  // subsystem untouched and simply has no `/crons`.
+  if (crons) app.use(createCronsRouter(crons.store, crons.scheduler, roleStore, crons.runner));
 
   // Skills control-plane REST (docs/plan-skills-importables.md §8.4). Same
   // X-Auth-Token gate. Mounted off `spawner.skills` so no extra dep is threaded;
@@ -474,7 +503,7 @@ export function startServer(
   backup: BackupScheduler,
   busMetrics?: BusMetricsCollector,
   bootGate?: BootGate,
-  onRolesChanged?: () => void,
+  crons?: CronsWiring,
   pluginHost?: PluginHost,
   pluginHttpRegistry?: PluginHttpRegistry,
   pluginInstaller?: PluginInstaller,
@@ -494,7 +523,7 @@ export function startServer(
     backup,
     busMetrics,
     bootGate,
-    onRolesChanged,
+    crons,
     pluginHost,
     pluginHttpRegistry,
     pluginInstaller,

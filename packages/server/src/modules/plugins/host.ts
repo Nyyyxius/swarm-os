@@ -155,12 +155,6 @@ export interface PluginHostDeps {
   pluginsDir: string;
   /** The server's zod instance (plugins must use api.zod for MCP schemas). */
   zod: typeof z;
-  /**
-   * Injected for J2's roles façade (mirrors startServer's onRolesChanged =
-   * () => scheduler.reload()). Accepted now so the wiring is stable.
-   */
-  onRolesChanged?: () => void;
-
   // ---- J2 deps (optional so J1 host tests still construct the host) --------
   /** Spawner — backs the teams + messaging façades. */
   spawner?: Spawner;
@@ -199,7 +193,6 @@ export class PluginHost {
   private readonly eventBus: SwarmEventBus;
   private readonly pluginsDir: string;
   private readonly zod: typeof z;
-  private readonly onRolesChanged?: () => void;
   private readonly spawner?: Spawner;
   private readonly roleStore?: RoleStore;
   private readonly settingsStore?: SettingsStore;
@@ -229,7 +222,6 @@ export class PluginHost {
     this.eventBus = deps.eventBus;
     this.pluginsDir = deps.pluginsDir;
     this.zod = deps.zod;
-    this.onRolesChanged = deps.onRolesChanged;
     this.spawner = deps.spawner;
     this.roleStore = deps.roleStore;
     this.settingsStore = deps.settingsStore;
@@ -409,7 +401,6 @@ export class PluginHost {
         settingsStore: this.settingsStore,
         notifier: this.spawner?.notifier,
         config: this.config,
-        onRolesChanged: this.onRolesChanged,
         toolRegistry: this.toolRegistry,
         httpRegistry: this.httpRegistry,
         connectorRegistry: this.connectorRegistry,

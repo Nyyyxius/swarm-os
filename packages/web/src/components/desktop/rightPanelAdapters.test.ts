@@ -72,8 +72,6 @@ const baseRole: RoleView = {
   defaultModel: null,
   defaultEffort: null,
   defaultPermissionMode: null,
-  schedule: null,
-  scheduleMessage: null,
   connectors: [],
   createdAt: '2026-05-22T10:00:00Z',
   updatedAt: '2026-05-22T10:00:00Z',
@@ -89,6 +87,7 @@ describe('buildRightPanelTeam', () => {
     expect(t.effort).toBe('high');
     expect(t.permissionMode).toBe('default');
     expect(t.cwd).toBe('/work/atlas');
+    expect(t.roleId).toBe('role-abc');
     expect(t.leadPrompt).toBe('You are the planner.');
     expect(t.leadPreamble).toBe('be careful');
     expect(t.workerPreamble).toBe('follow the lead');
@@ -126,6 +125,15 @@ describe('buildRightPanelTeam', () => {
     };
     const t = buildRightPanelTeam(baseOrch, role, '/work/atlas');
     expect(t.discordWebhook).toBe('https://discord.example/hook-1');
+  });
+
+  it('forwards a null roleId (free-form-role team: no cron can target it)', () => {
+    // Crons target a ROLE. A team created with a free-form `role` string has
+    // no roleId, and the panel keys its whole CRONS affordance on this field
+    // being non-null — so it must arrive as null, not as ''.
+    const orch: OrchestratorView = { ...baseOrch, roleId: null };
+    const t = buildRightPanelTeam(orch, null, '/work/atlas');
+    expect(t.roleId).toBeNull();
   });
 
   it('coerces a null leadSessionId to an empty string (transient post-create)', () => {

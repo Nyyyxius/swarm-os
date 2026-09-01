@@ -605,6 +605,31 @@
   .pr-meta .sep { color: var(--text-mute); opacity: 0.5; }
   .pr-meta b { color: var(--text-dim); font-weight: 400; }
 
+  /* Agent crons — ONE line, never wrapping (docs/crons-agents.md §2.4):
+     `pr-head` does not scroll, so a second line would push the tabs down.
+     Overflow is clipped rather than ellipsised on purpose — the count and
+     the next fire sit on the left and survive; the cron name is the part
+     allowed to be cut, and the full text is in its `title`. */
+  .pr-crons {
+    display: flex; align-items: center; gap: 6px;
+    white-space: nowrap; overflow: hidden;
+    font-family: "Geist Mono", monospace; font-size: 9.5px;
+    letter-spacing: 0.10em; color: var(--text-dim);
+  }
+  .pr-crons .lbl { color: var(--text-mute); letter-spacing: 0.16em; }
+  .pr-crons .sep { color: var(--text-mute); opacity: 0.5; }
+  .pr-crons .next { color: var(--amber); }
+  .pr-crons .nm { color: var(--text-mute); overflow: hidden; text-overflow: ellipsis; }
+  .pr-crons .paused { color: var(--stopped); }
+  .pr-crons .all {
+    margin-left: auto; flex: none;
+    background: none; border: 1px solid var(--border);
+    color: var(--text-mute); cursor: pointer;
+    font-family: "Geist Mono", monospace; font-size: 9px;
+    letter-spacing: 0.12em; padding: 3px 8px;
+  }
+  .pr-crons .all:hover { color: var(--amber); border-color: var(--border-strong); }
+
   .pr-actions {
     display: grid; grid-template-columns: repeat(5, 1fr); gap: 1px;
     background: var(--border);
@@ -1017,6 +1042,17 @@
   }
   .tag-pill.discord { color: var(--amber); border-color: rgba(255,176,96,0.35); }
   .tag-pill.model { color: var(--text-dim); }
+  /* Crons (docs/crons-agents.md) — hand-written, like the .appr-* block below:
+     a cron list needs exactly two extra tints, which is under the threshold
+     where the prototype-first ritual of this file's header pays for itself.
+     SCRIPT runs local code (amber = "read this one before trusting it"),
+     PAUSED is armed-but-silent (muted, and struck through so it reads at a
+     glance in a dense list). */
+  .tag-pill.script { color: var(--amber); border-color: rgba(255,176,96,0.35); }
+  .tag-pill.paused {
+    color: var(--text-mute); border-style: dashed;
+    text-decoration: line-through;
+  }
   .roles-add {
     border-top: 1px solid var(--border);
     padding: 14px 20px;

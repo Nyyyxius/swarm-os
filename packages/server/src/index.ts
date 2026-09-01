@@ -20,7 +20,9 @@ import { SettingsStore } from './modules/settings/index.js';
 import { MessagesAggregator } from './modules/metrics/aggregator.js';
 import { BusMetricsCollector } from './modules/metrics/busMetrics.js';
 import { BackupScheduler } from './modules/backup/index.js';
-import { RoleScheduler } from './modules/schedule/index.js';
+import { CronStore } from './modules/crons/store.js';
+import { CronScheduler } from './modules/crons/scheduler.js';
+import { CronScriptRunner } from './modules/crons/runner.js';
 import { IdeSupervisor } from './modules/ide/index.js';
 import { PluginStore } from './modules/plugins/store.js';
 import { MemoryStore } from './modules/memory/store.js';
@@ -530,22 +532,57 @@ const costRollup: CostRollupHandle = startCostRollup(spawner, db, {
   intervalMs: config.costRollupIntervalMs,
 });
 
-// ---- Per-role cron scheduler ----------------------------------------------
-// In-process; for each role carrying a `schedule` cron, delivers its
-// `scheduleMessage` to the lead inbox of every live instance at each tick.
-// Re-armed on every role mutation via the onRolesChanged hook below. Host-
-// independent (no OS cron / sidecar) — see modules/schedule for the rationale.
-const scheduler = new RoleScheduler({
-  roleStore,
-  spawner,
-  defaults: {
-    maxMessageSizeBytes: config.maxMessageSizeBytes,
-    idleThresholdMs: config.idleThresholdMs,
-  },
+// ---- Agent crons (docs/crons-agents.md) ------------------------------------
+// The ONE cadence engine: N crons per role, each with its own pause switch and
+// its own bounded run history, replacing the single `roles.schedule` column.
+// The store OWNS its tables on the raw Db handle (like MemoryStore /
+// ApprovalStore) and runs the legacy migration in its constructor. Wrapped so a
+// crons-subsystem failure never stops the boot: `/crons` is then simply not
+// mounted, `GET /roles` reports `cronCount: 0`, and every other subsystem is
+// unaffected. Host-independent (no OS cron / sidecar) — see modules/crons for
+// the rationale.
+let cronStore: CronStore | null = null;
+try {
+  cronStore = new CronStore(db);
+  log.info({ event: 'boot.cron_store' });
+} catch (err) {
+  log.error({
+    event: 'boot.cron_store_unavailable',
+    error: err instanceof Error ? err.message : String(err),
+    note: 'the crons table could not be opened — agent crons are DISABLED for this boot (no tick, no /crons route); every other subsystem is unaffected.',
+  });
+}
+// The script executor (§2.5). Stateless apart from its registry of in-flight
+// children, so it is built unconditionally and shared by the scheduler (runs +
+// shutdown kills) and the route (path refusal at creation time).
+const cronRunner = new CronScriptRunner({
+  workspaceRoot: config.workspaceRoot,
+  dataDir: config.dataDir,
   timezone: config.scheduleTimezone,
-  enabled: config.scheduleEnabled,
+  transport: config.agentTransport === 'ssh' ? 'ssh' : 'local',
 });
-scheduler.start();
+const cronScheduler =
+  cronStore === null
+    ? null
+    : new CronScheduler({
+        store: cronStore,
+        spawner,
+        defaults: {
+          maxMessageSizeBytes: config.maxMessageSizeBytes,
+          idleThresholdMs: config.idleThresholdMs,
+        },
+        timezone: config.scheduleTimezone,
+        enabled: config.scheduleEnabled,
+        runner: cronRunner,
+      });
+// NOT started here. `start()` is called once the bootGate flips (see
+// runAutoResume below): every fire now writes a `cron_runs` row, so ticks
+// landing while auto-resume is still rebuilding teams would persist a trail of
+// `noop`s for teams that were merely on their way back up.
+const crons =
+  cronStore && cronScheduler
+    ? { store: cronStore, scheduler: cronScheduler, runner: cronRunner }
+    : undefined;
 
 // ---- VS Code web (`code serve-web`) supervisor -----------------------------
 // In-container child process serving the official Microsoft VS Code web at the
@@ -651,7 +688,6 @@ const pluginHost = pluginStore === null ? null : new PluginHost({
   eventBus,
   pluginsDir: path.join(config.dataDir, 'plugins'),
   zod: z,
-  onRolesChanged: () => scheduler.reload(),
   // J2 façades.
   spawner,
   roleStore,
@@ -818,7 +854,7 @@ const handle = startServer(
   backup,
   busMetrics,
   bootGate,
-  () => scheduler.reload(),
+  crons,
   pluginHost ?? undefined,
   pluginHttpRegistry,
   pluginInstaller ?? undefined,
@@ -838,6 +874,24 @@ const handle = startServer(
 // without MCP.
 const mcp = new McpServer(spawner, config.mcpPort, config, busMetrics, pluginToolRegistry);
 
+/**
+ * Arm the crons — deliberately AFTER the bootGate flips, on both exits of
+ * `runAutoResume`. Ticks fired while auto-resume is still rebuilding teams
+ * would find no live instance and persist a `noop` in `cron_runs` for every
+ * cadence due in that window: a run history full of failures that never
+ * happened. No-op when the store failed to open or cadence is disabled.
+ */
+function startCronsAfterBoot(): void {
+  try {
+    cronScheduler?.start();
+  } catch (err) {
+    log.error({
+      event: 'boot.crons_start_failed',
+      error: err instanceof Error ? err.message : String(err),
+    });
+  }
+}
+
 async function runAutoResume(): Promise<void> {
   if (!config.autoResume || resumableState.resumable.length === 0) {
     // Still reconcile: with auto-resume off (or nothing to resume), every team
@@ -845,6 +899,7 @@ async function runAutoResume(): Promise<void> {
     // The store is passed explicitly — see the call in the `finally` below.
     reconcileUpdateTeams(spawner, updateTeams, updateRunId, updateStore ?? null);
     bootGate.value = true;
+    startCronsAfterBoot();
     log.info({ event: 'boot.complete', resumed: 0, mailboxRehydrated: 0 });
     return;
   }
@@ -896,6 +951,7 @@ async function runAutoResume(): Promise<void> {
     // in flight, so an ordinary boot still writes nowhere.
     reconcileUpdateTeams(spawner, updateTeams, updateRunId, updateStore ?? null);
     bootGate.value = true;
+    startCronsAfterBoot();
     // Lot 15 — one roll-up pass now that the fleet is back. The janitor's own
     // start-up tick ran before any of these sessions existed, and on a container
     // redeployed more often than the hourly interval it would be the only one to
@@ -971,8 +1027,13 @@ async function shutdown(signal: string): Promise<void> {
     // Disarm the codegraph janitor (interval + fs watchers) so no sweep/watch
     // event fires a graphify run into a half-closed DB during shutdown.
     codegraphJanitor?.stop();
-    // Disarm per-role crons so no tick fires into a half-torn-down spawner.
-    scheduler.stop();
+    // Disarm the agent crons so no tick fires into a half-torn-down spawner.
+    // `stop()` also SIGKILLs the process group of every in-flight script cron
+    // and journals those runs as `error` — synchronously, and this far above
+    // `db.close()` on purpose (docs/crons-agents.md §2.5): a SIGTERM must not
+    // leave an orphaned script running against a dead server with no trace of
+    // it in the run history.
+    cronScheduler?.stop();
     // The update RUNNER does own timers, and this is early on purpose: a
     // shutdown during a warning window must not let the grace timer fire into
     // a `docker compose up` on the way out. `stop()` clears the timers without

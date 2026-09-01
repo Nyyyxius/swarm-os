@@ -30,8 +30,6 @@ function role(over: Partial<RoleView> = {}): RoleView {
     defaultPermissionMode: null,
     defaultProvider: null,
     connectors: [],
-    schedule: null,
-    scheduleMessage: null,
     createdAt: '2026-08-30T09:00:00.000Z',
     updatedAt: '2026-08-30T09:00:00.000Z',
     ...over,

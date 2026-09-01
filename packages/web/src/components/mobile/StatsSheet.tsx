@@ -54,6 +54,13 @@ export default function StatsSheet({ open, onClose }: StatsSheetProps) {
     onClose();
     c.onOpenMonitoring();
   }
+  // Same reasoning for CRONS, plus one that is specific to it: the ⌘K launcher
+  // — the desktop way in — DOES NOT EXIST on mobile. Without this row the
+  // crons screen would be unreachable from a phone altogether.
+  function openCrons() {
+    onClose();
+    c.onOpenCrons();
+  }
 
   const busCells: Array<{ k: string; v: string; u: string; warn?: boolean }> = [
     { k: 'LATENCY', v: busCell(bus?.latency_ms, 0), u: 'ms' },
@@ -87,6 +94,13 @@ export default function StatsSheet({ open, onClose }: StatsSheetProps) {
           <div className="m-tr-count">→</div>
           <div className="m-tr-meta">
             <span>CONTEXT · THROUGHPUT · INBOX PER AGENT</span>
+          </div>
+        </button>
+        <button type="button" className="m-team-row mon-link-row" onClick={openCrons}>
+          <div className="m-tr-name">CRONS</div>
+          <div className="m-tr-count">→</div>
+          <div className="m-tr-meta">
+            <span>SCHEDULED WAKE-UPS PER ROLE</span>
           </div>
         </button>
 

@@ -39,13 +39,14 @@ import {
 import { type AuthState } from '../components/desktop/SettingsDrawer';
 import { type ComposerAudience, type ComposerMode } from '../components/desktop/Composer';
 import { type MapPulse, type MapViewTeam } from '../components/desktop/MapView';
+import { useCrons } from '../hooks/useCrons';
 import { useOrchestrators } from '../hooks/useOrchestrators';
 import { useRoles } from '../hooks/useRoles';
 import { useSession } from '../hooks/useSession';
 import { useEvents, type MailboxMessageEvent } from '../hooks/useEvents';
 import {
   api, apiErrorMessage, getToken, HttpError,
-  type HealthView, type InfoView, type MailMessageView,
+  type CronView, type HealthView, type InfoView, type MailMessageView,
   type OrchestratorView, type RoleView,
 } from '../api/client';
 import { deriveTopBarPillStatus } from '../lib/topBarStatus';
@@ -73,6 +74,13 @@ const NOTICE_TTL_MS = { ok: 5_000, error: 10_000 } as const;
 /** Cap on simultaneously visible notices (cf. `TOAST_MAX_VISIBLE`). */
 const NOTICE_MAX_VISIBLE = 4;
 
+/**
+ * Shared empty list for `selectedTeamCrons`. A frozen module-level constant,
+ * so the common "this team has no cadence" case keeps a STABLE identity
+ * across the 5 s poll instead of handing the panel a fresh `[]` every tick.
+ */
+const EMPTY_CRONS: readonly CronView[] = Object.freeze([]);
+
 /** Props supplied by App.tsx (the sovereign router) to the controller. */
 export interface SwarmControllerProps {
   /** Orchestrator id extrait de `#/orchestrators/:id`, ou null sur `#/`. */
@@ -97,6 +105,18 @@ export interface SwarmControllerProps {
   onOpenPlugins?: () => void;
   /** TopBar SKILLS → route `#/skills`. */
   onOpenSkills?: () => void;
+  /**
+   * TopBar/StatsSheet/RolesPage CRONS → route `#/crons`. The optional
+   * `roleId` pre-filters the screen on one role's cadences; it travels as an
+   * ARGUMENT, not in the URL, because the hash router compares by strict
+   * equality and would rewrite `#/crons?role=x` back to `#/`.
+   */
+  onOpenCrons?: (roleId?: string) => void;
+  /**
+   * RightPanel CONFIG tab → deep link one cron (`#/crons/<cronId>`). Separate
+   * from `onOpenCrons` because the target is a cron, not a role filter.
+   */
+  onOpenCron?: (cronId: string) => void;
   /** TopBar/Dock IDE → route `#/ide`. */
   onOpenIde?: () => void;
   /** Plugin panel nav → route `#/panel/<plugin>/<panelId>` (feature B.3). */
@@ -127,6 +147,16 @@ export interface SwarmControllerValue {
   // right panel / detail
   selectedAgent: RightPanelAgent | null;
   selectedTeam: RightPanelTeam | null;
+  /**
+   * Cadences of the selected team's ROLE (docs/crons-agents.md §2.4). Kept
+   * OUT of `selectedTeam` on purpose: this list is repolled every 5 s while a
+   * lead panel is open, and folding it into that memo would rebuild the team
+   * object — and every `team`-keyed consumer with it — on every poll.
+   *
+   * Empty unless a lead is selected AND its team has a `roleId`: the poll
+   * itself is gated the same way, so a worker panel costs nothing.
+   */
+  selectedTeamCrons: readonly CronView[];
   isLead: boolean;
   messages: readonly MessageBubble[];
   activeTab: RightPanelTab;
@@ -192,6 +222,10 @@ export interface SwarmControllerValue {
   onOpenMemory: () => void;
   onOpenPlugins: () => void;
   onOpenSkills: () => void;
+  /** Open the agent-crons screen (`#/crons`), optionally filtered on a role. */
+  onOpenCrons: (roleId?: string) => void;
+  /** Open one cron on the crons screen (`#/crons/<cronId>` deep link). */
+  onOpenCron: (cronId: string) => void;
   onOpenIde: () => void;
   /** Open a plugin UI panel overlay (feature B.3). */
   onOpenPanel: (plugin: string, panelId: string) => void;
@@ -282,6 +316,8 @@ export function SwarmControllerProvider({
   onOpenMonitoring,
   onOpenPlugins,
   onOpenSkills,
+  onOpenCrons,
+  onOpenCron,
   onOpenIde,
   onOpenPanel,
   shellMode,
@@ -739,6 +775,27 @@ export function SwarmControllerProvider({
 
   const panelOpen = !!(selectedAgent && selectedTeam);
 
+  // ── crons of the selected team's role (docs/crons-agents.md §2.4) ─────
+  // Gated poll, `useApprovals`-style: it runs only while a LEAD panel is
+  // open. A worker panel is excluded because a tick is delivered to the lead
+  // only, so the data would be shown nowhere; a closed panel issues nothing.
+  const { crons: allCrons } = useCrons(5_000, panelOpen && isLead);
+  const selectedTeamCrons = useMemo<readonly CronView[]>(() => {
+    // Mirror the poll gate explicitly. `useCrons` keeps its last snapshot
+    // when it stops polling, so without this a worker panel would inherit
+    // whatever the previously selected lead had fetched — data that is no
+    // longer refreshed and that the worker's own header does not show.
+    if (!panelOpen || !isLead) return EMPTY_CRONS;
+    const roleId = selectedOrch?.roleId;
+    // No role (free-form `role` string) ⇒ no cron can target this team.
+    if (!roleId) return EMPTY_CRONS;
+    const own = allCrons.filter((c) => c.roleId === roleId);
+    // Keep the identity stable while the list is empty: `filter` allocates a
+    // new array on every 5 s poll, which would re-render the panel for
+    // nothing on the (common) team that has no cadence at all.
+    return own.length === 0 ? EMPTY_CRONS : own;
+  }, [allCrons, selectedOrch?.roleId, panelOpen, isLead]);
+
   // ── Inbox poll (3 s) for the MESSAGES tab (selected session) ──────────
   useEffect(() => {
     const oid = selectedOrch?.id;
@@ -1148,6 +1205,14 @@ export function SwarmControllerProvider({
   );
   const onOpenPluginsResolved = useCallback(() => { onOpenPlugins?.(); }, [onOpenPlugins]);
   const onOpenSkillsResolved = useCallback(() => { onOpenSkills?.(); }, [onOpenSkills]);
+  const onOpenCronsResolved = useCallback(
+    (roleId?: string) => { onOpenCrons?.(roleId); },
+    [onOpenCrons],
+  );
+  const onOpenCronResolved = useCallback(
+    (cronId: string) => { onOpenCron?.(cronId); },
+    [onOpenCron],
+  );
   const onOpenIdeResolved = useCallback(() => { onOpenIde?.(); }, [onOpenIde]);
   const onOpenPanelResolved = useCallback(
     (plugin: string, panelId: string) => { onOpenPanel?.(plugin, panelId); },
@@ -1168,6 +1233,7 @@ export function SwarmControllerProvider({
     spawningIds,
     selectedAgent,
     selectedTeam,
+    selectedTeamCrons,
     isLead,
     messages,
     activeTab,
@@ -1209,6 +1275,8 @@ export function SwarmControllerProvider({
     onOpenMonitoring: onOpenMonitoringResolved,
     onOpenPlugins: onOpenPluginsResolved,
     onOpenSkills: onOpenSkillsResolved,
+    onOpenCrons: onOpenCronsResolved,
+    onOpenCron: onOpenCronResolved,
     onOpenIde: onOpenIdeResolved,
     onOpenPanel: onOpenPanelResolved,
     pluginsRev,

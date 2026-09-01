@@ -14,7 +14,7 @@ import { ICON, type IconName } from './icons';
  *  tant que la TopBar ne le route pas (cf. `_exhaustive`). */
 export type LauncherActionId =
   | 'new-team' | 'roles' | 'memory' | 'board' | 'approvals'
-  | 'monitoring' | 'code-graph' | 'skills' | 'plugins' | 'ide'
+  | 'monitoring' | 'code-graph' | 'skills' | 'plugins' | 'ide' | 'crons'
   | 'update' | 'settings' | 'appearance';
 
 export interface LauncherItem {
@@ -55,6 +55,10 @@ export const LAUNCHER_GROUPS: readonly LauncherGroup[] = [
     { id: 'skills',     label: 'SKILLS',     desc: 'importable instruction sets', icon: 'inbox' },
     { id: 'plugins',    label: 'PLUGINS',    desc: 'MCP servers + connectors',    icon: 'link' },
     { id: 'ide',        label: 'IDE',        desc: 'open workspace in editor',    icon: 'code' },
+    // Appended at the END of the group on purpose: the keyboard test locks the
+    // flat order of the first three items (↓↓+↵ → MEMORY), so a new entry may
+    // only ever land after them.
+    { id: 'crons',      label: 'CRONS',      desc: 'scheduled wake-ups',          icon: 'clock' },
   ] },
   { label: 'SYSTEM', items: [
     { id: 'settings',   label: 'SETTINGS',   desc: 'auth token · server info', icon: 'cog', kbd: ',' },
