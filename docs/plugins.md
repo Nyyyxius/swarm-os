@@ -149,7 +149,8 @@ for `manifest ∩ granted`.
 | `storage.defineTable(ddl)` / `prepare(sql)` | `db-tables` | Private SQLite tables — names must start `plugin_<name'>_` (`name'` = name with `-`→`_`). |
 | `events.on(kind, cb)` / `events.emit(subKind, payload)` | `events` / `events-emit` | Handlers dispatched async (off the emit path). Emitted kind is forced to `plugin.<name>.<subKind>` — you can't forge a core kind. |
 | `teams` | `teams` | `list/get/create/destroy/spawnWorker/killWorker` — snapshots only, never `session_secret`. |
-| `roles` | `roles` | `list/get/create/update/delete`. `schedule`/`scheduleMessage` are deprecated and forced to NULL — cadence lives in the `crons` entity (docs/crons-agents.md), which has no plugin façade yet. |
+| `roles` | `roles` | `list/get/create/update/delete`. `schedule`/`scheduleMessage` are deprecated and forced to NULL — cadence lives in the `crons` entity, reachable via `crons` below. |
+| `crons` | `crons` | `list/get/getByName/create/update/delete` on the agent crons (docs/crons-agents.md) — same entity, same validation as the `#/crons` screen. Provision your own cadences by upserting on `name` (see §4.3). |
 | `messaging` | `messaging` | `sendToSession/sendToLead/broadcast/broadcastToLeads/readInbox`. `from` shows as `plugin:<name>`. |
 | `mcp.registerTool(def)` | `mcp-tools` | Exposes `<name>.<tool>` to agents (see §5). |
 | `http.registerRouter` / `registerPublicRouter` | `http-routes` / `http-public` | Dynamic Express routes (see §5). |
@@ -313,6 +314,51 @@ across `disable()` becomes inert: the next `run/get/all` raises a benign
 > textual — `plugin_a_` is a prefix of `plugin_a_b_` (plugin `a-b`), the same
 > ambiguity the purge carries; avoid plugin names where one is a `<other>-…`
 > extension of another.
+
+### 4.3 `crons` — provision your own cadences
+
+A plugin that needs an agent woken on a schedule declares the cron itself rather
+than asking the operator to fill the `#/crons` form. The entity is the shared
+one (docs/crons-agents.md): what you create shows up on that screen, reports its
+next fire there, and can be paused there.
+
+Reconcile by **name** at every `activate()` — the name is unique instance-wide
+(it is also the `cron:<name>` sender of the delivered messages), so it is the
+stable identity across redeploys:
+
+```ts
+const wanted = {
+  name: 'trader-open',            // prefix with your plugin name
+  roleId,                         // the TARGET is a role, not a session
+  schedule: '30 9 * * 1-5',       // exactly 5 fields, server timezone
+  action: 'message' as const,
+  message: 'market open — {{now}}',
+};
+
+const found = api.crons.getByName(wanted.name);
+if (!found) {
+  await api.crons.create(wanted);
+} else if (found.schedule !== wanted.schedule || found.message !== wanted.message) {
+  await api.crons.update(found.id, { schedule: wanted.schedule, message: wanted.message });
+}
+```
+
+- **Diff before writing.** Each mutation re-arms the scheduler and bumps
+  `updatedAt`; an unconditional `update` on every activation makes the cron look
+  permanently edited. `create` on an existing name **throws** (unique) instead of
+  adopting the row — `getByName` first is not optional.
+- **Validation is the operator's.** 5-field expression (a 6-field per-second form
+  is refused), known `roleId`, `message` required for a `message` cron,
+  `scriptPath` + `interpreter` — contained under the workspace/data roots —
+  required for a `script` cron. A refused write throws with the field-level
+  reason.
+- **`nextRun` is read off the armed job**, and is `null` whenever no fire is
+  coming (paused, cadence disabled instance-wide). Test `paused`, not `nextRun`,
+  to know whether a cron is switched off.
+- **No ownership.** Operators see and can edit or delete your crons, and you see
+  theirs. Prefix your names so the origin of a cadence is legible.
+- **Degraded boot.** If the crons subsystem failed to start, every method throws a
+  named error — the same boot where `/crons` is not mounted at all.
 
 ---
 

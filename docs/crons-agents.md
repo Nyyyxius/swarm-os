@@ -451,8 +451,10 @@ création) + ce plan.
   « moved to /crons » (les clés à `null` restent acceptées — les clients
   existants les envoient toujours).
 - `plugin-sdk` : `Role.schedule`/`scheduleMessage` marqués `@deprecated`
-  (lus à `null`, écritures neutralisées par le store). Suivi possible :
-  façade `api.crons.*`.
+  (lus à `null`, écritures neutralisées par le store). Livré : façade
+  `api.crons.*` (capacité `crons`) — `list/get/getByName/create/update/delete`,
+  mêmes validateurs que la route (`modules/crons/validate.ts`, partagé), upsert
+  par nom recommandé (docs/plugins.md §4.3).
 - `RolesPage.CadenceSection` et champs cadence de `RoleDialog` retirés
   (Lot 1) ; badge `🕐 N CRONS` via `cronCount` de `GET /roles`.
 - La duplication de rôle ne copie pas les crons (documenté dans l'UI).

@@ -84,6 +84,7 @@ export const PLUGIN_CAPABILITIES = [
   'connectors',
   'settings-read',
   'host-exec',
+  'crons',
 ] as const;
 
 export type PluginCapability = (typeof PLUGIN_CAPABILITIES)[number];
@@ -288,6 +289,80 @@ export interface RoleInit {
 }
 
 export type RolePatch = Partial<RoleInit>;
+
+// ---------------------------------------------------------------------------
+// Crons (capability `crons`)
+// ---------------------------------------------------------------------------
+
+/**
+ * What a tick does.
+ *   - `message` — render the template and drop it in the lead inbox of every
+ *     live instance of the target role.
+ *   - `script`  — run a local script that decides whether waking the agent is
+ *     worth an agent turn, and with what message.
+ */
+export type CronAction = 'message' | 'script';
+
+/** A cron as `api.crons.*` returns it: the stored row + its live next fire. */
+export interface Cron {
+  id: string;
+  /**
+   * Display slug, UNIQUE across the instance — and the identity a plugin
+   * reconciles against (`getByName`). It is also the sender of the messages the
+   * cron delivers, which show up as `cron:<name>`.
+   */
+  name: string;
+  /** Target ROLE (not a session): the tick fans out to every live instance. */
+  roleId: string;
+  /** 5-field cron expression, evaluated in the server's `SWARM_OS_SCHEDULE_TZ`. */
+  schedule: string;
+  action: CronAction;
+  /** `action: 'message'` — template, supports `{{fire}}`, `{{now}}`, `{{window:Nh|Nm}}`. */
+  message: string | null;
+  /** `action: 'script'` — absolute path, under the workspace or data roots. */
+  scriptPath: string | null;
+  scriptArgs: string[] | null;
+  /** `action: 'script'` — `'python3' | 'bash' | 'node'`. */
+  interpreter: string | null;
+  /** `action: 'script'` — per-run wall-clock budget (1 000 … 240 000 ms). */
+  timeoutMs: number | null;
+  /** A paused cron stays in the list but is not armed (and has no next run). */
+  paused: boolean;
+  /**
+   * ISO-8601 of the next fire, read off the ARMED job — `null` whenever no fire
+   * is coming: the cron is paused, cadence is disabled instance-wide, or the row
+   * was only just written. Read `paused`, never a null `nextRun`, to tell
+   * whether a cron is switched off.
+   */
+  nextRun: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface CronInit {
+  /** 1-64 chars: letters, digits, dot, dash, underscore. UNIQUE. */
+  name: string;
+  roleId: string;
+  /** EXACTLY 5 fields — a 6-field (per-second) expression is refused. */
+  schedule: string;
+  action: CronAction;
+  /** Required when `action: 'message'`. */
+  message?: string | null;
+  /** Required when `action: 'script'`, together with `interpreter`. */
+  scriptPath?: string | null;
+  scriptArgs?: string[] | null;
+  interpreter?: string | null;
+  /** Script crons only; defaults to 60 000 ms, capped at 240 000 ms. */
+  timeoutMs?: number | null;
+  /** Create it switched off (default `false`). */
+  paused?: boolean;
+}
+
+/**
+ * Partial edit. An omitted key is left untouched; an explicit `null` clears the
+ * field (e.g. `{ scriptArgs: null }` drops the args).
+ */
+export type CronPatch = Partial<CronInit>;
 
 // ---------------------------------------------------------------------------
 // Notify + settings
@@ -530,6 +605,59 @@ export interface SwarmPluginApi {
     get(id: string): Role | null;
     create(init: RoleInit): Role;
     update(id: string, patch: RolePatch): Role;
+    delete(id: string): void;
+  };
+
+  /**
+   * Agent crons (capability `crons`) — the same entity the `#/crons` screen and
+   * the `/crons` REST surface drive, with the same validation. This is how a
+   * plugin PROVISIONS the cadences it needs instead of asking the operator to
+   * type them into a form.
+   *
+   * Use it as an idempotent UPSERT BY NAME at every `activate()`, so a redeploy
+   * reconciles instead of duplicating:
+   *
+   * ```ts
+   * const wanted = {
+   *   name: 'trader-open',              // stable identity, UNIQUE, also `cron:<name>`
+   *   roleId,
+   *   schedule: '30 9 * * 1-5',         // 5 fields, server timezone
+   *   action: 'message' as const,
+   *   message: 'market open — {{now}}',
+   * };
+   * const found = api.crons.getByName(wanted.name);
+   * if (!found) {
+   *   await api.crons.create(wanted);
+   * } else if (found.schedule !== wanted.schedule || found.message !== wanted.message) {
+   *   await api.crons.update(found.id, { schedule: wanted.schedule, message: wanted.message });
+   * }
+   * ```
+   *
+   * DIFF BEFORE WRITING, as above. Every mutation re-arms the scheduler and
+   * bumps `updatedAt`, so an unconditional `update` on each activation makes the
+   * cron look permanently edited and needlessly rebuilds the armed set. And
+   * `create` on an existing name THROWS (the name is unique) rather than
+   * adopting the row — `getByName` first is not optional.
+   *
+   * Validation is identical to the operator's form: 5-field expression, known
+   * `roleId`, `message` required for a message cron, `scriptPath` + `interpreter`
+   * required (and contained under the workspace/data roots) for a script cron.
+   * A rejected write throws with the field-level reason.
+   *
+   * Ownership is not enforced: crons a plugin creates are visible and editable in
+   * the UI, and vice-versa. Prefix your names (`myplugin-…`) so an operator can
+   * tell where a cadence came from.
+   */
+  readonly crons: {
+    list(): Cron[];
+    get(id: string): Cron | null;
+    /** `null` when no cron carries that name — the read half of an upsert. */
+    getByName(name: string): Cron | null;
+    /** Async: a `script` cron's path is realpath-checked before it is stored. */
+    create(init: CronInit): Promise<Cron>;
+    /** Partial edit. Throws when `id` is unknown. */
+    update(id: string, patch: CronPatch): Promise<Cron>;
+    /** Idempotent — deleting an unknown id is a no-op. Run history cascades. */
     delete(id: string): void;
   };
 

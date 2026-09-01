@@ -4,7 +4,8 @@
  *
  * J2 materialises the FULL surface minus connectors (J4): `log`, `zod`,
  * `config`, `storage.kv`, `events`, `schedule` (interval + cron), `teams`,
- * `roles`, `messaging`, `notify`, `mcp`, `http`, `settings`, `agentAssets`.
+ * `roles`, `crons`, `messaging`, `notify`, `mcp`, `http`, `settings`,
+ * `agentAssets`.
  *
  * Two cross-cutting guarantees hold on every method:
  *  - **Capability gating** — `requireCap` checks the granted set (already
@@ -25,6 +26,14 @@ import type { PluginStore } from './store.js';
 import type { Spawner } from '../spawner/index.js';
 import type { Orchestrator, OrchestratorInit } from '../orchestrator/index.js';
 import type { RoleStore } from '../roles/index.js';
+import type { CronStore, CronRecord } from '../crons/store.js';
+import type { CronScheduler } from '../crons/scheduler.js';
+import type { CronScriptRunner } from '../crons/runner.js';
+import {
+  validateCronInit,
+  validateCronPatch,
+  type CronValidationDeps,
+} from '../crons/validate.js';
 import type { SettingsStore } from '../settings/index.js';
 import type { Notifier } from '../notify/index.js';
 import type { Config, EffortLevel, PermissionMode } from '../../config.js';
@@ -63,6 +72,7 @@ import {
   type PluginCapability,
   type DisposableStore,
   type TeamView,
+  type CronView,
   type PluginToolDef,
   type ChannelConnectorProvider,
   PluginDisabledError,
@@ -106,6 +116,13 @@ export interface PluginApiDeps {
   httpRegistry?: PluginHttpRegistry;
   /** J4 — connector registry backing api.connectors.register. */
   connectorRegistry?: ConnectorRegistry;
+  /**
+   * Agent crons, backing `api.crons.*`. Absent when the crons subsystem failed
+   * to start (degraded boot) — every façade method then throws, exactly like
+   * `/crons` not being mounted. The `runner` is what makes a `script` cron
+   * creatable: without one the shared validator refuses `action: 'script'`.
+   */
+  crons?: { store: CronStore; scheduler: CronScheduler; runner?: CronScriptRunner };
   /** J4 — the manifest's `connectors[]` declarations (label + schema per type). */
   connectorDecls?: Array<{ type: string; label: string; schema?: unknown }>;
   /** TZ for schedule.cron (config.scheduleTimezone). */
@@ -164,6 +181,43 @@ export function buildPluginApi(
   }
 
   const from = `plugin:${name}`;
+
+  /**
+   * The crons subsystem, or a clear refusal. Unlike the other deps, an absent
+   * one here is not "this build does not wire it" but "the store could not be
+   * opened on this boot" (`boot.cron_store_unavailable`) — so the message names
+   * that cause rather than sending the plugin author hunting through the build.
+   */
+  function needCrons(): NonNullable<PluginApiDeps['crons']> {
+    if (deps.crons == null) {
+      throw new PluginCapabilityError(
+        'api.crons is unavailable — the crons subsystem did not start on this boot (see the boot.cron_store_unavailable log)',
+      );
+    }
+    return deps.crons;
+  }
+
+  /**
+   * Role existence + script containment for the two cron write paths — the same
+   * pair the `/crons` router wires, so a plugin gets no laxer a check than the
+   * operator's form. Without a runner the shared validator refuses
+   * `action: 'script'` outright rather than storing a cron that could never run.
+   */
+  function cronValidation(): CronValidationDeps {
+    const runner = deps.crons?.runner;
+    return {
+      ...(deps.roleStore ? { roles: deps.roleStore } : {}),
+      ...(runner ? { resolveScriptPath: (p: string) => runner.resolveScriptPath(p) } : {}),
+    };
+  }
+
+  /** Same projection the `/crons` route serves: the record + its live next fire. */
+  function cronView(cron: CronRecord): CronView {
+    return {
+      ...cron,
+      nextRun: needCrons().scheduler.nextRun(cron.id)?.toISOString() ?? null,
+    };
+  }
 
   // api.notify.custom input — trimmed, non-empty, bounded (Discord caps the
   // embed title at 256; the `[plugin:<name>]` prefix eats part of that budget).
@@ -483,6 +537,74 @@ export function buildPluginApi(
         requireCap('roles');
         ensureLive();
         need(deps.roleStore, 'roles').delete(id);
+      },
+    },
+
+    /**
+     * Agent crons. Every method goes through the SAME validators as the REST
+     * route (`modules/crons/validate.ts`) — a plugin gets no shortcut past the
+     * 5-field restriction, the role existence check or the script containment
+     * rules, and cannot store a cron the operator's own screen would refuse.
+     *
+     * Every mutation ends with `scheduler.reload()`, for the same reason the
+     * route does it: there is no cron-change event bus, so the writer IS the
+     * re-arm trigger. Skipping it would leave the plugin's fresh cadence
+     * unarmed until the next server restart.
+     */
+    crons: {
+      list(): CronView[] {
+        requireCap('crons');
+        ensureLive();
+        return needCrons().store.list().map(cronView);
+      },
+      get(id: string): CronView | null {
+        requireCap('crons');
+        ensureLive();
+        const cron = needCrons().store.get(id);
+        return cron ? cronView(cron) : null;
+      },
+      getByName(cronName: string): CronView | null {
+        requireCap('crons');
+        ensureLive();
+        const cron = needCrons().store.getByName(cronName);
+        return cron ? cronView(cron) : null;
+      },
+      async create(init): Promise<CronView> {
+        requireCap('crons');
+        ensureLive();
+        const { store: cronStore, scheduler } = needCrons();
+        const parsed = await validateCronInit(init, cronValidation());
+        if (!parsed.ok) throw new Error(parsed.error);
+        // Re-check the epoch AFTER the await: a plugin disabled while the script
+        // path was being realpath'd must not still write a cron.
+        ensureLive();
+        const cron = cronStore.create(parsed.value);
+        scheduler.reload();
+        log.info({ event: 'crons.created_by_plugin', cronId: cron.id, name: cron.name });
+        return cronView(cron);
+      },
+      async update(id: string, patch): Promise<CronView> {
+        requireCap('crons');
+        ensureLive();
+        const { store: cronStore, scheduler } = needCrons();
+        const existing = cronStore.get(id);
+        if (!existing) throw new Error(`cron ${id} not found`);
+        const parsed = await validateCronPatch(existing, patch, cronValidation());
+        if (!parsed.ok) throw new Error(parsed.error);
+        ensureLive();
+        const updated = cronStore.update(id, parsed.value);
+        if (!updated) throw new Error(`cron ${id} not found`);
+        scheduler.reload();
+        log.info({ event: 'crons.updated_by_plugin', cronId: updated.id, paused: updated.paused });
+        return cronView(updated);
+      },
+      delete(id: string): void {
+        requireCap('crons');
+        ensureLive();
+        const { store: cronStore, scheduler } = needCrons();
+        cronStore.delete(id);
+        scheduler.reload();
+        log.info({ event: 'crons.deleted_by_plugin', cronId: id });
       },
     },
 
