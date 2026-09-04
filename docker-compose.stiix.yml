@@ -41,6 +41,12 @@ services:
       - ${HOME}/.ssh:/host-ssh:ro
     environment:
       SWARM_OS_PROJECT_NAME: stiix
+      # Code graph (graphify) disabled: it was re-indexing every few minutes and
+      # timing out repeatedly on the large `/workspace/pipeline-state` scope
+      # (2400+ communities), churning host resources. Boot-only switch on this
+      # image (default true); the hot-toggle built-in-features work is not yet
+      # deployed. Re-enable by removing this line (or setting "true") + recreate.
+      SWARM_OS_CODEGRAPH_ENABLED: "false"
       SWARM_OS_PUBLIC_URL: https://vps-00b690bc.tail240b2d.ts.net:8789
       # MCP port — moved off the 8788 default ON PURPOSE. Under the ssh
       # transport each agent session opens `ssh -R <mcpPort>:127.0.0.1:<mcpPort>`
