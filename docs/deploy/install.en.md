@@ -68,6 +68,10 @@ swarm-os ships **no API key**. Every agent launches the Claude Code CLI, which
 authenticates from `~/.claude`. The container mounts that directory read-only and
 copies it to writable state at boot.
 
+That `~` is the home of the **account the instance belongs to** — by default the
+one you install from, but not necessarily: see "the host account the instance
+belongs to" in §3. That account is the one that must have logged in.
+
 Before anything else, on the host:
 
 ```sh
@@ -170,6 +174,61 @@ Optional, and only relevant if you use a provider other than Claude (§1):
 As with `SWARM_OS_GITHUB_TOKEN`, a variable only reaches the process if the
 compose service names it in `environment:` — that block is an explicit
 allow-list (§7.4).
+
+### The other choice that matters — the host account the instance belongs to
+
+By default the container runs as the image's own `node` user, **uid 1000**:
+the right answer whenever you install from the account that owns `~/.claude`,
+and nothing to do. On a host where an admin installs *for* another account — a
+dedicated one, a colleague's, a service account — three variables move the whole
+instance:
+
+| Variable | What it does |
+|---|---|
+| `SWARM_OS_RUN_UID` / `SWARM_OS_RUN_GID` | the process uid:gid (compose `user:`). Everything it writes under `/data` and `/workspace` belongs to that account, and this is the uid that reads the mounted `~/.claude` — 0700 and all |
+| `SWARM_OS_CONTAINER_HOME` | `HOME` **inside** the container. uid 1000 owns `/home/node`; any other uid has no passwd entry in the image, gets `HOME=/` and fails every plugin `npm install` that writes under it. Point it at `/data/home`, inside the one tree that account owns |
+| `SWARM_OS_RUN_USER` | informational, read by the installer only: it is what makes a reconfigure keep this account instead of reverting to whoever re-runs the script |
+
+And the paths must follow the same account, or nothing works: `CLAUDE_DIR` /
+`CLAUDE_JSON` (the login **every** agent inherits), `DATA_PATH` (the container
+has to write it, or it boots and then cannot write its database),
+`WORKSPACE_PATH` (the agents have to edit it). Under the `ssh` transport the
+user part of `SWARM_OS_SSH_TARGET` and the `SWARM_OS_HOST_*` directories name
+**that same account**: it is the one the agents log into, and its private key
+has to be readable by the uid above — so generate it as that account, not as
+yourself.
+
+By hand, for the account `alice`:
+
+```sh
+sudo -u alice -i claude                    # the OAuth login, in ITS home
+id -u alice; id -g alice                   # → SWARM_OS_RUN_UID / _GID
+sudo -u alice mkdir -p ~alice/.swarm-os/my-project/home
+```
+
+then in `.env`:
+
+```sh
+SWARM_OS_RUN_USER=alice
+SWARM_OS_RUN_UID=1001
+SWARM_OS_RUN_GID=1001
+SWARM_OS_CONTAINER_HOME=/data/home
+CLAUDE_DIR=/home/alice/.claude
+CLAUDE_JSON=/home/alice/.claude.json
+DATA_PATH=/home/alice/.swarm-os/my-project
+WORKSPACE_PATH=/home/alice/dev/my-project
+```
+
+`setup.sh` makes it a step of its own ("Run-as account", 4/12): it lists the
+host's accounts, checks *from the target account* that the Claude login is
+there, offers to run it if it is not, generates the SSH key under its identity
+and authorises it in its own `authorized_keys`, creates `/data` and its `home`
+with the right owner, and writes the variables above. `setup.sh --user alice`
+does the same without asking.
+
+**Never uid 0.** The container must not run as root: the installer refuses the
+value, and a hand-written `.env` carrying it leaves root-owned files all over
+your workspace.
 
 ### The choice that matters — the agent transport
 
@@ -292,8 +351,11 @@ Terminate TLS at Caddy/nginx in front of `127.0.0.1:8787`. Requirements:
 - **one vhost is enough.** The VS Code editor has no port to expose any more:
   `serve-web` listens on loopback *inside* the container and swarm-os
   reverse-proxies it under `/ide` on the same port, same origin. Whatever serves
-  the UI serves the editor — no second certificate, no plain-HTTP iframe.
-  `SWARM_OS_IDE_ENABLED=false` turns it off entirely.
+  the UI serves the editor — no second certificate, no plain-HTTP iframe. You
+  enable/disable it from the Plugins screen (built-in feature, BUILT-IN section —
+  see [../builtin-features.md](../builtin-features.md)); `SWARM_OS_IDE_ENABLED=false`
+  only seeds that state at the first boot, the database being authoritative
+  thereafter.
 
 Caddy example:
 
@@ -451,6 +513,16 @@ release.
 - **A team never starts / a session hangs** — Claude credentials missing or not
   logged in. Check `~/.claude/.credentials.json` exists and that `CLAUDE_DIR` in
   `.env` points at it.
+- **The container boots then dies / `EACCES` on `/data`** — the state directory
+  does not belong to the process uid. Compare `stat -c %u $DATA_PATH` with
+  `SWARM_OS_RUN_UID` (1000 by default), then
+  `sudo chown -R <uid>:<gid> $DATA_PATH` (§3).
+- **An agent cannot read the mounted `~/.claude` although it is right there** —
+  it is 0700 and owned by an account other than `SWARM_OS_RUN_UID`. Align the
+  uid with the owner of `CLAUDE_DIR` rather than opening up the permissions (§3).
+- **A plugin fails to install with a write error** — `HOME` inside the container
+  points at a directory it cannot write: uid ≠ 1000 with no
+  `SWARM_OS_CONTAINER_HOME` (§3).
 - **`pull access denied` / `unauthorized`** — log in to GHCR with a
   `read:packages` PAT and confirm the maintainer granted your account access to
   the package.
@@ -467,8 +539,9 @@ release.
   `SWARM_OS_COMPACT_ON_WAITING` is a no-op for them. See
   [../providers.md](../providers.md).
 - **IDE iframe is blank** — the editor is served under `/ide` on the UI's own
-  port (nothing to publish). Check `SWARM_OS_IDE_ENABLED` is not `false`, and
-  that your reverse proxy forwards WebSockets under that path.
+  port (nothing to publish). Check the IDE is enabled (Plugins screen, BUILT-IN
+  section — `SWARM_OS_IDE_ENABLED` is only a first-boot seed), and that your
+  reverse proxy forwards WebSockets under that path.
 - **SYSTEM UPDATE says "no SWARM_OS_GITHUB_TOKEN" although you set one** — the
   variable is in `.env` but not in the service's `environment:` allow-list, so
   it never reaches the process. Add

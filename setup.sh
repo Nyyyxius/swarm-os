@@ -21,6 +21,7 @@
 #
 # Options (after `bash -s --` when piping):
 #   --dir <path>       install directory                (default ~/swarm-os)
+#   --user <name>      host account to run as           (default: you)
 #   --port <n>         host port for the UI             (default 8787)
 #   --token <pat>      GitHub token, read-only
 #   --ref <ref>        branch or tag to fetch the compose files from
@@ -65,6 +66,21 @@ WORKSPACE_PATH=""
 DATA_PATH=""
 CLAUDE_DIR="${CLAUDE_DIR:-$HOME/.claude}"
 CLAUDE_JSON="${CLAUDE_JSON:-$HOME/.claude.json}"
+# ── The run-as account ────────────────────────────────────────────────────────
+# WHOSE host account this instance is. Everything the container touches on the
+# host belongs to it: /data, /workspace, the ~/.claude the agents authenticate
+# with — and under the ssh transport the agent processes themselves are started
+# as this user. It defaults to whoever runs the installer, but it does not have
+# to be them: an admin can install from their own shell and hand the instance,
+# with its Claude Code login, to a dedicated account. `screen_user` sets these
+# four and re-derives every path that hangs off the home directory.
+SELF_USER="$(id -un)"          # who is RUNNING the installer, fixed for the session
+SWARM_OS_RUN_USER="$SELF_USER"
+SWARM_OS_RUN_UID="$(id -u)"
+SWARM_OS_RUN_GID="$(id -g)"
+RUN_HOME="$HOME"
+# HOME *inside* the container — see `apply_run_user`.
+SWARM_OS_CONTAINER_HOME=""
 SWARM_OS_AGENT_TRANSPORT="local"
 SWARM_OS_SSH_TARGET=""
 SWARM_OS_SSH_PORT="22"
@@ -92,6 +108,8 @@ COMPOSE_PROJECT_NAME=""
 ACCESS_MODE="loopback"
 
 FULLSCREEN=1
+RUN_USER_ARG=""
+RUN_LABEL=""       # "alice (uid 1001)" — set by validate_env, printed after deploy
 SKIP_TO_DEPLOY=0
 ENV_FILE=""
 COMPOSE=(docker compose)
@@ -246,7 +264,7 @@ ui_kv() {
 }
 
 STEP_NO=0
-STEP_TOTAL=11
+STEP_TOTAL=12
 
 # ui_head "Title" "one-line subtitle"
 ui_head() {
@@ -549,6 +567,174 @@ expand_path() {
 
 path_owner_uid() { stat -c %u "$1" 2>/dev/null || stat -f %u "$1" 2>/dev/null || printf '%s' "-1"; }
 
+# ── Acting for the run-as account ─────────────────────────────────────────────
+# `getent` rather than /etc/passwd: it is the only lookup that also sees LDAP /
+# SSSD accounts, which is exactly the shape a shared build host has.
+user_field()  { getent passwd "$1" 2>/dev/null | head -1 | cut -d: -f"$2"; }
+user_exists() { getent passwd "$1" >/dev/null 2>&1; }
+user_home()   { user_field "$1" 6; }
+user_uid()    { user_field "$1" 3; }
+user_gid()    { user_field "$1" 4; }
+
+# Called on every keystroke through the path validators, so no fork: `$(id -un)`
+# would be one per call.
+is_self() { [ "$SWARM_OS_RUN_USER" = "$SELF_USER" ]; }
+
+# Everything below is `sudo -n` — NEVER a bare sudo. A password prompt would
+# land on a terminal this installer holds in raw mode with echo off: the screen
+# would simply stop, with the typing invisible. Where a password may genuinely
+# be needed the caller goes through `ui_suspend`, which restores the terminal.
+SUDO_RUN_OK=""     # "" not probed yet | 1 usable | 0 no non-interactive path
+RUN_AS_CMD=()      # the prefix that works on THIS host, probed once
+can_run_as() {
+  is_self && return 0
+  if [ -z "$SUDO_RUN_OK" ]; then
+    SUDO_RUN_OK=0
+    RUN_AS_CMD=()
+    if have sudo && sudo -n -u "$SWARM_OS_RUN_USER" true </dev/null >/dev/null 2>&1; then
+      RUN_AS_CMD=(sudo -n -u "$SWARM_OS_RUN_USER"); SUDO_RUN_OK=1
+    elif [ "$(id -u)" = 0 ] && have runuser \
+         && runuser -u "$SWARM_OS_RUN_USER" -- true </dev/null >/dev/null 2>&1; then
+      # A minimal host installed from a root shell may carry no sudo at all.
+      RUN_AS_CMD=(runuser -u "$SWARM_OS_RUN_USER" --); SUDO_RUN_OK=1
+    fi
+  fi
+  [ "$SUDO_RUN_OK" = 1 ]
+}
+
+# ALWAYS with stdin closed. These run while the installer holds the terminal in
+# raw mode, and a child that inherits that terminal DRAINS the keystrokes the
+# operator has already typed — verified: two buffered keys vanish into a single
+# `sudo -n … true`. Nothing routed through here ever wants stdin; the things
+# that do go through `ui_suspend`, which hands the terminal over on purpose.
+as_run_user() {
+  if is_self; then "$@" </dev/null; return; fi
+  can_run_as || return 1
+  [ "${#RUN_AS_CMD[@]}" -gt 0 ] || return 1
+  "${RUN_AS_CMD[@]}" "$@" </dev/null
+}
+
+# The interactive twin: for what must not end up owned by the installer AND may
+# talk to the operator (a git clone over ssh, an OAuth login). `ui_suspend` has
+# handed the terminal back by then, so a plain `sudo` password prompt is safe
+# here — the only place in this script where that is true.
+suspend_as_run_user() {
+  if is_self; then
+    ui_suspend "$@"
+  elif have sudo; then
+    ui_suspend sudo -u "$SWARM_OS_RUN_USER" "$@"
+  elif [ "$(id -u)" = 0 ] && have runuser; then
+    ui_suspend runuser -u "$SWARM_OS_RUN_USER" -- "$@"
+  else
+    # Running it as the installer instead would be worse than not running it:
+    # the files would land with the wrong owner and nothing would say so.
+    ui_no "cannot run this as $SWARM_OS_RUN_USER — no sudo, and this shell is not root"
+    return 1
+  fi
+}
+
+# run_test <test-op> <path> → 0 yes | 1 no | 2 could not look.
+# `[ -f ~bob/.claude/.credentials.json ]` answers "no" for a 0700 home even when
+# the file is right there, and reporting a missing credential that exists is the
+# one wrong answer here: it sends the operator off to redo an OAuth login.
+run_test() {
+  # Ask the account itself whenever we can become it: that answer is the only
+  # authoritative one. `-w` on a 0755 ~/dev is TRUE for the installer and FALSE
+  # for everybody else — testing it from here would green-light a workspace the
+  # agents cannot write a byte into.
+  if ! is_self && can_run_as; then
+    as_run_user test "$1" "$2" >/dev/null 2>&1 && return 0
+    return 1
+  fi
+  test "$1" "$2" 2>/dev/null && return 0
+  is_self && return 1
+  return 2
+}
+
+# Is a CLI on the account's LOGIN-shell PATH? That is the PATH an agent gets —
+# the ssh transport runs `bash -lc`, and a CLI that only exists in the
+# interactive branch of ~/.bashrc is invisible to it.
+run_user_has() {
+  if is_self; then have "$1"; return; fi
+  can_run_as || return 1
+  as_run_user bash -lc "command -v $1" >/dev/null 2>&1
+}
+
+# A directory that must end up owned by the run-as account. Created BY that
+# account when we can become it, so the ownership is right by construction
+# rather than by a chown afterwards.
+run_mkdir() {
+  [ -d "$1" ] && return 0
+  if can_run_as; then as_run_user mkdir -p "$1" >/dev/null 2>&1 && return 0; fi
+  mkdir -p "$1" 2>/dev/null || return 1
+  return 0
+}
+
+# Adopt an account: resolve it, and settle the two values the compose file reads
+# back. Returns 1 on an account this host does not have, leaving the current one
+# untouched — a caller must never end up with a half-applied identity.
+apply_run_user() {
+  local u="$1" h uid gid
+  [ -n "$u" ] || return 1
+  user_exists "$u" || return 1
+  h="$(user_home "$u")"; uid="$(user_uid "$u")"; gid="$(user_gid "$u")"
+  [ -n "$h" ] && [ -n "$uid" ] && [ -n "$gid" ] || return 1
+  SWARM_OS_RUN_USER="$u"
+  RUN_HOME="$h"
+  SWARM_OS_RUN_UID="$uid"
+  SWARM_OS_RUN_GID="$gid"
+  SUDO_RUN_OK=""
+  # HOME inside the container. uid 1000 IS the image's own `node` user, so
+  # /home/node exists there and belongs to it — that is the historical default
+  # and it must not move. Any other uid has NO passwd entry inside the image:
+  # Docker then hands the process HOME=/, and every npm fetch, plugin install
+  # and CLI that writes under it fails on a read-only root. /data is the one
+  # tree we know that uid owns, so the home goes there.
+  if [ "$uid" = 1000 ]; then SWARM_OS_CONTAINER_HOME="/home/node"
+  else SWARM_OS_CONTAINER_HOME="/data/home"; fi
+  return 0
+}
+
+# A path still pointing into the PREVIOUS home is a leftover, not a decision:
+# follow the account. Anything the operator pointed elsewhere is left alone.
+rehome() {   # rehome VARNAME <old home> <new home>
+  local __v="$1" __old="$2" __new="$3" __cur=""
+  [ -n "$__old" ] && [ -n "$__new" ] && [ "$__old" != "$__new" ] || return 0
+  eval "__cur=\${$__v:-}"
+  case "$__cur" in
+    "$__old")   printf -v "$__v" '%s' "$__new" ;;
+    "$__old"/*) printf -v "$__v" '%s' "$__new${__cur#"$__old"}" ;;
+  esac
+  return 0
+}
+
+# Move every answer that hangs off a home directory to the new account's home.
+# Anything the operator had pointed OUTSIDE that home is their decision, and
+# `rehome` leaves it exactly where it is.
+follow_run_home() {
+  local old="$1"
+  if [ -n "$old" ] && [ "$old" != "$RUN_HOME" ]; then
+    rehome CLAUDE_DIR "$old" "$RUN_HOME"
+    rehome CLAUDE_JSON "$old" "$RUN_HOME"
+    rehome DATA_PATH "$old" "$RUN_HOME"
+    rehome WORKSPACE_PATH "$old" "$RUN_HOME"
+    rehome HOST_SSH_DIR "$old" "$RUN_HOME"
+    rehome SWARM_OS_HOST_DATA_DIR "$old" "$RUN_HOME"
+    rehome SWARM_OS_HOST_WORKSPACE_ROOT "$old" "$RUN_HOME"
+    rehome SWARM_OS_HOST_CLAUDE_DIR "$old" "$RUN_HOME"
+    rehome SWARM_OS_HOST_CODEX_DIR "$old" "$RUN_HOME"
+    rehome SWARM_OS_HOST_GEMINI_DIR "$old" "$RUN_HOME"
+    rehome SWARM_OS_HOST_OPENCODE_DIR "$old" "$RUN_HOME"
+    # The ssh transport logs INTO this account; only the host part survives.
+    case "${SWARM_OS_SSH_TARGET:-}" in
+      *@*) SWARM_OS_SSH_TARGET="${SWARM_OS_RUN_USER}@${SWARM_OS_SSH_TARGET#*@}" ;;
+    esac
+  fi
+  [ -n "$CLAUDE_DIR" ]  || CLAUDE_DIR="$RUN_HOME/.claude"
+  [ -n "$CLAUDE_JSON" ] || CLAUDE_JSON="$RUN_HOME/.claude.json"
+  return 0
+}
+
 slug() { printf '%s' "$1" | tr '[:upper:]' '[:lower:]' | sed 's/[^a-z0-9-]/-/g; s/--*/-/g; s/^-//; s/-$//'; }
 
 # Longest common prefix of the directories matching what has been typed so far.
@@ -598,9 +784,23 @@ free_port_from() {
   printf '%s' "$p"
 }
 
+# Ordinary login accounts on this host: a real uid, a home, and a shell that is
+# not a refusal. Sorted by uid, so the humans come before the service accounts a
+# distribution happens to give a high uid. `getent` may not enumerate a
+# directory-backed account at all — the "another account…" entry is the way in
+# for those, and typing one is validated by a direct `getent passwd <name>`.
+scan_login_users() {
+  getent passwd 2>/dev/null | awk -F: '
+    $3 >= 1000 && $3 < 60000 && $6 != "" && $7 !~ /(nologin|false|sync|shutdown|halt)$/ {
+      printf "%09d:%s\n", $3, $1
+    }' | sort -u | cut -d: -f2
+}
+
 # Directories on this host that look like a project someone would point agents
 # at: a git checkout, at or one level below the places people keep code. Ordered
-# by how likely they are given where the script was launched from.
+# by how likely they are given where the script was launched from. The home-
+# derived roots are the RUN-AS account's, not the installer's: a workspace that
+# account cannot write is not a candidate, however convenient it looks here.
 scan_project_dirs() {
   # An ARRAY, not a string: `$HOME` is `/Users/John Smith` on a stock macOS, and
   # word-splitting a space in it would drop the launch directory and every
@@ -611,9 +811,9 @@ scan_project_dirs() {
   local SEP=$'\037'
   local finder=(find) roots=()
   have timeout && finder=(timeout 4 find)
-  roots=("$PWD" "$(dirname "$PWD")" "$HOME/dev" "$HOME/projets" "$HOME/projects"
-         "$HOME/src" "$HOME/code" "$HOME/work" "$HOME/git" "$HOME/repos"
-         "$HOME/workspace" "$HOME" /srv /opt)
+  roots=("$PWD" "$(dirname "$PWD")" "$RUN_HOME/dev" "$RUN_HOME/projets" "$RUN_HOME/projects"
+         "$RUN_HOME/src" "$RUN_HOME/code" "$RUN_HOME/work" "$RUN_HOME/git" "$RUN_HOME/repos"
+         "$RUN_HOME/workspace" "$RUN_HOME" /srv /opt)
   for root in "${roots[@]}"; do
     [ -d "$root" ] || continue
     # The launch directory itself is the strongest signal there is.
@@ -707,7 +907,13 @@ v_dir_exists() {  # the workspace: it has to be a real tree the agents can edit
   [ -n "$d" ] || { V_STATE=err; V_MSG="give a path"; return 0; }
   case "$d" in /*) : ;; *) V_STATE=err; V_MSG="must be an absolute path"; return 0 ;; esac
   if [ -d "$d" ]; then
-    if [ ! -w "$d" ]; then V_STATE=warn; V_MSG="exists but $(id -un) cannot write to it — the agents will not be able to either"; return 0; fi
+    # Writable BY THE RUN-AS ACCOUNT — the agents write as that user, not as
+    # whoever is running the installer.
+    run_test -w "$d"
+    case "$?" in
+      1) V_STATE=warn; V_MSG="exists but $SWARM_OS_RUN_USER cannot write to it — the agents will not be able to either"; return 0 ;;
+      2) V_STATE=warn; V_MSG="exists; cannot check from here whether $SWARM_OS_RUN_USER can write to it"; return 0 ;;
+    esac
     V_STATE=ok; V_MSG="$(dir_hint "$d")"
     return 0
   fi
@@ -720,15 +926,15 @@ v_dir_exists() {  # the workspace: it has to be a real tree the agents can edit
   else V_STATE=err; V_MSG="cannot create it — $p is not writable by $(id -un)"; fi
 }
 
-v_data_dir() {   # the state directory: uid 1000 has to own it
+v_data_dir() {   # the state directory: the run-as account has to own it
   local d uid
   d="$(expand_path "$1")"
   [ -n "$d" ] || { V_STATE=err; V_MSG="give a path"; return 0; }
   case "$d" in /*) : ;; *) V_STATE=err; V_MSG="must be an absolute path"; return 0 ;; esac
   if [ -d "$d" ]; then
     uid="$(path_owner_uid "$d")"
-    if [ "$uid" != "1000" ] && [ "$uid" != "-1" ]; then
-      V_STATE=warn; V_MSG="owned by uid $uid; the container runs as uid 1000 — a chown will be offered"
+    if [ "$uid" != "$SWARM_OS_RUN_UID" ] && [ "$uid" != "-1" ]; then
+      V_STATE=warn; V_MSG="owned by uid $uid; the container runs as $SWARM_OS_RUN_USER (uid $SWARM_OS_RUN_UID) — a chown will be offered"
       return 0
     fi
     if [ -f "$d/swarm-os.db" ] || [ -f "$d/token" ]; then
@@ -739,6 +945,33 @@ v_data_dir() {   # the state directory: uid 1000 has to own it
     return 0
   fi
   V_STATE=ok; V_MSG="will be created"
+}
+
+v_account() {   # the run-as account, typed by hand
+  local u="$1" uid h
+  [ -n "$u" ] || { V_STATE=err; V_MSG="give a user name"; return 0; }
+  if ! user_exists "$u"; then
+    V_STATE=err; V_MSG="no such account on this host (getent passwd $u finds nothing)"
+    return 0
+  fi
+  uid="$(user_uid "$u")"
+  if [ "$uid" = 0 ]; then
+    V_STATE=err; V_MSG="the container must never run as root — pick an ordinary account"
+    return 0
+  fi
+  h="$(user_home "$u")"
+  if [ ! -d "$h" ]; then
+    V_STATE=warn; V_MSG="uid $uid, but its home $h does not exist yet"
+    return 0
+  fi
+  # Below 1000 is a distribution's own service account (`daemon`, `bin`, …), not
+  # somewhere a Claude Code login lives. Allowed — a site may genuinely have one
+  # — but never silently.
+  if [ "$uid" -lt 1000 ] 2>/dev/null; then
+    V_STATE=warn; V_MSG="uid $uid is a system account — usable, but it is unlikely to own a Claude login"
+    return 0
+  fi
+  V_STATE=ok; V_MSG="uid $uid · home $h"
 }
 
 v_project_name() {
@@ -805,11 +1038,13 @@ screen_welcome() {
   ui_head "A swarm-os instance on this host" "one container, one project, one port"
   ui_out "This installer takes you from a bare host to a running instance:"
   ui_gap
-  ui_dim "  1.  checks Docker, Compose and the Claude Code login every agent inherits"
+  ui_dim "  1.  checks Docker, Compose and this host's outbound network"
   ui_dim "  2.  asks for a GitHub token, and only if this host actually needs one"
-  ui_dim "  3.  lets you pick the install directory, the workspace and the port"
-  ui_dim "  4.  writes a .env you own, pulls the image and starts the container"
-  ui_dim "  5.  waits for the boot gate and hands you the access token"
+  ui_dim "  3.  asks which host account it runs as — its uid, and the Claude Code"
+  ui_dim "      login every agent inherits from it"
+  ui_dim "  4.  lets you pick the install directory, the workspace and the port"
+  ui_dim "  5.  writes a .env you own, pulls the image and starts the container"
+  ui_dim "  6.  waits for the boot gate and hands you the access token"
   ui_gap
   ui_out "Nothing outside the directories you name is written. The existing"
   ui_out "configuration of a host that already runs swarm-os is backed up, never"
@@ -897,33 +1132,11 @@ run_prereqs() {
     fi
   fi
 
+  # Not fatal, and no longer a dead end: the account the instance RUNS as is its
+  # own step, two screens down, and root can hand it to a normal user there.
   if [ "$(id -u)" = 0 ]; then
     ui_warn "running as root"
-    ui_wrapdim "swarm-os runs as uid 1000 — install it as the normal user that owns ~/.claude, or /data ends up unwritable for the container"
-  fi
-
-  # The one prerequisite that is not about this installer: swarm-os ships no API
-  # key, every agent launches the Claude Code CLI and inherits ITS login.
-  if have claude; then
-    ui_ok "claude CLI $(claude --version 2>/dev/null | head -1)"
-  else
-    ui_warn "the Claude Code CLI is not on PATH  ${C_DIM}npm i -g @anthropic-ai/claude-code${C_RESET}"
-  fi
-  if [ -f "$CLAUDE_DIR/.credentials.json" ]; then
-    ui_ok "Claude Code credentials in $CLAUDE_DIR"
-    CLAUDE_READY=1
-  else
-    ui_no "no $CLAUDE_DIR/.credentials.json — no agent will start until you log in"
-  fi
-  if [ -f "$CLAUDE_JSON" ]; then
-    ui_ok "$CLAUDE_JSON"
-  else
-    # Not cosmetic: compose bind-mounts this path, so Docker creates a root-owned
-    # DIRECTORY where the container expects a file, and the first agent hangs on
-    # the theme picker. It counts against readiness exactly like the credentials.
-    ui_no "$CLAUDE_JSON is missing"
-    ui_dim "  Docker would create a DIRECTORY there and the first session would freeze"
-    CLAUDE_READY=0
+    ui_wrapdim "the container itself must not — pick the account that owns ~/.claude on the run-as screen and everything is created for it"
   fi
 
   if curl -fsS -m 6 -o /dev/null "https://api.github.com" 2>/dev/null; then
@@ -936,16 +1149,12 @@ run_prereqs() {
 screen_prereqs() {
   STEP_NO=1
   while :; do
-    ui_head "Host prerequisites" "Docker, Compose, and the Claude Code login every agent inherits"
+    ui_head "Host prerequisites" "Docker, Compose, disk, network — the Claude login is checked per account, later"
     run_prereqs
     ui_gap
     if [ "$HARD_FAIL" = 1 ]; then
       ui_out "${C_RED}Blocking problems above.${C_RESET} Fix them in another terminal, then re-check."
       ui_foot "r re-check   f fix what can be fixed   esc back   ^C quit"
-    elif [ "$CLAUDE_READY" != 1 ]; then
-      ui_wrap "The instance will start, but agents will not: swarm-os ships no API key and every agent inherits the host's Claude Code login."
-      ui_out "${C_BOLD}f${C_RESET} walks through fixing the ${C_RED}${G_NO}${C_RESET} lines above, one at a time."
-      ui_foot "f fix now   r re-check   $G_RET continue anyway   esc back"
     else
       ui_out "${C_GREEN}This host is ready.${C_RESET}"
       ui_foot "$G_RET continue   r re-check   esc back   ^C quit"
@@ -967,24 +1176,6 @@ screen_prereqs() {
 
 fix_prereqs() {
   UI_ROW=$((UI_ROW + 1))
-  if ! have claude && have npm; then
-    if ui_confirm "Install the Claude Code CLI (npm i -g @anthropic-ai/claude-code)?" y; then
-      ui_suspend npm i -g @anthropic-ai/claude-code || true
-      return 0
-    fi
-  fi
-  if [ ! -f "$CLAUDE_DIR/.credentials.json" ] && have claude; then
-    if ui_confirm "Launch \`claude\` now to complete the OAuth login?" y; then
-      ui_suspend claude || true
-      return 0
-    fi
-  fi
-  if [ ! -f "$CLAUDE_JSON" ]; then
-    if ui_confirm "Create $CLAUDE_JSON as an empty JSON file?" y; then
-      printf '{}\n' > "$CLAUDE_JSON" 2>/dev/null || true
-      return 0
-    fi
-  fi
   if ! have docker && have curl; then
     if ui_confirm "Install Docker Engine with the official get.docker.com script (needs sudo)?" n; then
       ui_suspend bash -c 'curl -fsSL https://get.docker.com | sudo sh && sudo usermod -aG docker "$(id -un)"' || true
@@ -1169,17 +1360,279 @@ screen_dir() {
 # truth rather than from the defaults.
 load_env_file() {
   [ -f "$ENV_FILE" ] || return 0
+  # Blanked BEFORE the source, or the check below could never tell "the file
+  # says this account" from "this is the default we started with" — the global
+  # is never empty, so every inference under it would be dead code.
+  local prev="$SWARM_OS_RUN_USER" u="" chome=""
+  SWARM_OS_RUN_USER=""
+  SWARM_OS_CONTAINER_HOME=""
   set -a
   # shellcheck disable=SC1090
   . "$ENV_FILE" 2>/dev/null || true
   set +a
   [ -n "${SWARM_OS_GITHUB_TOKEN:-}" ] && [ -z "$TOKEN" ] && TOKEN="$SWARM_OS_GITHUB_TOKEN"
+
+  # The run-as account is a property of the DEPLOYMENT, not of this shell.
+  # Silently reverting it to whoever is typing would rewrite /data's owner and
+  # cut the agents off from the credentials they have been running on.
+  u="${SWARM_OS_RUN_USER:-}"
+  chome="${SWARM_OS_CONTAINER_HOME:-}"
+  # An .env written before this installer grew the question has no such key, so
+  # infer it, best evidence first: an ssh transport already NAMES the account
+  # its agents run as, and otherwise whoever owns the state directory is the
+  # account the instance was installed for.
+  if [ -z "$u" ]; then
+    case "${SWARM_OS_SSH_TARGET:-}" in
+      ?*@*) u="${SWARM_OS_SSH_TARGET%@*}" ;;
+    esac
+  fi
+  if [ -z "$u" ] && [ -n "${DATA_PATH:-}" ] && [ -d "${DATA_PATH:-}" ]; then
+    u="$(getent passwd "$(path_owner_uid "$DATA_PATH")" 2>/dev/null | head -1 | cut -d: -f1)"
+  fi
+  apply_run_user "$u" || apply_run_user "$prev" || true
+  # A container HOME the operator moved by hand is an answer, not a default:
+  # keep it, exactly as `carry_over_unknown` keeps the keys we do not manage.
+  [ -n "$chome" ] && SWARM_OS_CONTAINER_HOME="$chome"
   return 0
+}
+
+# ── The account the instance runs as ──────────────────────────────────────────
+# One answer decides three things at once, which is why it is its own step:
+#   * the uid:gid the container process carries (compose `user:`), hence who
+#     owns everything it writes in /data and /workspace;
+#   * which ~/.claude is mounted at /claude-source — the login every agent
+#     authenticates with, since swarm-os ships no API key;
+#   * under the ssh transport, the account the agent CLI processes are actually
+#     started as on this host.
+# Defaulting to the installer is right on a single-user host and wrong on the
+# host where an admin installs for a dedicated account — the case this screen
+# exists for.
+ACCOUNT_FATAL=0
+ACCOUNT_UNSURE=0
+
+account_hint() {
+  local u="$1" h uid out
+  uid="$(user_uid "$u")"; h="$(user_home "$u")"
+  out="uid $uid"
+  [ -n "$h" ] && out="$out · $h"
+  [ "$u" = "$SELF_USER" ] && out="$out · you"
+  # A direct test only: a 0700 home simply answers nothing here, and claiming
+  # "no credentials" about an account we cannot look into would be a lie.
+  [ -f "$h/.claude/.credentials.json" ] && out="$out · has a Claude login"
+  printf '%s' "$out"
+}
+
+run_account_checks() {
+  CLAUDE_READY=0
+  ACCOUNT_FATAL=0
+  ACCOUNT_UNSURE=0
+
+  if [ "$SWARM_OS_RUN_UID" = 0 ]; then
+    ui_no "$SWARM_OS_RUN_USER is uid 0 — the container must never run as root"
+    ui_wrapdim "press c and pick the account that owns the Claude Code login: /data, /workspace and the agents all follow it"
+    ACCOUNT_FATAL=1
+    return 0
+  fi
+
+  ui_ok "$SWARM_OS_RUN_USER — uid $SWARM_OS_RUN_UID, gid $SWARM_OS_RUN_GID, home $RUN_HOME"
+  if [ ! -d "$RUN_HOME" ]; then
+    ui_warn "$RUN_HOME does not exist — create the home before deploying"
+    ACCOUNT_UNSURE=1
+  fi
+  if ! is_self; then
+    if can_run_as; then
+      ui_ok "$SELF_USER can act as $SWARM_OS_RUN_USER (password-less sudo)"
+    else
+      ui_warn "$SELF_USER cannot become $SWARM_OS_RUN_USER without a password"
+      ui_wrapdim "the steps that must belong to that account are printed for you to run rather than run from here"
+      ACCOUNT_UNSURE=1
+    fi
+  fi
+
+  run_test -f "$CLAUDE_DIR/.credentials.json"
+  case "$?" in
+    0) ui_ok "Claude Code credentials in $CLAUDE_DIR"; CLAUDE_READY=1 ;;
+    # Unknown is not "missing": claiming the credentials are absent would send
+    # the operator off to redo an OAuth login that is already done. Say what we
+    # could not see, and let the verdict below stay honest about it.
+    2) ui_warn "cannot look inside $CLAUDE_DIR from here — the container will, as uid $SWARM_OS_RUN_UID"
+       CLAUDE_READY=1; ACCOUNT_UNSURE=1 ;;
+    *) ui_no "no $CLAUDE_DIR/.credentials.json — no agent starts until $SWARM_OS_RUN_USER logs in" ;;
+  esac
+
+  run_test -f "$CLAUDE_JSON"
+  case "$?" in
+    0) ui_ok "$CLAUDE_JSON" ;;
+    2) ui_warn "cannot see $CLAUDE_JSON from here"; ACCOUNT_UNSURE=1 ;;
+    *) # Not cosmetic: compose bind-mounts this path, so Docker creates a
+       # root-owned DIRECTORY where the container expects a file, and the first
+       # agent hangs on the theme picker.
+       ui_no "$CLAUDE_JSON is missing"
+       ui_dim "  Docker would create a DIRECTORY there and the first session would freeze"
+       CLAUDE_READY=0 ;;
+  esac
+
+  if run_user_has claude; then
+    ui_ok "claude is on ${SWARM_OS_RUN_USER}'s login-shell PATH"
+  elif ! is_self && ! can_run_as; then
+    ui_warn "cannot check ${SWARM_OS_RUN_USER}'s PATH from here"
+    ACCOUNT_UNSURE=1
+  else
+    # `bash -lc` is what an ssh-transport agent gets: a CLI reachable only from
+    # the interactive branch of ~/.bashrc is invisible to it.
+    ui_warn "claude is not on ${SWARM_OS_RUN_USER}'s login-shell PATH  ${C_DIM}npm i -g @anthropic-ai/claude-code${C_RESET}"
+    ACCOUNT_UNSURE=1
+  fi
+
+  if id -nG "$SWARM_OS_RUN_USER" 2>/dev/null | tr ' ' '\n' | grep -qx docker; then
+    ui_ok "in the docker group — one-click updates and plugin host-exec will work"
+  else
+    ui_wrapdim "not in the docker group: under the ssh transport, one-click updates and plugin host-exec need  sudo usermod -aG docker $SWARM_OS_RUN_USER"
+  fi
+  return 0
+}
+
+# Every fix here runs AS the account. A credentials file or a ~/.claude.json
+# created by root is a file the container cannot read — the exact failure this
+# screen exists to prevent.
+fix_account() {
+  UI_ROW=$((UI_ROW + 1))
+  local cred cj
+  run_test -f "$CLAUDE_DIR/.credentials.json"; cred=$?
+  run_test -f "$CLAUDE_JSON"; cj=$?
+
+  if ! run_user_has claude && is_self && have npm; then
+    if ui_confirm "Install the Claude Code CLI (npm i -g @anthropic-ai/claude-code)?" y; then
+      ui_suspend npm i -g @anthropic-ai/claude-code || true
+      return 0
+    fi
+  fi
+
+  if [ "$cred" = 1 ]; then
+    if is_self; then
+      if ui_confirm "Launch \`claude\` now to complete the OAuth login?" y; then
+        ui_suspend claude || true
+        return 0
+      fi
+    elif have sudo; then
+      # A login shell, not `sudo -u … claude`: the CLI must come from the
+      # account's own PATH, and it writes into that account's home.
+      if ui_confirm "Run the OAuth login as $SWARM_OS_RUN_USER (sudo -u $SWARM_OS_RUN_USER -i claude)?" y; then
+        ui_suspend sudo -u "$SWARM_OS_RUN_USER" -i claude || true
+        return 0
+      fi
+    else
+      ui_out "Run this as $SWARM_OS_RUN_USER, then press r:"
+      ui_dim "  su - $SWARM_OS_RUN_USER -c claude"
+      # Not `ui_pause || return`: an esc here means "done reading", not "leave
+      # the run-as screen" — a UI_BACK left standing would send the wizard a
+      # screen backwards the next time this one is left.
+      ui_pause
+      UI_BACK=0
+      return 0
+    fi
+  fi
+
+  if [ "$cj" = 1 ]; then
+    if ui_confirm "Create $CLAUDE_JSON as an empty JSON file, owned by $SWARM_OS_RUN_USER?" y; then
+      if is_self; then
+        printf '{}\n' >"$CLAUDE_JSON" 2>/dev/null || ui_no "could not write $CLAUDE_JSON"
+      elif can_run_as; then
+        as_run_user sh -c "printf '{}\n' > \"\$1\"" sh "$CLAUDE_JSON" 2>/dev/null \
+          || ui_no "could not write $CLAUDE_JSON as $SWARM_OS_RUN_USER"
+      else
+        ui_suspend sudo -u "$SWARM_OS_RUN_USER" sh -c "printf '{}\n' > \"\$1\"" sh "$CLAUDE_JSON" || true
+      fi
+      return 0
+    fi
+  fi
+  return 0
+}
+
+pick_account() {
+  local u cand opts=() sel=1 n=0 old="$RUN_HOME"
+  ui_head "Run-as account" "who this instance belongs to on this host"
+  ui_wrapdim "Login accounts found on this host. The instance takes this account's uid, its ~/.claude, and — under the ssh transport — runs the agent processes as it."
+  ui_gap
+
+  opts=()
+  while IFS= read -r cand; do
+    [ -n "$cand" ] || continue
+    # See screen_dir: `|` is the menu's own delimiter.
+    case "$cand" in *'|'*) continue ;; esac
+    n=$((n + 1))
+    [ "$cand" = "$SWARM_OS_RUN_USER" ] && sel=$n
+    opts+=("$cand|$cand|$(account_hint "$cand")")
+    [ "$n" -ge 8 ] && break
+  done <<EOF
+$(scan_login_users)
+EOF
+  opts+=("__custom__|Another account…|type the user name — looked up in passwd, LDAP included")
+
+  ui_menu u "$sel" "${opts[@]}"
+  [ "$UI_BACK" = 1 ] && { UI_BACK=0; return 0; }
+
+  if [ "$u" = "__custom__" ]; then
+    ui_gap
+    ui_input u "user name" "$SWARM_OS_RUN_USER" v_account
+    [ "$UI_BACK" = 1 ] && { UI_BACK=0; return 0; }
+  fi
+
+  if ! apply_run_user "$u"; then
+    ui_gap
+    ui_no "no such account on this host: $u"
+    ui_pause || UI_BACK=0
+    return 0
+  fi
+
+  follow_run_home "$old"
+  return 0
+}
+
+screen_user() {
+  STEP_NO=4
+  while :; do
+    ui_head "Run-as account" "the uid the container carries, and the Claude login every agent inherits"
+    ui_wrapdim "swarm-os ships no API key: every agent launches a provider CLI and authenticates with THIS account's login. The container runs with its uid, so everything it writes in /data and /workspace belongs to it too."
+    ui_gap
+    run_account_checks
+    ui_gap
+    if [ "$ACCOUNT_FATAL" = 1 ]; then
+      ui_foot "c change account   r re-check   esc back   ^C quit"
+    elif [ "$CLAUDE_READY" != 1 ]; then
+      ui_wrap "The instance will start, but agents will not, until that account has a Claude Code login."
+      ui_out "${C_BOLD}f${C_RESET} fixes the ${C_RED}${G_NO}${C_RESET} lines above, one at a time, as $SWARM_OS_RUN_USER."
+      ui_foot "f fix now   c change account   r re-check   $G_RET continue anyway   esc back"
+    elif [ "$ACCOUNT_UNSURE" = 1 ]; then
+      # The Claude login is there, but something else is missing or could not be
+      # looked at from here — a 0700 home, no password-less sudo, no provider
+      # CLI on that account's PATH. Saying "ready" would be a promise this
+      # installer is in no position to make.
+      ui_wrap "Nothing here blocks the install — read the ${C_YELLOW}${G_WARN}${C_RESET} lines above: they are what could not be verified, or is missing on that account."
+      ui_foot "$G_RET continue   c change account   r re-check   esc back   ^C quit"
+    else
+      ui_out "${C_GREEN}This account is ready.${C_RESET}"
+      ui_foot "$G_RET continue   c change account   r re-check   esc back   ^C quit"
+    fi
+    ui_key
+    case "$KEYTYPE" in
+      enter|right) [ "$ACCOUNT_FATAL" = 1 ] || return 0 ;;
+      esc|left) UI_BACK=1; return 0 ;;
+      int|eof) ui_abort ;;
+      char)
+        case "$KEY" in
+          c|C) pick_account ;;
+          f|F) [ "$ACCOUNT_FATAL" = 1 ] || fix_account ;;
+          r|R) : ;;
+          q) ui_abort ;;
+        esac ;;
+    esac
+  done
 }
 
 # ── Project, workspace, state ─────────────────────────────────────────────────
 screen_project() {
-  STEP_NO=4
+  STEP_NO=5
   ui_head "Project" "one swarm-os instance drives exactly one project"
   ui_dim "The name shows up in the UI, in the logs and in the Discord notifications."
   ui_gap
@@ -1194,7 +1647,7 @@ screen_project() {
 }
 
 screen_workspace() {
-  STEP_NO=5
+  STEP_NO=6
   local pick opts=() d hint n=0 cap
   ui_head "Workspace" "the tree the agents actually edit — mounted read-write at /workspace"
 
@@ -1227,7 +1680,7 @@ EOF
   opts+=("__custom__|Another path…|type it yourself, with tab completion — it is created if missing")
 
   if [ "$n" = 0 ]; then
-    ui_wrapdim "No git checkout found near $PWD or under \$HOME, so there is nothing to suggest."
+    ui_wrapdim "No git checkout found near $PWD or under $RUN_HOME, so there is nothing to suggest."
     ui_gap
   else
     ui_dim "Found on this host — pick one, or give a path of your own."
@@ -1239,7 +1692,7 @@ EOF
 
   if [ "$pick" = "__custom__" ]; then
     ui_gap
-    ui_input WORKSPACE_PATH "path" "${WORKSPACE_PATH:-$HOME/dev/$(slug "$SWARM_OS_PROJECT_NAME")}" v_dir_exists
+    ui_input WORKSPACE_PATH "path" "${WORKSPACE_PATH:-$RUN_HOME/dev/$(slug "$SWARM_OS_PROJECT_NAME")}" v_dir_exists
     [ "$UI_BACK" = 1 ] && return 0
   else
     WORKSPACE_PATH="$pick"
@@ -1249,11 +1702,17 @@ EOF
   if [ ! -d "$WORKSPACE_PATH" ]; then
     ui_gap
     ui_warn "$WORKSPACE_PATH does not exist."
-    if ui_confirm "Create it?" y; then
+    if ui_confirm "Create it, owned by $SWARM_OS_RUN_USER?" y; then
       # Advancing here would hand compose a path only the daemon can create, as
-      # root — so go back to the question instead.
-      mkdir -p "$WORKSPACE_PATH" 2>/dev/null || { ui_no "could not create it"; ui_pause; UI_BACK=1; return 0; }
+      # root — so go back to the question instead. `run_mkdir` creates it AS the
+      # run-as account whenever it can: a workspace owned by the installer is
+      # one the agents cannot write to.
+      run_mkdir "$WORKSPACE_PATH" || { ui_no "could not create it"; ui_pause; UI_BACK=1; return 0; }
       ui_ok "created"
+      if [ "$(path_owner_uid "$WORKSPACE_PATH")" != "$SWARM_OS_RUN_UID" ]; then
+        ui_warn "it belongs to uid $(path_owner_uid "$WORKSPACE_PATH"), not to $SWARM_OS_RUN_USER"
+        ui_dim "  sudo chown -R $SWARM_OS_RUN_UID:$SWARM_OS_RUN_GID $WORKSPACE_PATH"
+      fi
     else
       UI_BACK=1; return 0
     fi
@@ -1273,7 +1732,9 @@ EOF
       # Through ui_suspend, not inline: a private HTTPS URL or an unknown host
       # key makes git prompt on /dev/tty, and the wizard has that terminal in
       # -icanon -echo — the installer would look frozen with typing invisible.
-      ui_suspend git clone "$url" "$WORKSPACE_PATH" \
+      # As the run-as account, so the checkout it produces is one the agents can
+      # commit in — and so the credentials git asks for are that account's.
+      suspend_as_run_user git clone "$url" "$WORKSPACE_PATH" \
         && ui_ok "cloned into $WORKSPACE_PATH" \
         || ui_warn "clone failed — continuing with an empty workspace"
       ui_pause || return 0
@@ -1283,36 +1744,51 @@ EOF
 }
 
 screen_data() {
-  STEP_NO=6
+  STEP_NO=7
   local ps uid
   ps="$(slug "$SWARM_OS_PROJECT_NAME")"
   ui_head "State directory" "SQLite database, access token, logs, backups — mounted at /data"
   ui_dim "Everything that must survive a container replacement lives here. Keep it,"
   ui_dim "and teams, history and tokens come back after an update."
   ui_gap
-  ui_input DATA_PATH "path" "${DATA_PATH:-$HOME/.swarm-os/$ps}" v_data_dir
+  ui_input DATA_PATH "path" "${DATA_PATH:-$RUN_HOME/.swarm-os/$ps}" v_data_dir
   [ "$UI_BACK" = 1 ] && return 0
   DATA_PATH="$(expand_path "$DATA_PATH")"
-  mkdir -p "$DATA_PATH" 2>/dev/null || { ui_no "could not create $DATA_PATH"; ui_pause; UI_BACK=1; return 0; }
+  run_mkdir "$DATA_PATH" || { ui_no "could not create $DATA_PATH"; ui_pause; UI_BACK=1; return 0; }
 
-  # The image drops to the unprivileged `node` user. A state directory owned by
+  # The container writes here as the run-as account. A state directory owned by
   # anyone else is a container that boots and then cannot write its database.
   uid="$(path_owner_uid "$DATA_PATH")"
-  if [ "$uid" != "1000" ] && [ "$uid" != "-1" ]; then
+  if [ "$uid" != "$SWARM_OS_RUN_UID" ] && [ "$uid" != "-1" ]; then
     ui_gap
-    ui_warn "$DATA_PATH belongs to uid $uid; the container runs as uid 1000."
-    if ui_confirm "Run: sudo chown -R 1000:1000 $DATA_PATH ?" y; then
-      ui_suspend sudo chown -R 1000:1000 "$DATA_PATH" || ui_warn "chown failed — expect write errors in /data"
+    ui_warn "$DATA_PATH belongs to uid $uid; the container runs as $SWARM_OS_RUN_USER (uid $SWARM_OS_RUN_UID)."
+    if ui_confirm "Run: sudo chown -R $SWARM_OS_RUN_UID:$SWARM_OS_RUN_GID $DATA_PATH ?" y; then
+      ui_suspend sudo chown -R "$SWARM_OS_RUN_UID:$SWARM_OS_RUN_GID" "$DATA_PATH" \
+        || ui_warn "chown failed — expect write errors in /data"
     else
       ui_warn "left as-is — the container will fail to write its database"
       ui_pause || return 0
     fi
   fi
+
+  # The container's own HOME when it does not run as uid 1000 — see
+  # `apply_run_user`. It lives under /data because that is the one tree we know
+  # the run-as account owns; created here so the very first boot finds it there.
+  case "$SWARM_OS_CONTAINER_HOME" in
+    /data/*)
+      local ch="$DATA_PATH/${SWARM_OS_CONTAINER_HOME#/data/}"
+      if run_mkdir "$ch"; then
+        ui_gap
+        ui_ok "$ch — the container's HOME (uid $SWARM_OS_RUN_UID has no home inside the image)"
+      else
+        ui_warn "could not create $ch — npm and plugin installs inside the container will fail"
+      fi ;;
+  esac
   return 0
 }
 
 screen_port() {
-  STEP_NO=7
+  STEP_NO=8
   ui_head "Port" "the UI is published on the host loopback only — 127.0.0.1, never 0.0.0.0"
   ui_dim "The container always listens on 8787 internally; this is the host side."
   ui_dim "The VS Code editor needs no port of its own — it is proxied under /ide here."
@@ -1326,7 +1802,7 @@ screen_port() {
 
 # ── Transport ─────────────────────────────────────────────────────────────────
 screen_transport() {
-  STEP_NO=8
+  STEP_NO=9
   local t sshd_up=0 def=2
   port_in_use 22 && sshd_up=1
   [ "$sshd_up" = 1 ] && def=1
@@ -1337,8 +1813,11 @@ screen_transport() {
   ui_dim "      plugin host-exec, and no race on the Claude OAuth refresh."
   ui_dim "local agents run in the container: claude only, updates stay a shell job."
   ui_gap
+  ui_dim "Either way they are ${SWARM_OS_RUN_USER}'s processes: as that account on the host,"
+  ui_dim "or as uid $SWARM_OS_RUN_UID inside the container."
+  ui_gap
   ui_menu t "$def" \
-    "ssh|Agents run on this host, over SSH|recommended$([ "$sshd_up" = 1 ] || printf '%s' ' — but no sshd is listening on port 22 right now')" \
+    "ssh|Agents run on this host as $SWARM_OS_RUN_USER|recommended$([ "$sshd_up" = 1 ] || printf '%s' ' — but no sshd is listening on port 22 right now')" \
     "local|Agents run inside the container|simplest; codex / gemini / opencode will correctly report themselves unavailable"
   [ "$UI_BACK" = 1 ] && return 0
   SWARM_OS_AGENT_TRANSPORT="$t"
@@ -1357,13 +1836,18 @@ setup_ssh() {
   ui_wrapdim "It needs a key it can read, and an account whose CLI logins the agents will inherit."
   ui_gap
 
-  # Every default is seeded from the current `.env` when there is one: a
+  # NOT a question: the account is the one chosen on the run-as screen. Asking
+  # again is how an instance ends up ssh-ing as one user while mounting another
+  # one's ~/.claude — a mismatch nothing downstream can detect, and every agent
+  # dies on its first turn with a credentials error that names neither.
+  user="$SWARM_OS_RUN_USER"
+  ui_kv "ssh user" "$user  (the run-as account — change it on step 4)"
+  # `ui_gap`, not a bare UI_ROW bump: a row that is skipped without being
+  # printed still shows the previous frame underneath it.
+  ui_gap
+  # Every other default is seeded from the current `.env` when there is one: a
   # reconfigure must not silently drag a customised gateway, port or key path
   # back to the shipped default and strip the agents of the credentials they had.
-  user="${SWARM_OS_SSH_TARGET%@*}"
-  [ -n "$user" ] && [ "$user" != "$SWARM_OS_SSH_TARGET" ] || user="$(id -un)"
-  ui_input user "ssh user" "$user"
-  [ "$UI_BACK" = 1 ] && return 0
   # `host.docker.internal` is what the overlay's extra_hosts maps to the bridge
   # gateway, so it resolves from inside the container on Linux too.
   host="${SWARM_OS_SSH_TARGET#*@}"
@@ -1381,30 +1865,45 @@ setup_ssh() {
   [ "$UI_BACK" = 1 ] && return 0
 
   if [ "$mode" = generate ]; then
-    keydir="${HOST_SSH_DIR:-$HOME/.swarm-os/ssh}"
+    # Under the RUN-AS account's home, generated AS that account. Two reasons,
+    # both fatal otherwise: the container reads the private key as that uid (a
+    # 0600 key owned by the installer is EACCES), and the key has to end up in
+    # THAT account's authorized_keys for the login to be accepted at all.
+    keydir="${HOST_SSH_DIR:-$RUN_HOME/.swarm-os/ssh}"
     key_path="$keydir/swarm-os-spawner"
-    mkdir -p "$keydir" 2>/dev/null && chmod 700 "$keydir" 2>/dev/null
+    run_mkdir "$keydir" && as_run_user chmod 700 "$keydir" 2>/dev/null
     ui_gap
-    if [ -f "$key_path" ]; then
+    # `[ -f ]` from here is FALSE for a key that exists inside a 0700 home;
+    # `run_test` asks the account itself.
+    if run_test -f "$key_path"; then
       ui_ok "reusing the key already at $key_path"
-    elif have ssh-keygen; then
-      if ssh-keygen -t ed25519 -N "" -C "swarm-os-$(slug "$SWARM_OS_PROJECT_NAME")" -f "$key_path" >/dev/null 2>&1; then
-        ui_ok "generated $key_path"
+    elif ! have ssh-keygen; then
+      ui_no "ssh-keygen is not installed (package openssh-client)"
+    elif ! is_self && ! can_run_as; then
+      ui_no "cannot generate it as $user from here (no password-less sudo)"
+      ui_wrapdim "run this as $user, then come back and choose \"a key I already have\":"
+      ui_dim "  ssh-keygen -t ed25519 -N '' -f $key_path"
+    else
+      if as_run_user ssh-keygen -t ed25519 -N "" -C "swarm-os-$(slug "$SWARM_OS_PROJECT_NAME")" \
+           -f "$key_path" >/dev/null 2>&1; then
+        ui_ok "generated $key_path (owned by $user)"
       else
         ui_no "ssh-keygen failed"
       fi
-    else
-      ui_no "ssh-keygen is not installed (package openssh-client)"
     fi
-    if [ -f "$key_path.pub" ]; then
-      if [ "$user" = "$(id -un)" ]; then
-        mkdir -p "$HOME/.ssh" 2>/dev/null && chmod 700 "$HOME/.ssh" 2>/dev/null
-        touch "$HOME/.ssh/authorized_keys" 2>/dev/null && chmod 600 "$HOME/.ssh/authorized_keys" 2>/dev/null
-        pub="$(cut -d' ' -f2 "$key_path.pub" 2>/dev/null)"
-        if [ -n "$pub" ] && grep -qF "$pub" "$HOME/.ssh/authorized_keys" 2>/dev/null; then
-          ui_ok "already authorised in ~/.ssh/authorized_keys"
+    if run_test -f "$key_path.pub"; then
+      if is_self || can_run_as; then
+        as_run_user mkdir -p "$RUN_HOME/.ssh" 2>/dev/null && as_run_user chmod 700 "$RUN_HOME/.ssh" 2>/dev/null
+        as_run_user touch "$RUN_HOME/.ssh/authorized_keys" 2>/dev/null \
+          && as_run_user chmod 600 "$RUN_HOME/.ssh/authorized_keys" 2>/dev/null
+        pub="$(as_run_user cat "$key_path.pub" 2>/dev/null | cut -d' ' -f2)"
+        if [ -n "$pub" ] && as_run_user grep -qF "$pub" "$RUN_HOME/.ssh/authorized_keys" 2>/dev/null; then
+          ui_ok "already authorised in ~$user/.ssh/authorized_keys"
+        elif as_run_user sh -c 'cat "$1" >> "$2"' sh "$key_path.pub" "$RUN_HOME/.ssh/authorized_keys" 2>/dev/null; then
+          ui_ok "authorised in ~$user/.ssh/authorized_keys"
         else
-          cat "$key_path.pub" >> "$HOME/.ssh/authorized_keys" 2>/dev/null && ui_ok "authorised in ~/.ssh/authorized_keys"
+          ui_warn "could not append to ~$user/.ssh/authorized_keys"
+          ui_dim "  sudo -u $user tee -a ~$user/.ssh/authorized_keys < $key_path.pub"
         fi
       else
         ui_warn "authorise it yourself for $user:"
@@ -1413,7 +1912,7 @@ setup_ssh() {
     fi
   else
     ui_gap
-    local kdef="$HOME/.ssh/id_ed25519"
+    local kdef="$RUN_HOME/.ssh/id_ed25519"
     [ -n "$HOST_SSH_DIR" ] && [ -n "$SWARM_OS_SSH_KEY" ] && kdef="$HOST_SSH_DIR/${SWARM_OS_SSH_KEY##*/}"
     ui_input key_path "private key path" "$kdef" v_keyfile
     [ "$UI_BACK" = 1 ] && return 0
@@ -1424,7 +1923,7 @@ setup_ssh() {
   # `.env` would otherwise be complete and valid, the overlay's `:?` guard
   # satisfied and the container HEALTHY — and every single agent spawn would die
   # on `ssh -i /host-ssh/…: no such file`, with nothing on the boot path saying so.
-  if [ ! -f "$key_path" ]; then
+  if ! run_test -f "$key_path"; then
     ui_gap
     ui_no "no private key at $key_path"
     ui_wrapdim "the ssh transport cannot be configured without one. Install openssh-client and come back, or choose the local transport."
@@ -1437,31 +1936,39 @@ setup_ssh() {
   HOST_SSH_DIR="$(dirname "$key_path")"
   SWARM_OS_SSH_KEY="/host-ssh/$(basename "$key_path")"
 
-  # The container reads that file as uid 1000 and gets EACCES otherwise.
+  # The container reads that file as the run-as uid and gets EACCES otherwise.
+  # -1 means we could not even stat it (a 0700 directory of another account),
+  # which says nothing about the container: it will read it as the owner.
   local kuid; kuid="$(path_owner_uid "$key_path")"
-  if [ "$kuid" != "1000" ] && [ "$kuid" != "-1" ]; then
-    ui_warn "the key is owned by uid $kuid; the container reads it as uid 1000"
+  if [ "$kuid" != "$SWARM_OS_RUN_UID" ] && [ "$kuid" != "-1" ]; then
+    ui_warn "the key is owned by uid $kuid; the container reads it as uid $SWARM_OS_RUN_UID ($SWARM_OS_RUN_USER)"
   fi
 
   # Verify exactly the way the container will, including the shell. The agent's
   # remote command is `bash -lc`, so what matters is the LOGIN shell's PATH: a
   # CLI that only exists in the interactive branch of ~/.bashrc is invisible to
   # a spawned agent, and the failure looks like a swarm-os bug.
-  if have ssh && [ -f "$key_path" ]; then
+  if ! have ssh; then
+    :
+  elif ! is_self && ! can_run_as; then
+    ui_gap
+    ui_warn "cannot test the connection from here — the key belongs to $user"
+    ui_dim "  sudo -u $user ssh -i $key_path -p ${SWARM_OS_SSH_PORT:-22} ${user}@127.0.0.1 -- true"
+  else
     ui_gap
     ui_out "${C_DIM}testing the exact path the agents will take…${C_RESET}"
-    if ssh -i "$key_path" -p "${SWARM_OS_SSH_PORT:-22}" -o BatchMode=yes \
+    if as_run_user ssh -i "$key_path" -p "${SWARM_OS_SSH_PORT:-22}" -o BatchMode=yes \
          -o StrictHostKeyChecking=accept-new -o ConnectTimeout=6 \
          "${user}@127.0.0.1" -- true >/dev/null 2>&1; then
       ui_ok "ssh ${user}@127.0.0.1 works with that key"
-      seen="$(ssh -i "$key_path" -p "${SWARM_OS_SSH_PORT:-22}" -o BatchMode=yes \
+      seen="$(as_run_user ssh -i "$key_path" -p "${SWARM_OS_SSH_PORT:-22}" -o BatchMode=yes \
         -o StrictHostKeyChecking=accept-new -o ConnectTimeout=6 "${user}@127.0.0.1" -- \
         "bash -lc 'command -v claude'" 2>/dev/null)" || seen=""
       if [ -n "$seen" ]; then
         ui_ok "claude resolves in the agents' login shell: $seen"
       else
         ui_no "claude is NOT on the login-shell PATH of $user"
-        ui_wrapdim "agents would spawn and die. Add its directory to ~/.profile — they run \`bash -lc\`, not your interactive shell"
+        ui_wrapdim "agents would spawn and die. Add its directory to ~$user/.profile — they run \`bash -lc\`, not your interactive shell"
       fi
     else
       ui_no "could not ssh to ${user}@127.0.0.1 with that key"
@@ -1481,19 +1988,21 @@ setup_ssh() {
   SWARM_OS_HOST_DATA_DIR="$DATA_PATH"
   SWARM_OS_HOST_WORKSPACE_ROOT="$WORKSPACE_PATH"
   SWARM_OS_HOST_CLAUDE_DIR="$CLAUDE_DIR"
-  SWARM_OS_HOST_CODEX_DIR="${SWARM_OS_HOST_CODEX_DIR:-$HOME/.codex}"
-  SWARM_OS_HOST_GEMINI_DIR="${SWARM_OS_HOST_GEMINI_DIR:-$HOME/.gemini}"
+  # Per-CLI state under the RUN-AS account's home: that is the account the agent
+  # logs in as, and the only one whose provider logins it can possibly read.
+  SWARM_OS_HOST_CODEX_DIR="${SWARM_OS_HOST_CODEX_DIR:-$RUN_HOME/.codex}"
+  SWARM_OS_HOST_GEMINI_DIR="${SWARM_OS_HOST_GEMINI_DIR:-$RUN_HOME/.gemini}"
   if [ -z "$SWARM_OS_HOST_OPENCODE_DIR" ]; then
-    if [ -d "$HOME/.config/opencode" ]; then
-      SWARM_OS_HOST_OPENCODE_DIR="$HOME/.config/opencode"
+    if run_test -d "$RUN_HOME/.config/opencode"; then
+      SWARM_OS_HOST_OPENCODE_DIR="$RUN_HOME/.config/opencode"
     else
-      SWARM_OS_HOST_OPENCODE_DIR="$HOME/.opencode"
+      SWARM_OS_HOST_OPENCODE_DIR="$RUN_HOME/.opencode"
     fi
   fi
   # gemini has no "use whatever works" auth mode: unpinned it opens an auth
   # picker that repaints for ever, so the agent never goes idle and never reads
   # its team messages.
-  [ -f "$HOME/.gemini/oauth_creds.json" ] && SWARM_OS_GEMINI_AUTH_TYPE="oauth-personal"
+  run_test -f "$RUN_HOME/.gemini/oauth_creds.json" && SWARM_OS_GEMINI_AUTH_TYPE="oauth-personal"
 
   # Only under ssh can anything but claude run at all, and only what is already
   # on this host. Offer the choice rather than hardcoding claude — a team that
@@ -1501,10 +2010,11 @@ setup_ssh() {
   # `.env`. Installing the CLIs stays the operator's job: one is selectable at
   # the next availability poll, 60 s, no restart.
   local popts
+  # On the RUN-AS account's login-shell PATH — the only PATH an agent ever sees.
   popts=("claude|claude (Anthropic)|always available")
-  have codex    && popts+=("codex|codex (OpenAI)|installed on this host")
-  have gemini   && popts+=("gemini|gemini (Google)|installed on this host")
-  have opencode && popts+=("opencode|opencode (OpenRouter)|installed on this host")
+  run_user_has codex    && popts+=("codex|codex (OpenAI)|on ${user}'s login-shell PATH")
+  run_user_has gemini   && popts+=("gemini|gemini (Google)|on ${user}'s login-shell PATH")
+  run_user_has opencode && popts+=("opencode|opencode (OpenRouter)|on ${user}'s login-shell PATH")
   if [ "${#popts[@]}" -gt 1 ]; then
     ui_gap
     ui_dim "Default provider — what a team gets when neither it nor its role names one:"
@@ -1521,7 +2031,7 @@ setup_ssh() {
 
 # ── Remote access ─────────────────────────────────────────────────────────────
 screen_access() {
-  STEP_NO=9
+  STEP_NO=10
   local m dns=""
   ui_head "Remote access" "the UI binds to 127.0.0.1 and terminates no TLS inside the container"
   ui_gap
@@ -1592,7 +2102,7 @@ screen_access() {
 
 # ── Optional extras ───────────────────────────────────────────────────────────
 screen_extras() {
-  STEP_NO=10
+  STEP_NO=11
   ui_head "Notifications, updates, limits" "all optional — enter walks past every one of them"
   ui_dim "Update detection reads the GitHub releases of a private repository, so it"
   ui_dim "needs a read-only PAT. Empty is a healthy state: it means \"never tell me\"."
@@ -1614,12 +2124,14 @@ screen_extras() {
 mask() { [ -n "${1-}" ] && printf 'set (hidden)' || printf '(not set)'; }
 
 screen_review() {
-  STEP_NO=11
+  STEP_NO=12
   ui_head "Review" "nothing has been written to $DIR yet"
   ui_kv "project"        "$SWARM_OS_PROJECT_NAME"
   ui_kv "container"      "$SWARM_OS_CONTAINER_NAME"
   ui_kv "url"            "http://127.0.0.1:${SWARM_OS_PORT}"
   ui_kv "install dir"    "$DIR"
+  ui_kv "runs as"        "$SWARM_OS_RUN_USER  (uid $SWARM_OS_RUN_UID, gid $SWARM_OS_RUN_GID)"
+  ui_kv "claude login"   "$CLAUDE_DIR"
   ui_kv "workspace"      "$WORKSPACE_PATH"
   ui_kv "state (/data)"  "$DATA_PATH"
   ui_kv "image"          "$SWARM_OS_IMAGE"
@@ -1715,7 +2227,23 @@ write_env() {
   etx "# leave the old container running against this same DATA_PATH."
   ekv COMPOSE_PROJECT_NAME "$(compose_project)"
   etx ""
-  etx "# ── Host paths ───────────────────────────────────────────────────────────────"
+  etx "# ── Run-as account ───────────────────────────────────────────────────────────"
+  etx "# The host account this instance belongs to. The container process carries"
+  etx "# this uid:gid (compose \`user:\`), so everything it writes in /data and"
+  etx "# /workspace belongs to that account — and under the ssh transport the agent"
+  etx "# CLIs are started as it. The paths below are its home, not the installer's."
+  etx "# SWARM_OS_RUN_USER is not read by anything at runtime: it is what makes a"
+  etx "# reconfigure keep this account instead of reverting to whoever re-runs the"
+  etx "# installer."
+  ekv SWARM_OS_RUN_USER "$SWARM_OS_RUN_USER"
+  ekv SWARM_OS_RUN_UID "$SWARM_OS_RUN_UID"
+  ekv SWARM_OS_RUN_GID "$SWARM_OS_RUN_GID"
+  etx "# HOME inside the container. uid 1000 is the image's own \`node\` user, which"
+  etx "# owns /home/node; any other uid has no passwd entry in the image, would get"
+  etx "# HOME=/ and fail every npm / plugin install that writes under it."
+  ekv SWARM_OS_CONTAINER_HOME "$SWARM_OS_CONTAINER_HOME"
+  etx ""
+  etx "# ── Host paths (under the run-as account's home) ──────────────────────────────"
   ekv WORKSPACE_PATH "$WORKSPACE_PATH"
   ekv DATA_PATH "$DATA_PATH"
   ekv CLAUDE_DIR "$CLAUDE_DIR"
@@ -1892,10 +2420,28 @@ compose_args() {
 # and a wrong path here is silent rather than loud. A bind mount whose host side
 # does not exist makes the DAEMON create it — root-owned. `${WORKSPACE_PATH}`
 # then mounts an empty tree the agents happily "work" in, and `${DATA_PATH}`
-# mounts a directory uid 1000 cannot write, so the container restart-loops.
+# mounts a directory the run-as uid cannot write, so the container restart-loops.
 validate_env() {
+  local duid chome who
   : "${SWARM_OS_CONTAINER_NAME:=swarm-os}"
   : "${SWARM_OS_PORT:=8787}"
+  # An .env from before the run-as question — or one written by hand — means uid
+  # 1000, the image's own `node` user: exactly what the compose file falls back
+  # to. Resolve it identically here, so every check below speaks about the uid
+  # the container will really carry.
+  : "${SWARM_OS_RUN_UID:=1000}"
+  : "${SWARM_OS_RUN_GID:=1000}"
+  : "${SWARM_OS_CONTAINER_HOME:=/home/node}"
+  # A NAME, resolved from that uid — never a label like "uid 1000". The checks
+  # below reach into another account's home through it, and a name no passwd
+  # entry matches would turn every one of them into a silent "cannot tell".
+  # `who` stays EMPTY when nothing resolves: the fallback below keeps the tests
+  # working, but a name we invented must never appear in a message.
+  who="${SWARM_OS_RUN_USER:-}"
+  [ -n "$who" ] || who="$(getent passwd "$SWARM_OS_RUN_UID" 2>/dev/null | head -1 | cut -d: -f1)"
+  RUN_LABEL="uid $SWARM_OS_RUN_UID"
+  [ -n "$who" ] && RUN_LABEL="$who (uid $SWARM_OS_RUN_UID)"
+  SWARM_OS_RUN_USER="${who:-$SELF_USER}"
   : "${CLAUDE_DIR:=$HOME/.claude}"
   : "${CLAUDE_JSON:=$HOME/.claude.json}"
   [ -n "${SWARM_OS_IMAGE:-}" ] || die "SWARM_OS_IMAGE is empty in $ENV_FILE"
@@ -1904,8 +2450,32 @@ validate_env() {
   Docker would create it as root and the agents would work in an empty tree."
   [ -n "${DATA_PATH:-}" ]      || die "DATA_PATH is empty in $ENV_FILE"
   mkdir -p "$DATA_PATH"        || die "cannot create DATA_PATH: $DATA_PATH"
-  [ -f "$CLAUDE_JSON" ] || hmm "$CLAUDE_JSON does not exist — Docker will create a directory there and the first agent will hang on the theme picker."
-  [ -f "$CLAUDE_DIR/.credentials.json" ] || hmm "no $CLAUDE_DIR/.credentials.json — the server will start, but no agent can."
+
+  # The state directory has to belong to the uid in `user:`, or the container
+  # boots and then cannot write its own database. -1 = we cannot stat it from
+  # here, which says nothing about the container.
+  duid="$(path_owner_uid "$DATA_PATH")"
+  if [ "$duid" != "$SWARM_OS_RUN_UID" ] && [ "$duid" != "-1" ]; then
+    hmm "$DATA_PATH belongs to uid $duid, but the container runs as $RUN_LABEL:"
+    dimly "sudo chown -R $SWARM_OS_RUN_UID:$SWARM_OS_RUN_GID $DATA_PATH"
+  fi
+
+  # A run-as account other than uid 1000 has no home inside the image, so its
+  # HOME is redirected into /data. It has to exist before the first boot.
+  case "$SWARM_OS_CONTAINER_HOME" in
+    /data/*)
+      chome="$DATA_PATH/${SWARM_OS_CONTAINER_HOME#/data/}"
+      mkdir -p "$chome" 2>/dev/null \
+        || hmm "cannot create $chome — the container's HOME; npm and plugin installs inside it will fail" ;;
+  esac
+
+  # Through `run_test`: on a deployment installed FOR another account, a 0700
+  # home makes a plain `[ -f ]` answer "missing" about files that are there, and
+  # this warning would send the operator off to redo an OAuth login.
+  run_test -f "$CLAUDE_JSON"
+  [ "$?" = 1 ] && hmm "$CLAUDE_JSON does not exist — Docker will create a directory there and the first agent will hang on the theme picker."
+  run_test -f "$CLAUDE_DIR/.credentials.json"
+  [ "$?" = 1 ] && hmm "no $CLAUDE_DIR/.credentials.json — the server will start, but no agent can."
   return 0
 }
 
@@ -2042,6 +2612,7 @@ do_deploy() {
   local token; token="$(read_token)"
   printf '\n  %s%s%s\n' "$C_GREEN$C_BOLD" "swarm-os is up." "$C_RESET"
   printf '  %surl%s     http://127.0.0.1:%s\n' "$C_DIM" "$C_RESET" "$SWARM_OS_PORT"
+  printf '  %sruns as%s %s, Claude login %s\n' "$C_DIM" "$C_RESET" "$RUN_LABEL" "$CLAUDE_DIR"
   [ -n "${SWARM_OS_PUBLIC_URL:-}" ] && printf '  %sremote%s  %s\n' "$C_DIM" "$C_RESET" "$SWARM_OS_PUBLIC_URL"
   if [ -n "$token" ]; then
     printf '  %stoken%s   %s%s%s\n' "$C_DIM" "$C_RESET" "$C_BOLD" "$token" "$C_RESET"
@@ -2073,13 +2644,14 @@ usage() {
     ""|bash|-bash|sh|/dev/fd/*|/proc/self/fd/*) self="" ;;
   esac
   if [ -n "$self" ] && [ -r "$self" ]; then
-    sed -n '2,34p' "$self" | sed 's/^# \{0,1\}//'
+    sed -n '2,35p' "$self" | sed 's/^# \{0,1\}//'
     return 0
   fi
   printf '%s\n' \
     "swarm-os — fullscreen guided installer." \
     "" \
     "  --dir <path>      install directory      (default ~/swarm-os)" \
+    "  --user <name>     host account to run as (default: you)" \
     "  --port <n>        host port for the UI   (default 8787)" \
     "  --token <pat>     GitHub token, read-only" \
     "  --ref <ref>       branch or tag to fetch the compose files from" \
@@ -2089,11 +2661,19 @@ usage() {
     "  --help"
 }
 
-SCREENS=(screen_welcome screen_prereqs screen_token screen_dir screen_project
-         screen_workspace screen_data screen_port screen_transport screen_access
-         screen_extras screen_review)
+# `screen_user` sits AFTER `screen_dir` on purpose: the directory screen is what
+# loads an existing `.env`, and the account that deployment was installed for
+# must be the default offered, not the one who happens to be typing.
+SCREENS=(screen_welcome screen_prereqs screen_token screen_dir screen_user
+         screen_project screen_workspace screen_data screen_port screen_transport
+         screen_access screen_extras screen_review)
 
 main() {
+  # Settle the default account before anything derived from it is read. The
+  # globals at the top of this file can only carry `id -u`; the container's own
+  # HOME depends on the passwd lookup, which lives down here.
+  apply_run_user "$SELF_USER" || true
+
   # `shift 2` with a single argument left shifts NOTHING and returns non-zero,
   # and with `set -e` off that spins this loop on the same `$1` for ever — a
   # hung, hot machine after the exact typo a piped invocation invites
@@ -2102,11 +2682,12 @@ main() {
   while [ "$#" -gt 0 ]; do
     need="$1"
     case "$1" in
-      --dir|--port|--token|--ref|--repo|--image)
+      --dir|--port|--token|--ref|--repo|--image|--user)
         [ "$#" -ge 2 ] || die "$need needs a value (try --help)" ;;
     esac
     case "$1" in
       --dir)            DIR="$(expand_path "$2")"; shift 2 ;;
+      --user)           RUN_USER_ARG="$2"; shift 2 ;;
       --port)           SWARM_OS_PORT="$2"; shift 2 ;;
       --token)          TOKEN="$2"; shift 2 ;;
       --ref)            REF="$2"; shift 2 ;;
@@ -2117,6 +2698,15 @@ main() {
       *) printf 'unknown option: %s (try --help)\n' "$1" >&2; exit 2 ;;
     esac
   done
+
+  # Applied before the first screen so the account is the DEFAULT everywhere,
+  # not an override applied afterwards to answers already derived from it.
+  if [ -n "$RUN_USER_ARG" ]; then
+    local prev="$RUN_HOME"
+    apply_run_user "$RUN_USER_ARG" || die "--user: no such account on this host: $RUN_USER_ARG"
+    [ "$SWARM_OS_RUN_UID" = 0 ] && die "--user: the container must never run as root"
+    follow_run_home "$prev"
+  fi
 
   if [ "$INTERACTIVE" != 1 ]; then
     printf '\n  swarm-os setup needs a terminal to ask its questions.\n' >&2

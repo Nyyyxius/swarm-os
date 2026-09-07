@@ -22,6 +22,16 @@ services:
   swarm-os:
     image: ${SWARM_OS_IMAGE:-ghcr.io/luminis1986/swarm-os:latest}
     container_name: ${SWARM_OS_CONTAINER_NAME:-swarm-os}
+    # WHOSE processes these are on the host. The image's own `USER node` is
+    # uid 1000 — the default here, so an .env that never heard of this key
+    # behaves exactly as before. Set SWARM_OS_RUN_UID/GID (the installer writes
+    # them) to run the server as another host account: then everything it
+    # creates under ${DATA_PATH} and ${WORKSPACE_PATH} belongs to that account,
+    # and the ${CLAUDE_DIR} mounted below can be ITS ~/.claude, 0700 and all.
+    # Both halves must be set: uid alone would keep gid 1000 and lock the
+    # container out of group-readable state.
+    # NEVER 0 — the container must not run as root.
+    user: "${SWARM_OS_RUN_UID:-1000}:${SWARM_OS_RUN_GID:-1000}"
     # init: true → Docker injects tini as PID 1 to reap zombies (the image also
     # has its own tini ENTRYPOINT; both layered is harmless and explicit).
     init: true
@@ -41,8 +51,8 @@ services:
       # /ide on THIS port, same origin. One ingress covers the whole product —
       # nothing to expose, nothing to give its own vhost, and a remote setup
       # that works for the UI works for the editor. `SWARM_OS_IDE_PORT` below is
-      # the in-container port only; set SWARM_OS_IDE_ENABLED=false to turn the
-      # editor off entirely.
+      # the in-container port only; turn the editor off from the Plugins screen
+      # (SWARM_OS_IDE_ENABLED only seeds that at first boot — see below).
     volumes:
       # The project the agents work in. RW.
       - ${WORKSPACE_PATH}:/workspace
@@ -55,6 +65,13 @@ services:
       # .claude-runtime/. Persist this to keep teams + history across restarts.
       - ${DATA_PATH}:/data
     environment:
+      # The home directory of the uid above, INSIDE the container. uid 1000 is
+      # the image's `node` user and owns /home/node — the default, unchanged.
+      # Any other uid has no passwd entry in the image: Docker would hand the
+      # process HOME=/, and every npm fetch, plugin install and CLI that writes
+      # under $HOME would fail on a read-only root. The installer points this at
+      # /data/home, inside the one bind mount that account owns, and creates it.
+      HOME: ${SWARM_OS_CONTAINER_HOME:-/home/node}
       SWARM_OS_PROJECT_NAME: ${SWARM_OS_PROJECT_NAME:-swarm-os}
       # Lets the container report its own image reference on `/info.image`.
       # Same variable as the `image:` key above (see .env.example) — passing it
@@ -64,6 +81,9 @@ services:
       # In-container port for `code serve-web` (proxied under /ide, see above).
       # Change it only if something else in the container already uses 8790.
       SWARM_OS_IDE_PORT: ${SWARM_OS_IDE_PORT:-8790}
+      # First-boot SEED ONLY for the VS Code editor. After the first boot the DB is
+      # the source of truth: enable/disable it from the Plugins screen (BUILT-IN
+      # section, docs/builtin-features.md). Editing this later has no effect.
       SWARM_OS_IDE_ENABLED: ${SWARM_OS_IDE_ENABLED:-true}
       # Update detection: the GitHub PAT that reads the releases of the (private)
       # swarm-os repository — scope `contents:read`, nothing else. `environment:`
