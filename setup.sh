@@ -633,6 +633,19 @@ suspend_as_run_user() {
   fi
 }
 
+# `stat` needs execute permission on every parent, so a path inside another
+# account's 0700 home answers -1 from here. Ask the account itself before
+# concluding anything about ownership.
+run_owner_uid() {
+  local u
+  u="$(path_owner_uid "$1")"
+  if [ "$u" = "-1" ] && ! is_self && can_run_as; then
+    u="$(as_run_user stat -c %u "$1" 2>/dev/null)" || u=""
+    [ -n "$u" ] || u="-1"
+  fi
+  printf '%s' "$u"
+}
+
 # run_test <test-op> <path> → 0 yes | 1 no | 2 could not look.
 # `[ -f ~bob/.claude/.credentials.json ]` answers "no" for a 0700 home even when
 # the file is right there, and reporting a missing credential that exists is the
@@ -811,13 +824,19 @@ scan_project_dirs() {
   local SEP=$'\037'
   local finder=(find) roots=()
   have timeout && finder=(timeout 4 find)
-  roots=("$PWD" "$(dirname "$PWD")" "$RUN_HOME/dev" "$RUN_HOME/projets" "$RUN_HOME/projects"
+  roots=("$RUN_HOME/dev" "$RUN_HOME/projets" "$RUN_HOME/projects"
          "$RUN_HOME/src" "$RUN_HOME/code" "$RUN_HOME/work" "$RUN_HOME/git" "$RUN_HOME/repos"
          "$RUN_HOME/workspace" "$RUN_HOME" /srv /opt)
+  # The launch directory is a strong signal — but it is the INSTALLER's context,
+  # not the account's. First when they are the same person; last, and subject to
+  # the same write test as anything else, when they are not: offering an admin's
+  # own checkout to an instance running as someone else is offering a workspace
+  # the agents cannot write a byte into.
+  if is_self; then roots=("$PWD" "$(dirname "$PWD")" "${roots[@]}")
+  else roots+=("$PWD" "$(dirname "$PWD")"); fi
   for root in "${roots[@]}"; do
-    [ -d "$root" ] || continue
-    # The launch directory itself is the strongest signal there is.
-    if [ -e "$root/.git" ]; then
+    run_test -d "$root" || continue
+    if run_test -e "$root/.git" && run_test -w "$root"; then
       case "$seen" in *"$SEP$root$SEP"*) : ;; *) out="$out$root"$'\n'; seen="$seen$SEP$root$SEP"; n=$((n+1)) ;; esac
     fi
     while IFS= read -r d; do
@@ -827,28 +846,40 @@ scan_project_dirs() {
         */node_modules/*|*/.cache/*|*/vendor/*|*/.local/*) continue ;;
       esac
       case "$seen" in *"$SEP$d$SEP"*) continue ;; esac
+      # A candidate the run-as account cannot write is not a candidate: the
+      # agents edit this tree as that account, whatever it looks like from here.
+      run_test -w "$d" || continue
       out="$out$d"$'\n'; seen="$seen$SEP$d$SEP"; n=$((n+1))
       [ "$n" -ge 9 ] && break
     done <<EOF
-$("${finder[@]}" "$root" -mindepth 2 -maxdepth 2 -name .git -not -path '*/.*/*' 2>/dev/null | head -9)
+$(as_run_user "${finder[@]}" "$root" -mindepth 2 -maxdepth 2 -name .git -not -path '*/.*/*' 2>/dev/null | head -9)
 EOF
     [ "$n" -ge 9 ] && break
   done
   printf '%s' "$out"
 }
 
+# Every look is taken THROUGH the run-as account: a directory inside its 0700
+# home is invisible from the installer's shell, and the honest-looking
+# "does not exist yet" this used to print about an existing checkout is the
+# worst answer available — it invites creating a second one next to it.
 dir_hint() {
-  local d="$1" branch=""
-  if [ ! -d "$d" ]; then printf 'does not exist yet — it will be created'; return 0; fi
-  if [ -e "$d/.git" ]; then
+  local d="$1" branch="" n=""
+  run_test -d "$d"
+  case "$?" in
+    1) printf 'does not exist yet — it will be created'; return 0 ;;
+    2) printf 'cannot be inspected from %s' "$SELF_USER"; return 0 ;;
+  esac
+  if run_test -e "$d/.git"; then
     if have git; then
-      branch="$(git -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null)" || branch=""
+      branch="$(as_run_user git -C "$d" rev-parse --abbrev-ref HEAD 2>/dev/null)" || branch=""
     fi
     printf 'git repository%s' "${branch:+ · branch $branch}"
     return 0
   fi
-  if [ -z "$(ls -A "$d" 2>/dev/null)" ]; then printf 'exists, empty'; return 0; fi
-  printf 'exists · %s entries' "$(ls -A "$d" 2>/dev/null | wc -l | tr -d ' ')"
+  n="$(as_run_user ls -A "$d" 2>/dev/null | wc -l | tr -d ' ')"
+  case "$n" in ''|0) printf 'exists, empty'; return 0 ;; esac
+  printf 'exists · %s entries' "$n"
 }
 
 human_gb() { awk -v k="$1" 'BEGIN{printf "%.1f", k/1048576}'; }
@@ -906,7 +937,7 @@ v_dir_exists() {  # the workspace: it has to be a real tree the agents can edit
   d="$(expand_path "$1")"
   [ -n "$d" ] || { V_STATE=err; V_MSG="give a path"; return 0; }
   case "$d" in /*) : ;; *) V_STATE=err; V_MSG="must be an absolute path"; return 0 ;; esac
-  if [ -d "$d" ]; then
+  if run_test -d "$d"; then
     # Writable BY THE RUN-AS ACCOUNT — the agents write as that user, not as
     # whoever is running the installer.
     run_test -w "$d"
@@ -931,13 +962,13 @@ v_data_dir() {   # the state directory: the run-as account has to own it
   d="$(expand_path "$1")"
   [ -n "$d" ] || { V_STATE=err; V_MSG="give a path"; return 0; }
   case "$d" in /*) : ;; *) V_STATE=err; V_MSG="must be an absolute path"; return 0 ;; esac
-  if [ -d "$d" ]; then
-    uid="$(path_owner_uid "$d")"
+  if run_test -d "$d"; then
+    uid="$(run_owner_uid "$d")"
     if [ "$uid" != "$SWARM_OS_RUN_UID" ] && [ "$uid" != "-1" ]; then
       V_STATE=warn; V_MSG="owned by uid $uid; the container runs as $SWARM_OS_RUN_USER (uid $SWARM_OS_RUN_UID) — a chown will be offered"
       return 0
     fi
-    if [ -f "$d/swarm-os.db" ] || [ -f "$d/token" ]; then
+    if run_test -f "$d/swarm-os.db" || run_test -f "$d/token"; then
       V_STATE=ok; V_MSG="existing swarm-os state — teams and history will be picked back up"
       return 0
     fi
@@ -1699,7 +1730,7 @@ EOF
   fi
   WORKSPACE_PATH="$(expand_path "$WORKSPACE_PATH")"
 
-  if [ ! -d "$WORKSPACE_PATH" ]; then
+  if ! run_test -d "$WORKSPACE_PATH"; then
     ui_gap
     ui_warn "$WORKSPACE_PATH does not exist."
     if ui_confirm "Create it, owned by $SWARM_OS_RUN_USER?" y; then
@@ -1709,8 +1740,8 @@ EOF
       # one the agents cannot write to.
       run_mkdir "$WORKSPACE_PATH" || { ui_no "could not create it"; ui_pause; UI_BACK=1; return 0; }
       ui_ok "created"
-      if [ "$(path_owner_uid "$WORKSPACE_PATH")" != "$SWARM_OS_RUN_UID" ]; then
-        ui_warn "it belongs to uid $(path_owner_uid "$WORKSPACE_PATH"), not to $SWARM_OS_RUN_USER"
+      if [ "$(run_owner_uid "$WORKSPACE_PATH")" != "$SWARM_OS_RUN_UID" ]; then
+        ui_warn "it belongs to uid $(run_owner_uid "$WORKSPACE_PATH"), not to $SWARM_OS_RUN_USER"
         ui_dim "  sudo chown -R $SWARM_OS_RUN_UID:$SWARM_OS_RUN_GID $WORKSPACE_PATH"
       fi
     else
@@ -1720,7 +1751,7 @@ EOF
 
   # An empty workspace is the last moment where cloning is the operator's job
   # rather than an agent's.
-  if [ -z "$(ls -A "$WORKSPACE_PATH" 2>/dev/null)" ] && have git; then
+  if [ -z "$(as_run_user ls -A "$WORKSPACE_PATH" 2>/dev/null)" ] && have git; then
     ui_gap
     ui_dim "The workspace is empty. Give a git URL to clone into it, or leave blank."
     local url=""
@@ -1758,7 +1789,7 @@ screen_data() {
 
   # The container writes here as the run-as account. A state directory owned by
   # anyone else is a container that boots and then cannot write its database.
-  uid="$(path_owner_uid "$DATA_PATH")"
+  uid="$(run_owner_uid "$DATA_PATH")"
   if [ "$uid" != "$SWARM_OS_RUN_UID" ] && [ "$uid" != "-1" ]; then
     ui_gap
     ui_warn "$DATA_PATH belongs to uid $uid; the container runs as $SWARM_OS_RUN_USER (uid $SWARM_OS_RUN_UID)."
@@ -1939,7 +1970,7 @@ setup_ssh() {
   # The container reads that file as the run-as uid and gets EACCES otherwise.
   # -1 means we could not even stat it (a 0700 directory of another account),
   # which says nothing about the container: it will read it as the owner.
-  local kuid; kuid="$(path_owner_uid "$key_path")"
+  local kuid; kuid="$(run_owner_uid "$key_path")"
   if [ "$kuid" != "$SWARM_OS_RUN_UID" ] && [ "$kuid" != "-1" ]; then
     ui_warn "the key is owned by uid $kuid; the container reads it as uid $SWARM_OS_RUN_UID ($SWARM_OS_RUN_USER)"
   fi
@@ -2446,15 +2477,19 @@ validate_env() {
   : "${CLAUDE_JSON:=$HOME/.claude.json}"
   [ -n "${SWARM_OS_IMAGE:-}" ] || die "SWARM_OS_IMAGE is empty in $ENV_FILE"
   [ -n "${WORKSPACE_PATH:-}" ] || die "WORKSPACE_PATH is empty in $ENV_FILE"
-  [ -d "$WORKSPACE_PATH" ]     || die "WORKSPACE_PATH does not exist: $WORKSPACE_PATH
+  # `run_test`, not `[ -d ]`: on an instance installed for another account the
+  # workspace can sit in a 0700 home. Killing a legitimate deploy over a
+  # permission the CONTAINER has and we do not is the wrong call.
+  run_test -d "$WORKSPACE_PATH"
+  [ "$?" = 1 ] && die "WORKSPACE_PATH does not exist: $WORKSPACE_PATH
   Docker would create it as root and the agents would work in an empty tree."
   [ -n "${DATA_PATH:-}" ]      || die "DATA_PATH is empty in $ENV_FILE"
-  mkdir -p "$DATA_PATH"        || die "cannot create DATA_PATH: $DATA_PATH"
+  run_mkdir "$DATA_PATH"       || die "cannot create DATA_PATH: $DATA_PATH"
 
   # The state directory has to belong to the uid in `user:`, or the container
   # boots and then cannot write its own database. -1 = we cannot stat it from
   # here, which says nothing about the container.
-  duid="$(path_owner_uid "$DATA_PATH")"
+  duid="$(run_owner_uid "$DATA_PATH")"
   if [ "$duid" != "$SWARM_OS_RUN_UID" ] && [ "$duid" != "-1" ]; then
     hmm "$DATA_PATH belongs to uid $duid, but the container runs as $RUN_LABEL:"
     dimly "sudo chown -R $SWARM_OS_RUN_UID:$SWARM_OS_RUN_GID $DATA_PATH"
@@ -2465,7 +2500,7 @@ validate_env() {
   case "$SWARM_OS_CONTAINER_HOME" in
     /data/*)
       chome="$DATA_PATH/${SWARM_OS_CONTAINER_HOME#/data/}"
-      mkdir -p "$chome" 2>/dev/null \
+      run_mkdir "$chome" \
         || hmm "cannot create $chome — the container's HOME; npm and plugin installs inside it will fail" ;;
   esac
 
