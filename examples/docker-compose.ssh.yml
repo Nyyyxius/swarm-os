@@ -34,11 +34,16 @@ services:
       # a directory that contains ONLY the swarm-os key (install.sh generates
       # one under ~/.swarm-os/ssh) rather than your whole ~/.ssh — the container
       # can read every file it mounts.
-      # The key file must be readable by uid 1000: the image runs as `node`.
+      # The key file must be readable by the uid in the dist file's `user:` —
+      # 1000 (`node`) by default, or SWARM_OS_RUN_UID when the instance runs as
+      # another host account. The installer generates the key AS that account.
       - ${HOST_SSH_DIR:-${HOME}/.ssh}:/host-ssh:ro
     environment:
       SWARM_OS_AGENT_TRANSPORT: ssh
       # user@host as resolved FROM THE CONTAINER, e.g. ubuntu@host.docker.internal.
+      # The user part IS the run-as account (SWARM_OS_RUN_USER): the agents log
+      # into it, and SWARM_OS_HOST_CLAUDE_DIR below is its ~/.claude. Pointing
+      # them at two different accounts authenticates every agent as nobody.
       SWARM_OS_SSH_TARGET: ${SWARM_OS_SSH_TARGET:?SWARM_OS_SSH_TARGET is required by the ssh transport}
       # Path INSIDE the container, i.e. under /host-ssh.
       SWARM_OS_SSH_KEY: ${SWARM_OS_SSH_KEY:-/host-ssh/id_ed25519}

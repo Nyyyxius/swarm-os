@@ -70,6 +70,10 @@ swarm-os ne contient **aucune clé API**. Chaque agent lance le CLI Claude Code,
 qui s'authentifie depuis `~/.claude`. Le conteneur monte ce répertoire en lecture
 seule et le recopie en zone inscriptible au démarrage.
 
+Le `~` en question est celui du **compte qui porte l'instance** — par défaut
+celui depuis lequel tu installes, mais pas forcément : voir « le compte hôte qui
+porte l'instance » au §3. C'est ce compte-là qui doit avoir fait le login.
+
 Avant tout, sur l'hôte :
 
 ```sh
@@ -176,6 +180,61 @@ Optionnel, et utile uniquement si tu utilises un provider autre que Claude (§1)
 Comme pour `SWARM_OS_GITHUB_TOKEN`, une variable n'atteint le processus que si
 le service compose la nomme dans `environment:` — ce bloc est une liste blanche
 explicite (§7.4).
+
+### L'autre choix qui compte — le compte hôte qui porte l'instance
+
+Par défaut le conteneur tourne sous l'utilisateur `node` de l'image, **uid
+1000** : c'est le bon choix quand tu installes depuis le compte qui possède
+`~/.claude`, et il n'y a rien à faire. Sur un hôte où l'admin installe *pour* un
+autre compte — un compte dédié, celui d'un collègue, un compte de service —
+trois variables déplacent l'instance entière :
+
+| Variable | Rôle |
+|---|---|
+| `SWARM_OS_RUN_UID` / `SWARM_OS_RUN_GID` | l'uid:gid du process (clé `user:` du compose). Tout ce qu'il écrit dans `/data` et `/workspace` appartient à ce compte, et c'est cet uid qui lit le `~/.claude` monté — y compris en 0700 |
+| `SWARM_OS_CONTAINER_HOME` | le `HOME` **dans** le conteneur. uid 1000 possède `/home/node` ; tout autre uid n'a aucune entrée passwd dans l'image, reçoit `HOME=/` et échoue sur le moindre `npm install` de plugin. Vise `/data/home`, dans le seul arbre que ce compte possède |
+| `SWARM_OS_RUN_USER` | informatif, lu par l'installeur seul : c'est ce qui fait qu'une reconfiguration garde ce compte au lieu de revenir à celui qui relance le script |
+
+Et les chemins doivent suivre le même compte, sinon rien ne marche :
+`CLAUDE_DIR` / `CLAUDE_JSON` (le login dont **tous** les agents héritent),
+`DATA_PATH` (que le conteneur doit pouvoir écrire, sinon il boote puis
+n'écrit pas sa base), `WORKSPACE_PATH` (que les agents doivent pouvoir
+modifier). Sous le transport `ssh`, la partie utilisateur de
+`SWARM_OS_SSH_TARGET` et les `SWARM_OS_HOST_*` désignent **ce même compte** :
+c'est lui que les agents ouvrent en session, et sa clé privée doit être lisible
+par l'uid ci-dessus — donc générée sous son identité, pas sous la tienne.
+
+À la main, pour le compte `alice` :
+
+```sh
+sudo -u alice -i claude                    # le login OAuth, dans SON home
+id -u alice; id -g alice                   # → SWARM_OS_RUN_UID / _GID
+sudo -u alice mkdir -p ~alice/.swarm-os/mon-projet/home
+```
+
+puis dans `.env` :
+
+```sh
+SWARM_OS_RUN_USER=alice
+SWARM_OS_RUN_UID=1001
+SWARM_OS_RUN_GID=1001
+SWARM_OS_CONTAINER_HOME=/data/home
+CLAUDE_DIR=/home/alice/.claude
+CLAUDE_JSON=/home/alice/.claude.json
+DATA_PATH=/home/alice/.swarm-os/mon-projet
+WORKSPACE_PATH=/home/alice/dev/mon-projet
+```
+
+`setup.sh` en fait une étape à part entière (« Run-as account », 4/12) : il liste
+les comptes de l'hôte, vérifie *depuis le compte visé* que le login Claude est
+là, propose de le faire s'il manque, génère la clé SSH sous son identité et
+l'autorise dans son `authorized_keys`, crée `/data` et son `home` avec le bon
+propriétaire, et écrit les variables ci-dessus. `setup.sh --user alice` fait la
+même chose sans poser la question.
+
+**Jamais uid 0.** Le conteneur ne doit pas tourner en root : l'installeur refuse
+la valeur, et un `.env` écrit à la main qui la porte donne des fichiers root
+partout dans ton workspace.
 
 ### Le choix qui compte — le transport des agents
 
@@ -298,8 +357,11 @@ Termine le TLS sur Caddy/nginx devant `127.0.0.1:8787`. Exigences :
 - **un seul vhost suffit.** L'éditeur VS Code n'a plus de port à exposer :
   `serve-web` écoute en loopback *dans* le conteneur et swarm-os le
   reverse-proxifie sous `/ide` sur le même port, même origine. Ce qui sert l'UI
-  sert l'éditeur, sans second certificat ni iframe en HTTP simple.
-  `SWARM_OS_IDE_ENABLED=false` le désactive complètement.
+  sert l'éditeur, sans second certificat ni iframe en HTTP simple. Tu
+  l'actives/désactives depuis l'écran Plugins (fonctionnalité intégrée, section
+  BUILT-IN — voir [../builtin-features.md](../builtin-features.md)) ;
+  `SWARM_OS_IDE_ENABLED=false` ne fait qu'en fixer l'état au premier boot, la
+  base de données faisant foi ensuite.
 
 Exemple Caddy :
 
@@ -457,6 +519,16 @@ crée aucune release.
 - **Une équipe ne démarre jamais / une session se fige** — identifiants Claude
   absents ou non connectés. Vérifie `~/.claude/.credentials.json` et que
   `CLAUDE_DIR` dans `.env` pointe dessus.
+- **Le conteneur boote puis meurt / `EACCES` sur `/data`** — le répertoire
+  d'état n'appartient pas à l'uid du process. Compare
+  `stat -c %u $DATA_PATH` et `SWARM_OS_RUN_UID` (1000 par défaut) puis
+  `sudo chown -R <uid>:<gid> $DATA_PATH` (§3).
+- **Un agent ne lit pas le `~/.claude` monté alors qu'il est bien là** — il est
+  en 0700 et appartient à un autre compte que `SWARM_OS_RUN_UID`. Aligne l'uid
+  sur le propriétaire de `CLAUDE_DIR` plutôt que d'ouvrir les droits (§3).
+- **Un plugin échoue à s'installer avec une erreur d'écriture** — `HOME` dans le
+  conteneur pointe sur un répertoire non inscriptible : uid ≠ 1000 sans
+  `SWARM_OS_CONTAINER_HOME` (§3).
 - **`pull access denied` / `unauthorized`** — connecte-toi à GHCR avec un PAT
   `read:packages` et vérifie que le mainteneur a autorisé ton compte sur le package.
 - **Un provider est grisé à la création d'une équipe** — survole-le : la raison
@@ -473,8 +545,9 @@ crée aucune release.
   humain », donc `SWARM_OS_COMPACT_ON_WAITING` est sans effet pour elles. Voir
   [../providers.md](../providers.md).
 - **Iframe IDE vide** — l'éditeur est servi sous `/ide` sur le port de l'UI
-  (aucun port à publier). Vérifie que `SWARM_OS_IDE_ENABLED` n'est pas `false`,
-  et que ton reverse proxy relaie bien les WebSockets sous ce chemin.
+  (aucun port à publier). Vérifie que l'IDE est activé (écran Plugins, section
+  BUILT-IN — `SWARM_OS_IDE_ENABLED` ne sert que de valeur de seed au premier
+  boot), et que ton reverse proxy relaie bien les WebSockets sous ce chemin.
 - **SYSTEM UPDATE dit « no SWARM_OS_GITHUB_TOKEN » alors que tu en as mis un** —
   la variable est dans `.env` mais pas dans la liste blanche `environment:` du
   service : elle n'atteint jamais le processus. Ajoute
