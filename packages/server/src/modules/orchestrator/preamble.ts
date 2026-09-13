@@ -88,6 +88,7 @@ export const TEAM_TOOL_LOGICAL_NAMES: readonly string[] = [
   'swarm.broadcast_to_leads',
   'discord.send_message',
   'discord.create_thread',
+  'discord.add_reaction',
   // Shared knowledge-graph tools (docs/memoire-partagee.md) — mounted on the
   // same team-comms server, so they are part of the renamed vocabulary.
   'memory.search',
