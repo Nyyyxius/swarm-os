@@ -434,6 +434,18 @@ describe('Session — requestContextReset (deferred /clear & /compact)', () => {
     expect(s.hasPendingContextReset).toBe(false);
   });
 
+  it('writes the command with NO leading CR — the lone submit CR is the only one', async () => {
+    // Claude Code >= 2.1.277 cancels a submit whose prompt holds a CR not
+    // followed by LF (docs/correctif-signal-cr-invisible.md).
+    const { s, fake } = makeRunning();
+    expect(s.requestContextReset('/compact', { idleMs: 10 })).toBe(true);
+    await new Promise((r) => setTimeout(r, 350));
+    const idx = fake.writes.findIndex((w) => w.includes('/compact'));
+    expect(idx).toBeGreaterThanOrEqual(0);
+    expect(fake.writes[idx].startsWith('\r')).toBe(false);
+    expect(fake.writes.filter((w) => w.includes('\r'))).toEqual(['\r']);
+  });
+
   it('is idempotent — a second arm while one is pending returns false', () => {
     const { s } = makeRunning();
     expect(s.requestContextReset('/clear', { idleMs: 50 })).toBe(true);
@@ -542,15 +554,26 @@ describe('Session — armNotice (operator warning with a deadline)', () => {
     expect(s.hasPendingNotice).toBe(true);
 
     await new Promise((r) => setTimeout(r, 300));
-    // Text first, then a SOLO carriage return ~150 ms later (structural for
-    // the Ink TUI — a one-shot `\rtext\r` lands in the prompt without firing).
+    // Text first (no leading CR), then a SOLO carriage return ~150 ms later
+    // (structural for the Ink TUI — a one-shot `text\r` lands in the prompt
+    // without firing).
     const idx = fake.writes.findIndex((w) => w.includes(NOTICE));
     expect(idx).toBeGreaterThanOrEqual(0);
-    expect(fake.writes[idx]).toBe(`\r${NOTICE}`);
+    expect(fake.writes[idx]).toBe(NOTICE);
     expect(fake.writes[idx + 1]).toBe('\r');
     expect(s.hasPendingNotice).toBe(false);
     expect(s.noticeState).toEqual({ id: 'n-1', outcome: 'fired' });
     expect(outcomes).toEqual(['fired']);
+  });
+
+  it('notifySignal never writes a leading CR — the lone submit CR is the only one', async () => {
+    // Claude Code >= 2.1.277 cancels a submit whose prompt holds a CR not
+    // followed by LF (docs/correctif-signal-cr-invisible.md).
+    const { s, fake } = makeRunning();
+    s.notifySignal('[swarm-os] new message in inbox — call team.read_inbox to fetch');
+    await new Promise((r) => setTimeout(r, 250));
+    expect(fake.writes.some((w) => w.length > 1 && w.startsWith('\r'))).toBe(false);
+    expect(fake.writes.filter((w) => w.includes('\r'))).toEqual(['\r']);
   });
 
   it('does NOT bump idleSince — a server-injected write must not fake activity', async () => {
