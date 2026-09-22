@@ -178,6 +178,52 @@ export function requireLead(ctx: ToolContext, toolName: string): void {
 }
 
 /**
+ * `discord.send_message` posting rule. The lead may post anywhere (channel root
+ * or any thread); a WORKER may post ONLY inside an existing thread — i.e. it must
+ * pass a `thread_id`. This keeps the human's main channel a lead-owned surface
+ * (a worker can never broadcast to the root) while letting a delegated worker
+ * reply in the thread the lead handed it. A worker only ever learns a `thread_id`
+ * from its lead (delivered via `team.read_inbox` → `source.thread_id`), so this
+ * is a safe intra-team scoping, not a new exfiltration surface.
+ */
+export function requireLeadOrThread(
+  ctx: ToolContext,
+  threadId: string | undefined,
+  toolName: string,
+): void {
+  const isLead = ctx.session.id === ctx.orchestrator.leadSessionId;
+  if (isLead) return;
+  if (!threadId) {
+    throw new McpError(
+      ErrorCode.InvalidRequest,
+      `PERMISSION_DENIED: tool ${toolName} at the channel root is lead-only; a worker must pass thread_id to reply inside a thread`,
+    );
+  }
+}
+
+/**
+ * Status reactions any session (lead OR worker) may post via
+ * `discord.add_reaction`. Deliberately EXCLUDES the approval-decision emojis
+ * (✅ / ♾️ / ❌ read by `modules/approvals/reaction.ts`) so a reaction posted
+ * through this tool can NEVER resolve a pending approval. `⏳` is the default:
+ * the same "seen / in progress" ack the bot auto-posts on inbound delivery.
+ */
+export const ALLOWED_REACTION_EMOJIS = ['⏳', '👀', '🔄', '🙏', '🎉'] as const;
+export const DEFAULT_REACTION_EMOJI = '⏳';
+
+/** Throw a clean `InvalidParams` when `emoji` is outside the safe allowlist. */
+export function assertAllowedReactionEmoji(emoji: string, toolName: string): void {
+  if (!(ALLOWED_REACTION_EMOJIS as readonly string[]).includes(emoji)) {
+    throw new McpError(
+      ErrorCode.InvalidParams,
+      `DISCORD_EMOJI_NOT_ALLOWED: tool ${toolName} accepts only ${ALLOWED_REACTION_EMOJIS.join(
+        ' ',
+      )} (the approval emojis ✅ ♾️ ❌ are reserved); got '${emoji}'`,
+    );
+  }
+}
+
+/**
  * Per-tool log line. We log `sid.slice(0,8)` rather than the full session
  * id to keep log volume sane; the session secret is NEVER logged (it's not
  * even in scope here — McpServer drops it before invoking tools).
@@ -976,9 +1022,9 @@ export function registerTeamCommsTools(
   server.registerTool(
     'discord.send_message',
     {
-      title: 'Post a message to the role\'s Discord channel (lead-only)',
+      title: "Post a message to the role's Discord channel (lead, or worker in a thread)",
       description:
-        "Lead-only. Posts `content` to the Discord channel bound to this orchestrator's role (role.connectors[type=discord].channelId). When `thread_id` is provided, posts into that thread instead of the channel root — use the `source.thread_id` returned by `team.read_inbox` to stay in the same fil. When `reply_to_message_id` is provided, attaches a Discord native reply reference (use the `source.discord_message_id` from the inbound message). Returns the freshly-posted `message_id` (Discord snowflake) so you can chain follow-ups. Errors NO_DISCORD_CHANNEL when the role has no channel, DISCORD_BOT_NOT_CONFIGURED when the role has no bot token, DISCORD_BOT_DISABLED when the bot failed to start, DISCORD_SEND_FAILED on Discord-side errors. Discord's hard limit is 2000 chars — chunk longer messages yourself.",
+        "Posts `content` to the Discord channel bound to this orchestrator's role (role.connectors[type=discord].channelId). The lead may post anywhere; a WORKER may post ONLY inside a thread (pass `thread_id`) — channel-root posting is lead-only. When `thread_id` is provided, posts into that thread instead of the channel root — use the `source.thread_id` returned by `team.read_inbox` to stay in the same fil. When `reply_to_message_id` is provided, attaches a Discord native reply reference (use the `source.discord_message_id` from the inbound message). Returns the freshly-posted `message_id` (Discord snowflake) so you can chain follow-ups. Errors PERMISSION_DENIED when a worker posts to the channel root, NO_DISCORD_CHANNEL when the role has no channel, DISCORD_BOT_NOT_CONFIGURED when the role has no bot token, DISCORD_BOT_DISABLED when the bot failed to start, DISCORD_SEND_FAILED on Discord-side errors. Discord's hard limit is 2000 chars — chunk longer messages yourself.",
       inputSchema: {
         content: z.string().min(1).max(2000),
         thread_id: z.string().optional(),
@@ -993,12 +1039,13 @@ export function registerTeamCommsTools(
     },
     async (args) => {
       const ctx = ctxResolver();
-      requireLead(ctx, 'discord.send_message');
       const a = args as {
         content: string;
         thread_id?: string;
         reply_to_message_id?: string;
       };
+      // Lead posts anywhere; a worker may only reply inside a thread.
+      requireLeadOrThread(ctx, a.thread_id, 'discord.send_message');
 
       const { bot, channelId } = resolveDiscordContext(ctx, 'discord.send_message');
 
@@ -1080,6 +1127,66 @@ export function registerTeamCommsTools(
           throw new McpError(ErrorCode.InternalError, msg);
         }
         throw new McpError(ErrorCode.InternalError, `DISCORD_THREAD_CREATE_FAILED: ${msg}`);
+      }
+    },
+  );
+
+  // ---- discord.add_reaction (worker-accessible) ------------------------
+  // Post a status reaction (default ⏳) onto a message on the role's Discord
+  // channel. Worker-accessible (no requireLead): reactions carry no free-form
+  // content and the emoji is allowlisted, so a worker can neither broadcast text
+  // nor touch an approval decision. Scoped to the calling orch's own channel via
+  // `resolveDiscordContext` (`botForOrch(orch.id)`) — a worker cannot reach
+  // another team's channel. Note: the bot ALSO auto-adds ⏳ the instant an
+  // inbound message lands in the inbox, so this tool is rarely needed — it is
+  // here for the worker path (workers do not receive inbound Discord events) and
+  // for re-acknowledging a message in a thread the worker was handed.
+  server.registerTool(
+    'discord.add_reaction',
+    {
+      title: "React to a Discord message with a status emoji (lead or worker)",
+      description:
+        "Adds a status reaction (default ⏳ 'seen / working on it') to a message on this orchestrator's role Discord channel. Pass `message_id` (the `source.discord_message_id` from `team.read_inbox`); if the message lives in a thread, also pass `thread_id` (the `source.thread_id`). `emoji` is optional and restricted to a safe status set: ⏳ 👀 🔄 🙏 🎉 — the approval emojis (✅ ♾️ ❌) are intentionally NOT postable here. NOTE: the bot AUTO-adds ⏳ the moment an inbound message reaches the inbox, so you rarely need to call this; it exists mainly for workers (who receive no inbound Discord events directly) and for re-acking in a thread. Errors DISCORD_EMOJI_NOT_ALLOWED (emoji outside the allowlist), NO_DISCORD_CHANNEL, DISCORD_BOT_NOT_CONFIGURED, DISCORD_BOT_DISABLED, DISCORD_REACTION_FAILED (Discord-side error, e.g. the bot lacks the Add Reactions permission or the message is gone).",
+      inputSchema: {
+        message_id: z.string().min(1),
+        emoji: z.string().optional(),
+        thread_id: z.string().optional(),
+      },
+      outputSchema: {
+        reacted: z.boolean(),
+        channel_id: z.string(),
+        message_id: z.string(),
+        emoji: z.string(),
+      },
+    },
+    async (args) => {
+      const ctx = ctxResolver();
+      const a = args as { message_id: string; emoji?: string; thread_id?: string };
+      const emoji = a.emoji ?? DEFAULT_REACTION_EMOJI;
+      // Validate the emoji BEFORE resolving the bot so a bad emoji fails fast
+      // and identically whether or not the channel/bot is configured.
+      assertAllowedReactionEmoji(emoji, 'discord.add_reaction');
+
+      const { bot, channelId } = resolveDiscordContext(ctx, 'discord.add_reaction');
+
+      try {
+        await bot.addReaction(
+          channelId,
+          a.message_id,
+          emoji,
+          a.thread_id ? { threadId: a.thread_id } : {},
+        );
+        logCall('discord.add_reaction', ctx, true);
+        return ok({
+          reacted: true,
+          channel_id: channelId,
+          message_id: a.message_id,
+          emoji,
+        });
+      } catch (err) {
+        const msg = err instanceof Error ? err.message : String(err);
+        logCall('discord.add_reaction', ctx, false, msg);
+        throw new McpError(ErrorCode.InternalError, `DISCORD_REACTION_FAILED: ${msg}`);
       }
     },
   );

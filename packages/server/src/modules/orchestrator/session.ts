@@ -1222,9 +1222,15 @@ export class Session extends EventEmitter {
    * Two-step write: the text first, then a `\r` ~150 ms later. Claude
    * Code's Ink TUI groups a single multi-byte chunk as a paste and treats
    * embedded `\r` as a newline inside the buffer rather than a submit —
-   * so a one-shot `\r${text}\r` lands in the prompt without firing. By
-   * sending the trailing CR in its own write after the PTY has drained,
-   * Ink parses it as a standalone Enter keypress and submits.
+   * so a one-shot `text\r` lands in the prompt without firing. By sending
+   * the trailing CR in its own write after the PTY has drained, Ink parses
+   * it as a standalone Enter keypress and submits.
+   *
+   * No LEADING CR for Ink providers: since Claude Code 2.1.277 a CR not
+   * followed by LF inside the prompt counts as an "invisible character" —
+   * the TUI strips it and CANCELS the submit ("review and press Enter to
+   * send"), leaving the signal typed but never sent
+   * (docs/correctif-signal-cr-invisible.md).
    *
    * Best-effort: if the agent has exited or the write throws, we swallow
    * and log; the mailbox push is the source of truth, the signal is just
@@ -1236,8 +1242,9 @@ export class Session extends EventEmitter {
   notifySignal(text: string): void {
     // Providers without an Ink TUI submit fine from a single chunk, so they
     // get `\r<text>\r` in one write instead of the two-step cadence.
+    // Ink providers get no leading CR (see the JSDoc above).
     const dance = this.provider.capabilities.inkSubmitDance;
-    const intro = dance ? `\r${text}` : `\r${text}\r`;
+    const intro = dance ? text : `\r${text}\r`;
     if (!this.agent) {
       // skipSpawn / no-process sessions still get the signal in their log
       // for testability.
@@ -1390,7 +1397,9 @@ export class Session extends EventEmitter {
     }
     // The reset shrinks the context, so restart the auto-compact accounting.
     this._bytesSinceReset = 0;
-    const intro = `\r${line}`;
+    // Same rule as notifySignal: a leading CR would make Claude Code ≥ 2.1.277
+    // cancel the submit, leaving the slash command typed but never run.
+    const intro = this.provider.capabilities.inkSubmitDance ? line : `\r${line}`;
     try {
       this.agent.write(intro);
       this._appendLog(intro);

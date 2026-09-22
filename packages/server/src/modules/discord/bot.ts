@@ -41,6 +41,17 @@ const DEFAULT_SEND_TIMEOUT_MS = 5000;
 const READY_TIMEOUT_MS = 15_000;
 
 /**
+ * Status reaction the bot posts on an inbound human message the instant it is
+ * delivered to an agent's inbox — a lightweight, text-free "seen — working on
+ * it" acknowledgement for the human that adds no inbox noise. U+23F3.
+ *
+ * Reserved-emoji safety: this is deliberately NOT one of the approval-decision
+ * emojis (✅ / ♾️ / ❌ read by `modules/approvals/reaction.ts`), so the bot's own
+ * auto-ack can never be mistaken for — or race with — an approval resolution.
+ */
+export const HOURGLASS_REACTION = '⏳'; // ⏳
+
+/**
  * Payload accepted by `TextChannel.send` / `ThreadChannel.send`. We narrow to
  * the fields we actually use (content + optional Discord native reply) so the
  * private channel cast stays tight.
@@ -385,7 +396,98 @@ export class DiscordBotService {
     }
   }
 
+  /**
+   * Add a unicode `emoji` reaction to an existing message. Powers the
+   * worker-accessible `discord.add_reaction` MCP tool. (The auto-⏳-on-delivery
+   * path in `handleMessageCreate` reacts on the live `Message` object directly,
+   * so it never takes this fetch path.)
+   *
+   * `opts.threadId` names the thread the message lives in — a `ThreadChannel` is
+   * itself a `Channel`, so we fetch by id exactly as `sendMessage` does. Wrapped
+   * in the same timeout as `sendMessage`; throws on failure so the MCP tool can
+   * surface a clean error. Posting a reaction is a REST call and needs no extra
+   * Gateway intent.
+   */
+  async addReaction(
+    channelId: string,
+    messageId: string,
+    emoji: string,
+    opts?: { threadId?: string },
+  ): Promise<{ reacted: true; channelId: string; messageId: string; emoji: string }> {
+    if (!this.ready) {
+      throw new Error('discord bot not ready');
+    }
+    const target = opts?.threadId ?? channelId;
+    const reactPromise = (async () => {
+      const channel = await this.fetchReactableChannel(target);
+      const msg = await channel.messages.fetch(messageId);
+      if (!msg || typeof msg.react !== 'function') {
+        throw new Error(`discord message ${messageId} cannot be reacted to`);
+      }
+      await msg.react(emoji);
+    })();
+    let timer: NodeJS.Timeout | undefined;
+    const timeoutPromise = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`discord add_reaction timed out after ${this.sendTimeoutMs}ms`)),
+        this.sendTimeoutMs,
+      );
+    });
+    try {
+      await Promise.race([reactPromise, timeoutPromise]);
+      log.info({
+        event: 'discord.bot.reaction_added',
+        channelId: target,
+        messageId,
+        emoji,
+        auto: false,
+      });
+      return { reacted: true, channelId: target, messageId, emoji };
+    } catch (err) {
+      log.warn({
+        event: 'discord.bot.reaction_failed',
+        channelId: target,
+        messageId,
+        auto: false,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      throw err;
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   // -- internals ----------------------------------------------------------
+
+  /**
+   * Fetch a channel we only need to pull a message from (to react to it). The
+   * shape is narrower than `fetchSendableChannel`: we require `messages.fetch`,
+   * not `send`. A `ThreadChannel` satisfies this the same as a text channel.
+   */
+  private async fetchReactableChannel(channelId: string): Promise<{
+    messages: {
+      fetch: (id: string) => Promise<{ react?: (emoji: string) => Promise<unknown> }>;
+    };
+  }> {
+    const cached = this.client.channels.cache.get(channelId);
+    const channel = cached ?? (await this.client.channels.fetch(channelId));
+    if (!channel) {
+      throw new Error(`discord channel not found: ${channelId}`);
+    }
+    const c = channel as unknown as {
+      messages?: {
+        fetch: (id: string) => Promise<{ react?: (emoji: string) => Promise<unknown> }>;
+      };
+    };
+    if (!c.messages || typeof c.messages.fetch !== 'function') {
+      throw new Error(`discord channel ${channelId} cannot fetch messages`);
+    }
+    return c as {
+      messages: {
+        fetch: (id: string) => Promise<{ react?: (emoji: string) => Promise<unknown> }>;
+      };
+    };
+  }
 
   private async fetchSendableChannel(channelId: string): Promise<
     Channel & { send: (payload: SendPayload) => Promise<{ id: string }> }
@@ -430,6 +532,13 @@ export class DiscordBotService {
     const content = renderMessage(msg);
     const threadId = isThread ? msg.channelId : undefined;
     const threadName = isThread ? channel.name : undefined;
+    // Auto-⏳ (feature: hourglass ack). Set as soon as the message lands in at
+    // least one lead inbox, then posted ONCE after the fan-out. Gating on actual
+    // delivery means we skip bot/system messages (early return), no-subscriber
+    // channels (early return), consumed approval replies (`continue` before the
+    // push) and no-lead orchs (`continue` before the push) — the human sees the
+    // hourglass exactly when an agent has actually received their message.
+    let deliveredToAnyInbox = false;
     for (const sub of subs) {
       // ---- P4: is this a reply that DECIDES a pending approval? -------------
       // Checked BEFORE the lead guard + inbox push: a decision needs no lead,
@@ -490,6 +599,7 @@ export class DiscordBotService {
           ...(threadId ? { threadId } : {}),
           ...(threadName ? { threadName } : {}),
         });
+        deliveredToAnyInbox = true;
         log.info({
           event: 'discord.bot.message_received',
           orchId: sub.orchestratorId,
@@ -520,6 +630,57 @@ export class DiscordBotService {
         });
       }
     }
+
+    // Post the ⏳ acknowledgement once, after the fan-out, iff the message
+    // actually reached an inbox. Fire-and-forget (see `reactHourglass`).
+    if (deliveredToAnyInbox) {
+      this.reactHourglass(msg);
+    }
+  }
+
+  /**
+   * Best-effort ⏳ acknowledgement on a freshly-delivered inbound message.
+   * Fire-and-forget: reacting is a courtesy to the human and MUST NOT break the
+   * inbound flow if the bot lacks the `Add Reactions` permission or Discord
+   * rejects the call — hence the swallow. Reacts on the live `Message` object we
+   * already hold, so no channel/message fetch is needed. Posting a reaction is a
+   * REST call and needs NO extra Gateway intent (intents gate received events,
+   * not outbound reactions).
+   */
+  private reactHourglass(msg: Message): void {
+    const m = msg as unknown as { react?: (emoji: string) => Promise<unknown>; id?: string };
+    if (typeof m.react !== 'function') return;
+    let pending: Promise<unknown>;
+    try {
+      // Invoke synchronously (not deferred behind a microtask) so the REST call
+      // is issued immediately; only the RESULT is handled fire-and-forget.
+      pending = Promise.resolve(m.react(HOURGLASS_REACTION));
+    } catch (err) {
+      log.warn({
+        event: 'discord.bot.reaction_failed',
+        messageId: m.id,
+        auto: true,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return;
+    }
+    void pending
+      .then(() => {
+        log.info({
+          event: 'discord.bot.reaction_added',
+          messageId: m.id,
+          emoji: HOURGLASS_REACTION,
+          auto: true,
+        });
+      })
+      .catch((err: unknown) => {
+        log.warn({
+          event: 'discord.bot.reaction_failed',
+          messageId: m.id,
+          auto: true,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      });
   }
 }
 

@@ -27,6 +27,9 @@ function makeMessage(over: Partial<Record<string, unknown>> = {}): Message {
     content: 'hello',
     attachments: new Map(),
     reference: null,
+    // Auto-⏳-on-delivery reacts on the live Message object; give every fixture
+    // its own resolvable mock so a test can assert the acknowledgement.
+    react: vi.fn(async () => undefined),
     // `isThread()` is the canonical "this message lives in a thread" signal
     // in discord.js v14. Default false so the fixture mirrors a normal
     // channel-root post; thread-aware tests override `channel`.
@@ -213,6 +216,104 @@ describe('DiscordBotService.handleMessageCreate', () => {
     const msg = sub.mailbox.peek('lead-1')[0];
     expect(msg?.threadId).toBeUndefined();
     expect(msg?.threadName).toBeUndefined();
+  });
+});
+
+/** Read the `react` mock off a fixture message built by `makeMessage`. */
+function reactMock(msg: Message): ReturnType<typeof vi.fn> {
+  return (msg as unknown as { react: ReturnType<typeof vi.fn> }).react;
+}
+
+describe('DiscordBotService.handleMessageCreate — auto ⏳ acknowledgement', () => {
+  let bot: DiscordBotService;
+  beforeEach(() => {
+    bot = makeBot();
+  });
+
+  it('adds a ⏳ reaction to a message once it is delivered to an inbox', () => {
+    const sub = makeSubscription();
+    bot.subscribeOrchestrator(sub);
+    const msg = makeMessage();
+    bot.handleMessageCreate(msg);
+    // The reaction is issued synchronously (only its result is awaited).
+    expect(reactMock(msg)).toHaveBeenCalledTimes(1);
+    expect(reactMock(msg)).toHaveBeenCalledWith('⏳');
+  });
+
+  it('does NOT react to a bot/system message (never delivered)', () => {
+    const sub = makeSubscription();
+    bot.subscribeOrchestrator(sub);
+    const botMsg = makeMessage({ author: { id: 'b', username: 'bot', bot: true } });
+    const sysMsg = makeMessage({ system: true });
+    bot.handleMessageCreate(botMsg);
+    bot.handleMessageCreate(sysMsg);
+    expect(reactMock(botMsg)).not.toHaveBeenCalled();
+    expect(reactMock(sysMsg)).not.toHaveBeenCalled();
+  });
+
+  it('does NOT react when there is no subscriber for the channel', () => {
+    const sub = makeSubscription();
+    bot.subscribeOrchestrator(sub);
+    const msg = makeMessage({ channelId: 'channel-unknown' });
+    bot.handleMessageCreate(msg);
+    expect(reactMock(msg)).not.toHaveBeenCalled();
+  });
+
+  it('does NOT react when the orch has no lead session (not delivered)', () => {
+    const sub = makeSubscription({ getLeadSessionId: () => null });
+    bot.subscribeOrchestrator(sub);
+    const msg = makeMessage();
+    bot.handleMessageCreate(msg);
+    expect(reactMock(msg)).not.toHaveBeenCalled();
+  });
+
+  it('reacts only ONCE even when several orchs share the channel', () => {
+    const subA = makeSubscription({ orchestratorId: 'orch-A', getLeadSessionId: () => 'lead-A' });
+    const subB = makeSubscription({ orchestratorId: 'orch-B', getLeadSessionId: () => 'lead-B' });
+    bot.subscribeOrchestrator(subA);
+    bot.subscribeOrchestrator(subB);
+    const msg = makeMessage();
+    bot.handleMessageCreate(msg);
+    expect(reactMock(msg)).toHaveBeenCalledTimes(1);
+  });
+
+  it('a failing reaction never breaks inbound delivery', () => {
+    const sub = makeSubscription();
+    bot.subscribeOrchestrator(sub);
+    const msg = makeMessage({
+      // A react() that rejects must be swallowed (best-effort ack).
+      react: vi.fn(async () => {
+        throw new Error('Missing Permissions');
+      }),
+    });
+    expect(() => bot.handleMessageCreate(msg)).not.toThrow();
+    // The message still reached the inbox.
+    expect(sub.mailbox.peek('lead-1')).toHaveLength(1);
+  });
+
+  it('a react() that throws synchronously is swallowed', () => {
+    const sub = makeSubscription();
+    bot.subscribeOrchestrator(sub);
+    const msg = makeMessage({
+      react: vi.fn(() => {
+        throw new Error('sync boom');
+      }),
+    });
+    expect(() => bot.handleMessageCreate(msg)).not.toThrow();
+    expect(sub.mailbox.peek('lead-1')).toHaveLength(1);
+  });
+
+  it('does NOT react to a reply that is CONSUMED as an approval decision', () => {
+    // A consumed approval reply is not delivered to the inbox — it already gets
+    // its own ✅/❌ confirmation, so no ⏳ ack should be posted on it.
+    vi.spyOn(bot, 'sendMessage').mockResolvedValue({ messageId: 'c', channelId: 'channel-1' });
+    const sub = makeSubscription({
+      tryConsumeApprovalReply: vi.fn(() => ({ consumed: true, confirmation: 'Approuvé ✅.' })),
+    });
+    bot.subscribeOrchestrator(sub);
+    const msg = makeMessage({ id: 'reply-1', reference: { messageId: 'appr' }, content: 'oui' });
+    bot.handleMessageCreate(msg);
+    expect(reactMock(msg)).not.toHaveBeenCalled();
   });
 });
 
@@ -491,6 +592,58 @@ describe('DiscordBotService.createThread', () => {
     await expect(
       bot.createThread('channel-1', { name: 'x' }),
     ).rejects.toThrow(/DISCORD_THREAD_CHANNEL_NOT_THREADABLE/);
+  });
+});
+
+describe('DiscordBotService.addReaction', () => {
+  it('throws when the bot is not ready', async () => {
+    const bot = makeBot();
+    await expect(bot.addReaction('channel-1', 'msg-1', '⏳')).rejects.toThrow(/not ready/);
+  });
+
+  it('fetches the message and reacts with the given emoji', async () => {
+    const react = vi.fn(async () => undefined);
+    const fetch = vi.fn(async () => ({ react }));
+    const bot = makeReadyBotWithChannel({ messages: { fetch } });
+    const out = await bot.addReaction('channel-1', 'msg-9', '⏳');
+    expect(fetch).toHaveBeenCalledWith('msg-9');
+    expect(react).toHaveBeenCalledWith('⏳');
+    expect(out).toEqual({
+      reacted: true,
+      channelId: 'channel-1',
+      messageId: 'msg-9',
+      emoji: '⏳',
+    });
+  });
+
+  it('targets the thread channel when threadId is provided', async () => {
+    const react = vi.fn(async () => undefined);
+    const fetchMsg = vi.fn(async () => ({ react }));
+    const fetchChannel = vi.fn(async () => ({ messages: { fetch: fetchMsg } }));
+    const bot = makeBot();
+    (bot as unknown as { ready: boolean }).ready = true;
+    const client = (bot as unknown as { client: Record<string, unknown> }).client;
+    client.channels = { cache: new Map<string, unknown>(), fetch: fetchChannel };
+    const out = await bot.addReaction('channel-1', 'msg-3', '👀', { threadId: 'thread-7' });
+    // The channel fetched must be the THREAD, not the parent channel.
+    expect(fetchChannel).toHaveBeenCalledWith('thread-7');
+    expect(react).toHaveBeenCalledWith('👀');
+    expect(out.channelId).toBe('thread-7');
+  });
+
+  it('throws when the channel cannot fetch messages', async () => {
+    const bot = makeReadyBotWithChannel({ /* no messages manager */ });
+    await expect(bot.addReaction('channel-1', 'msg-1', '⏳')).rejects.toThrow(
+      /cannot fetch messages/,
+    );
+  });
+
+  it('propagates a Discord-side reaction failure', async () => {
+    const react = vi.fn(async () => {
+      throw new Error('Missing Permissions');
+    });
+    const bot = makeReadyBotWithChannel({ messages: { fetch: vi.fn(async () => ({ react })) } });
+    await expect(bot.addReaction('channel-1', 'msg-1', '⏳')).rejects.toThrow(/Missing Permissions/);
   });
 });
 
