@@ -109,6 +109,23 @@ describe('CodegraphMemoryNotes', () => {
     expect(memory.readNote(scopeNoteName('project__app'))).toBeNull();
   });
 
+  it('removeAll drops the hub AND every per-scope note (feature purge, D7)', () => {
+    seedScope('project__app');
+    seedScope('plugin__novelai');
+    notes.syncScope('project__app');
+    notes.syncScope('plugin__novelai');
+    notes.refreshHub();
+    expect(memory.readNote(HUB_NOTE_NAME)).not.toBeNull();
+    expect(memory.readNote(scopeNoteName('project__app'))).not.toBeNull();
+    expect(memory.readNote(scopeNoteName('plugin__novelai'))).not.toBeNull();
+
+    notes.removeAll();
+
+    expect(memory.readNote(HUB_NOTE_NAME)).toBeNull();
+    expect(memory.readNote(scopeNoteName('project__app'))).toBeNull();
+    expect(memory.readNote(scopeNoteName('plugin__novelai'))).toBeNull();
+  });
+
   it('no-ops safely when memory is absent', () => {
     const noMem = new CodegraphMemoryNotes(null, store);
     seedScope('project__app');
@@ -117,6 +134,7 @@ describe('CodegraphMemoryNotes', () => {
       noMem.syncScope('project__app');
       noMem.refreshHub();
       noMem.removeScope('project__app');
+      noMem.removeAll();
     }).not.toThrow();
   });
 });

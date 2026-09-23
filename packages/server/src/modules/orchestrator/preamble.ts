@@ -2,6 +2,11 @@ import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { SIGNAL_TEXT } from './messaging.js';
+import { withModule } from '../../logger.js';
+// Type-only: the registry never imports this module, so no runtime edge.
+import type { FeatureName } from '../features/registry.js';
+
+const log = withModule('orchestrator.preamble');
 
 /**
  * Per-session preamble builder (plan §11).
@@ -369,6 +374,80 @@ export function buildSkillsSection(
   ].join('\n');
 }
 
+/**
+ * Tool-name prefix each strippable feature owns, for the stale-mention lint.
+ * Only the three features whose MCP tools ride in `team-comms` carry one
+ * (`memory.*`, `board.*`, `codegraph.*`); ide/monitoring/approvals publish no
+ * agent-facing tool prefix, so a disabled one leaves nothing to flag.
+ */
+const FEATURE_TOOL_PREFIXES: Partial<Record<FeatureName, string>> = {
+  memory: 'memory.',
+  board: 'board.',
+  codegraph: 'codegraph.',
+};
+
+function escapeMarkerRegExp(s: string): string {
+  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+/**
+ * Strip the per-feature sections from a preamble.
+ *
+ * The default preambles wrap each feature's block in
+ * `<!--feature:x-->…<!--/feature:x-->` markers (added in Lots 4/5/6). For a
+ * feature that is OFF the whole block (markers + content) is removed; for one
+ * that is ON only the marker comments are stripped, leaving the content. A text
+ * WITHOUT markers is returned untouched — which is exactly the Lot 1 state, so
+ * this is a pure no-op until the markers land.
+ *
+ * Applied FIRST in `buildPreamble` (before placeholder substitution), on the
+ * loaded default only — the operator override, skills and plugin sections carry
+ * no markers.
+ */
+export function stripFeatureSections(
+  text: string,
+  features: Record<FeatureName, boolean>,
+): string {
+  let out = text;
+  for (const name of Object.keys(features) as FeatureName[]) {
+    const open = `<!--feature:${name}-->`;
+    const close = `<!--/feature:${name}-->`;
+    if (features[name]) {
+      // ON — drop only the markers, keep the content.
+      out = out.split(open).join('').split(close).join('');
+    } else {
+      // OFF — drop the whole block (non-greedy, spanning newlines).
+      const block = new RegExp(
+        `${escapeMarkerRegExp(open)}[\\s\\S]*?${escapeMarkerRegExp(close)}\\n?`,
+        'g',
+      );
+      out = out.replace(block, '');
+    }
+  }
+  return out;
+}
+
+/**
+ * Lint: warn once per disabled feature whose tool prefix is STILL mentioned in
+ * the assembled preamble — i.e. in text `stripFeatureSections` does not reach
+ * (role overrides, skills, `TEAM_TOOL_LOGICAL_NAMES` notes, codegraph vault
+ * notes). We inform the operator; we never rewrite their text (D5). With nothing
+ * disabled (Lot 1) it logs nothing.
+ */
+export function lintStaleFeatureMentions(
+  assembledPreamble: string,
+  features: Record<FeatureName, boolean>,
+): void {
+  for (const [name, prefix] of Object.entries(FEATURE_TOOL_PREFIXES) as Array<
+    [FeatureName, string]
+  >) {
+    if (features[name]) continue;
+    if (assembledPreamble.includes(prefix)) {
+      log.warn({ event: 'preamble.stale_feature_mention', feature: name, prefix });
+    }
+  }
+}
+
 export interface BuildPreambleInput {
   /** Identity slot — substituted into `{{name}}`/`{{role}}`/`{{sessionId}}`/`{{orchName}}`. */
   identity: {
@@ -415,6 +494,14 @@ export interface BuildPreambleInput {
    * activated skill. Omitted / empty ⇒ no section at all.
    */
   skills?: readonly SkillFragment[] | null;
+  /**
+   * Snapshot of the built-in features (true = enabled), from
+   * `FeatureRegistry.snapshot()`. Drives `stripFeatureSections` (applied FIRST,
+   * before the placeholders) and the stale-mention lint. Omitted / `null` ⇒ no
+   * stripping and no lint — the Lot 1 default, so the output is byte-for-byte
+   * what it was before this field existed.
+   */
+  features?: Record<FeatureName, boolean> | null;
 }
 
 /**
@@ -444,7 +531,11 @@ export interface BuildPreambleInput {
  *     rewrite that quote into a line the agent will never actually see.
  */
 export function buildPreamble(input: BuildPreambleInput): string {
-  const base = input.isLead ? getLeadDefault() : getWorkerDefault();
+  const features = input.features ?? null;
+  // FIRST, before placeholders: strip the sections of OFF features (and the
+  // markers of ON ones). A no-op until the markers land (Lots 4/5/6).
+  let base = input.isLead ? getLeadDefault() : getWorkerDefault();
+  if (features) base = stripFeatureSections(base, features);
   const namer = input.mcpToolName ?? null;
   let filled = base
     .replace(/\{\{name\}\}/g, input.identity.name)
@@ -477,11 +568,16 @@ export function buildPreamble(input: BuildPreambleInput): string {
 
   let override = input.customOverride?.trim();
   if (override && namer) override = renderMcpToolNames(override, namer);
-  if (override) {
-    return `${filled}\n\n---\n\n## Project-specific instructions\n\n${override}\n`;
-  }
+  const assembled = override
+    ? `${filled}\n\n---\n\n## Project-specific instructions\n\n${override}\n`
+    : filled;
 
-  return filled;
+  // Lint the FINAL text: role overrides / skills / notes escape the strip above,
+  // so a disabled feature's tool prefix may still be cited there. Logs nothing
+  // in Lot 1 (nothing is disabled).
+  if (features) lintStaleFeatureMentions(assembled, features);
+
+  return assembled;
 }
 
 /** Test-only — drop the cached defaults so a test can swap the files on disk. */

@@ -39,7 +39,10 @@ export const DEFAULT_PROVIDER_ID: BuiltinProviderId = 'claude';
  * is shared, because only the model is needed before the registry exists.
  */
 export const BUILTIN_PROVIDER_DEFAULT_MODELS: Record<BuiltinProviderId, string> = {
-  claude: 'claude-opus-5',
+  // An ALIAS, not an id (docs/model-aliases.md): stored as-is on the team, and
+  // resolved to the newest opus at every spawn — so a team created today runs
+  // whatever opus is current the day it spawns its next worker.
+  claude: 'opus',
   codex: 'gpt-5.5',
   gemini: 'gemini-3.1-pro-preview',
   opencode: 'anthropic/claude-opus-5',
@@ -86,4 +89,55 @@ export const BUILTIN_PROVIDER_DEFAULT_FAMILIES: Record<BuiltinProviderId, RegExp
  */
 export function builtinDefaultModel(providerId: string): string | null {
   return (BUILTIN_PROVIDER_DEFAULT_MODELS as Record<string, string>)[providerId] ?? null;
+}
+
+// ---------------------------------------------------------------------------
+// Claude family aliases (docs/model-aliases.md)
+// ---------------------------------------------------------------------------
+
+/**
+ * The families a claude model value may name instead of a concrete id. Each is
+ * also an alias the claude CLI resolves on its own, which is what makes the
+ * alias a safe thing to exec when no catalogue can answer.
+ */
+export const CLAUDE_MODEL_FAMILIES = ['opus', 'sonnet', 'fable', 'haiku'] as const;
+
+export type ClaudeModelFamily = (typeof CLAUDE_MODEL_FAMILIES)[number];
+
+export interface ParsedModelAlias {
+  family: ClaudeModelFamily;
+  /** The `[1m]` long-context marker, carried over onto the resolved id. */
+  oneM: boolean;
+}
+
+const ALIAS_RE = /^(opus|sonnet|fable|haiku)(\[1m\])?$/i;
+
+/** `opus`, `sonnet[1m]`, … → parts; anything else (a concrete id) → `null`. */
+export function parseModelAlias(model: string): ParsedModelAlias | null {
+  const m = ALIAS_RE.exec(model.trim());
+  if (!m?.[1]) return null;
+  return { family: m[1].toLowerCase() as ClaudeModelFamily, oneM: m[2] !== undefined };
+}
+
+/**
+ * Newest-member pattern of one family, anchored at both ends for the same
+ * reason as `BUILTIN_PROVIDER_DEFAULT_FAMILIES`: it must not elect a dated twin
+ * (`claude-haiku-4-5-20251001`) or a suffixed variant of another price.
+ */
+export function claudeFamilyPattern(family: ClaudeModelFamily): RegExp {
+  return new RegExp(`^claude-${family}-\\d+(-\\d{1,2})?$`);
+}
+
+const CONCRETE_CLAUDE_RE = /^claude-(opus|sonnet|fable|haiku)-\d+(-\d{1,2})?(-\d{8})?(\[1m\])?$/i;
+
+/**
+ * The alias a concrete claude id belongs to — `claude-sonnet-4-6` → `sonnet`,
+ * `claude-opus-4-8[1m]` → `opus[1m]` — or `null` when the id is not a plain
+ * member of a known family (already an alias, another vendor, a variant).
+ * Used to upgrade stored/requested pins to "latest of that family".
+ */
+export function claudeFamilyOf(model: string): string | null {
+  const m = CONCRETE_CLAUDE_RE.exec(model.trim());
+  if (!m?.[1]) return null;
+  return `${m[1].toLowerCase()}${m[4] ? '[1m]' : ''}`;
 }

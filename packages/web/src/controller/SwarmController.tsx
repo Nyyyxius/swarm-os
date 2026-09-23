@@ -43,10 +43,10 @@ import { useCrons } from '../hooks/useCrons';
 import { useOrchestrators } from '../hooks/useOrchestrators';
 import { useRoles } from '../hooks/useRoles';
 import { useSession } from '../hooks/useSession';
-import { useEvents, type MailboxMessageEvent } from '../hooks/useEvents';
+import { useEvents, type MailboxMessageEvent, type FeatureChangedEvent } from '../hooks/useEvents';
 import {
   api, apiErrorMessage, getToken, HttpError,
-  type CronView, type HealthView, type InfoView, type MailMessageView,
+  type CronView, type FeatureName, type HealthView, type InfoView, type MailMessageView,
   type OrchestratorView, type RoleView,
 } from '../api/client';
 import { deriveTopBarPillStatus } from '../lib/topBarStatus';
@@ -73,6 +73,22 @@ const NOTICE_TTL_MS = { ok: 5_000, error: 10_000 } as const;
 
 /** Cap on simultaneously visible notices (cf. `TOAST_MAX_VISIBLE`). */
 const NOTICE_MAX_VISIBLE = 4;
+
+/**
+ * Fail-open feature map (docs/builtin-features.md D2/D10). Used when
+ * `GET /features` fails — a server that predates the feature registry (404) or
+ * a transient error must degrade to "everything visible", never hide a working
+ * surface. Also the seed a `feature.changed` frame patches onto if it somehow
+ * arrives before the first snapshot.
+ */
+const ALL_FEATURES_ENABLED: Record<FeatureName, boolean> = {
+  ide: true,
+  codegraph: true,
+  board: true,
+  memory: true,
+  monitoring: true,
+  approvals: true,
+};
 
 /**
  * Shared empty list for `selectedTeamCrons`. A frozen module-level constant,
@@ -231,6 +247,26 @@ export interface SwarmControllerValue {
   onOpenPanel: (plugin: string, panelId: string) => void;
   /** Revision counter bumped on each plugin.host.changed WS event (live refresh). */
   pluginsRev: number;
+  /**
+   * Built-in feature visibility map (docs/builtin-features.md). `true` =
+   * enabled, `false` = disabled/uninstalled. **`null` = UNKNOWN** — the
+   * snapshot has not been hydrated yet: consumers must NOT hide nav, redirect a
+   * route, or fetch a gated page while null (D10). Hydrated by `GET /features`
+   * at login and patched in place on each `feature.changed` WS frame.
+   */
+  features: Record<FeatureName, boolean> | null;
+  /**
+   * Bumped on each `feature.changed` frame. Read-only detail views
+   * (`PluginsPage`'s `useFeatures`) refetch `GET /features` when it changes;
+   * the `features` MAP above is patched directly and never refetched.
+   */
+  featuresRev: number;
+  /** Enable a built-in feature (install+enable on an `uninstalled` one). */
+  enableFeature: (name: FeatureName) => Promise<void>;
+  /** Disable a built-in feature (data kept). */
+  disableFeature: (name: FeatureName) => Promise<void>;
+  /** Uninstall a built-in feature (disable + purge). */
+  uninstallFeature: (name: FeatureName) => Promise<void>;
   /** Revision counter bumped on each memory.* WS event (live graph refresh). */
   memoryRev: number;
   /** Revision counter bumped on each taskboard.* WS event (live board refresh). */
@@ -600,6 +636,21 @@ export function SwarmControllerProvider({
     setPluginsRev((v) => v + 1);
   }, []);
 
+  // ── Built-in features (docs/builtin-features.md D10) ──────────────────────
+  // `null` until the first `GET /features` snapshot: UNKNOWN, so no nav is
+  // hidden and no gated route is redirected. Patched IN PLACE on each
+  // `feature.changed` frame (no refetch of the map); `featuresRev` bumps so the
+  // detail views (PluginsPage) can refetch the richer `FeatureView[]`.
+  const [features, setFeatures] = useState<Record<FeatureName, boolean> | null>(null);
+  const [featuresRev, setFeaturesRev] = useState(0);
+  const handleFeatureChanged = useCallback((ev: FeatureChangedEvent) => {
+    setFeatures((prev) => ({
+      ...(prev ?? ALL_FEATURES_ENABLED),
+      [ev.name]: ev.state === 'enabled',
+    }));
+    setFeaturesRev((v) => v + 1);
+  }, []);
+
   // Shared memory graph — bump a revision on each memory.* frame so the
   // MemoryPage (via useMemoryNotes) re-fetches live on top of its 3 s poll.
   const [memoryRev, setMemoryRev] = useState(0);
@@ -635,8 +686,10 @@ export function SwarmControllerProvider({
     dismiss,
     approvals,
     dismissApproval,
+    clearApprovals,
     budgets,
     dismissBudget,
+    clearBudgets,
   } = useEvents({
     onMailboxMessage: handleMailboxMessage,
     onSessionCreated: handleSessionCreated,
@@ -647,7 +700,58 @@ export function SwarmControllerProvider({
     onApprovalRequested: handleApprovalEvent,
     onApprovalResolved: handleApprovalEvent,
     onGraphEvent: handleGraphEvent,
+    onFeatureChanged: handleFeatureChanged,
   });
+
+  // ── Hydrate the feature map once authenticated ────────────────────────────
+  // `GET /features` is behind the auth gate (D10), so it is fetched when the
+  // token probe says `ok` — NOT via the public `/info`. A failure (404 on a
+  // server predating the registry, or a transient error) degrades to
+  // fail-open: every feature reads as enabled, which also lifts the deep-link
+  // page-fetch gate so an older backend behaves exactly as before.
+  useEffect(() => {
+    if (authState !== 'ok') return;
+    let alive = true;
+    void api.listFeatures()
+      .then((r) => {
+        if (!alive) return;
+        const map = { ...ALL_FEATURES_ENABLED };
+        for (const f of r.features) map[f.name] = f.state === 'enabled';
+        setFeatures(map);
+      })
+      .catch(() => {
+        if (alive) setFeatures((prev) => prev ?? { ...ALL_FEATURES_ENABLED });
+      });
+    return () => { alive = false; };
+  }, [authState]);
+
+  // ── Flush actionable toasts a feature toggle has invalidated ──────────────
+  // On a genuine enabled→off transition (observed after hydration): the
+  // approvals stack when `approvals` goes off — its Approve/Deny buttons would
+  // hit a 404'd route — and the budget stack when `monitoring` goes off, whose
+  // notices drill into the now-hidden cost surface. Re-enabling clears nothing
+  // (there is no stale toast when a feature was off).
+  const prevFeaturesRef = useRef<Record<FeatureName, boolean> | null>(null);
+  useEffect(() => {
+    const prev = prevFeaturesRef.current;
+    prevFeaturesRef.current = features;
+    if (!prev || !features) return;
+    if (prev.approvals !== false && features.approvals === false) clearApprovals();
+    if (prev.monitoring !== false && features.monitoring === false) clearBudgets();
+  }, [features, clearApprovals, clearBudgets]);
+
+  // ── Feature verbs — call the API and let the `feature.changed` frame refresh
+  //    the map (+ bump `featuresRev` for the detail views). PluginsPage awaits
+  //    these then refetches its own richer list for immediate feedback. ──────
+  const enableFeature = useCallback(async (name: FeatureName) => {
+    await api.enableFeature(name);
+  }, []);
+  const disableFeature = useCallback(async (name: FeatureName) => {
+    await api.disableFeature(name);
+  }, []);
+  const uninstallFeature = useCallback(async (name: FeatureName) => {
+    await api.uninstallFeature(name);
+  }, []);
 
   useEffect(() => {
     if (pulses.length === 0) return;
@@ -1280,6 +1384,11 @@ export function SwarmControllerProvider({
     onOpenIde: onOpenIdeResolved,
     onOpenPanel: onOpenPanelResolved,
     pluginsRev,
+    features,
+    featuresRev,
+    enableFeature,
+    disableFeature,
+    uninstallFeature,
     memoryRev,
     boardRev,
     shellMode,

@@ -3,6 +3,11 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 import * as crypto from 'node:crypto';
 import { fileURLToPath } from 'node:url';
+// Boot-time warnings about a malformed knob go through the shared logger. The
+// import is safe both ways: `logger.ts` only takes a TYPE from this module, so
+// nothing is evaluated in a cycle, and a `loadConfig()` that runs before
+// `initRootLogger` simply lands on the default JSON logger (see logger.ts).
+import { withModule } from './logger.js';
 import {
   BUILTIN_PROVIDER_DEFAULT_MODELS,
   BUILTIN_PROVIDER_IDS,
@@ -176,6 +181,28 @@ export interface Config {
    * Default 15 000. Env: `SWARM_OS_CONTEXT_USAGE_TTL_MS`.
    */
   contextUsageTtlMs: number;
+  /**
+   * Auto-compact (docs/auto-compact.md, D6) — the INSTANCE default threshold,
+   * in PERCENT of the model's context window (0..100), past which the server
+   * arms a `/compact` on an agent that has gone idle with an empty inbox.
+   *
+   * This is only the fallback: the resolution at each idle boundary is
+   * `role.autoCompactPct ?? config.autoCompactPct`, read live from the role
+   * store, so a role editing its threshold applies at the next boundary of
+   * every one of its agents — no restart, which matters on a 24/7 fleet. On a
+   * role, `null` means "inherit this value" and `0` means "never compact this
+   * role".
+   *
+   * `0` here is the kill switch: every role that inherits stops being
+   * auto-compacted at all (i.e. the whole fleet, unless a role carries its own
+   * non-zero threshold, which still wins — an explicit per-role setting is an
+   * instruction, not a suggestion).
+   *
+   * Default 35. A value that is not an integer in 0..100 falls back to 35 with
+   * a `warn` at boot rather than failing the boot — see `autoCompactPctEnv`.
+   * Env: `SWARM_OS_AUTO_COMPACT_PCT`.
+   */
+  autoCompactPct: number;
   /**
    * Hot-backup interval in ms. The server takes an online SQLite snapshot of
    * `swarm-os.db` into `<dataDir>/backups/` every `backupIntervalMs`. Since
@@ -496,6 +523,44 @@ function intEnv(name: string, def: number): number {
   return n;
 }
 
+/**
+ * Instance default for the auto-compact threshold, in percent of the context
+ * window (docs/auto-compact.md D6). Exported so the roles route can serve the
+ * same number to the web form that the orchestrator resolves against, and so
+ * the figure lives in exactly one place.
+ */
+export const DEFAULT_AUTO_COMPACT_PCT = 35;
+
+/**
+ * Read `SWARM_OS_AUTO_COMPACT_PCT` as an integer percentage 0..100.
+ *
+ * Deliberately NOT `intEnv`: that one THROWS on a bad value, which is right for
+ * the knobs it guards (ports, sizes, caps — a wrong number there is worse than
+ * no boot). This one is a tuning parameter on a fleet that runs 24/7, and
+ * taking the server down over a typo in a percentage would be a far worse
+ * outcome than running at the documented default. So anything that is not an
+ * integer in 0..100 — `"35%"`, `3.5`, `-1`, `200` — degrades to
+ * `DEFAULT_AUTO_COMPACT_PCT` and says so once, loudly, at boot.
+ *
+ * `0` is a VALID value (the kill switch), not a rejected one; only an unset or
+ * empty var falls through silently to the default.
+ */
+function autoCompactPctEnv(): number {
+  const raw = process.env.SWARM_OS_AUTO_COMPACT_PCT;
+  if (raw == null || raw === '') return DEFAULT_AUTO_COMPACT_PCT;
+  const n = Number(raw);
+  if (!Number.isInteger(n) || n < 0 || n > 100) {
+    withModule('config').warn({
+      event: 'config.auto_compact_pct_invalid',
+      value: raw,
+      fallback: DEFAULT_AUTO_COMPACT_PCT,
+      reason: 'SWARM_OS_AUTO_COMPACT_PCT must be an integer between 0 and 100',
+    });
+    return DEFAULT_AUTO_COMPACT_PCT;
+  }
+  return n;
+}
+
 function boolEnv(name: string, def: boolean): boolean {
   const raw = process.env[name];
   if (raw == null || raw === '') return def;
@@ -714,6 +779,12 @@ export function loadConfig(): Config {
   // Monitoring — TTL of the per-session context-usage snapshot. Rides the
   // existing 3 s poll (no timer of its own); `0` turns the tracker off.
   const contextUsageTtlMs = intEnv('SWARM_OS_CONTEXT_USAGE_TTL_MS', 15_000);
+  // Auto-compact (docs/auto-compact.md D6) — instance default threshold, in
+  // percent of the context window, for roles that do not carry their own.
+  // ON by default at 35: the agent-driven path exists but agents forget, and
+  // the whole point of the feature is that nobody has to remember. `0` is the
+  // kill switch.
+  const autoCompactPct = autoCompactPctEnv();
 
   // Hot SQLite backup scheduler (in-process; writes to <dataDir>/backups).
   const backupIntervalMs = intEnv('SWARM_OS_BACKUP_INTERVAL_MS', 6 * 60 * 60 * 1000);
@@ -819,15 +890,16 @@ export function loadConfig(): Config {
   const ideCliPath = process.env.SWARM_OS_VSCODE_CLI ?? '/opt/vscode-cli/code';
   const ideServerDataDir = path.join(dataDir, 'ide', 'server-data');
   const ideCliDataDir = path.join(dataDir, 'ide', 'cli');
-  if (ideEnabled) {
-    // Pre-create so the serve-web child never races a missing dir on first
-    // spawn. Best-effort: the supervisor also mkdir's defensively.
-    for (const d of [ideServerDataDir, ideCliDataDir]) {
-      try {
-        ensureDir(d);
-      } catch {
-        /* best-effort */
-      }
+  // Pre-create UNCONDITIONALLY so the serve-web child never races a missing dir
+  // on first spawn. `ideEnabled` is now only a first-boot seed default for the
+  // feature registry (built after the DB), so config time can't know the IDE's
+  // live state — pre-creating two empty dirs on the /data volume is benign, and
+  // the supervisor also mkdir's defensively before spawning.
+  for (const d of [ideServerDataDir, ideCliDataDir]) {
+    try {
+      ensureDir(d);
+    } catch {
+      /* best-effort */
     }
   }
 
@@ -982,6 +1054,7 @@ export function loadConfig(): Config {
     contextCompactOnWaiting,
     contextAutoCompactBytes,
     contextUsageTtlMs,
+    autoCompactPct,
     backupIntervalMs,
     backupKeep,
     taskboardOrphanTtlMs,

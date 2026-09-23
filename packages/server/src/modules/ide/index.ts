@@ -36,10 +36,18 @@ export class IdeSupervisor {
   constructor(private readonly config: Config) {}
 
   start(): void {
-    if (!this.config.ideEnabled) {
-      log.info({ event: 'ide.disabled', note: 'SWARM_OS_IDE_ENABLED=false — VS Code web not started' });
-      return;
-    }
+    // Re-arm on every start so a disable→enable cycle actually respawns:
+    // `stop()` latches `stopping=true` (and grows `restarts`), while
+    // `spawnChild()` / `scheduleRestart()` bail out on `stopping` — leaving a
+    // re-start silently inert unless both are cleared here. The FEATURE REGISTRY
+    // (not this supervisor) now decides whether the IDE runs, so the old
+    // `SWARM_OS_IDE_ENABLED` early-return is gone; that env var is only a
+    // first-boot seed default for the registry (see FeatureRegistry).
+    this.stopping = false;
+    this.restarts = 0;
+    // Idempotent: a live child (or a pending respawn) means we're already armed
+    // — never spawn a second serve-web.
+    if (this.child || this.restartTimer) return;
     // Skip cleanly when the VS Code CLI isn't present (typical of `pnpm dev`
     // outside the container) — otherwise we'd spin an ENOENT restart loop.
     if (!fs.existsSync(this.config.ideCliPath)) {

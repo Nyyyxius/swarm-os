@@ -374,3 +374,61 @@ describe('Mailbox.readCount (update_system D.5 read receipt)', () => {
     expect(m.readCount('a')).toBe(1);
   });
 });
+
+/**
+ * docs/auto-compact.md §3.2 — `newestTs`.
+ *
+ * It exists for one rule, at the idle boundary: re-signal the inbox only when
+ * something arrived AFTER the last signal we sent. That is what caps the
+ * wake-ups at one per message, so an agent that keeps ignoring its inbox is not
+ * nudged again at every boundary for the rest of its life.
+ */
+describe('Mailbox.newestTs', () => {
+  it('is null for an unknown or empty queue', () => {
+    const m = new Mailbox();
+    expect(m.newestTs('nobody')).toBeNull();
+    m.push('a', { from: 's', content: '1' });
+    m.read('a');
+    expect(m.newestTs('a')).toBeNull();
+  });
+
+  it('is the epoch ms of the queued message', () => {
+    const m = new Mailbox();
+    m.push('a', { from: 's', content: '1', ts: '2026-09-14T10:00:00.000Z' });
+    expect(m.newestTs('a')).toBe(Date.parse('2026-09-14T10:00:00.000Z'));
+  });
+
+  it('answers the NEWEST, not the last pushed', () => {
+    // `rehydrateMailbox` re-pushes persisted rows with their ORIGINAL `ts`, so
+    // insertion order is not timestamp order across a restart — a "read the
+    // last element" implementation would under-report and lose a wake-up.
+    const m = new Mailbox();
+    m.push('a', { from: 's', content: 'new', ts: '2026-09-14T10:00:05.000Z' });
+    m.push('a', { from: 's', content: 'old', ts: '2026-09-14T10:00:00.000Z' });
+    expect(m.newestTs('a')).toBe(Date.parse('2026-09-14T10:00:05.000Z'));
+  });
+
+  it('skips a ts it cannot parse rather than inventing "now"', () => {
+    // A fabricated fresh timestamp would read as "newer than the last signal"
+    // at every single boundary — i.e. an infinite nudge loop.
+    const m = new Mailbox();
+    m.push('a', { from: 's', content: 'junk', ts: 'not-a-date' });
+    expect(m.newestTs('a')).toBeNull();
+    m.push('a', { from: 's', content: 'ok', ts: '2026-09-14T10:00:00.000Z' });
+    expect(m.newestTs('a')).toBe(Date.parse('2026-09-14T10:00:00.000Z'));
+  });
+
+  it('tracks a push made after a drain', () => {
+    const m = new Mailbox();
+    m.push('a', { from: 's', content: '1', ts: '2026-09-14T10:00:00.000Z' });
+    m.read('a');
+    m.push('a', { from: 's', content: '2', ts: '2026-09-14T10:00:09.000Z' });
+    expect(m.newestTs('a')).toBe(Date.parse('2026-09-14T10:00:09.000Z'));
+  });
+
+  it('is per session', () => {
+    const m = new Mailbox();
+    m.push('a', { from: 's', content: '1', ts: '2026-09-14T10:00:00.000Z' });
+    expect(m.newestTs('b')).toBeNull();
+  });
+});

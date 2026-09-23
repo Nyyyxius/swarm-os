@@ -10,6 +10,7 @@ import {
   type SkillActivation,
 } from '../api/client';
 import { budgetFieldValue, parseCostBudget, toBudgetAction } from '../lib/budget';
+import { autoCompactFieldValue, parseAutoCompactPct } from '../lib/autoCompact';
 import { DiscordOnboarding } from './DiscordOnboarding';
 import { useProviders } from '../hooks/useProviders';
 import {
@@ -49,6 +50,13 @@ interface SubmitBody {
    */
   costBudgetUsd: number | null;
   budgetAction: BudgetAction;
+  /**
+   * Auto-compact threshold (docs/auto-compact.md) — `null` = inherit the
+   * instance default, `0` = disabled for this role, `1..100` = the percentage.
+   * Always SENT, `null` included, for the same reason as `costBudgetUsd`:
+   * going back to inheriting has to be expressible.
+   */
+  autoCompactPct: number | null;
 }
 
 const INHERIT_LABEL = '(inherit global default)';
@@ -108,6 +116,9 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
   const [autoRemoveDelayMin, setAutoRemoveDelayMin] = useState<string>('10');
   const [costBudget, setCostBudget] = useState<string>('');
   const [budgetAction, setBudgetAction] = useState<BudgetAction>('notify');
+  // Empty string = inherit the instance threshold; `'0'` = disabled. Kept as a
+  // string so those two stay distinguishable while the operator types.
+  const [autoCompact, setAutoCompact] = useState<string>('');
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
   const [availableSkills, setAvailableSkills] = useState<SkillView[]>([]);
   const [submitting, setSubmitting] = useState(false);
@@ -157,6 +168,9 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
       // Absent on a server predating Lot 14 — read as "no budget", never as 0.
       setCostBudget(budgetFieldValue(initial.costBudgetUsd));
       setBudgetAction(toBudgetAction(initial.budgetAction));
+      // Absent on a server predating auto-compact — read as "inherit", and `0`
+      // as the explicit opt-out it is, never as an empty field.
+      setAutoCompact(autoCompactFieldValue(initial.autoCompactPct));
       setSelectedSkills((initial.skills ?? []).map((s) => s.name));
     } else {
       setLabel('');
@@ -175,6 +189,7 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
       setAutoRemoveDelayMin('10');
       setCostBudget('');
       setBudgetAction('notify');
+      setAutoCompact('');
       setSelectedSkills([]);
     }
   }, [open, initial]);
@@ -273,6 +288,10 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
       // leaves the operator believing a ceiling exists. See `parseCostBudget`.
       const budget = parseCostBudget(costBudget);
       if (!budget.ok) throw new Error(budget.error);
+      // Same contract as the budget: rejected rather than rounded, since the
+      // server answers 400 on a non-integer and the role would look saved.
+      const compact = parseAutoCompactPct(autoCompact);
+      if (!compact.ok) throw new Error(compact.error);
       await onSubmit({
         label: label.trim(),
         leadPrompt: leadPrompt.trim() ? leadPrompt : null,
@@ -290,6 +309,7 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
         autoRemoveDeadWorkersDelayMs: autoRemoveDelayMs,
         costBudgetUsd: budget.value,
         budgetAction,
+        autoCompactPct: compact.value,
       });
       onClose();
     } catch (err) {
@@ -459,6 +479,28 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
             <p className="mt-1 text-[11px] text-slate-400">
               Un worker terminé (killed / exited / failed) est retiré de l’affichage une fois ce
               délai écoulé. Leads et sessions actives jamais touchés.
+            </p>
+          </Field>
+
+          {/* ── AUTO-COMPACT (docs/auto-compact.md) ──
+              Under the reaper, above the budget: the three of them are the
+              per-role guard rails the server applies by itself, and this one
+              is the only one that is ON by default — hence the placeholder
+              showing what an empty field actually inherits. */}
+          <Field label="auto-compact (%)">
+            <input
+              className={inputCls}
+              type="number"
+              min={0}
+              max={100}
+              placeholder="35"
+              value={autoCompact}
+              onChange={(e) => setAutoCompact(e.target.value)}
+            />
+            <p className="mt-1 text-[11px] text-slate-400">
+              Le serveur arme « /compact » quand le contexte de l’agent dépasse ce pourcentage
+              de sa fenêtre, seulement quand l’agent est idle avec une inbox vide. Vide = valeur
+              de l’instance (35 % par défaut). 0 = désactivé pour ce rôle.
             </p>
           </Field>
 

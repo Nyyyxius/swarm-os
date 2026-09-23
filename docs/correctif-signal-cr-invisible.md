@@ -5,8 +5,8 @@
 > depuis le 2026-09-22 20:31Z (voir [§6](#6-contournement-en-place-à-retirer-après-déploiement)).
 > Rédigé le 2026-09-22 à partir du diagnostic de la panne du pipeline stiix.
 >
-> Note d'application : le §4.3 (`clearDialogPending`) vise du code encore non commité
-> sur `feature/discord-hourglass-reactions`. Il sera à reprendre au rebase de ce travail.
+> Note d'application : le §4.3 (`clearDialogPending`) a été appliqué à l'intégration de
+> `feature/discord-hourglass-reactions` (merge de master, 2026-09-23).
 
 ## 1. Résumé
 

@@ -316,6 +316,23 @@ export class GraphStore {
     }
   }
 
+  /**
+   * Purge ALL scope bookkeeping — `DELETE FROM codegraph_scopes` (docs/
+   * builtin-features.md D7). Deliberately a DELETE, NEVER a DROP: the prepared
+   * statements above stay valid, so a codegraph re-enable finds this store
+   * already present and simply empty. The graphify ARTIFACTS on disk
+   * (`<dataDir>/codegraph/`) are the caller's responsibility (the feature purge
+   * rm's them AFTER draining in-flight runs). Never throws.
+   */
+  purgeAll(): void {
+    try {
+      this.db.exec('DELETE FROM codegraph_scopes');
+      log.info({ event: 'codegraph.purged' });
+    } catch (err) {
+      log.warn({ event: 'codegraph.write_failed', op: 'purgeAll', error: String(err) });
+    }
+  }
+
   /** Emit a `code.graph.*` event; never throws (a bad emit must not break a write). */
   private emit(kind: CodegraphSwarmEventKind, payload: CodegraphEventPayload): void {
     if (!this.eventBus) return;

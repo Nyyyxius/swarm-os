@@ -41,9 +41,9 @@
       },
       "leadModel": {
         "type": "string",
-        "default": "claude-opus-4-8[1m]",
+        "default": "opus[1m]",
         "title": "Modele du lead",
-        "description": "Modele Claude du lead permanent. Defaut 'claude-opus-4-8[1m]' (contexte 1M, valide sur le CLI hote). Repli manuel sur 'claude-opus-4-8' si un CLI refuse le suffixe [1m]."
+        "description": "Modele Claude du lead permanent. Defaut 'opus[1m]' : alias de famille, toujours le dernier Opus en contexte 1M (docs/model-aliases.md). Un id concret (ex. 'claude-opus-5-5') fige le modele."
       },
       "ttsVoice": {
         "type": "string",

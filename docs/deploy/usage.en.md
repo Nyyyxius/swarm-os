@@ -29,7 +29,9 @@ How to operate a running instance. For install/remote access see
 - **Console / events** — a global activity feed (expandable to a full-screen
   overlay), with toasts / picture-in-picture for notifications.
 - **IDE** — a VS Code Web overlay opens the `/workspace` folder right in the
-  browser. Toggle it with `SWARM_OS_IDE_ENABLED`.
+  browser. Toggle it from the Plugins screen (built-in feature — see
+  [../builtin-features.md](../builtin-features.md)); `SWARM_OS_IDE_ENABLED` only
+  sets its initial state at the first boot.
 - **Restart team** — relaunches a dead team **in place** (same id/config). It does
   a fresh start, not a Claude resume.
 

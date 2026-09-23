@@ -78,15 +78,26 @@ export interface CodegraphJanitorDeps {
    */
   watchCaps?: { perScope?: number; total?: number };
   /**
-   * Shared memory store, for the Option-A integration (auto note per scope +
-   * hub note). OPTIONAL — when absent (memory off), note maintenance is skipped
-   * and indexing is unaffected.
+   * Shared memory store, resolved through a GETTER consulted on EVERY note write
+   * (docs/builtin-features.md D8.3). It must return `null` whenever memory is
+   * off/uninstalled so a codegraph sweep can never resurrect a disabled vault —
+   * wired from index.ts as `() => features.isEnabled('memory') ? memoryStore : null`.
+   * OPTIONAL: when absent (or it returns null), note maintenance is skipped and
+   * indexing is unaffected.
    */
-  memory?: MemoryStore | null;
+  memory?: () => MemoryStore | null;
 }
 
 export interface CodegraphJanitorHandle {
-  stop(): void;
+  /**
+   * Disarm the interval + watchers AND drain any in-flight graphify run: the
+   * returned promise resolves only once the child (killed via SIGTERM) has
+   * terminated, so a caller may safely `purge()` the index dir afterwards
+   * (docs/builtin-features.md D8.4). The synchronous part (`stopped=true`, abort,
+   * clearInterval) runs before the first await, so a fire-and-forget `stop()`
+   * still halts new sweeps immediately.
+   */
+  stop(): Promise<void>;
   /** Exposed for tests / manual triggers: run exactly one sweep to completion. */
   sweepNow(): Promise<void>;
 }
@@ -233,7 +244,7 @@ export function startCodegraphJanitor(
 
   if (intervalMs <= 0) {
     log.info({ event: 'codegraph.janitor_disabled', intervalMs });
-    return { stop: () => undefined, sweepNow: async () => undefined };
+    return { stop: async () => undefined, sweepNow: async () => undefined };
   }
 
   // Per-scope run lock + whole-sweep reentrancy guard: a sweep may take longer
@@ -242,6 +253,18 @@ export function startCodegraphJanitor(
   const running = new Set<string>();
   let sweepInFlight = false;
   let stopped = false;
+  // Cooperative cancellation for in-flight graphify children: `stop()` aborts it
+  // (→ SIGTERM to the child) so a drained run resolves promptly instead of
+  // finishing a build that could recreate the index dir after purge() rm's it.
+  const abort = new AbortController();
+  // Every sweep promise currently running, so `stop()` can await them all before
+  // it resolves (a sweep awaits its graphify run, so this covers the run too).
+  const inflight = new Set<Promise<void>>();
+  function track(p: Promise<void>): Promise<void> {
+    inflight.add(p);
+    void p.finally(() => inflight.delete(p));
+    return p;
+  }
   /**
    * scopeId → (absolute directory → its NON-recursive watcher).
    *
@@ -258,8 +281,11 @@ export function startCodegraphJanitor(
   const maxPerScope = deps.watchCaps?.perScope ?? MAX_WATCHES_PER_SCOPE;
   const maxTotal = deps.watchCaps?.total ?? MAX_WATCHES_TOTAL;
   let debounceTimer: NodeJS.Timeout | null = null;
-  // Option-A memory integration (no-op when memory is absent).
-  const notes = new CodegraphMemoryNotes(deps.memory ?? null, deps.store);
+  // Option-A memory integration. The store is resolved through the getter on
+  // EVERY write (a fresh, cheap CodegraphMemoryNotes per call) so a note never
+  // resurrects a memory vault disabled/uninstalled after this janitor started
+  // (D8.3). No-op when the getter is absent or returns null (memory off).
+  const getNotes = () => new CodegraphMemoryNotes(deps.memory?.() ?? null, deps.store);
 
   /** Index one scope if its source changed. Never throws. */
   async function maybeIndex(discovered: DiscoveredScope): Promise<void> {
@@ -297,6 +323,8 @@ export function startCodegraphJanitor(
         engine: deps.engine,
         timeoutMs: deps.runTimeoutMs,
         extraExcludes: discovered.extraExcludes,
+        // Drained by stop() before purge (D8.4).
+        signal: abort.signal,
       });
       if (result.ok) {
         deps.store.recordIndexResult(scopeId, {
@@ -305,7 +333,7 @@ export function startCodegraphJanitor(
           sourceHash: fp.hash,
         });
         // Option A: refresh this scope's memory note (best-effort, never throws).
-        notes.syncScope(scopeId);
+        getNotes().syncScope(scopeId);
         log.info({
           event: 'codegraph.indexed',
           scopeId,
@@ -340,13 +368,13 @@ export function startCodegraphJanitor(
       for (const s of discovered) {
         deps.store.upsertScope({ id: s.id, kind: s.kind, path: s.path, enabled: s.hasCode });
         deps.store.setEnabled(s.id, s.hasCode);
-        if (!s.hasCode) notes.removeScope(s.id);
+        if (!s.hasCode) getNotes().removeScope(s.id);
       }
       // Prune scopes that vanished from the workspace/plugin set (+ their notes).
       for (const existing of deps.store.listScopes()) {
         if (!discoveredIds.has(existing.id)) {
           deps.store.removeScope(existing.id);
-          notes.removeScope(existing.id);
+          getNotes().removeScope(existing.id);
         }
       }
 
@@ -362,7 +390,7 @@ export function startCodegraphJanitor(
       }
 
       // Refresh the hub note once per sweep (idempotent — writes only on change).
-      notes.refreshHub();
+      getNotes().refreshHub();
     } catch (err) {
       log.warn({ event: 'codegraph.sweep_failed', error: err instanceof Error ? err.message : String(err) });
     } finally {
@@ -375,7 +403,7 @@ export function startCodegraphJanitor(
     if (debounceTimer) clearTimeout(debounceTimer);
     debounceTimer = setTimeout(() => {
       debounceTimer = null;
-      void sweep();
+      void track(sweep());
     }, WATCH_DEBOUNCE_MS);
     debounceTimer.unref?.();
   }
@@ -585,23 +613,35 @@ export function startCodegraphJanitor(
   }
 
   // Fire one sweep immediately (catch changes stranded by a previous boot), then
-  // every interval.
-  void sweep();
-  const timer = setInterval(() => void sweep(), intervalMs);
+  // every interval. Both are TRACKED so stop() can drain a run that is still in
+  // flight when the feature is disabled/uninstalled.
+  void track(sweep());
+  const timer = setInterval(() => void track(sweep()), intervalMs);
   timer.unref?.();
   log.info({ event: 'codegraph.janitor_started', intervalMs, watch: useWatch });
 
   return {
-    stop: () => {
-      // `stopped` is set FIRST: it gates sweep() and ensureWatchers(), so no
-      // watcher can be armed after this point — the maps we clear below are the
-      // last ones that will ever exist for this janitor.
+    stop: async () => {
+      // Everything up to the await is SYNCHRONOUS, so a fire-and-forget stop()
+      // halts all new work at once. `stopped` is set FIRST: it gates sweep() and
+      // ensureWatchers(), so no watcher can be armed and no NEW sweep can start
+      // after this point. The watchers are closed here too (not after the drain):
+      // they only schedule sweeps, which `stopped` already blocks, so tearing
+      // them down immediately is both correct and observable to callers.
       stopped = true;
       clearInterval(timer);
       if (debounceTimer) clearTimeout(debounceTimer);
       for (const byDir of watchers.values()) closeScopeWatchers(byDir);
       watchers.clear();
       capWarnedAt.clear();
+      // Kill any graphify child in flight (SIGTERM via the shared signal) so its
+      // run resolves now instead of finishing a build that could recreate the
+      // index dir after a subsequent purge() rm (D8.4), then await every
+      // in-flight sweep/run so the caller's purge() runs only once no child
+      // remains. `allSettled`: runUpdate never rejects, but a sweep guarded
+      // elsewhere must not make stop() reject.
+      abort.abort();
+      await Promise.allSettled([...inflight]);
     },
     sweepNow: sweep,
   };

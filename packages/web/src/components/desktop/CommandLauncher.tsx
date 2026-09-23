@@ -8,6 +8,7 @@
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';
 import { ICON, type IconName } from './icons';
+import { type FeatureName } from '../../api/client';
 
 /** Identifiants d'action — le contrat entre la table déclarative et le
  *  `switch` exhaustif de la TopBar. Ajouter un id ici casse la compilation
@@ -28,6 +29,12 @@ export interface LauncherItem {
   kbd?: string;
   /** pastille d'état (UPDATE). */
   dot?: 'warn';
+  /**
+   * Built-in feature qui gouverne cet item (docs/builtin-features.md). Quand
+   * `features?.[feature] === false`, l'item est filtré de la liste. Absent =
+   * item toujours affiché (n'est lié à aucune feature désactivable).
+   */
+  feature?: FeatureName;
 }
 
 export interface LauncherGroup {
@@ -43,18 +50,18 @@ export const LAUNCHER_GROUPS: readonly LauncherGroup[] = [
   ] },
   { label: 'WORKSPACE', items: [
     { id: 'roles',      label: 'ROLES',      desc: 'reusable team templates',     icon: 'template' },
-    { id: 'memory',     label: 'MEMORY',     desc: 'shared long-term store',      icon: 'memory' },
-    { id: 'board',      label: 'BOARD',      desc: 'task lanes across teams',     icon: 'board' },
+    { id: 'memory',     label: 'MEMORY',     desc: 'shared long-term store',      icon: 'memory', feature: 'memory' },
+    { id: 'board',      label: 'BOARD',      desc: 'task lanes across teams',     icon: 'board', feature: 'board' },
     // Pas de compteur chiffré ici : le seul signal disponible côté client est
     // `approvalToasts`, qui repart de zéro à chaque chargement et diminue
     // quand on écarte un toast sans résoudre le gate. Un badge nourri par là
     // mentirait. À rebrancher le jour où le serveur expose un pending global.
-    { id: 'approvals',  label: 'APPROVALS',  desc: 'pending human decisions',     icon: 'shield' },
-    { id: 'monitoring', label: 'MONITORING', desc: 'context, throughput & inbox per agent', icon: 'graph' },
-    { id: 'code-graph', label: 'CODE GRAPH', desc: 'symbol + dependency map',     icon: 'graph' },
+    { id: 'approvals',  label: 'APPROVALS',  desc: 'pending human decisions',     icon: 'shield', feature: 'approvals' },
+    { id: 'monitoring', label: 'MONITORING', desc: 'context, throughput & inbox per agent', icon: 'graph', feature: 'monitoring' },
+    { id: 'code-graph', label: 'CODE GRAPH', desc: 'symbol + dependency map',     icon: 'graph', feature: 'codegraph' },
     { id: 'skills',     label: 'SKILLS',     desc: 'importable instruction sets', icon: 'inbox' },
     { id: 'plugins',    label: 'PLUGINS',    desc: 'MCP servers + connectors',    icon: 'link' },
-    { id: 'ide',        label: 'IDE',        desc: 'open workspace in editor',    icon: 'code' },
+    { id: 'ide',        label: 'IDE',        desc: 'open workspace in editor',    icon: 'code', feature: 'ide' },
     // Appended at the END of the group on purpose: the keyboard test locks the
     // flat order of the first three items (↓↓+↵ → MEMORY), so a new entry may
     // only ever land after them.
@@ -76,6 +83,12 @@ interface Props {
   /** version de la release, pour la description de l'item UPDATE. */
   updateLatest?: string | null;
   /**
+   * Carte de visibilité des built-in features (docs/builtin-features.md). Un
+   * item dont la `feature` vaut explicitement `false` est retiré de la liste.
+   * `null`/`undefined` (état inconnu ou serveur ancien) = rien n'est filtré.
+   */
+  features?: Record<FeatureName, boolean> | null;
+  /**
    * Neutralise le raccourci d'ouverture. Vrai quand une modale est ouverte :
    * le panneau passerait AU-DESSUS d'elle (les modales sont rendues dans
    * `.app`, donc enfermées dans son contexte d'empilement — cf. le portail
@@ -94,7 +107,7 @@ function isTypingContext(target: EventTarget | null): boolean {
 }
 
 export default function CommandLauncher({
-  open, onOpen, onClose, onPick, updateAvailable, updateLatest, blocked,
+  open, onOpen, onClose, onPick, updateAvailable, updateLatest, features, blocked,
 }: Props) {
   const [q, setQ] = useState('');
   const [cursor, setCursor] = useState(0);
@@ -102,18 +115,37 @@ export default function CommandLauncher({
 
   // UPDATE n'est pas dans la table statique : sa description dépend de la
   // version détectée, et l'item n'existe que tant qu'une release est dispo.
+  // Le filtrage des built-in features désactivées vient ENSUITE : il ne fait
+  // que RETIRER des items, jamais les réordonner — l'ordre relatif (donc le
+  // test clavier ↓↓↵ → MEMORY) reste intact tant que rien au-dessus n'est masqué.
   const allGroups = useMemo<readonly LauncherGroup[]>(() => {
-    if (!updateAvailable) return LAUNCHER_GROUPS;
-    const item: LauncherItem = {
-      id: 'update',
-      label: 'UPDATE',
-      desc: updateLatest ? `v${updateLatest} available` : 'a new version is available',
-      icon: 'reload',
-      dot: 'warn',
-    };
-    return LAUNCHER_GROUPS.map((g) =>
-      g.label === 'SYSTEM' ? { ...g, items: [item, ...g.items] } : g);
-  }, [updateAvailable, updateLatest]);
+    const withUpdate: readonly LauncherGroup[] = updateAvailable
+      ? LAUNCHER_GROUPS.map((g) =>
+          g.label === 'SYSTEM'
+            ? {
+                ...g,
+                items: [
+                  {
+                    id: 'update',
+                    label: 'UPDATE',
+                    desc: updateLatest ? `v${updateLatest} available` : 'a new version is available',
+                    icon: 'reload',
+                    dot: 'warn',
+                  } as LauncherItem,
+                  ...g.items,
+                ],
+              }
+            : g)
+      : LAUNCHER_GROUPS;
+    // État inconnu (null) ou serveur ancien (undefined) : rien n'est filtré.
+    if (!features) return withUpdate;
+    return withUpdate
+      .map((g) => ({
+        ...g,
+        items: g.items.filter((it) => !it.feature || features[it.feature] !== false),
+      }))
+      .filter((g) => g.items.length > 0);
+  }, [updateAvailable, updateLatest, features]);
 
   const groups = useMemo(() => {
     const needle = q.trim().toLowerCase();

@@ -701,4 +701,28 @@ export class ApprovalStore {
       return [];
     }
   }
+
+  /**
+   * Purge ALL approval data — `DELETE` the two owned tables in ONE transaction
+   * (docs/builtin-features.md D7: `approval_requests` + `approval_events`).
+   * Deliberately a DELETE, NEVER a DROP: every prepared statement above stays
+   * valid, so an approvals re-enable finds this store already present and simply
+   * empty. The role-level override (`roles.approval_json`) is cleared by the
+   * feature descriptor via `RoleStore.clearApprovalSettings()`, not here — this
+   * store owns only its own two tables. Never throws (a purge hiccup must not
+   * crash the 24/7 server); wrapped in a transaction so both tables clear
+   * together. `pending` rows go with everything else — the descriptor runs this
+   * only on UNINSTALL (a plain disable keeps the data, docs D9).
+   */
+  purgeAll(): void {
+    try {
+      this.db.transaction(() => {
+        this.db.exec('DELETE FROM approval_requests');
+        this.db.exec('DELETE FROM approval_events');
+      })();
+      log.info({ event: 'approvals.purged' });
+    } catch (err) {
+      log.warn({ event: 'approvals.purge_all_failed', error: String(err) });
+    }
+  }
 }

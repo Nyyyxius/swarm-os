@@ -85,6 +85,14 @@ export interface RunUpdateInput {
    * `name/` gitignore patterns in the seeded build config.
    */
   extraExcludes?: string[];
+  /**
+   * Optional cooperative-cancellation signal. When it aborts, `execFile` sends
+   * the child SIGTERM and the run resolves `{ ok:false }` promptly — the codegraph
+   * feature `stop()` uses it to DRAIN in-flight builds before `purge()` rm's the
+   * index dir, so a run cannot recreate `<dataDir>/codegraph/<scope>` after the
+   * rm (docs/builtin-features.md D8.4).
+   */
+  signal?: AbortSignal;
 }
 
 export type RunUpdateResult =
@@ -124,7 +132,17 @@ export function runUpdate(input: RunUpdateInput): Promise<RunUpdateResult> {
     execFile(
       input.bin,
       args,
-      { cwd: input.indexDir, env, timeout: input.timeoutMs, maxBuffer: MAX_BUFFER, windowsHide: true },
+      {
+        cwd: input.indexDir,
+        env,
+        timeout: input.timeoutMs,
+        maxBuffer: MAX_BUFFER,
+        windowsHide: true,
+        // Aborting sends SIGTERM to the child (same signal `timeout` uses), so a
+        // drained run and a timed-out run land on the same `killed`/`SIGTERM`
+        // branch below and are recorded identically.
+        signal: input.signal,
+      },
       (err, stdout, stderr) => {
         if (err) {
           const e = err as NodeJS.ErrnoException & { killed?: boolean; signal?: string };

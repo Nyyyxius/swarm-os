@@ -13,7 +13,6 @@
 
 import * as path from 'node:path';
 import { withModule } from '../../logger.js';
-import { SIGNAL_TEXT } from '../orchestrator/messaging.js';
 import type { Orchestrator } from '../orchestrator/index.js';
 import type { Session } from '../orchestrator/session.js';
 import type { SkillFragment } from '../orchestrator/preamble.js';
@@ -141,7 +140,12 @@ function broadcast(orch: Orchestrator, content: string, targetSessionId?: string
     if (targetSessionId && s.id !== targetSessionId) continue;
     orch.mailbox.push(s.id, { from: 'system', content });
     try {
-      s.notifySignal(SIGNAL_TEXT);
+      // docs/auto-compact.md §3.2 — single gate. Best-effort as before: the
+      // notice is already in the inbox, and a refusal (a dialog on screen, a
+      // half-typed injection) is re-signalled at the next idle boundary.
+      if (!s.signalInbox()) {
+        log.debug({ event: 'skills.signal_line_busy', sid: s.id });
+      }
     } catch (err) {
       log.warn({ event: 'skills.signal_failed', sid: s.id, error: String(err) });
     }

@@ -105,6 +105,26 @@
  *   400 { error: ... }                      — body invalid
  *   401 { error: 'unauthorized' }           — missing/wrong bearer
  *
+ * TWO PAYLOAD FIELDS THIS ROUTE READS FOR THE AUTO-COMPACT FEATURE
+ * (docs/auto-compact.md). Both are single field reads with a single call each;
+ * neither changes a status, a response or a notification.
+ *
+ *  - `notification_type` on the `needs-human` branch (D5). It is what separates
+ *    "a dialog is on screen waiting for a human" from "the agent has been idle
+ *    for 60 seconds" — two things this endpoint could not tell apart before, and
+ *    which need OPPOSITE handling: the first must freeze every server-side
+ *    injection into that PTY (a line typed into a permission dialog validates
+ *    the highlighted option), the second must not. It raises / lowers
+ *    `Session.dialogPending`; see the three type tables below for the
+ *    vocabulary and where it was read from.
+ *
+ *  - `source` on the `session.transcript` branch (D4). `compact` / `clear` mean
+ *    the CLI restarted its session because the context was thrown away — most
+ *    importantly by Claude Code's OWN internal auto-compact, which fires
+ *    mid-turn with no server involvement. The gauge is marked stale so the
+ *    auto-compact decision does not act on a figure describing a context that
+ *    no longer exists.
+ *
  * Logging: NEVER includes the bearer token, NEVER includes the message body
  * (it could carry tool transcripts). Only orch_id/session_id/kind.
  */
@@ -116,9 +136,11 @@ import { eventBus } from '../../events.js';
 import { withModule } from '../../logger.js';
 import type { Notifier } from '../../modules/notify/index.js';
 import type { ApprovalStore } from '../../modules/approvals/store.js';
+import type { FeatureRegistry } from '../../modules/features/registry.js';
 import {
   approvalDiscordEnabled,
   classifyCategory,
+  isPromptingMode,
   shouldArmApproval,
   summarizeRequest,
 } from '../../modules/approvals/prompting.js';
@@ -126,6 +148,162 @@ import type { RoleApprovalSettings } from '../../modules/roles/index.js';
 import { notifyApprovalRequested } from '../../modules/approvals/discord-notify.js';
 
 const log = withModule('hooks');
+
+/**
+ * docs/auto-compact.md D5 — what claude's `notification_type` means for the
+ * dialog guard.
+ *
+ * The `Notification` hook payload is
+ * `{hook_event_name, message, title?, notification_type}`. The three sets below
+ * were read out of the two binaries this deployment actually runs — 2.1.142
+ * (pinned in the image, `Dockerfile`) and 2.1.270 (the host CLI) — by grepping
+ * their bundled `cli.js`; both carry the field, so the untyped fallback further
+ * down is a legacy path, not the normal one.
+ *
+ * The stake is asymmetric, which is why this is three explicit tables and not
+ * one heuristic. Missing a BLOCKING type means the server types into a live
+ * permission dialog and validates whatever option is highlighted. Over-claiming
+ * one means an agent's mail signals, context resets and operator notices freeze
+ * until a human types something. So: blocking when we know it blocks, clearing
+ * when the CLI says the dialog is over, nothing at all for the informational
+ * ones — and for a type we have never seen, fail closed ONLY where a dialog is
+ * possible at all (see `isPromptingMode` at the callsite).
+ */
+
+/** A dialog is now on screen, waiting for a human. */
+const BLOCKING_NOTIFICATION_TYPES: ReadonlySet<string> = new Set([
+  'permission_prompt',
+  'worker_permission_prompt',
+  'elicitation_dialog',
+  'elicitation_url_dialog',
+  'agent_needs_input',
+]);
+
+/**
+ * The dialog is over. The only automatic way the flag ever comes down without a
+ * keystroke — which is what rescues an MCP elicitation cancelled on a timeout,
+ * where nobody types anything and the guard would otherwise stand for the rest
+ * of the session's life.
+ */
+const DIALOG_DONE_NOTIFICATION_TYPES: ReadonlySet<string> = new Set([
+  'elicitation_complete',
+  'elicitation_response',
+]);
+
+/**
+ * Informational — the CLI is telling us something, nobody is blocked. Notably
+ * `idle_prompt` ("Claude is waiting for your input", fired after 60 s of
+ * inactivity): treating THAT as a dialog would freeze every idle agent in the
+ * fleet, which is the exact opposite of what this feature is for.
+ */
+const INFORMATIONAL_NOTIFICATION_TYPES: ReadonlySet<string> = new Set([
+  'idle_prompt',
+  'auth_success',
+  'agent_completed',
+  'push_notification',
+  'computer_use_enter',
+  'computer_use_exit',
+  'quota_auto_resume_fired',
+  'quota_auto_resume_stale',
+  'quota_auto_resume_disabled',
+]);
+
+/**
+ * One `hooks.notification_type_unknown` warning per unrecognised type for the
+ * life of the process — a new CLI release adds a handful at most, so this set
+ * is bounded by the vocabulary, not by traffic.
+ */
+const unknownNotificationTypesWarned = new Set<string>();
+
+/**
+ * docs/auto-compact.md D5 — raise or lower `Session.dialogPending` from one
+ * `Notification` payload.
+ *
+ * Extracted from the route body so the decision is one readable table lookup
+ * and so its failure mode is one `try/catch` at the callsite (spike H6: this
+ * endpoint never answers anything but 2xx). Takes the narrow slice of the
+ * session it needs, which is also the slice the route's own tests double.
+ */
+function applyDialogGuard(
+  session: {
+    id: string;
+    permissionMode: string;
+    markDialogPending(notificationType: string): void;
+    clearDialogPending(source: 'input' | 'elicitation'): void;
+    dialogPendingUntypedWarned: boolean;
+  },
+  payload: Record<string, unknown> | null,
+  providerId: string,
+  orchId: string,
+): void {
+  const notificationType = readStringField(payload, 'notification_type');
+  if (notificationType !== null) {
+    if (BLOCKING_NOTIFICATION_TYPES.has(notificationType)) {
+      session.markDialogPending(notificationType);
+      log.info({
+        event: 'hooks.dialog_pending',
+        orchId,
+        sessionId: session.id,
+        notificationType,
+      });
+    } else if (DIALOG_DONE_NOTIFICATION_TYPES.has(notificationType)) {
+      session.clearDialogPending('elicitation');
+    } else if (!INFORMATIONAL_NOTIFICATION_TYPES.has(notificationType)) {
+      // A type neither binary we checked emits. Fail closed, but ONLY where a
+      // dialog is possible at all: freezing a whole bypassPermissions fleet's
+      // mail on a future informational type would be the real regression, and
+      // those sessions show no permission dialog to type into anyway.
+      const couldPrompt = isPromptingMode(providerId, session.permissionMode);
+      if (!unknownNotificationTypesWarned.has(notificationType)) {
+        unknownNotificationTypesWarned.add(notificationType);
+        log.warn({
+          event: 'hooks.notification_type_unknown',
+          orchId,
+          sessionId: session.id,
+          notificationType,
+          provider: providerId,
+          blocking: couldPrompt,
+        });
+      }
+      if (couldPrompt) {
+        session.markDialogPending(notificationType);
+        log.info({
+          event: 'hooks.dialog_pending',
+          orchId,
+          sessionId: session.id,
+          notificationType,
+        });
+      }
+    }
+  } else if (isPromptingMode(providerId, session.permissionMode)) {
+    // Field ABSENT — a CLI older than both binaries we checked. The question
+    // here is "does this mode show dialogs", which is `isPromptingMode`, NOT
+    // "does this role want approvals" (`shouldArmApproval`): a role may list
+    // `bypassPermissions` in its `armingModes`, and that would have frozen a
+    // whole bypass fleet on a single untyped `idle_prompt`.
+    session.markDialogPending('untyped');
+    log.info({
+      event: 'hooks.dialog_pending',
+      orchId,
+      sessionId: session.id,
+      notificationType: 'untyped',
+    });
+    if (!session.dialogPendingUntypedWarned) {
+      session.dialogPendingUntypedWarned = true;
+      // Never silent: if this path is taken, a prompting session receiving an
+      // untyped `idle_prompt` after 60 s of inactivity freezes its signal, its
+      // resets and its notices until someone types — a regression against
+      // today's behaviour that an operator must be able to find.
+      log.warn({
+        event: 'hooks.dialog_pending_untyped',
+        orchId,
+        sessionId: session.id,
+        provider: providerId,
+        permissionMode: session.permissionMode,
+      });
+    }
+  }
+}
 
 interface HookBody {
   orch_id?: unknown;
@@ -238,6 +416,16 @@ export function createHooksRouter(
    * then simply not recorded — the legacy `waiting`/Discord path is untouched).
    */
   approvals?: ApprovalStore,
+  /**
+   * Built-in feature registry (docs/builtin-features.md D9). Optional — when
+   * absent the gate FAILS OPEN (approvals behave as enabled), matching the rest
+   * of the codebase's `!features || features.isEnabled(...)` convention. When
+   * present it gates the SINGLE approval-creation site below: with `approvals`
+   * disabled the whole request still runs the pre-approvals fallback (the
+   * `waiting` badge event, Discord legacy ping, auto-compact) — only the
+   * persisted approval + its actionable notification are skipped.
+   */
+  features?: FeatureRegistry,
 ): Router {
   const router = Router();
 
@@ -343,11 +531,40 @@ export function createHooksRouter(
     // A body we cannot parse means one poll cycle without a gauge, never a
     // failed agent startup.
     if (kind === 'session.transcript') {
+      // docs/auto-compact.md D4 — `SessionStart` carries WHY the CLI restarted
+      // its session, and two of those reasons mean the context we are gauging
+      // no longer exists: `compact` (Claude Code's OWN internal auto-compact,
+      // which fires mid-turn entirely behind the server's back, and a `/compact`
+      // typed by hand in the console) and `clear`. Without this, the premise the
+      // auto-compact decision rests on — "the context only grows between two
+      // resets" — is false for exactly those cases, and a snapshot inherited
+      // from before such a compaction would arm a redundant `/compact` on a
+      // context that is already fresh. For a reset the SERVER armed this is a
+      // harmless second bump (already stale, floor already null).
+      const startSource = readStringField(payload, 'source');
+      let contextMarkedStale = false;
+      if (startSource === 'compact' || startSource === 'clear') {
+        try {
+          session.markContextStale();
+          contextMarkedStale = true;
+        } catch (err) {
+          // Same rule as everything else on this path: never a 4xx, never a
+          // failed agent startup, for a gauge.
+          log.warn({
+            event: 'hooks.context_stale_failed',
+            orchId: orch.id,
+            sessionId: session.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
       log.info({
         event: 'hooks.transcript',
         orchId: orch.id,
         sessionId: session.id,
         adopted: transcriptAdopted,
+        source: startSource,
+        contextMarkedStale,
         msgLen: message.length,
       });
       res.status(200).json({ ok: true, transcript: transcriptAdopted });
@@ -398,6 +615,38 @@ export function createHooksRouter(
       return;
     }
 
+    // ---- Is a DIALOG waiting for a human? (docs/auto-compact.md D5) ----
+    //
+    // Deliberately the FIRST thing this branch does — before the `waiting`
+    // event (an automation listening on the bus must not be able to answer
+    // before the flag exists) and therefore before the `compactOnWaiting`
+    // backstop below, which is then held from the start instead of arming a
+    // `/compact` that would be typed into the dialog.
+    //
+    // Rejected alternative: reading the approval store. `createRequest` fires
+    // for EVERY `needs-human` notification of a prompting session, `idle_prompt`
+    // included, with no type filter and no deduplication, and nothing resolves
+    // those — the guard would have answered "blocked" for the rest of the
+    // session's life.
+    //
+    // The speed of this guard is the latency of the hook's POST (a curl on the
+    // agent's host), far under the 2 s idle window — and the dialog's own
+    // rendering IS PTY output, so no reset can slip into a dialog whose hook
+    // has not landed yet.
+    // Guarded like every other side effect on this path: spike H6 — a hook that
+    // answers anything but 2xx can crash the calling agent, so a bug in the
+    // dialog guard costs the guard, never the session.
+    try {
+      applyDialogGuard(session, payload, providerId, orch.id);
+    } catch (err) {
+      log.warn({
+        event: 'hooks.dialog_guard_failed',
+        orchId: orch.id,
+        sessionId: session.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+
     // ---- A human is needed --------------------------------------------
     // Emit a status_changed event so the UI badge flips to 'waiting'
     // immediately. We DO NOT actually mutate the SessionStatus here — the
@@ -423,8 +672,18 @@ export function createHooksRouter(
     // turn into a non-2xx that crashes the calling agent (spike H6). The event is
     // emitted by the store (same pattern as memory/taskboard), atomically with
     // the audit journal — nothing else to emit here.
+    // D9 gate: the approval-CREATION site is the ONLY thing behind the feature
+    // toggle. When approvals is disabled the request has ALREADY emitted the
+    // `waiting` badge event above and STILL runs the Discord-legacy ping +
+    // auto-compact below — the exact pre-approvals behaviour. Fail-open when no
+    // registry is wired (tests / boot-degraded), consistent with the HTTP gates.
+    const approvalsFeatureOn = !features || features.isEnabled('approvals');
     const roleSettings = readRoleApprovalSettings(spawner, orch.roleId);
-    if (approvals && shouldArmApproval(providerId, session.permissionMode, roleSettings)) {
+    if (
+      approvals &&
+      approvalsFeatureOn &&
+      shouldArmApproval(providerId, session.permissionMode, roleSettings)
+    ) {
       try {
         const category = classifyCategory(message);
         const requestedSummary = summarizeRequest(

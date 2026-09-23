@@ -7,7 +7,17 @@ import { ProviderRegistry } from '../providers/index.js';
 import { FakeProvider } from '../providers/fake.js';
 import { SwarmDb } from '../db/index.js';
 import { TaskboardStore } from '../taskboard/store.js';
+import type { FeatureName } from '../features/registry.js';
 import type { Config } from '../../config.js';
+
+const ALL_ON: Record<FeatureName, boolean> = {
+  ide: true,
+  codegraph: true,
+  board: true,
+  memory: true,
+  monitoring: true,
+  approvals: true,
+};
 
 const ORCH_ID = 'orch-autocard';
 
@@ -37,7 +47,9 @@ function makeConfig(): Config {
   } as unknown as Config;
 }
 
-function makeOrchestrator(): Orchestrator {
+function makeOrchestrator(
+  features?: () => Record<FeatureName, boolean>,
+): Orchestrator {
   const provider = new FakeProvider({ id: 'claude', binary: 'sh' });
   const registry = new ProviderRegistry();
   registry.register(provider, { builtin: true });
@@ -55,7 +67,11 @@ function makeOrchestrator(): Orchestrator {
       lead: { cwd: tmpRoot, prompt: 'hi', preamble: null },
     },
     makeConfig(),
-    { providerRegistry: registry, taskboard: store },
+    {
+      providerRegistry: registry,
+      taskboard: store,
+      ...(features ? { features } : {}),
+    },
   );
 }
 
@@ -137,5 +153,23 @@ describe('auto-card on worker spawn', () => {
       skipSpawn: true,
     });
     expect(store.listCards({ orchestratorId: ORCH_ID })).toHaveLength(0);
+  });
+
+  // Lot 5 (docs/builtin-features.md D8.5) — the auto-card consults the feature
+  // registry via the `features` thunk, so a disabled board writes no card.
+  it('does NOT create a card when the board feature is OFF', () => {
+    const o = makeOrchestrator(() => ({ ...ALL_ON, board: false }));
+    orch = o;
+    o.start({ skipSpawn: true });
+    o.addWorker({ name: 'scout-1', role: 'scout', prompt: 'go', skipSpawn: true });
+    expect(store.listCards({ orchestratorId: ORCH_ID })).toHaveLength(0);
+  });
+
+  it('still creates a card when the board feature is explicitly ON', () => {
+    const o = makeOrchestrator(() => ({ ...ALL_ON }));
+    orch = o;
+    o.start({ skipSpawn: true });
+    o.addWorker({ name: 'scout-1', role: 'scout', prompt: 'go', skipSpawn: true });
+    expect(store.listCards({ orchestratorId: ORCH_ID })).toHaveLength(1);
   });
 });

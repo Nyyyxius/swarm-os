@@ -286,3 +286,44 @@ describe('discord_message_id (P4 correlation)', () => {
     expect(reopened.findByDiscordMessageId(ORCH_A, 'msg-persist')?.id).toBe(req!.id);
   });
 });
+
+describe('purgeAll (docs/builtin-features.md D7)', () => {
+  const countRequests = (): number =>
+    (db.db.prepare('SELECT COUNT(*) AS n FROM approval_requests').get() as { n: number }).n;
+  const countEvents = (): number =>
+    (db.db.prepare('SELECT COUNT(*) AS n FROM approval_events').get() as { n: number }).n;
+
+  it('DELETEs both owned tables (requests + events)', () => {
+    // Two requests across two teams, each carrying at least one journal row, plus
+    // a resolve that appends a second event — so both tables are non-empty.
+    const a = store.createRequest(baseInput());
+    const b = store.createRequest(baseInput({ orchestratorId: ORCH_B, sessionId: SESSION_2 }));
+    store.resolveRequest(a!.id, { decision: 'approved', by: 'web' });
+    expect(countRequests()).toBe(2);
+    expect(countEvents()).toBeGreaterThanOrEqual(3);
+    expect(b).not.toBeNull();
+
+    store.purgeAll();
+
+    expect(countRequests()).toBe(0);
+    expect(countEvents()).toBe(0);
+    expect(store.listPending()).toEqual([]);
+    expect(store.getRequest(a!.id)).toBeNull();
+  });
+
+  it('is DELETE not DROP — the store keeps working after a purge', () => {
+    store.createRequest(baseInput());
+    store.purgeAll();
+    // Prepared statements are still valid: a fresh write lands in the empty table.
+    const fresh = store.createRequest(baseInput({ sessionId: SESSION_2 }));
+    expect(fresh).not.toBeNull();
+    expect(countRequests()).toBe(1);
+    expect(store.listPending()).toHaveLength(1);
+  });
+
+  it('is a no-op on an already-empty store (idempotent, never throws)', () => {
+    expect(() => store.purgeAll()).not.toThrow();
+    store.purgeAll();
+    expect(countRequests()).toBe(0);
+  });
+});

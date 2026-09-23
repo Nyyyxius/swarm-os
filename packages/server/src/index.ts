@@ -1,3 +1,4 @@
+import * as fs from 'node:fs';
 import * as path from 'node:path';
 import { z } from 'zod';
 import { loadConfig } from './config.js';
@@ -11,6 +12,7 @@ import { DiscordWebhookNotifier, NoOpNotifier, type Notifier } from './modules/n
 import { DiscordBotPool } from './modules/discord/pool.js';
 import {
   bindModelCatalogue,
+  claudeFamilyOf,
   createBuiltinProviderRegistry,
   ModelCatalogue,
   OpencodeProvider,
@@ -28,6 +30,7 @@ import { PluginStore } from './modules/plugins/store.js';
 import { MemoryStore } from './modules/memory/store.js';
 import { GraphStore } from './modules/codegraph/store.js';
 import { probeGraphify } from './modules/codegraph/graphify.js';
+import { CodegraphMemoryNotes } from './modules/codegraph/memory-notes.js';
 import {
   startCodegraphJanitor,
   type CodegraphJanitorHandle,
@@ -61,8 +64,9 @@ import {
   type CostRollupHandle,
 } from './modules/orchestrator/cost-rollup.js';
 import { createEmbeddingProvider } from './modules/memory/embeddings.js';
-import { PluginHost } from './modules/plugins/host.js';
+import { PluginHost, PluginLockRegistry } from './modules/plugins/host.js';
 import { PluginToolRegistry } from './modules/plugins/mcp-registry.js';
+import { FeatureRegistry, type FeatureDescriptor } from './modules/features/registry.js';
 import { PluginHttpRegistry } from './modules/plugins/http-registry.js';
 import { PluginInstaller } from './modules/plugins/installer.js';
 import { UpdateService, UpdateStore, UpdateRunner, githubTokenFromEnv } from './modules/updates/index.js';
@@ -172,7 +176,51 @@ if (config.agentTransport === 'ssh') {
 
 // ---- Phase 4: SQLite persistence ------------------------------------------
 const db = new SwarmDb(config.dataDir);
+// docs/model-aliases.md, Lot 5 — once per database, BEFORE anything reads a
+// team or role: stored claude pins become family aliases so new agents follow
+// the newest release. Never fatal: the worst case is teams staying pinned.
+try {
+  const migrated = db.migrateModelAliases(config.defaultProvider, claudeFamilyOf);
+  if (migrated) log.info({ event: 'boot.model_aliases_migrated', ...migrated });
+} catch (err) {
+  log.warn({
+    event: 'boot.model_aliases_migration_failed',
+    error: err instanceof Error ? err.message : String(err),
+  });
+}
 const persistence = new DbPersistence(db);
+
+// ---- Built-in feature registry (docs/builtin-features.md) ------------------
+// Constructed HERE — right after the DB and BEFORE the stores/janitors (D2) —
+// so later lots can hand `featureRegistry` to store getters and the per-request
+// gate. It owns its `builtin_features` table on the raw handle (like PluginStore)
+// and seeds all six ENABLED on first boot (codegraph/ide follow their legacy env
+// var as a seed default only; the DB governs thereafter). Its verbs share a
+// per-name lock and broadcast a "refresh your tools" notice to live leads,
+// exactly like the plugin host. In Lot 1 every descriptor is a no-op, so nothing
+// about the running behaviour changes.
+const featureLocks = new PluginLockRegistry();
+const featureRegistry = new FeatureRegistry({
+  db,
+  eventBus,
+  config,
+  locks: featureLocks,
+  // Forward-references `spawner` (declared below) — a closure only invoked at
+  // toggle time, long after boot wires the spawner. Mirrors the plugin host.
+  broadcastToLeads: (from, content) => {
+    try {
+      broadcastToLeadsFromExternal(spawner, from, content, {
+        maxMessageSizeBytes: config.maxMessageSizeBytes,
+        idleThresholdMs: config.idleThresholdMs,
+      });
+    } catch (err) {
+      log.warn({
+        event: 'features.broadcast_to_leads_failed',
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+  },
+});
 
 // ---- Shared memory / knowledge graph (docs/memoire-partagee.md) ------------
 // GLOBAL to the deployment: one instance = one memory shared by every team.
@@ -200,17 +248,16 @@ try {
 // ---- Code knowledge graph / Graphify indexer (docs/graphify-integration.md) -
 // GLOBAL to the deployment. The store OWNS its own table on the raw Db handle
 // (like MemoryStore) and keeps every graphify artifact under
-// `<dataDir>/codegraph/<scopeId>/` — NEVER inside a user's source dir. Wrapped
-// so a codegraph-subsystem failure never stops the boot (exactly like
-// MEMORY_UNAVAILABLE); the janitor is started later, next to the plugin store.
+// `<dataDir>/codegraph/<scopeId>/` — NEVER inside a user's source dir. Built
+// UNCONDITIONALLY (docs/builtin-features.md D2): a hot enable never fabricates a
+// store at runtime — `config.codegraphEnabled` is now only a seed default for
+// the feature registry, and the codegraph descriptor (below) governs the janitor.
+// Wrapped so a codegraph-subsystem failure never stops the boot (exactly like
+// MEMORY_UNAVAILABLE); the janitor is armed by the descriptor's start().
 let graphStore: GraphStore | null = null;
 try {
-  if (config.codegraphEnabled) {
-    graphStore = new GraphStore(db, { dataDir: config.dataDir, eventBus });
-    log.info({ event: 'boot.codegraph_store' });
-  } else {
-    log.info({ event: 'codegraph.disabled', reason: 'SWARM_OS_CODEGRAPH_ENABLED=false' });
-  }
+  graphStore = new GraphStore(db, { dataDir: config.dataDir, eventBus });
+  log.info({ event: 'boot.codegraph_store' });
 } catch (err) {
   log.error({
     event: 'codegraph.unavailable',
@@ -396,6 +443,10 @@ const spawner = new Spawner(config, {
   // Every preamble — lead, worker, resumed, and whatever custom role text the
   // operator wrote — gets the currently-registered plugin tools appended.
   pluginTools: () => pluginToolRegistry.list(),
+  // Built-in feature snapshot, MIRRORING `pluginTools` (a thunk so a toggle
+  // mid-team is seen at each spawn). Consumed at buildPreamble time (feature-
+  // section stripping + stale-mention lint, D5); Lots 5/8 also gate jobs on it.
+  features: () => featureRegistry.snapshot(),
   // Carried so `GET /providers` can await the catalogue's cold resolve on the
   // same deadline as the availability probes. The adapters already hold it.
   modelCatalogue,
@@ -409,7 +460,9 @@ const spawner = new Spawner(config, {
   // MCP tools reach it. `undefined` when the store failed to open.
   ...(taskboardStore ? { taskboard: taskboardStore } : {}),
   // Code-knowledge-graph store — threaded into every ToolContext so the
-  // codegraph.* MCP tools reach it. `undefined` when codegraph is off/absent.
+  // codegraph.* MCP tools reach it. Built unconditionally now (D2); `undefined`
+  // only when the store failed to open. The codegraph FEATURE toggle is enforced
+  // in mcp/server.ts (per-request registration gate), not by this presence.
   ...(graphStore ? { graph: graphStore } : {}),
   // Human-in-the-loop approval queue — threaded so the Discord connector wiring
   // can attach the P4 reply-router to each orch subscription. `undefined` when
@@ -430,19 +483,321 @@ skillsSubsystem?.setOrchestratorLookup((id) => spawner.get(id) ?? null);
 // board failed to open) cards simply stay unpriced.
 taskboardStore?.setCostLookup(makeSessionCostLookup(spawner));
 
-// ---- S9: in-memory `/metrics/messages` aggregator -------------------------
-// Owns a 60-pt global ring + 8-pt per-orch rings, ticked every 60 s. Lost on
-// restart by design (see docs/update_system/09_metrics_messages.md §7.3).
+// ---- Built-in feature descriptors -----------------------------------------
+// Each descriptor encapsulates one feature's jobs + data (start/stop/purge).
+// Lots not yet done keep a NO-OP body; ide (Lot 3) and codegraph (Lot 4) carry
+// the real one. Labels mirror the web CommandLauncher so both surfaces name a
+// feature the same way. Registered here (after the stores + spawner exist) so a
+// descriptor can capture them; `startEnabled()` then arms every feature seeded
+// `enabled` — but it runs LATER (just after `pluginStore`), because the
+// codegraph janitor's scope discovery needs the plugin registry.
+//
+// Holds the codegraph janitor handle across the descriptor's start()/stop() and
+// the shutdown path. Declared here so the closures below can assign/read it.
+let codegraphJanitor: CodegraphJanitorHandle | null = null;
+// Holds the task-board TTL janitor handle across the 'board' descriptor's
+// start()/stop() and the shutdown path (mirrors codegraphJanitor above). Armed
+// by the descriptor via `featureRegistry.startEnabled()`, not unconditionally.
+let taskboardJanitor: TaskboardJanitorHandle | null = null;
+// Holds the approval-gate TTL janitor handle across the 'approvals' descriptor's
+// start()/stop() and the shutdown path (mirrors taskboardJanitor above). Armed by
+// the descriptor via `featureRegistry.startEnabled()`, NOT unconditionally at boot
+// anymore (docs/builtin-features.md D9), so a hot disable stops the sweep.
+let approvalJanitor: ApprovalJanitorHandle | null = null;
+// VS Code web (`code serve-web`) supervisor — an in-container child process
+// serving the official Microsoft VS Code web at the root of its own port
+// (config.idePort), guarded by a connection-token, editing the same /workspace
+// tree the agents work in. Independent of the orchestrator stack (no auto-resume
+// dependency). Created HERE — before the descriptor below and before
+// `startEnabled()` — so the 'ide' descriptor can drive it and the registry (not
+// a boot-only flag) arms it when the feature is enabled.
+const ide = new IdeSupervisor(config);
+// ---- S9 / S8: in-memory metrics collectors (docs/builtin-features.md D6) ----
+// Constructed HERE — before the descriptor loop below — so the 'monitoring'
+// descriptor can capture them; NOT started here. `featureRegistry.startEnabled()`
+// arms them iff monitoring is enabled, and a hot enable/disable drives them
+// through the descriptor. Both are lost-on-restart by design (rings are in
+// memory) — see docs/update_system/09_metrics_messages.md §7.3.
+//   - aggregator: 60-pt global ring + 8-pt per-orch rings, ticked every 60 s
+//     (`GET /metrics/messages`).
+//   - busMetrics: 60-slot ring (1 s/slot) backing latency / throughput /
+//     err_rate + instantaneous queue_depth (`GET /metrics/bus`), instrumented
+//     from McpServer (constructor arg). Its `active` flag makes that
+//     instrumentation a no-op while monitoring is off, and start() resets the
+//     ring so a re-enable never reports a throughput spike.
 const aggregator = new MessagesAggregator(spawner);
-aggregator.start();
-
-// ---- S8: in-memory `/metrics/bus` collector -------------------------------
-// 60-slot ring (1 s/slot) backing latency / throughput / err_rate, with an
-// instantaneous queue_depth. Instrumented from McpServer (constructor arg)
-// so each tool call updates the current slot synchronously. Lost on restart
-// by design — same policy as the messages aggregator above.
 const busMetrics = new BusMetricsCollector(spawner);
-busMetrics.start();
+for (const desc of [
+  {
+    name: 'ide',
+    displayName: 'IDE',
+    description: 'open workspace in editor',
+    start: () => ide.start(),
+    stop: () => ide.stop(),
+    // D7: drop the serve-web SERVER payload only. Keep <dataDir>/ide/cli (the
+    // downloaded VS Code CLI payload, hundreds of MB) and the <dataDir>/ide-token
+    // secret (identity) — those are cache/identity, not user data.
+    purge: () => {
+      fs.rmSync(config.ideServerDataDir, { recursive: true, force: true });
+    },
+  } satisfies FeatureDescriptor,
+  // Code graph (docs/builtin-features.md Lot 4). start() probes graphify then
+  // arms the bounded janitor (scope discovery needs `pluginStore`, so this only
+  // runs once `startEnabled()` fires below it); stop() DRAINS in-flight graphify
+  // runs (kills the child + awaits) so purge()'s rm can't race a live build;
+  // purge() (D7) drops the managed memory notes (while memory is enabled and the
+  // scope rows still exist), the scope rows, then the on-disk artifacts.
+  {
+    name: 'codegraph',
+    displayName: 'CODE GRAPH',
+    description: 'symbol + dependency map',
+    start: () => {
+      if (!graphStore) return; // boot-degraded: store failed to open → stays 404
+      if (codegraphJanitor) return; // idempotent: already armed
+      const probe = probeGraphify(config.codegraphBin);
+      if (!probe.available) {
+        log.warn({
+          event: 'codegraph.unavailable',
+          reason: probe.reason,
+          note: 'graphify binary not usable — codegraph janitor NOT started; store stays empty. Every other subsystem is unaffected.',
+        });
+        return;
+      }
+      try {
+        log.info({ event: 'codegraph.graphify_probed', version: probe.version });
+        codegraphJanitor = startCodegraphJanitor(
+          {
+            store: graphStore,
+            workspaceRoot: config.workspaceRoot,
+            dataDir: config.dataDir,
+            pluginStore,
+            graphifyBin: config.codegraphBin,
+            engine: config.codegraphEngine,
+            runTimeoutMs: config.codegraphTimeoutMs,
+            // D8.3 — memory resolved through the registry on EVERY note write, so
+            // a sweep never resurrects a memory vault disabled after this start.
+            memory: () => (featureRegistry.isEnabled('memory') ? memoryStore : null),
+          },
+          { intervalMs: config.codegraphJanitorIntervalMs },
+        );
+      } catch (err) {
+        log.warn({
+          event: 'codegraph.janitor_start_failed',
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+    stop: async () => {
+      // Drains in-flight graphify runs (SIGTERM the child + await) BEFORE
+      // resolving, so a following purge() rm cannot race a live build (D8.4).
+      await codegraphJanitor?.stop();
+      codegraphJanitor = null;
+    },
+    purge: () => {
+      // Runs AFTER stop() (the registry sequences stop → purge). Order matters:
+      // drop the managed memory notes FIRST (needs the scope rows + an enabled
+      // memory vault), THEN the scope rows, THEN the artifacts on disk.
+      if (graphStore && memoryStore && featureRegistry.isEnabled('memory')) {
+        try {
+          new CodegraphMemoryNotes(memoryStore, graphStore).removeAll();
+        } catch (err) {
+          log.warn({
+            event: 'codegraph.purge_notes_failed',
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+      graphStore?.purgeAll();
+      try {
+        fs.rmSync(path.join(config.dataDir, 'codegraph'), { recursive: true, force: true });
+      } catch (err) {
+        log.warn({
+          event: 'codegraph.purge_artifacts_failed',
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+  } satisfies FeatureDescriptor,
+  // Board (docs/builtin-features.md Lot 5). start() arms the TTL janitor (soft-
+  // deletes orphaned cards past their TTL); stop() disarms it; purge() (D7)
+  // DELETEs the three owned tables (cards + deps + events). Depends only on
+  // `taskboardStore` (built above) — no plugin registry — so `startEnabled()`
+  // below arms it. The auto-card at worker spawn is gated separately in the
+  // orchestrator (D8.5), and markOrphanedCardsAtBoot is gated at its call site.
+  {
+    name: 'board',
+    displayName: 'BOARD',
+    description: 'task lanes across teams',
+    start: () => {
+      if (!taskboardStore) return; // boot-degraded: store failed to open → stays 404
+      if (taskboardJanitor) return; // idempotent: already armed
+      try {
+        taskboardJanitor = startTaskboardJanitor(taskboardStore, {
+          ttlMs: config.taskboardOrphanTtlMs,
+          intervalMs: config.taskboardJanitorIntervalMs,
+        });
+      } catch (err) {
+        log.warn({
+          event: 'taskboard.janitor_start_failed',
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+    stop: () => {
+      taskboardJanitor?.stop();
+      taskboardJanitor = null;
+    },
+    purge: () => taskboardStore?.purgeAll(),
+  } satisfies FeatureDescriptor,
+  // Memory (docs/builtin-features.md Lot 6). No jobs to arm — the embedding
+  // queue is driven by writes, not a janitor — so start() only RE-OPENS the
+  // store (an enable-from-uninstalled runs purge(), which close()s it, THEN
+  // start(); a plain disable keeps the data and never closes). purge() is the
+  // careful, irreversible sequence: archive-first (D8.1, the .md vault is the
+  // source of truth and is NOT in the SQLite backup) → close (every writer,
+  // incl. a concurrent codegraph note sweep, now throws — D8.2) → drain in-flight
+  // embedding → DELETE the 4 tables (+ clear FTS5/embedQueue) → rm the vault →
+  // rm once more after a final drain, so nothing that slipped in survives.
+  {
+    name: 'memory',
+    displayName: 'MEMORY',
+    description: 'shared long-term store',
+    start: () => {
+      // Re-open so writes work again after a disable→enable or a reinstall.
+      memoryStore?.open();
+    },
+    // No-op by design: a disable must KEEP the data and leave the store usable
+    // for a later enable. The destructive close() lives ONLY in purge() (D8.2).
+    stop: () => {},
+    purge: async () => {
+      if (!memoryStore) return; // boot-degraded: store failed to open → nothing to purge
+      const vaultDir = memoryStore.vaultPath;
+      // (a) Archive FIRST — irreversible past this point (D8.1). Best-effort:
+      //     the store swallows/logs partial failures and must not block purge.
+      try {
+        memoryStore.archive();
+      } catch (err) {
+        log.warn({
+          event: 'memory.archive_threw',
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      // (b) Close: from here every write throws. The registry flips the state to
+      //     'uninstalled' only AFTER this purge() returns, so isEnabled('memory')
+      //     is still true right now — `closed` is what stops a codegraph sweep
+      //     from resurrecting the vault after the rm below, not the getter.
+      memoryStore.close();
+      // (c) Drain in-flight embedding work so no vector row lands after purgeAll.
+      try {
+        await memoryStore.flushEmbeddings();
+      } catch {
+        /* flush is best-effort */
+      }
+      // (d) DELETE the 4 tables (+ clear FTS5 + embedQueue), then rm the vault.
+      memoryStore.purgeAll();
+      try {
+        fs.rmSync(vaultDir, { recursive: true, force: true });
+      } catch (err) {
+        log.warn({
+          event: 'memory.purge_rm_failed',
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+      // (e) A writer that slipped in just before close() could have re-created a
+      //     file; drain once more and rm again so nothing survives the purge.
+      try {
+        await memoryStore.flushEmbeddings();
+      } catch {
+        /* best-effort */
+      }
+      try {
+        fs.rmSync(vaultDir, { recursive: true, force: true });
+      } catch (err) {
+        log.warn({
+          event: 'memory.purge_rm_retry_failed',
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+  } satisfies FeatureDescriptor,
+  // Monitoring (docs/builtin-features.md D6) — a DELIBERATELY RESTRICTED scope.
+  // start()/stop() drive ONLY the two in-memory observability collectors
+  // (aggregator + busMetrics); the HTTP gate below covers `/metrics/*`. It does
+  // NOT gate `startBudgetWatch` (the SIGSTOP anti-runaway guard) nor
+  // `startCostRollup` (accounting + the `session_token_daily` watermark): both
+  // stay armed UNCONDITIONALLY (see their blocks below), because stopping/purging
+  // them would disarm a safety guard or double-count a lifetime of spend as one
+  // day. purge() is a persistent no-op (the rings are in-memory and come back
+  // fresh at the next enable; `session_token_daily` is NEVER touched).
+  {
+    name: 'monitoring',
+    displayName: 'MONITORING',
+    description: 'context, throughput & inbox per agent',
+    start: () => {
+      aggregator.start();
+      busMetrics.start();
+    },
+    stop: () => {
+      aggregator.stop();
+      busMetrics.stop();
+    },
+    purge: () => {
+      log.info({
+        event: 'monitoring.purged',
+        note: 'in-memory rings only; session_token_daily (accounting + watermark) untouched (D6/D7).',
+      });
+    },
+  } satisfies FeatureDescriptor,
+  // Approvals (docs/builtin-features.md D9) — the human-in-the-loop approval gate.
+  // start() arms the TTL janitor (flags stale `pending` approvals `expired`);
+  // stop() disarms it; purge() (D7) DELETEs the two owned tables AND clears every
+  // role's approval override (`roles.approval_json = NULL`). The ApprovalStore
+  // itself is built UNCONDITIONALLY (D2) so the Discord reply/reaction resolvers
+  // stay wired and honour the toggle AT CALL TIME (spawner/index.ts); the creation
+  // gate lives at the single hook site (hooks.ts) and the HTTP gate on
+  // `/api/approvals`. A plain DISABLE keeps every row (re-visible on re-enable,
+  // D9 note) — purge() runs only on UNINSTALL.
+  {
+    name: 'approvals',
+    displayName: 'APPROVALS',
+    description: 'pending human decisions',
+    start: () => {
+      if (!approvalStore) return; // boot-degraded: store failed to open → stays 404
+      if (approvalJanitor) return; // idempotent: already armed
+      try {
+        approvalJanitor = startApprovalJanitor(approvalStore, {
+          ttlMs: config.approvalOrphanTtlMs,
+          intervalMs: config.approvalJanitorIntervalMs,
+        });
+      } catch (err) {
+        log.warn({
+          event: 'approvals.janitor_start_failed',
+          error: err instanceof Error ? err.message : String(err),
+        });
+      }
+    },
+    stop: () => {
+      approvalJanitor?.stop();
+      approvalJanitor = null;
+    },
+    purge: () => {
+      approvalStore?.purgeAll();
+      roleStore.clearApprovalSettings();
+    },
+  } satisfies FeatureDescriptor,
+]) {
+  featureRegistry.register(desc);
+}
+// NB: `featureRegistry.startEnabled()` is deliberately NOT called here — it runs
+// just after `pluginStore` is built (below), because the codegraph descriptor's
+// start() needs the plugin registry for scope discovery.
+
+// ---- S9 / S8: metrics collectors -------------------------------------------
+// `aggregator` and `busMetrics` are constructed ~200 lines above (next to the
+// feature descriptors) and armed by `featureRegistry.startEnabled()` — NOT
+// unconditionally here anymore — so a hot enable/disable of `monitoring` drives
+// them through its descriptor. `busMetrics` is still handed to McpServer +
+// startServer below (unchanged).
 
 // ---- Hot SQLite backup scheduler ------------------------------------------
 // In-process online snapshots of swarm-os.db into <dataDir>/backups (bind-
@@ -457,36 +812,21 @@ const backup = new BackupScheduler({
 backup.start();
 
 // ---- Task board TTL janitor ------------------------------------------------
-// Periodically purges (soft-deletes) orphaned cards past their TTL. In-process,
-// unref'd interval, every tick guarded — a sweep can never crash the boot or
-// the 24/7 loop. No-op when the board store failed to open.
-let taskboardJanitor: TaskboardJanitorHandle | null = null;
-if (taskboardStore) {
-  taskboardJanitor = startTaskboardJanitor(taskboardStore, {
-    ttlMs: config.taskboardOrphanTtlMs,
-    intervalMs: config.taskboardJanitorIntervalMs,
-  });
-}
+// Periodically purges (soft-deletes) orphaned cards past their TTL. Now armed by
+// the 'board' feature descriptor's start() (above) via
+// `featureRegistry.startEnabled()` — NOT unconditionally here — so a hot disable
+// stops the sweep and an enable re-arms it. The `taskboardJanitor` handle is
+// declared next to `codegraphJanitor` so the descriptor closures and shutdown()
+// share it.
 
 // ---- Approval-gate TTL janitor --------------------------------------------
 // Periodically flags still-`pending` approvals past their TTL as `expired` — a
-// cleanup flag only, NEVER an auto-deny (timeout policy = "leave pending").
-// In-process, unref'd interval, every tick guarded. No-op when the approval
-// store failed to open at boot.
-let approvalJanitor: ApprovalJanitorHandle | null = null;
-if (approvalStore) {
-  try {
-    approvalJanitor = startApprovalJanitor(approvalStore, {
-      ttlMs: config.approvalOrphanTtlMs,
-      intervalMs: config.approvalJanitorIntervalMs,
-    });
-  } catch (err) {
-    log.warn({
-      event: 'approvals.janitor_start_failed',
-      error: err instanceof Error ? err.message : String(err),
-    });
-  }
-}
+// cleanup flag only, NEVER an auto-deny (timeout policy = "leave pending"). Now
+// armed by the 'approvals' feature descriptor's start() (above) via
+// `featureRegistry.startEnabled()` — NOT unconditionally here anymore
+// (docs/builtin-features.md D9) — so a hot disable stops the sweep and an enable
+// re-arms it. The `approvalJanitor` handle is declared next to `taskboardJanitor`
+// so the descriptor closures and shutdown() share it.
 
 // ---- Dead-worker session reaper -------------------------------------------
 // In-process; per role, soft-deletes (hideSession) terminal workers
@@ -584,17 +924,9 @@ const crons =
     ? { store: cronStore, scheduler: cronScheduler, runner: cronRunner }
     : undefined;
 
-// ---- VS Code web (`code serve-web`) supervisor -----------------------------
-// In-container child process serving the official Microsoft VS Code web at the
-// root of its own port (config.idePort), guarded by a connection-token. Edits
-// the same /workspace tree the agents work in. Independent of the orchestrator
-// stack, so started here (no auto-resume dependency). Disabled when
-// SWARM_OS_IDE_ENABLED=false.
-const ide = new IdeSupervisor(config);
-ide.start();
-if (config.ideEnabled) {
-  log.info({ event: 'boot.ide', port: config.idePort, cli: config.ideCliPath });
-}
+// The VS Code web (`code serve-web`) supervisor is created above, next to the
+// feature descriptors, and armed by `featureRegistry.startEnabled()` — no
+// unconditional `ide.start()` here anymore (the registry governs its state).
 
 // ---- Plugin system (J1 — socle) -------------------------------------------
 // PluginStore owns its own tables on the raw Db handle. PluginHost loads,
@@ -637,47 +969,14 @@ skillsSubsystem?.setPluginLookup((name) => {
 // spawner, which reads it when building preambles.
 const pluginHttpRegistry = new PluginHttpRegistry();
 
-// ---- Codegraph janitor -----------------------------------------------------
-// Started here (not with the other janitors) because scope discovery needs the
-// plugin registry. Probes graphify first: if the binary is absent the feature
-// auto-disables cleanly (log + skip) and the boot is unaffected. In-process,
-// unref'd interval, every sweep guarded; runs graphify ONLY when a scope's code
-// actually changed. No-op when the store failed to open or the feature is off.
-let codegraphJanitor: CodegraphJanitorHandle | null = null;
-if (graphStore) {
-  const probe = probeGraphify(config.codegraphBin);
-  if (!probe.available) {
-    log.warn({
-      event: 'codegraph.unavailable',
-      reason: probe.reason,
-      note: 'graphify binary not usable — codegraph janitor NOT started; store stays empty. Every other subsystem is unaffected.',
-    });
-  } else {
-    try {
-      log.info({ event: 'codegraph.graphify_probed', version: probe.version });
-      codegraphJanitor = startCodegraphJanitor(
-        {
-          store: graphStore,
-          workspaceRoot: config.workspaceRoot,
-          dataDir: config.dataDir,
-          pluginStore,
-          graphifyBin: config.codegraphBin,
-          engine: config.codegraphEngine,
-          runTimeoutMs: config.codegraphTimeoutMs,
-          // Option-A memory integration: auto note per scope + hub note.
-          // Optional — when memory is unavailable, note maintenance is skipped.
-          memory: memoryStore,
-        },
-        { intervalMs: config.codegraphJanitorIntervalMs },
-      );
-    } catch (err) {
-      log.warn({
-        event: 'codegraph.janitor_start_failed',
-        error: err instanceof Error ? err.message : String(err),
-      });
-    }
-  }
-}
+// ---- Arm the built-in features ---------------------------------------------
+// Deferred to HERE (not next to the descriptor registration ~200 lines above)
+// on purpose: the codegraph descriptor's start() arms the janitor, whose scope
+// discovery needs `pluginStore` (built just above). Every feature seeded
+// `enabled` is started; each start() is idempotent and guarded, so this never
+// stops the boot. Later feature lots whose start() has no such dependency are
+// unaffected by the deferral (they were no-ops until then).
+featureRegistry.startEnabled();
 
 const pluginMessagingDefaults = {
   maxMessageSizeBytes: config.maxMessageSizeBytes,
@@ -868,6 +1167,7 @@ const handle = startServer(
   taskboardStore ?? undefined,
   approvalStore ?? undefined,
   graphStore ?? undefined,
+  featureRegistry,
 );
 
 // Start MCP HTTP listener on its own port (loopback only, plan §14).
@@ -876,7 +1176,14 @@ const handle = startServer(
 // agent wastes its first turn on a transport error. If MCP fails to bind
 // we shut down the main listener too — the system is non-functional
 // without MCP.
-const mcp = new McpServer(spawner, config.mcpPort, config, busMetrics, pluginToolRegistry);
+const mcp = new McpServer(
+  spawner,
+  config.mcpPort,
+  config,
+  busMetrics,
+  pluginToolRegistry,
+  featureRegistry,
+);
 
 /**
  * Arm the crons — deliberately AFTER the bootGate flips, on both exits of
@@ -897,6 +1204,11 @@ function startCronsAfterBoot(): void {
 }
 
 async function runAutoResume(): Promise<void> {
+  // Give the catalogue warm-up (fired above) its bounded cold wait BEFORE the
+  // boot gate opens: the first team or worker spawned after a restart resolves
+  // its family alias (`opus` → newest opus) against it, and a cold catalogue
+  // would hand the bare alias to the CLI instead (docs/model-aliases.md).
+  await modelCatalogue.resolve();
   if (!config.autoResume || resumableState.resumable.length === 0) {
     // Still reconcile: with auto-resume off (or nothing to resume), every team
     // the update interrupted is a casualty, and that is worth saying out loud.
@@ -983,7 +1295,11 @@ mcp
   // as orphaned every open card whose assignee session didn't come back. Fully
   // defensive (never throws), so it can't trip the fatal .catch below.
   .then(() => {
-    if (taskboardStore) markOrphanedCardsAtBoot(spawner, taskboardStore);
+    // D8.5 — only run the crash-resume orphan pass when the board feature is
+    // enabled: a disabled board must not write `orphaned_at` / audit rows.
+    if (taskboardStore && featureRegistry.isEnabled('board')) {
+      markOrphanedCardsAtBoot(spawner, taskboardStore);
+    }
   })
   .catch(async (err) => {
     log.error({ event: 'mcp.start_failed', error: err instanceof Error ? err.message : String(err) });
@@ -1008,10 +1324,10 @@ async function shutdown(signal: string): Promise<void> {
   shuttingDown = true;
   log.info({ event: 'shutdown.start', signal });
   try {
-    // S9 + S8 — stop the metrics ticks BEFORE the spawner so the last tick
-    // can't observe a half-torn-down mailbox.
-    aggregator.stop();
-    busMetrics.stop();
+    // S9 + S8 — the metrics ticks (aggregator + busMetrics) are now stopped via
+    // `featureRegistry.stopAll()` below (the 'monitoring' descriptor's stop()),
+    // which runs just BEFORE `spawner.shutdownAll()` — so the invariant "no tick
+    // observes a half-torn-down mailbox" still holds. No direct stop here.
     // Stop the backup timer before db.close() so no snapshot races teardown.
     backup.stop();
     // Disarm the task-board TTL janitor (unref'd, but stop it explicitly so no
@@ -1029,8 +1345,11 @@ async function shutdown(signal: string): Promise<void> {
     // watermark is in SQLite, so the next process files the pending delta whole.
     costRollup.stop();
     // Disarm the codegraph janitor (interval + fs watchers) so no sweep/watch
-    // event fires a graphify run into a half-closed DB during shutdown.
-    codegraphJanitor?.stop();
+    // event fires a graphify run into a half-closed DB during shutdown. stop()
+    // is now awaitable (it drains in-flight runs); on the shutdown path we do not
+    // block on the drain — the synchronous part (abort + clearInterval) halts new
+    // work immediately, which is all shutdown needs.
+    void codegraphJanitor?.stop();
     // Disarm the agent crons so no tick fires into a half-torn-down spawner.
     // `stop()` also SIGKILLs the process group of every in-flight script cron
     // and journals those runs as `error` — synchronously, and this far above
@@ -1053,8 +1372,10 @@ async function shutdown(signal: string): Promise<void> {
     // Tear down active plugins (disposables + deactivate) before the spawner
     // goes away, so a plugin's teardown can still observe live teams.
     await pluginHost?.deactivateAll();
-    // Stop the VS Code web child (suppresses its restart loop, SIGTERM→SIGKILL).
-    await ide.stop();
+    // Stop built-in features (reverse registration order). This drives the IDE
+    // supervisor's `stop()` via its descriptor (SIGTERM→SIGKILL, restart loop
+    // suppressed) — no direct `ide.stop()` needed here.
+    await featureRegistry.stopAll();
     spawner.shutdownAll(`signal:${signal}`);
     // Stop MCP first (per-request transport instances will tear down with
     // their sockets) then the main HTTP listener.

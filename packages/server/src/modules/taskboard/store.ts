@@ -1239,4 +1239,26 @@ export class TaskboardStore {
       autoCreated: true,
     });
   }
+
+  /**
+   * Purge ALL board data — `DELETE` the three owned tables in ONE transaction
+   * (docs/builtin-features.md D7: `taskboard_cards` + `taskboard_deps` +
+   * `taskboard_events`). Deliberately a DELETE, NEVER a DROP: every prepared
+   * statement above stays valid, so a board re-enable finds this store already
+   * present and simply empty. The per-card `cost_*` bookkeeping columns leave
+   * with their cards. Never throws (a purge hiccup must not crash the 24/7
+   * server); wrapped in a transaction so the three tables are cleared together.
+   */
+  purgeAll(): void {
+    try {
+      this.db.transaction(() => {
+        this.db.exec('DELETE FROM taskboard_cards');
+        this.db.exec('DELETE FROM taskboard_deps');
+        this.db.exec('DELETE FROM taskboard_events');
+      })();
+      log.info({ event: 'taskboard.purged' });
+    } catch (err) {
+      log.warn({ event: 'taskboard.purge_all_failed', error: String(err) });
+    }
+  }
 }

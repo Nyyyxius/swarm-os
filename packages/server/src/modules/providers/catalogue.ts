@@ -624,6 +624,7 @@ export function modelContextLimit(
 const OPUS_RATES: TokenCostRates = { input: 5, output: 25, cacheRead: 0.5, cacheWrite: 6.25 };
 const SONNET_RATES: TokenCostRates = { input: 2, output: 10, cacheRead: 0.2, cacheWrite: 2.5 };
 const HAIKU_RATES: TokenCostRates = { input: 1, output: 5, cacheRead: 0.1, cacheWrite: 1.25 };
+const FABLE_RATES: TokenCostRates = { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 };
 
 const PINNED_COST_RATES: ReadonlyArray<{ match: RegExp; rates: TokenCostRates }> = [
   // Opus 4.1 is priced apart from the rest of the opus line — and it is still
@@ -634,7 +635,7 @@ const PINNED_COST_RATES: ReadonlyArray<{ match: RegExp; rates: TokenCostRates }>
   { match: /^claude-opus-/i, rates: OPUS_RATES },
   { match: /^claude-sonnet-/i, rates: SONNET_RATES },
   { match: /^claude-haiku-/i, rates: HAIKU_RATES },
-  { match: /^claude-fable-/i, rates: { input: 10, output: 50, cacheRead: 1, cacheWrite: 12.5 } },
+  { match: /^claude-fable-/i, rates: FABLE_RATES },
   // The one non-Anthropic family the payload lets us pin: `openai/gpt-5.5`, the
   // model the codex CLI offers first. No cache buckets are published for it, so
   // none are invented — see the lower-bound note above.
@@ -651,6 +652,7 @@ const PINNED_CLAUDE_ALIAS_RATES: Readonly<Record<string, TokenCostRates>> = {
   opus: OPUS_RATES,
   sonnet: SONNET_RATES,
   haiku: HAIKU_RATES,
+  fable: FABLE_RATES,
 };
 
 /**
@@ -668,7 +670,8 @@ export function pinnedCostRates(providerId: string, modelId: string): TokenCostR
     if (entry.match.test(id)) return entry.rates;
   }
   if (providerId === 'claude') {
-    const alias = PINNED_CLAUDE_ALIAS_RATES[id.toLowerCase()];
+    // `opus[1m]` is priced as `opus`: the suffix selects the window, not the card.
+    const alias = PINNED_CLAUDE_ALIAS_RATES[id.toLowerCase().replace(/\[1m\]$/, '')];
     if (alias) return alias;
   }
   return null;
@@ -860,6 +863,20 @@ export class ModelCatalogue {
   defaultModel(provider: BuiltinProviderId, pinnedDefault: string): string {
     void this.#maybeRefresh();
     return this.#views.get(provider)?.familyDefault ?? pinnedDefault;
+  }
+
+  /**
+   * Newest LIVE id matching `family`, or `null` when the catalogue has no
+   * answer (cold, disabled, unreachable, or the family is absent). The resolver
+   * behind the family aliases (`opus`, `sonnet`, …, docs/model-aliases.md);
+   * `null` tells the caller to fall back, never to guess.
+   */
+  familyLatest(provider: BuiltinProviderId, family: RegExp): string | null {
+    void this.#maybeRefresh();
+    const live = this.#views.get(provider)?.models;
+    if (!live) return null;
+    for (const m of live) if (family.test(m.value)) return m.value;
+    return null;
   }
 
   /**

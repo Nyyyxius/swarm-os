@@ -546,6 +546,130 @@ describe('ContextUsageTracker — staleness', () => {
   });
 });
 
+/**
+ * docs/auto-compact.md D3 — `floorTokens`, the base of the anti-loop.
+ *
+ * The MINIMUM accepted since the last generation bump, not the first sample.
+ * That distinction is the BLOCKER three reviewers found independently: on
+ * claude the first "fresh" reading after a `/compact` is still the
+ * PRE-compaction figure (the transcript is rewritten in place and the gauge
+ * re-serves it), so a first-sample floor would freeze at the previous peak and
+ * the effective threshold would drift +10 points at every compaction until it
+ * never fired again.
+ */
+describe('ContextUsageTracker — floorTokens', () => {
+  const SMALL_TURN = [assistantLine({ id: 'small', input: 10, cacheRead: 40, output: 50 })].join(
+    '\n',
+  );
+
+  it('is null until something has actually been read', async () => {
+    const tracker = makeTracker();
+    expect(tracker.floorTokens).toBeNull();
+    tracker.setTranscriptPath('/t.jsonl');
+    expect(tracker.floorTokens).toBeNull();
+  });
+
+  it('is the first accepted reading, then the MINIMUM of what follows', async () => {
+    let now = 1_000;
+    // 200 → 500 → 100: a growing context, then the post-compaction drop.
+    const { read } = scriptedReader([TURN, BIGGER_TURN, SMALL_TURN]);
+    const tracker = makeTracker({ read, now: () => now });
+    tracker.setTranscriptPath('/t.jsonl');
+    tracker.maybeRefresh();
+    await flush();
+    expect(tracker.floorTokens).toBe(200);
+
+    now += 20_000;
+    tracker.maybeRefresh();
+    await flush();
+    // Growth does NOT move the floor — that is the whole point of a floor.
+    expect(tracker.snapshot()?.usedTokens).toBe(500);
+    expect(tracker.floorTokens).toBe(200);
+
+    now += 20_000;
+    tracker.maybeRefresh();
+    await flush();
+    expect(tracker.floorTokens).toBe(100);
+  });
+
+  it('is re-based to null by markStale() — the reset case', async () => {
+    let now = 1_000;
+    const { read } = scriptedReader([TURN, BIGGER_TURN]);
+    const tracker = makeTracker({ read, now: () => now });
+    tracker.setTranscriptPath('/t.jsonl');
+    tracker.maybeRefresh();
+    await flush();
+    expect(tracker.floorTokens).toBe(200);
+
+    tracker.markStale();
+    // Whatever we counted belongs to a context that was just thrown away.
+    expect(tracker.floorTokens).toBeNull();
+
+    now += 20_000;
+    tracker.maybeRefresh();
+    await flush();
+    // The floor of the NEW context is whatever the first accepted reading is —
+    // even when, as on claude, that reading is still the pre-compaction figure.
+    expect(tracker.floorTokens).toBe(500);
+  });
+
+  it('is re-based to null by retarget() — the rotation case', async () => {
+    const now = 1_000;
+    const { read } = scriptedReader([TURN, BIGGER_TURN]);
+    const tracker = makeTracker({ read, now: () => now });
+    tracker.setTranscriptPath('/boot.jsonl');
+    tracker.maybeRefresh();
+    await flush();
+    expect(tracker.floorTokens).toBe(200);
+
+    tracker.setTranscriptPath('/after-clear.jsonl');
+    expect(tracker.floorTokens).toBeNull();
+  });
+
+  it('is untouched by a read that measured nothing', async () => {
+    // An `empty` (a transcript freshly rotated, a turn still running) or a
+    // failed read must not lower the floor: the anti-loop would then depend on
+    // how often a file happened to be mid-write.
+    let now = 1_000;
+    const { read } = scriptedReader([TURN, TAIL_NOISE.join('\n'), null]);
+    const tracker = makeTracker({ read, now: () => now });
+    tracker.setTranscriptPath('/t.jsonl');
+    tracker.maybeRefresh();
+    await flush();
+    expect(tracker.floorTokens).toBe(200);
+
+    now += 20_000;
+    tracker.maybeRefresh();
+    await flush();
+    expect(tracker.snapshot()?.stale).toBe(true);
+    expect(tracker.floorTokens).toBe(200);
+
+    now += 20_000;
+    tracker.maybeRefresh();
+    await flush();
+    expect(tracker.floorTokens).toBe(200);
+  });
+
+  it('ignores a read that landed after a reset (the generation guard)', async () => {
+    let resolveRead: ((text: string) => void) | null = null;
+    const read: TranscriptTailReader = async () =>
+      new Promise<string>((resolve) => {
+        resolveRead = resolve;
+      });
+    const tracker = makeTracker({ read });
+    tracker.setTranscriptPath('/t.jsonl');
+    tracker.maybeRefresh();
+    await flush();
+
+    tracker.markStale();
+    resolveRead!(TURN);
+    await flush();
+    // Nothing committed — including the floor, which would otherwise be seeded
+    // from the conversation that was just thrown away.
+    expect(tracker.floorTokens).toBeNull();
+  });
+});
+
 describe('ContextUsageTracker — setTranscriptPath', () => {
   it('always adopts the LAST path: /clear rotates the file', async () => {
     // Spike S4: `/clear` hands back a new `session_id` AND a new `.jsonl`; the

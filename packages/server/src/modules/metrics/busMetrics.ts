@@ -108,6 +108,17 @@ export class BusMetricsCollector {
   private _ticksSinceStart = 0;
   /** setInterval handle. Null when stopped. */
   private _timer: ReturnType<typeof setInterval> | null = null;
+  /**
+   * Whether the collector is armed (between `start()` and `stop()`). The MCP
+   * server holds a `private readonly` reference and calls
+   * `recordRequestStart`/`recordRequestEnd` on EVERY tool call, even while the
+   * `monitoring` feature is disabled — this flag turns that instrumentation
+   * into a TRUE no-op so it never writes into a frozen slot
+   * (docs/builtin-features.md D6). `false` at construction and after `stop()`:
+   * a collector that was never `start()`ed — e.g. `monitoring` seeded disabled —
+   * records nothing.
+   */
+  private _active = false;
 
   constructor(spawner: BusMetricsSpawnerLike, opts: BusMetricsCollectorOptions = {}) {
     this._spawner = spawner;
@@ -123,10 +134,29 @@ export class BusMetricsCollector {
    */
   start(): void {
     if (this._timer) return;
-    // Seed the *current* slot's messagesTotal so the very first tick's
-    // throughput computation has a baseline rather than (newest - 0) which
-    // would dump the entire boot-time backlog into one second of "throughput".
-    this._slots[this._cursor]!.messagesTotal = this._computeGlobalTotal();
+    this._active = true;
+    // Reset the ring + tick counter on every (re)start so a disable→enable
+    // never reports a throughput SPIKE (docs/builtin-features.md D6). Two things
+    // must be reset together:
+    //   - `_ticksSinceStart` → 0, so the throughput denominator restarts at
+    //     "1 elapsed second" instead of dividing by a stale 60;
+    //   - every slot's `messagesTotal` → the CURRENT Σ total (the fresh
+    //     baseline), so `(newest − oldest)` starts at 0 rather than measuring
+    //     the whole idle gap that elapsed while the collector was stopped
+    //     (seeding only the current slot would leave `oldest = 0`, i.e. the
+    //     entire lifetime total dumped into one second of "throughput").
+    // The MCP no-op (`_active`) already keeps the ring clean while stopped; this
+    // guarantees a clean baseline even if a tick or a record slipped in.
+    const seed = this._computeGlobalTotal();
+    this._cursor = 0;
+    this._ticksSinceStart = 0;
+    for (const slot of this._slots) {
+      slot.requests = 0;
+      slot.errors = 0;
+      slot.latencySumMs = 0;
+      slot.latencyCount = 0;
+      slot.messagesTotal = seed;
+    }
     const timer = setInterval(() => {
       try {
         this.tick();
@@ -143,8 +173,11 @@ export class BusMetricsCollector {
     this._timer = timer;
   }
 
-  /** Stop the tick. Idempotent. */
+  /** Stop the tick and disarm instrumentation. Idempotent. */
   stop(): void {
+    // Disarm FIRST (before the timer guard) so `_active` is false even if the
+    // collector was already stopped — record* is a no-op from here on.
+    this._active = false;
     if (!this._timer) return;
     clearInterval(this._timer);
     this._timer = null;
@@ -182,6 +215,9 @@ export class BusMetricsCollector {
    * realistic MCP request rate.
    */
   recordRequestStart(): bigint {
+    // True no-op when disarmed (monitoring off): skip even the hrtime read and
+    // return a sentinel. The matching recordRequestEnd() also short-circuits.
+    if (!this._active) return 0n;
     return process.hrtime.bigint();
   }
 
@@ -195,6 +231,10 @@ export class BusMetricsCollector {
    * 60 ticks/min the systematic bias is < 1 s on a 60 s window.
    */
   recordRequestEnd(start: bigint, ok: boolean): void {
+    // Disarmed (monitoring off): never write into the frozen slot. Without this
+    // the MCP server's per-call instrumentation would keep inflating whatever
+    // slot the cursor stopped on (docs/builtin-features.md D6).
+    if (!this._active) return;
     const durationNs = process.hrtime.bigint() - start;
     // Convert ns → ms as a float. Safe: even 1 minute fits in a Number.
     const durationMs = Number(durationNs) / 1_000_000;
