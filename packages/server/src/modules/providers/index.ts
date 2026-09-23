@@ -60,7 +60,12 @@ export {
   BUILTIN_PROVIDER_IDS,
   DEFAULT_PROVIDER_ID,
   builtinDefaultModel,
+  CLAUDE_MODEL_FAMILIES,
+  claudeFamilyOf,
+  claudeFamilyPattern,
+  parseModelAlias,
   type BuiltinProviderId,
+  type ClaudeModelFamily,
 } from './ids.js';
 
 import type { Config } from '../../config.js';

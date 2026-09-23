@@ -109,7 +109,9 @@ describe('GET /providers — live catalogue', () => {
     const providers = await get(spawner);
 
     const claude = providers.find((p) => p.id === 'claude')!;
-    expect(claude.defaults.model).toBe('claude-opus-5');
+    // An alias, labelled with what it resolves to right now.
+    expect(claude.defaults.model).toBe('opus');
+    expect(claude.models.find((m) => m.value === 'opus')?.label).toContain('claude-opus-5');
     expect(claude.models.map((m) => m.value)).toContain('claude-sonnet-5');
     // The price rides along in the label — see `catalogue.ts:labelFor`.
     expect(claude.models.find((m) => m.value === 'claude-fable-5')?.label).toContain(

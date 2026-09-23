@@ -32,7 +32,12 @@ import {
   writeSessionFile,
 } from './session-config.js';
 import type { ModelCatalogue } from './catalogue.js';
-import { BUILTIN_PROVIDER_DEFAULT_MODELS } from './ids.js';
+import {
+  BUILTIN_PROVIDER_DEFAULT_MODELS,
+  CLAUDE_MODEL_FAMILIES,
+  claudeFamilyPattern,
+  parseModelAlias,
+} from './ids.js';
 import { probeCliBinary } from './probe.js';
 import type {
   AgentProvider,
@@ -242,17 +247,56 @@ export class ClaudeProvider implements AgentProvider {
   }
 
   models(): readonly ProviderModel[] {
-    return this._catalogue?.models('claude', CLAUDE_MODELS) ?? CLAUDE_MODELS;
+    const concrete = this._catalogue?.models('claude', CLAUDE_MODELS) ?? CLAUDE_MODELS;
+    // The family aliases come FIRST: they are the recommended values — a team
+    // or role stored on `opus` follows every future opus release, a concrete
+    // id is a deliberate pin (docs/model-aliases.md). The label names what the
+    // alias resolves to right now, so the operator sees "5.5" the day it ships.
+    const aliases: ProviderModel[] = CLAUDE_MODEL_FAMILIES.map((family) => {
+      const target = this._resolveAlias(family);
+      const name = family.charAt(0).toUpperCase() + family.slice(1);
+      return {
+        value: family,
+        label: target ? `${name} — latest (${target})` : `${name} — latest`,
+      };
+    });
+    return [...aliases, ...concrete];
   }
 
   defaults(): { model: string; effort: EffortLevel; permissionMode: PermissionMode } {
     return {
-      model:
-        this._catalogue?.defaultModel('claude', BUILTIN_PROVIDER_DEFAULT_MODELS.claude) ??
-        BUILTIN_PROVIDER_DEFAULT_MODELS.claude,
+      // The alias, NOT its resolution: this is what a team created without a
+      // model STORES, and a stored concrete id would freeze the team on the
+      // opus of its creation day. Resolution happens per spawn (`resolveModel`).
+      model: BUILTIN_PROVIDER_DEFAULT_MODELS.claude,
       effort: 'xhigh',
       permissionMode: 'bypassPermissions',
     };
+  }
+
+  /**
+   * Alias → newest concrete id from the live catalogue. With no catalogue
+   * answer (cold boot, models.dev unreachable, unbound in tests) the alias is
+   * exec'd as-is: the claude CLI resolves `opus` / `sonnet` / `fable` /
+   * `haiku` (and their `[1m]` forms) itself, so the worst case is the CLI's
+   * own choice — never a failed spawn.
+   */
+  resolveModel(model: string): string {
+    const parsed = parseModelAlias(model);
+    if (!parsed) return model;
+    const target = this._resolveAlias(parsed.family);
+    const resolved = target ? `${target}${parsed.oneM ? '[1m]' : ''}` : model;
+    log.info({
+      event: 'model.alias_resolved',
+      alias: model,
+      model: resolved,
+      source: target ? 'catalogue' : 'cli',
+    });
+    return resolved;
+  }
+
+  private _resolveAlias(family: (typeof CLAUDE_MODEL_FAMILIES)[number]): string | null {
+    return this._catalogue?.familyLatest('claude', claudeFamilyPattern(family)) ?? null;
   }
 
   /**

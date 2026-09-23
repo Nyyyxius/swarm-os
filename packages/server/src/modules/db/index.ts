@@ -1017,6 +1017,58 @@ export class SwarmDb {
 
   // --- Public API --------------------------------------------------------
 
+  /**
+   * ONE-SHOT: rewrite stored concrete claude ids to their family alias
+   * (`claude-opus-4-8` → `opus`, `claude-sonnet-5` → `sonnet`,
+   * `claude-opus-4-8[1m]` → `opus[1m]`) on teams and roles, so every NEW lead
+   * and worker they spawn runs the newest release of that family
+   * (docs/model-aliases.md, Lot 5). `sessions` are left alone: a resumed agent
+   * keeps the model it ran on.
+   *
+   * Guarded by `PRAGMA user_version` (bit 0) rather than being idempotent on
+   * its own: after it has run once, a concrete id an operator deliberately
+   * pins in the UI must never be rewritten again on the next boot.
+   *
+   * Only rows whose EFFECTIVE provider is claude: a team's `default_provider`
+   * is NOT NULL; a role's NULL means "the instance default", hence the
+   * parameter. Returns the number of rows rewritten, or `null` if it had
+   * already run.
+   */
+  migrateModelAliases(
+    instanceDefaultProvider: string,
+    familyOf: (model: string) => string | null,
+  ): { orchestrators: number; roles: number } | null {
+    const MODEL_ALIASES_BIT = 1;
+    const version = this.db.pragma('user_version', { simple: true }) as number;
+    if ((version & MODEL_ALIASES_BIT) !== 0) return null;
+    const rewrite = (table: 'orchestrators' | 'roles', where: string, params: unknown[]): number => {
+      const rows = this.db
+        .prepare(`SELECT id, default_model FROM ${table} WHERE default_model IS NOT NULL AND (${where})`)
+        .all(...params) as Array<{ id: string; default_model: string }>;
+      const update = this.db.prepare(`UPDATE ${table} SET default_model = ? WHERE id = ?`);
+      let n = 0;
+      for (const r of rows) {
+        const alias = familyOf(r.default_model);
+        if (alias !== null && alias !== r.default_model) {
+          update.run(alias, r.id);
+          n++;
+        }
+      }
+      return n;
+    };
+    const run = this.db.transaction(() => {
+      const orchestrators = rewrite('orchestrators', "default_provider = 'claude'", []);
+      const roles = rewrite(
+        'roles',
+        "default_provider = 'claude' OR (default_provider IS NULL AND ? = 'claude')",
+        [instanceDefaultProvider],
+      );
+      this.db.pragma(`user_version = ${version | MODEL_ALIASES_BIT}`);
+      return { orchestrators, roles };
+    });
+    return run();
+  }
+
   upsertOrchestrator(row: OrchestratorRow): void {
     try {
       this.upsertOrchStmt.run(row);

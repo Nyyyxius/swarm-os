@@ -12,6 +12,7 @@ import { DiscordWebhookNotifier, NoOpNotifier, type Notifier } from './modules/n
 import { DiscordBotPool } from './modules/discord/pool.js';
 import {
   bindModelCatalogue,
+  claudeFamilyOf,
   createBuiltinProviderRegistry,
   ModelCatalogue,
   OpencodeProvider,
@@ -175,6 +176,18 @@ if (config.agentTransport === 'ssh') {
 
 // ---- Phase 4: SQLite persistence ------------------------------------------
 const db = new SwarmDb(config.dataDir);
+// docs/model-aliases.md, Lot 5 — once per database, BEFORE anything reads a
+// team or role: stored claude pins become family aliases so new agents follow
+// the newest release. Never fatal: the worst case is teams staying pinned.
+try {
+  const migrated = db.migrateModelAliases(config.defaultProvider, claudeFamilyOf);
+  if (migrated) log.info({ event: 'boot.model_aliases_migrated', ...migrated });
+} catch (err) {
+  log.warn({
+    event: 'boot.model_aliases_migration_failed',
+    error: err instanceof Error ? err.message : String(err),
+  });
+}
 const persistence = new DbPersistence(db);
 
 // ---- Built-in feature registry (docs/builtin-features.md) ------------------
@@ -1191,6 +1204,11 @@ function startCronsAfterBoot(): void {
 }
 
 async function runAutoResume(): Promise<void> {
+  // Give the catalogue warm-up (fired above) its bounded cold wait BEFORE the
+  // boot gate opens: the first team or worker spawned after a restart resolves
+  // its family alias (`opus` → newest opus) against it, and a cold catalogue
+  // would hand the bare alias to the CLI instead (docs/model-aliases.md).
+  await modelCatalogue.resolve();
   if (!config.autoResume || resumableState.resumable.length === 0) {
     // Still reconcile: with auto-resume off (or nothing to resume), every team
     // the update interrupted is a casualty, and that is worth saying out loud.

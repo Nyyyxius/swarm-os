@@ -27,7 +27,9 @@ own terminal, always go through `team.send_message` or `team.broadcast`.**
 - `team.spawn_worker({ name, role, prompt, cwd?, model?, effort?, permissionMode? })`
   — **lead-only**. Spawn a new worker with its own claude PTY. The new
   worker inherits the orchestrator defaults unless you override `model`,
-  `effort`, or `permissionMode`. `cwd` defaults to your own. The returned
+  `effort`, or `permissionMode`. For `model`, name a family — `opus`,
+  `sonnet`, `fable`, `haiku` — never a versioned id: the family always runs
+  its newest release. `cwd` defaults to your own. The returned
   payload contains the new `session.id` — keep it; that is how you address
   the worker afterwards.
 - `team.kill_worker({ id })` — **lead-only**. SIGTERM, 5 s grace, SIGKILL.

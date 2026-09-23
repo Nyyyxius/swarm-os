@@ -393,6 +393,13 @@ export interface AgentProvider {
   /** Indicative catalogue — the UI keeps a free-text escape hatch. */
   models(): readonly ProviderModel[];
   defaults(): { model: string; effort: EffortLevel; permissionMode: PermissionMode };
+  /**
+   * Turn a stored model value into the id to EXEC, at spawn time only
+   * (docs/model-aliases.md). A family alias (`opus`, `sonnet[1m]`, …) becomes
+   * the newest concrete member; anything else comes back unchanged. Optional:
+   * an adapter without aliases is the identity. Must not throw.
+   */
+  resolveModel?(model: string): string;
 
   /** PHASE A — see `SessionConfigRequest`. Must not throw. */
   prepareSessionConfig(req: SessionConfigRequest): SessionConfigResult;

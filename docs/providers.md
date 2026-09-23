@@ -448,10 +448,22 @@ Three things worth knowing:
   `gemini-*-pro*` for gemini, `anthropic/claude-opus-*` for opencode. The
   patterns are anchored, so variants like `-fast`, `-pro` or `-customtools` are
   offered in the list but can never become the default.
-- **The scope is NEW teams.** A team's model is materialised into
-  `orchestrators.default_model` when it is created; existing teams keep theirs,
-  and so does a resumed one. "The instance follows the newest model" would be
-  wrong — "teams created from now on start on the newest" is right.
+- **claude stores family aliases, not ids** (`docs/model-aliases.md`). A claude
+  team or role holds `opus`, `sonnet`, `fable` or `haiku` (optionally `[1m]`),
+  and every NEW lead or worker resolves it at spawn to the newest member of that
+  family (`ClaudeProvider.resolveModel`). The session row records the concrete
+  id it actually ran on. So when a new release ships, every new agent picks it up
+  within one catalogue TTL, with no redeploy and no edit. Resumed and restarted
+  agents keep their recorded model. If the catalogue has no answer, the alias
+  itself goes to the claude CLI, which resolves it on its own.
+  - A concrete id (`claude-opus-4-8`) is still accepted as a deliberate pin in
+    the UI and the HTTP API.
+  - The `team.spawn_worker` MCP tool is the exception: it upgrades a concrete
+    id to its family alias, because a lead's context goes stale.
+  - A one-time boot migration (guarded by `PRAGMA user_version`) turned
+    existing claude teams and roles into aliases.
+  - For the other providers the scope is still NEW teams: their default model
+    is saved as a concrete id when the team is created.
 - **codex does not use models.dev.** It reads the codex CLI's own
   `~/.codex/models_cache.json` instead, because models.dev catalogues the *API*
   and `codex exec` accepts strictly less: measured 2026-07-28, `-m gpt-5.6` (a

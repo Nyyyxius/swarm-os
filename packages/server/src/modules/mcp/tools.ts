@@ -22,6 +22,7 @@ import type { TaskboardStore } from '../taskboard/store.js';
 import type { GraphStore } from '../codegraph/store.js';
 import type { SkillsSubsystem } from '../skills/index.js';
 import { withModule } from '../../logger.js';
+import { claudeFamilyOf } from '../providers/ids.js';
 
 const log = withModule('mcp.tool');
 
@@ -544,7 +545,7 @@ export function registerTeamCommsTools(
     {
       title: 'Spawn a new worker session (lead-only)',
       description:
-        "Lead-only. Spawns a new PTY worker agent with its own team-comms MCP. Returns the new session metadata. cwd defaults to the lead's cwd; provider/model/effort/permissionMode default to the team's defaults. `provider` selects which CLI the worker runs (see GET /providers) — that is how a mixed team is built, e.g. a claude lead with gemini workers.",
+        "Lead-only. Spawns a new PTY worker agent with its own team-comms MCP. Returns the new session metadata. cwd defaults to the lead's cwd; provider/model/effort/permissionMode default to the team's defaults. For claude, prefer the family aliases `opus` / `sonnet` / `fable` / `haiku` (optionally `opus[1m]`): they always run the newest release of that family, and a concrete id such as `claude-sonnet-4-6` is upgraded to its family's newest anyway. `provider` selects which CLI the worker runs (see GET /providers) — that is how a mixed team is built, e.g. a claude lead with gemini workers.",
       inputSchema: {
         name: z.string(),
         role: z.string(),
@@ -661,13 +662,27 @@ export function registerTeamCommsTools(
         );
       }
 
+      // A lead names models from its own context, which is stale the day a new
+      // release ships: `claude-sonnet-5` is read as "a sonnet", i.e. the newest
+      // one (docs/model-aliases.md). Only plain members of a known claude family
+      // are upgraded; variants, other vendors and aliases pass through.
+      let model = a.model;
+      const workerProvider = a.provider ?? ctx.orchestrator.defaultProvider;
+      if (model != null && workerProvider === 'claude') {
+        const alias = claudeFamilyOf(model);
+        if (alias !== null) {
+          log.info({ event: 'model.alias_normalized', requested: model, alias });
+          model = alias;
+        }
+      }
+
       try {
         const worker = ctx.orchestrator.addWorker({
           name: a.name,
           role: a.role,
           prompt: a.prompt,
           cwd: resolvedCwd,
-          model: a.model,
+          model,
           effort: a.effort as EffortLevel | undefined,
           permissionMode: a.permissionMode as PermissionMode | undefined,
           provider: a.provider,

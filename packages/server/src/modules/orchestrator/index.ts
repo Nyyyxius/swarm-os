@@ -622,6 +622,9 @@ export class Orchestrator {
       fallbackProvider: this.defaultProvider,
       context: { channel: 'start', orchId: this.id },
     });
+    // The team stores an alias (`opus`); the lead EXECS its newest member, and
+    // the session row records the concrete id (docs/model-aliases.md).
+    const leadModel = provider.resolveModel?.(resolved.model) ?? resolved.model;
     // Pre-build the preamble so the agent has the team-comms instructions
     // baked into its initial prompt. We use the orchestrator-level
     // `leadPreamble` as the optional override layered atop the default.
@@ -650,7 +653,7 @@ export class Orchestrator {
       cwd: this.init.lead.cwd,
       initialPrompt: this.init.lead.prompt,
       preamble,
-      model: resolved.model,
+      model: leadModel,
       effort: resolved.effort,
       permissionMode: resolved.permissionMode,
       // id → adapter resolution lives here; `Session` only ever sees objects.
@@ -680,7 +683,7 @@ export class Orchestrator {
       sourceDir: this.config.claudeSourceDir,
       siblingSource: this.config.claudeJsonSource,
       sshTransport: this._sshTransportBundle(),
-      contextUsage: this._contextUsageWiring(provider, resolved.model),
+      contextUsage: this._contextUsageWiring(provider, leadModel),
     });
 
     this._leadSessionId = lead.id;
@@ -954,7 +957,13 @@ export class Orchestrator {
       fallbackProvider: this.defaultProvider,
       context: { channel: 'addWorker', orchId: this.id, worker: spec.name },
     });
-    const model = resolved.model;
+    // A NEW worker execs the newest member of its alias' family; a resumed one
+    // (`existingId`) keeps the model its row recorded — same agent, same model,
+    // exactly like `resume()` does for the lead (docs/model-aliases.md).
+    const model =
+      spec.existingId != null
+        ? resolved.model
+        : (provider.resolveModel?.(resolved.model) ?? resolved.model);
     const effort = resolved.effort;
     const permissionMode = resolved.permissionMode;
     // Phase 8: reuse the persisted id when resuming so the row + log path

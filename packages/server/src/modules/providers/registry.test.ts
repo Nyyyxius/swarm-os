@@ -237,9 +237,13 @@ describe('createBuiltinProviderRegistry', () => {
     try {
       await catalogue.resolve(1_000);
       const claude = registry.get('claude')!;
-      expect(claude.defaults().model).toBe('claude-opus-6');
-      expect(claude.defaults().model).not.toBe(BUILTIN_PROVIDER_DEFAULT_MODELS.claude);
+      // claude's default is an ALIAS (docs/model-aliases.md): it stays `opus`
+      // on the stored side and only the spawn-time resolution moves.
+      expect(claude.defaults().model).toBe('opus');
+      expect(claude.resolveModel?.('opus')).toBe('claude-opus-6');
+      expect(claude.resolveModel?.('opus[1m]')).toBe('claude-opus-6[1m]');
       expect(claude.models().map((m) => m.value)).toContain(claude.defaults().model);
+      expect(claude.models().find((m) => m.value === 'opus')?.label).toContain('claude-opus-6');
     } finally {
       bindModelCatalogue(registry, null);
     }

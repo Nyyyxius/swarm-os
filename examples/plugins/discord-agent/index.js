@@ -83,7 +83,7 @@ function parseConfig(api) {
     channelId: str('channelId'),
     openaiApiKey: str('openaiApiKey'),
     allowedUserIds,
-    leadModel: str('leadModel', 'claude-opus-4-8[1m]'),
+    leadModel: str('leadModel', 'opus[1m]'),
     ttsVoice: str('ttsVoice', 'alloy'),
     ttsModel: str('ttsModel', 'gpt-4o-mini-tts'),
     sttModel: str('sttModel', 'whisper-1'),
