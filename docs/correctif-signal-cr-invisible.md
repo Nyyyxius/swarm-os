@@ -1,8 +1,12 @@
 # Correctif — le `\r` de tête des injections PTY annule l'envoi (Claude Code ≥ 2.1.277)
 
-> Statut : **à appliquer**. Contournement en place sur l'instance `stiix` depuis le
-> 2026-09-22 20:31Z (voir [§6](#6-contournement-en-place-à-retirer-après-déploiement)).
+> Statut : **appliqué** sur la branche `fix/signal-cr-invisible` (issue de `d1d63da`),
+> reste à valider sur un agent réel (§5). Contournement en place sur l'instance `stiix`
+> depuis le 2026-09-22 20:31Z (voir [§6](#6-contournement-en-place-à-retirer-après-déploiement)).
 > Rédigé le 2026-09-22 à partir du diagnostic de la panne du pipeline stiix.
+>
+> Note d'application : le §4.3 (`clearDialogPending`) a été appliqué à l'intégration de
+> `feature/discord-hourglass-reactions` (merge de master, 2026-09-23).
 
 ## 1. Résumé
 
@@ -129,6 +133,14 @@ La chaîne causale repose donc sur les points suivants, tous établis :
 - il n'existe qu'à partir de 2.1.277 (binaires) ;
 - le message apparaît sur chaque signal bloqué (logs) ;
 - le seul CR en bloc de texte envoyé par swarm-os est celui de tête (code).
+
+Piste probable pour l'écart test / réel, lue dans le parseur d'entrée de 2.1.280 : un
+octet de contrôle n'est traité comme une touche que si le bloc reçu fait **moins de 64
+caractères** (`!s&&a<32&&(u.length<64||…)`). Au-delà, le bloc entier, `\r` compris, est
+inséré comme du texte. Le signal de boîte aux lettres fait 63 caractères : avec le `\r` de tête, le bloc en fait
+**exactement 64**, pile au seuil. Il part donc en collage et le CR atterrit dans la
+saisie. Un avis opérateur ou un `/compact` avec instructions dépasse aussi ce seuil. Un
+texte de test plus court que 63 caractères n'aurait pas reproduit la panne.
 
 En revanche, **le correctif n'a pas encore été validé sur un agent réel.** Voir §5.
 
