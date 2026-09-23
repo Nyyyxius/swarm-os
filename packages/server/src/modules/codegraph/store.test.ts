@@ -94,6 +94,22 @@ describe('GraphStore', () => {
     expect(store.getScope('project__foo')?.status).toBe('pending');
   });
 
+  it('purgeAll empties the table but keeps the store writable (DELETE, not DROP)', () => {
+    store.upsertScope({ id: 'project__foo', kind: 'project', path: '/ws/foo', enabled: true });
+    store.recordIndexResult('project__foo', { nodeCount: 5, edgeCount: 4, sourceHash: 'h' });
+    store.upsertScope({ id: 'plugin__bar', kind: 'plugin', path: '/ws/bar', enabled: true });
+    expect(store.listScopes()).toHaveLength(2);
+
+    store.purgeAll();
+    expect(store.listScopes()).toEqual([]);
+
+    // The prepared statements must still work after a purge — a re-enable finds
+    // the store present and simply empty (the whole point of DELETE-not-DROP).
+    const s = store.upsertScope({ id: 'project__foo', kind: 'project', path: '/ws/foo', enabled: true });
+    expect(s?.status).toBe('pending');
+    expect(store.listScopes()).toHaveLength(1);
+  });
+
   it('removeScope deletes the row', () => {
     store.upsertScope({ id: 'project__foo', kind: 'project', path: '/ws/foo', enabled: true });
     store.removeScope('project__foo');

@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, apiErrorMessage, type SystemMetricsSnapshot } from '../api/client';
+import { api, apiErrorMessage, HttpError, type SystemMetricsSnapshot } from '../api/client';
 
 /**
  * Poll `GET /metrics/system` every `intervalMs` while `enabled`
@@ -43,6 +43,12 @@ export function useSystemMetrics(
           warnedRef.current = false;
         }
       } catch (err) {
+        // 404 = the endpoint is GONE (monitoring off, or a server predating
+        // Lot 10). Blank the gauges rather than freezing on dead numbers
+        // (patron `useMemoryNotes`); a transient non-404 keeps the last read.
+        if (err instanceof HttpError && err.status === 404 && !cancelledRef.current) {
+          setSnap(null);
+        }
         if (!warnedRef.current) {
           warnedRef.current = true;
           console.warn(

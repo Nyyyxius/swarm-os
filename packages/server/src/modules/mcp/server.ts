@@ -14,6 +14,7 @@ import type { Config } from '../../config.js';
 import type { MessagingDefaults } from '../orchestrator/messaging.js';
 import type { BusMetricsCollector } from '../metrics/busMetrics.js';
 import type { PluginToolRegistry } from '../plugins/mcp-registry.js';
+import type { FeatureRegistry } from '../features/registry.js';
 import { withModule } from '../../logger.js';
 
 const log = withModule('mcp');
@@ -91,6 +92,13 @@ export class McpServer {
      * after the built-in team-comms tools. Optional so pre-J2 test paths boot.
      */
     private readonly pluginTools?: PluginToolRegistry,
+    /**
+     * Built-in feature registry (docs/builtin-features.md). Consulted per request
+     * in `handle()` to guard tool registration by family (D5) — codegraph (Lot 4)
+     * is wired; memory/board follow in Lots 5/6. Optional so every existing test
+     * path constructs the server unchanged; absent ⇒ fail open (all registered).
+     */
+    private readonly features?: FeatureRegistry,
   ) {
     this.messagingDefaults = {
       maxMessageSizeBytes: this.config?.maxMessageSizeBytes ?? 16 * 1024,
@@ -233,13 +241,29 @@ export class McpServer {
     registerTeamCommsTools(sdkServer, () => ctx);
     // Shared knowledge-graph tools (memory.*), registered right after the
     // built-in team-comms set so every agent sees them (docs memoire-partagee.md).
-    registerMemoryTools(sdkServer, () => ctx);
-    // Durable task-board tools (board.*), registered right after the memory set
-    // so every agent sees them (docs/tableau-de-taches.md §5).
-    registerTaskboardTools(sdkServer, () => ctx);
+    // Gated per request by the memory feature (D5): the SdkMcpServer is rebuilt on
+    // every request, so a hot disable drops the tools from the NEXT session with
+    // no rebuild. Fail open when no registry is wired (unit tests): register as
+    // before.
+    if (!this.features || this.features.isEnabled('memory')) {
+      registerMemoryTools(sdkServer, () => ctx);
+    }
+    // Durable task-board tools (board.*), registered right after the memory set.
+    // Gated per request by the board feature (D5): the SdkMcpServer is rebuilt on
+    // every request, so a hot disable drops the tools from the NEXT session with
+    // no rebuild. Fail open when no registry is wired (unit tests): register as
+    // before. (docs/tableau-de-taches.md §5)
+    if (!this.features || this.features.isEnabled('board')) {
+      registerTaskboardTools(sdkServer, () => ctx);
+    }
     // Code-knowledge-graph tools (codegraph.*), registered next so every agent
-    // can query the live code map (docs/graphify-integration.md, P2).
-    registerGraphTools(sdkServer, () => ctx);
+    // can query the live code map (docs/graphify-integration.md, P2). Gated per
+    // request by the codegraph feature (D5): the SdkMcpServer is rebuilt on every
+    // request, so a hot disable drops the tools from the NEXT session with no
+    // rebuild. Fail open when no registry is wired (unit tests): register as before.
+    if (!this.features || this.features.isEnabled('codegraph')) {
+      registerGraphTools(sdkServer, () => ctx);
+    }
     // Skills library tools (skills.*), registered next so every agent can list
     // and (lead) activate skills (docs/plan-skills-importables.md §7).
     registerSkillsTools(sdkServer, () => ctx);

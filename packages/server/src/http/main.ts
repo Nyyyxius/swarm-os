@@ -23,6 +23,10 @@ import { createDiscordRouter } from './routes/discord.js';
 import { createSettingsRouter } from './routes/settings.js';
 import { createIdeRouter } from './routes/ide.js';
 import { createPluginsRouter } from './routes/plugins.js';
+import { createFeaturesRouter } from './routes/features.js';
+import { listBlockingApprovalTeams } from '../modules/approvals/blocking.js';
+import type { FeatureRegistry } from '../modules/features/registry.js';
+import { featureGate } from './feature-gate.js';
 import { createUpdatesRouter } from './routes/updates.js';
 import { createMemoryRouter } from './routes/memory.js';
 import { createTaskboardRouter } from './routes/taskboard.js';
@@ -161,6 +165,7 @@ export function createApp(
   taskboard?: TaskboardStore,
   approvals?: ApprovalStore,
   graph?: GraphStore,
+  features?: FeatureRegistry,
 ): { app: express.Express; ideProxy: ProxyHandler | null } {
   const app = express();
   app.disable('x-powered-by');
@@ -250,6 +255,9 @@ export function createApp(
         idleThresholdMs: config.idleThresholdMs,
       },
       approvals,
+      // docs/builtin-features.md D9 — gate ONLY the approval-creation site inside
+      // the hook; the legacy `waiting`/Discord fallback runs regardless.
+      features,
     ),
   );
 
@@ -295,17 +303,25 @@ export function createApp(
   // serve-web's own connection-token instead (handed to the authenticated
   // client via `GET /ide-info`). The matching WebSocket upgrades are wired in
   // `startServer`'s `http.on('upgrade')` via the returned handler.
-  let ideProxy: ProxyHandler | null = null;
-  if (config.ideEnabled) {
-    const base = config.ideBasePath;
-    ideProxy = createProxyMiddleware({
-      target: `http://127.0.0.1:${config.idePort}`,
-      changeOrigin: true,
-      ws: true,
-      pathFilter: (pathname: string) => pathname === base || pathname.startsWith(base + '/'),
-    });
-    app.use(ideProxy);
-  }
+  //
+  // Mounted UNCONDITIONALLY and gated at CALL-TIME via the feature registry
+  // (patron `pluginHttpRegistry`): a hot enable/disable of the IDE takes effect
+  // on the next request without a rebuild. When disabled we simply `next()` —
+  // an iframe navigation, NOT a JSON API, so no `FEATURE_DISABLED` body; the
+  // request falls through the normal pipeline. Fail open when no registry is
+  // wired (unit tests): behave as before (proxy active). Building the middleware
+  // is lazy — it only dials the loopback target when a matching request arrives.
+  const base = config.ideBasePath;
+  const ideProxy: ProxyHandler = createProxyMiddleware({
+    target: `http://127.0.0.1:${config.idePort}`,
+    changeOrigin: true,
+    ws: true,
+    pathFilter: (pathname: string) => pathname === base || pathname.startsWith(base + '/'),
+  });
+  app.use((req, res, next) => {
+    if (features && !features.isEnabled('ide')) return next();
+    return ideProxy(req, res, next);
+  });
 
   // Phase 8 — bootGate: while auto-resume is rebuilding teams, business
   // routes return 503 (health/info/static stay green). Mounted BEFORE the
@@ -374,32 +390,53 @@ export function createApp(
   app.use(createProvidersRouter(spawner, config));
   app.use(createSettingsRouter(settingsStore));
   // Shared knowledge graph (docs/memoire-partagee.md) — `/api/memory/*`. Behind
-  // the X-Auth-Token gate like the other business routes. Mounted only when the
-  // store came up (a boot where it failed is unaffected everywhere else).
-  if (memory) app.use(createMemoryRouter(memory));
+  // the X-Auth-Token gate like the other business routes. The store is built
+  // UNCONDITIONALLY (D2), so this boot `if (memory)` only guards the degraded
+  // case (store failed to open); the memory FEATURE toggle is enforced by
+  // `featureGate` at CALL-TIME (404 FEATURE_DISABLED when memory is off) so a hot
+  // disable takes effect on the next request without a rebuild.
+  if (memory) {
+    if (features) app.use('/api/memory', featureGate(features, 'memory'));
+    app.use(createMemoryRouter(memory));
+  }
   // Durable task board (docs/tableau-de-taches.md) — `/api/board/*`, READ-ONLY
   // plus one operator DELETE. Behind the X-Auth-Token gate like the memory
-  // router. Mounted only when the store came up (a boot where it failed leaves
-  // every other subsystem unaffected — the `board.*` MCP tools answer
-  // TASKBOARD_UNAVAILABLE and this router is simply absent).
-  if (taskboard) app.use(createTaskboardRouter(taskboard));
+  // router. The store is built UNCONDITIONALLY (D2), so this boot `if (taskboard)`
+  // only guards the degraded case (store failed to open); the board FEATURE toggle
+  // is enforced by `featureGate` at CALL-TIME (404 FEATURE_DISABLED when board is
+  // off) so a hot disable takes effect on the next request without a rebuild.
+  if (taskboard) {
+    if (features) app.use('/api/board', featureGate(features, 'board'));
+    app.use(createTaskboardRouter(taskboard));
+  }
   // Human-in-the-loop approval queue (docs/garde-fous-approbation.md) —
   // `/api/approvals/*`, list + resolve (keystroke back to the PTY). Behind the
   // X-Auth-Token gate like the board router (§9.4: anyone with the global token
   // may approve). Needs the spawner to reach the blocked session. Mounted only
   // when the store came up; a boot where it failed leaves every other subsystem
-  // unaffected and this router simply absent.
-  if (approvals) app.use(createApprovalsRouter(spawner, approvals));
+  // unaffected and this router simply absent. docs/builtin-features.md D9 — the
+  // whole `/api/approvals/*` surface is gated behind the `approvals` feature at
+  // CALL-TIME (404 FEATURE_DISABLED when off), so a hot disable hides the queue
+  // on the next request; `pending` rows are kept and re-appear on re-enable.
+  if (approvals) {
+    if (features) app.use('/api/approvals', featureGate(features, 'approvals'));
+    app.use(createApprovalsRouter(spawner, approvals));
+  }
   // Code graph (docs/graphify-integration.md, P3) — `/api/codegraph/*`,
-  // READ-ONLY. Behind the X-Auth-Token gate like the memory router. Mounted only
-  // when codegraph is enabled/available; otherwise simply absent (every other
-  // subsystem unaffected).
-  if (graph) app.use(createCodegraphRouter(graph));
+  // READ-ONLY. Behind the X-Auth-Token gate like the memory router. The store is
+  // now built UNCONDITIONALLY (D2), so the boot `if (graph)` only guards the
+  // degraded case (store failed to open); the feature toggle is enforced by
+  // `featureGate` at CALL-TIME (404 FEATURE_DISABLED when codegraph is off) so a
+  // hot disable takes effect on the next request without a rebuild.
+  if (graph) {
+    if (features) app.use('/api/codegraph', featureGate(features, 'codegraph'));
+    app.use(createCodegraphRouter(graph));
+  }
   // `GET /ide-info` — VS Code web connection details for the authenticated
   // client. Mounted after the auth gate so it 401s without X-Auth-Token
   // (parity with the other business routes). The IDE itself runs on its own
   // port (config.idePort), NOT proxied here.
-  app.use(createIdeRouter(config));
+  app.use(createIdeRouter(config, features));
   app.use(createPreamblesRouter());
   app.use(createAiRouter(config));
   app.use(createDiscordRouter());
@@ -415,6 +452,13 @@ export function createApp(
   // rather than by handing the router a `Spawner`: the DB aggregate, the live
   // teams, and the live rate card. Rates are looked up per call, never
   // captured — the catalogue is cold at boot and warms up seconds later.
+  //
+  // docs/builtin-features.md D6 — the whole `/metrics/*` router is gated behind
+  // the `monitoring` feature: a hot disable 404s every metrics endpoint on the
+  // next request. Mounted at CALL-TIME like the memory/board/codegraph gates
+  // above (fail-open when no registry is wired — tests keep the endpoints).
+  // NB: this gates ONLY `/metrics/*`; budgets + cost roll-up run outside it.
+  if (features) app.use('/metrics', featureGate(features, 'monitoring'));
   app.use(
     createMetricsRouter(aggregator, busMetrics, getSystemMetricsCollector(), {
       sumTokenUsage: () => spawner.persistence.db.sumTokenUsageByOrchestrator(),
@@ -460,6 +504,18 @@ export function createApp(
       ),
     );
   }
+
+  // Built-in feature control plane (list/enable/disable/uninstall). Same
+  // X-Auth-Token gate as `/plugins`, mounted next to it. `GET /features` is the
+  // authenticated source of the feature map the web hydrates at login (D10).
+  // docs/builtin-features.md D9 — the approvals disable/uninstall 409 guard reads
+  // the live teams + their role permission modes through this checker.
+  if (features)
+    app.use(
+      createFeaturesRouter(features, {
+        listBlockingApprovalTeams: () => listBlockingApprovalTeams(spawner, roleStore),
+      }),
+    );
 
   // J2 — plugin AUTHENTICATED routes (`/plugin-api/:name/*`). Mounted AFTER the
   // auth gate so a token is required, and after the `/plugins` control plane so
@@ -513,6 +569,7 @@ export function startServer(
   taskboard?: TaskboardStore,
   approvals?: ApprovalStore,
   graph?: GraphStore,
+  features?: FeatureRegistry,
 ): ServerHandle {
   const { app, ideProxy } = createApp(
     config,
@@ -533,6 +590,7 @@ export function startServer(
     taskboard,
     approvals,
     graph,
+    features,
   );
   const http = createServer(app);
 
@@ -587,9 +645,13 @@ export function startServer(
 
       // VS Code web WebSocket (the editor's remote connection) — proxied to
       // the loopback serve-web. No ticket: guarded by serve-web's
-      // connection-token like the rest of `<ideBasePath>/*`.
+      // connection-token like the rest of `<ideBasePath>/*`. Gated at call-time
+      // via the registry (mirror of the HTTP wrapper): a disabled IDE drops the
+      // upgrade so a hot toggle takes effect immediately. Fail open when no
+      // registry is wired (tests): behave as before.
       if (
         ideProxy &&
+        (!features || features.isEnabled('ide')) &&
         (url.pathname === config.ideBasePath ||
           url.pathname.startsWith(config.ideBasePath + '/'))
       ) {

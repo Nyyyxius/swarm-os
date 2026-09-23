@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, apiErrorMessage, type TeamCostsSnapshot } from '../api/client';
+import { api, apiErrorMessage, HttpError, type TeamCostsSnapshot } from '../api/client';
 
 /**
  * Poll `GET /metrics/costs` every `intervalMs` while `enabled`
@@ -41,6 +41,12 @@ export function useTeamCosts(
           warnedRef.current = false;
         }
       } catch (err) {
+        // 404 = the endpoint is GONE (monitoring off, or a server predating
+        // Lot 12). Blank the section rather than freezing dead totals (patron
+        // `useMemoryNotes`); a transient non-404 keeps the last read.
+        if (err instanceof HttpError && err.status === 404 && !cancelledRef.current) {
+          setSnap(null);
+        }
         if (!warnedRef.current) {
           warnedRef.current = true;
           console.warn(

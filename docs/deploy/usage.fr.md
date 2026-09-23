@@ -29,7 +29,9 @@ Comment opérer une instance en marche. Pour l'install / l'accès distant, voir
 - **Console / events** — un flux d'activité global (agrandissable en overlay plein
   écran), avec toasts / picture-in-picture pour les notifications.
 - **IDE** — un overlay VS Code Web ouvre le dossier `/workspace` dans le navigateur.
-  Activable via `SWARM_OS_IDE_ENABLED`.
+  Activable/désactivable depuis l'écran Plugins (fonctionnalité intégrée — voir
+  [../builtin-features.md](../builtin-features.md)) ; `SWARM_OS_IDE_ENABLED` n'en
+  fixe que l'état initial au premier boot.
 - **Restart team** — relance une équipe morte **en place** (même id/config). C'est
   un démarrage neuf, pas un resume Claude.
 

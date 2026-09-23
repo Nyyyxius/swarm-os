@@ -26,6 +26,10 @@ import {
   type TokenUsageCounters,
 } from './context-usage.js';
 import { estimateTokenCostUsd, type TokenCostRates } from '../providers/catalogue.js';
+// Type-only: the DECISION lives in `auto-compact.ts`, which imports
+// `ContextUsageView` back from here. Both directions are `import type`, so
+// there is no runtime cycle — nothing of that module is loaded by this one.
+import type { AutoCompactSkipReason } from './auto-compact.js';
 import { CodexRolloutSource, createLocalRolloutLister } from './context-usage-codex.js';
 import { OpencodeControlPlaneSource } from './context-usage-opencode.js';
 import { CLAUDE_PROVIDER } from '../providers/claude.js';
@@ -106,6 +110,84 @@ const PTY_INJECT_CONTENTION_RETRY_MS = 300;
  * timer jitter can't let a context reset slip in between the two writes.
  */
 const NOTICE_WRITE_WINDOW_MS = 200;
+
+/**
+ * Delay between `notifySignal`'s two writes — the text, then the standalone CR
+ * that makes Ink parse it as a real Enter keypress (see `notifySignal`'s JSDoc).
+ *
+ * It doubles as the window during which `_signalFiring` holds the line, because
+ * it IS that window: two mailbox signals 50 ms apart used to interleave as
+ * `text1 text2 CR CR` and submit one garbled line that was neither message's
+ * wake-up. Refusing the second costs nothing — the idle boundary re-signals it
+ * the moment its `ts` is newer than `lastInboxSignalAt`
+ * (docs/auto-compact.md §3.2).
+ */
+const SIGNAL_WRITE_WINDOW_MS = 150;
+
+/**
+ * Text of the mailbox wake-up signal (Phase 3).
+ *
+ * Lives HERE, with the only method that types it, since
+ * docs/auto-compact.md §3.2 made `signalInbox()` the single gate every injector
+ * goes through. `messaging.ts` re-exports it for its historical importers
+ * (`preamble.ts` bakes it into every agent's instructions, so the string is
+ * part of the agent-facing contract and must stay byte-identical).
+ */
+export const SIGNAL_TEXT = '[swarm-os] new message in inbox — call team.read_inbox to fetch';
+
+/**
+ * How old a `dialogPending` flag must get before we say so (D5).
+ *
+ * A dialog closed WITHOUT a keystroke — an MCP elicitation the client cancelled
+ * on a timeout, a permission prompt the agent withdrew — leaves the flag up,
+ * and a flag that stays up freezes this session's mail signal, its context
+ * resets and its operator notices until a human types something. That is the
+ * documented trade (never auto-lower a guard against typing into a dialog), but
+ * it must never be SILENT: past this age we warn, once, with the age and the
+ * notification type that raised it.
+ */
+const DIALOG_PENDING_STALE_MS = 10 * 60 * 1000;
+
+/**
+ * Answers a terminal emulator sends back on its OWN initiative, which arrive on
+ * the console WebSocket looking exactly like keystrokes.
+ *
+ * xterm.js replies to queries the CLI makes at startup and on every resize:
+ * Device Attributes (`ESC [ ? … c`), Cursor Position Report (`ESC [ row;col R`),
+ * DECRPM mode reports (`ESC [ ? … $ y`), OSC 10-19 colour reports
+ * (`ESC ] 1x ; … BEL` / `… ST`) and focus in/out (`ESC [ I` / `ESC [ O`). None
+ * of them is a human answering a dialog — and taking them for one is not
+ * cosmetic: `clearDialogPending` lowers the D5 guard, so a browser tab that
+ * merely gained focus while a permission prompt was on screen would re-open the
+ * window in which the server types into that prompt.
+ *
+ * Deliberately conservative: it answers true ONLY when the whole frame is made
+ * of these sequences and nothing else. A frame mixing an auto-response with a
+ * real keystroke counts as human input — a false negative costs one redundant
+ * guard release on a frame that did contain typing, a false positive costs the
+ * guard itself.
+ */
+const TERMINAL_AUTO_RESPONSE_RE = new RegExp(
+  '^(?:' +
+    [
+      '\u001b\\[[?>]?[0-9;]*c', // Device Attributes (DA1 / DA2)
+      '\u001b\\[\\??[0-9]+(?:;[0-9]+)*R', // Cursor Position Report
+      '\u001b\\[\\??[0-9;]*\\$y', // DECRPM mode report
+      '\u001b\\]1[0-9];[^\u0007\u001b]*(?:\u0007|\u001b\\\\)', // OSC 10-19 colour report
+      '\u001b\\[[IO]', // focus in / focus out
+    ].join('|') +
+    ')+$',
+);
+
+/**
+ * True when `data` carries nothing but terminal auto-responses. Exported for
+ * its own unit test — the regex is the kind of thing that is only ever right by
+ * being checked against real captures.
+ */
+export function isTerminalAutoResponse(data: string): boolean {
+  if (data.length === 0) return false;
+  return TERMINAL_AUTO_RESPONSE_RE.test(data);
+}
 
 export type SessionType = 'lead' | 'worker';
 
@@ -245,6 +327,26 @@ export interface SessionInit {
    * it is wiped).
    */
   onContextReset?: (session: Session, cmd: ContextResetCommand) => void;
+  /**
+   * docs/auto-compact.md D1 — fired ONCE per period of PTY silence, the moment
+   * this session has been quiet for `idleThresholdMs` and is genuinely free:
+   * `running`/`waiting`, no dialog on screen, no context reset armed or being
+   * typed, no operator notice armed. Everything else the Orchestrator wants to
+   * do at a task boundary (re-signal the inbox, decide an auto-compact, refresh
+   * the gauge) hangs off this one callback.
+   *
+   * The four exclusions are checked inside the Session (`_fireIdleBoundary`)
+   * because they are all Session state, and because a boundary the Session
+   * declines is NOT consumed: it comes back through the reset's own echo,
+   * through the next keystroke, or through `_resolveNotice`. The Orchestrator
+   * only ever sees boundaries on which it is safe to type.
+   *
+   * Synchronous by contract — it runs inside a timer callback and everything it
+   * does (a queue size, a cached snapshot, a `requestContextReset`) is
+   * synchronous. A throwing handler is caught and logged; it may not take the
+   * session down.
+   */
+  onIdle?: (session: Session) => void;
   /**
    * Idle window (ms) a self-armed context reset waits for before firing. Used
    * by the byte-based auto-compact backstop below. Defaults to 2000ms.
@@ -620,6 +722,78 @@ export class Session extends EventEmitter {
   /** True while the notice's two-step write (text, then CR) is in flight. */
   private _noticeFiring = false;
   /**
+   * docs/auto-compact.md D1 — the idle-boundary timer. At most ONE per session,
+   * armed on the first byte of a burst only when none exists (never a clear+set
+   * per chunk, which on a chatty PTY would be thousands of timer churns a
+   * minute), sized to the idle time that remains, and `unref()`'d so it can
+   * never be the reason the process stays up.
+   */
+  private _idleTimer: NodeJS.Timeout | null = null;
+  /**
+   * True once `onIdle` has been called for the CURRENT period of silence.
+   *
+   * Reset to `false` on every PTY byte, and explicitly at every site that
+   * re-arms the timer without one (`resume`, spawn, `writeInput`/`submitInput`,
+   * the provider-has-no-reset branch, `_resolveNotice`) — without that reset,
+   * those sites would arm a timer whose callback returns immediately and the
+   * boundary would be lost for good.
+   *
+   * Deliberately NOT set when the boundary is DECLINED by one of the D2 step-0
+   * guards: a declined boundary is not a consumed one.
+   */
+  private _idleNotified = false;
+  /**
+   * docs/auto-compact.md D5 — a dialog is on screen and is waiting for a human.
+   *
+   * Anything written into a prompt buffer showing a claude permission dialog
+   * VALIDATES THE HIGHLIGHTED OPTION: a mailbox signal, a `/compact`, an
+   * operator notice — all of them would answer a question nobody read. So every
+   * server-side injector consults this flag, and only a real human keystroke
+   * (`writeInput` / `submitInput`) or an explicit "the dialog is gone"
+   * notification lowers it. Never lowered on PTY output: a resize redraws the
+   * dialog, and lowering on the first byte would re-open the auto-validation
+   * window at the exact moment an operator opens the console.
+   *
+   * Carries the notification type that raised it, so the refusal an operator
+   * reads in `session.auto_compact_skipped` names the dialog.
+   */
+  private _dialogPending: { type: string; at: number } | null = null;
+  /** One `session.dialog_pending_stale` warning per raised flag, not per read. */
+  private _dialogPendingStaleWarned = false;
+  /**
+   * docs/auto-compact.md D5 — once per session, the `warn` for the untyped
+   * fallback in `http/routes/hooks.ts`. It lives on the Session so it dies with
+   * it: a process-wide set would grow one uuid per agent, forever, on a 24/7
+   * fleet. Public and mutable for the same reason as the two auto-compact
+   * fields below — it is the route's state, scoped to this session's life.
+   */
+  dialogPendingUntypedWarned = false;
+  /**
+   * True while a mailbox signal's two-step write is in flight (text now, CR at
+   * +150 ms). The third member of the `_noticeFiring` / `_contextResetFiring`
+   * family, and read by exactly the same backoffs.
+   */
+  private _signalFiring = false;
+  /**
+   * Epoch ms of the last inbox signal `signalInbox()` actually wrote, or `null`
+   * when none has been written since the last context reset.
+   *
+   * `_fireContextReset` resets it to `null` at the moment the command reaches
+   * the PTY, which is what makes ONE rule cover two situations: "mail arrived
+   * after the last nudge" and "the agent's memory of its inbox was just wiped".
+   * See `Orchestrator._onSessionIdle` step 1.
+   */
+  private _lastInboxSignalAt: number | null = null;
+  /**
+   * docs/auto-compact.md D8 — the last refusal reason
+   * `Orchestrator._onSessionIdle` logged for this session, so it can log at
+   * `info` on a CHANGE and at `debug` otherwise. Lives here because the state
+   * is per-agent and must die with it; the Orchestrator owns the meaning.
+   */
+  lastAutoCompactSkipReason: AutoCompactSkipReason | null = null;
+  /** Same ownership — the once-per-session `session.auto_compact_starved` warn. */
+  autoCompactStarvedWarned = false;
+  /**
    * True while a context reset's two-step write is in flight. `_pendingContextReset`
    * is nulled at the TOP of `_fireContextReset`, i.e. 250 ms before the command
    * is actually submitted, so `hasPendingContextReset` alone leaves a window in
@@ -627,6 +801,8 @@ export class Session extends EventEmitter {
    * exactly that window.
    */
   private _contextResetFiring = false;
+  /** D5 — one `held — dialog pending` session-log line per armed reset. */
+  private _contextResetHeldLogged = false;
   /** Bytes of PTY output emitted since the last context reset (auto-compact backstop). */
   private _bytesSinceReset = 0;
   private readonly _idleThresholdMs: number;
@@ -638,6 +814,8 @@ export class Session extends EventEmitter {
   private readonly _onContextReset:
     | ((session: Session, cmd: ContextResetCommand) => void)
     | null;
+  /** docs/auto-compact.md D1 — the idle-boundary handler, or `null`. */
+  private readonly _onIdle: ((session: Session) => void) | null;
   /** Phase 4 — initial prompt is needed by persistence (not normally exposed). */
   readonly initialPromptRaw: string | null;
   /** One-shot resume notice prefixed to the positional prompt on spawn. */
@@ -690,6 +868,7 @@ export class Session extends EventEmitter {
     this._contextUsageWiring = init.contextUsage ?? null;
     this._onStateChange = init.onStateChange ?? null;
     this._onContextReset = init.onContextReset ?? null;
+    this._onIdle = init.onIdle ?? null;
     this._idleThresholdMs = init.idleThresholdMs ?? 2000;
     this._autoCompactBytes = init.autoCompactBytes ?? 0;
 
@@ -1158,10 +1337,24 @@ export class Session extends EventEmitter {
     };
   }
 
-  /** Push human input to the underlying PTY. */
+  /**
+   * Push human input to the underlying PTY.
+   *
+   * Every human-typed byte in the system arrives here or through
+   * `submitInput`: the web console (`http/ws/terminal.ts`), the REST composer
+   * (`http/routes/sessions.ts`) and a Discord approval reply
+   * (`approvals/resolve.ts`) are the only callers of `agent.write` outside this
+   * file. That is exactly why the D5 dialog guard is lowered here — a keystroke
+   * is the ONLY proof that whatever dialog was on screen has been dealt with.
+   */
   writeInput(data: string): void {
     if (!this.agent) return;
     this.agent.write(data);
+    // …but only a HUMAN keystroke lowers the D5 guard. A console frame that is
+    // pure terminal auto-response (a focus event, a resize's cursor report)
+    // answered a query the CLI made, not the dialog on screen.
+    if (isTerminalAutoResponse(data)) return;
+    this.clearDialogPending('input');
   }
 
   /**
@@ -1200,6 +1393,10 @@ export class Session extends EventEmitter {
       });
       return;
     }
+    // D5 — a human just answered whatever was on screen. Same argument as
+    // `writeInput`, and it has to be after the write succeeded: a refused write
+    // answered nothing.
+    this.clearDialogPending('input');
     if (!dance) return;
     setTimeout(() => {
       if (!this.agent) return;
@@ -1255,11 +1452,20 @@ export class Session extends EventEmitter {
     }
     this._appendLog(intro);
     if (!dance) return;
+    // docs/auto-compact.md §3.2 — from here until the CR below lands, the
+    // prompt buffer holds a half-typed line. `_scheduleContextReset` and
+    // `_scheduleNotice` back off on this flag exactly as they do on
+    // `_noticeFiring`, and `signalInbox` refuses outright: two signals 50 ms
+    // apart used to interleave into `text1 text2 CR CR` and submit one garbled
+    // line. Never raised for a provider without the Ink dance — there is a
+    // single write and no window to protect.
+    this._signalFiring = true;
     // Submit on the next tick so the TUI sees a standalone CR keypress
     // instead of a pasted chunk. We do NOT bump lastActivityAt here: the
     // signal is server-injected, not agent-produced output, so it must
     // not extend the busy window.
     setTimeout(() => {
+      this._signalFiring = false;
       if (!this.agent) return;
       try {
         this.agent.write('\r');
@@ -1271,7 +1477,189 @@ export class Session extends EventEmitter {
           error: err instanceof Error ? err.message : String(err),
         });
       }
-    }, 150);
+    }, SIGNAL_WRITE_WINDOW_MS);
+  }
+
+  /**
+   * Type the mailbox wake-up signal — THE single gate every server-side inbox
+   * nudge goes through (docs/auto-compact.md §3.2).
+   *
+   * Six call sites used to type `SIGNAL_TEXT` straight into the PTY
+   * (`messaging.injectSignal`, two in `Orchestrator`, `Spawner.notifyLead`,
+   * `skills/activation`, `mailbox-persistence`), one of them with a LITERAL
+   * copy of the string, and not one of them checked whether the line was
+   * already taken. Returns `false` WITHOUT writing when it is:
+   *
+   *  - `dialogPending` — the text would answer a permission dialog (D5);
+   *  - `_contextResetFiring` — a `/compact` is half-typed in the buffer;
+   *  - `_noticeFiring` — an operator notice is half-typed in the buffer;
+   *  - `_signalFiring` — another signal is half-typed in the buffer.
+   *
+   * A `false` is not an error and callers treat it as one of two things: the
+   * mailbox row is the source of truth, and the idle boundary re-signals it as
+   * soon as the line is free, because the message's `ts` is newer than the
+   * stamp this method sets.
+   */
+  signalInbox(): boolean {
+    if (this.dialogPending) return false;
+    if (this._contextResetFiring || this._noticeFiring || this._signalFiring) return false;
+    this.notifySignal(SIGNAL_TEXT);
+    this._lastInboxSignalAt = Date.now();
+    return true;
+  }
+
+  /**
+   * Epoch ms of the last signal `signalInbox` actually wrote, or `null` when
+   * none has been written since the last context reset. See `_lastInboxSignalAt`.
+   */
+  get lastInboxSignalAt(): number | null {
+    return this._lastInboxSignalAt;
+  }
+
+  /**
+   * docs/auto-compact.md D5 — is a dialog waiting for a human right now?
+   *
+   * Reading it is where the staleness check lives, deliberately: a flag that
+   * nobody consults is a flag that is hurting nobody, and a lazy check costs no
+   * timer on a fleet of hundreds of sessions.
+   */
+  get dialogPending(): boolean {
+    const pending = this._dialogPending;
+    if (pending === null) return false;
+    const ageMs = Date.now() - pending.at;
+    if (ageMs >= DIALOG_PENDING_STALE_MS && !this._dialogPendingStaleWarned) {
+      this._dialogPendingStaleWarned = true;
+      // Never auto-lowered — see `DIALOG_PENDING_STALE_MS`. This line is the
+      // only thing that tells an operator why an agent has stopped receiving
+      // mail signals, resets and notices.
+      log.warn({
+        event: 'session.dialog_pending_stale',
+        sessionId: this.id,
+        notificationType: pending.type,
+        ageMs,
+      });
+    }
+    return true;
+  }
+
+  /**
+   * The notification type that raised the dialog flag, or `null`. Carried into
+   * `session.auto_compact_skipped { reason: 'blocked' }` so the refusal names
+   * the dialog instead of leaving an operator guessing.
+   */
+  get dialogPendingType(): string | null {
+    return this._dialogPending?.type ?? null;
+  }
+
+  /**
+   * Raise the dialog guard (D5). Called from `http/routes/hooks.ts` for every
+   * `Notification` whose `notification_type` means "a dialog is waiting", and
+   * for an unknown type on a session whose permission mode can show one.
+   *
+   * Re-raising with a new type re-stamps the age, which is right: a second
+   * dialog is a second wait, and the staleness warning should describe the one
+   * that is actually on screen.
+   */
+  markDialogPending(notificationType: string): void {
+    this._dialogPending = { type: notificationType, at: Date.now() };
+    this._dialogPendingStaleWarned = false;
+    log.info({ event: 'session.dialog_pending', sessionId: this.id, notificationType });
+  }
+
+  /**
+   * Lower the dialog guard — the ONE clearing path (D5).
+   *
+   * `'input'`      a human typed (`writeInput` / `submitInput`). The only proof
+   *                we ever get for a permission prompt, which the CLI does not
+   *                report the end of.
+   * `'elicitation'` the CLI itself said the dialog is over
+   *                (`elicitation_complete` / `elicitation_response`). This is
+   *                what rescues an MCP elicitation that was cancelled on a
+   *                timeout: nobody typed, so without this notification the flag
+   *                would sit there for the rest of the session's life.
+   *
+   * Whatever the source, clearing RE-ARMS the three things the flag was holding
+   * back. They are all "one timer at a time, sized to the remaining idle gap"
+   * and each is a no-op when it has nothing pending, so calling all three
+   * unconditionally is cheaper than asking which of them was held.
+   */
+  clearDialogPending(source: 'input' | 'elicitation'): void {
+    // RE-BASE THE SILENCE CLOCK. `_idleSince` only moves on PTY bytes, so a
+    // dialog that sat on screen for ten minutes leaves it ten minutes old — and
+    // the three timers armed at the bottom of this method would then wake after
+    // 1 ms, pass their idle check, and write BEFORE the CLI has rendered
+    // anything at all.
+    //
+    // The failure that costs real work: an operator answering a free-text
+    // prompt (AskUserQuestion "Other", an elicitation form) types the first
+    // character, `writeInput` lands here, and a millisecond later the idle
+    // boundary types `\r[swarm-os] new message…\r` — whose LEADING `\r`
+    // submits that one-character answer. A held `/compact` fires the same way.
+    // Re-basing makes all three wait a full `idleThresholdMs` of REAL silence
+    // after the keystroke, which is the same rule every other injection obeys.
+    //
+    // Only here and in `resume()`: the other arm sites (spawn,
+    // `_resolveNotice`, the provider-without-reset branch) act on an agent that
+    // genuinely IS idle, and re-basing there would just delay a free boundary.
+    this._idleSince = Date.now();
+    const had = this._dialogPending;
+    this._dialogPending = null;
+    this._dialogPendingStaleWarned = false;
+    if (had !== null) {
+      log.info({
+        event: 'session.dialog_cleared',
+        sessionId: this.id,
+        notificationType: had.type,
+        source,
+        heldMs: Date.now() - had.at,
+      });
+    }
+    // D1 — an arm site with no PTY byte behind it: without this reset the timer
+    // below would fire into a callback that returns immediately.
+    this._idleNotified = false;
+    this._scheduleIdleCheck();
+    this._scheduleContextReset();
+    this._scheduleNotice();
+  }
+
+  /**
+   * docs/auto-compact.md D4 — declare the cached occupancy no longer descriptive
+   * of the live context.
+   *
+   * Called by `http/routes/hooks.ts` when a `SessionStart` arrives with
+   * `source` ∈ `{compact, clear}`, i.e. for the compactions the server did NOT
+   * arm: Claude Code's own internal auto-compact (which fires mid-turn, behind
+   * our back) and a `/compact` an operator typed in the console. Without it,
+   * the premise the auto-compact decision rests on — "the context only grows
+   * between two resets" — is false, and a snapshot inherited from before such a
+   * compaction would arm a redundant `/compact` on a context that is already
+   * fresh. For a reset the server DID arm this is a harmless second bump.
+   */
+  markContextStale(): void {
+    this._contextUsage?.markStale();
+  }
+
+  /**
+   * docs/auto-compact.md D3 — the smallest occupancy measured since this
+   * session's last context reset, in tokens, or `null`. Read by the auto-compact
+   * decision as the base of its 10-point hysteresis.
+   */
+  get contextFloorTokens(): number | null {
+    return this._contextUsage?.floorTokens ?? null;
+  }
+
+  /**
+   * Append one server-authored line to the session log (and therefore to the
+   * console an operator can attach to).
+   *
+   * The same channel `requestContextReset` and `armNotice` write their own
+   * `[swarm-os] …` lines on, exposed because a decision taken OUTSIDE this class
+   * — the auto-compact arming, which lives in the Orchestrator — has to be
+   * visible in the same place. Nothing is written to the PTY: this is a log
+   * line, not an injection.
+   */
+  appendServerLogLine(text: string): void {
+    this._appendLog(text.endsWith('\n') ? text : `${text}\n`);
   }
 
   /**
@@ -1313,11 +1701,19 @@ export class Session extends EventEmitter {
     if (this._pendingContextReset || this._contextResetFiring) return false;
     if (!this.agent) return false;
     if (this._status !== 'running' && this._status !== 'waiting') return false;
+    // "…or the session is terminating", as the JSDoc above promises. `stop()`
+    // leaves the status at `running` for the whole SIGTERM grace window, so the
+    // status check alone would arm a reset onto a PTY that is being torn down —
+    // and the idle boundary the command waits for is precisely the silence of a
+    // process on its way out.
+    if (this._stopRequested) return false;
     this._pendingContextReset = {
       cmd,
       instructions: opts.instructions,
       idleMs: Math.max(0, opts.idleMs),
     };
+    // One "held — dialog pending" line per ARMED reset, not per re-check.
+    this._contextResetHeldLogged = false;
     this._appendLog(
       `[swarm-os] context ${cmd} armed — will fire once idle for ${opts.idleMs}ms\n`,
     );
@@ -1350,16 +1746,51 @@ export class Session extends EventEmitter {
         this._scheduleContextReset();
         return;
       }
+      // docs/auto-compact.md D5 — two states in which a reset must be HELD,
+      // not fired and not re-armed:
+      //
+      //  `dialogPending` a permission / elicitation dialog is on screen. The
+      //                  `\r` that submits `/compact` would validate the
+      //                  highlighted option of that dialog instead. Covers every
+      //                  source of a reset at once — `team.context_compact`,
+      //                  `team.clear_worker`, the operator's COMPACT button and
+      //                  both env backstops all land here.
+      //  `paused`        the process is SIGSTOP'd and cannot read its tty. This
+      //                  is a pre-existing defect repaired in passing: a reset
+      //                  armed before `pause()` used to be written into the
+      //                  frozen PTY, arrive as one glued chunk at SIGCONT and
+      //                  never submit — while `markStale`/`recordReset` had
+      //                  already run, so the gauge reported a compaction that
+      //                  never happened.
+      //
+      // No re-arm on purpose: `clearDialogPending` (a human keystroke, or the
+      // CLI reporting the dialog closed) and `resume()` both re-arm, so the
+      // reset resumes the instant the obstacle is gone instead of spinning a
+      // timer against it.
+      if (this.dialogPending || this._status === 'paused') {
+        if (this.dialogPending && !this._contextResetHeldLogged) {
+          this._contextResetHeldLogged = true;
+          // Without this line "held" and "crashed" are indistinguishable from
+          // the COMPACT button, which answered `scheduled` and keeps its badge.
+          this._appendLog(
+            `[swarm-os] context ${this._pendingContextReset.cmd} held — dialog pending\n`,
+          );
+        }
+        return;
+      }
       // D.5 ordering guard, reset side. An operator notice fires on the SAME
       // idle boundary and writes to the SAME prompt buffer; if its two-step
       // write is in flight, back off rather than garble both. This branch is
       // unreachable unless someone called `armNotice` — sessions that never
       // use the new API keep the exact previous behaviour.
-      if (this._noticeFiring || this._contextResetFiring) {
+      if (this._noticeFiring || this._contextResetFiring || this._signalFiring) {
         // `_contextResetFiring`: another reset's two-step write is mid-flight
         // (only reachable through the race the occupancy guards now close, or
         // a future caller) — firing NOW would interleave two half-typed slash
         // commands in the same prompt buffer and garble both.
+        // `_signalFiring`: same window, third injector (docs/auto-compact.md
+        // §3.2) — a mailbox signal's text is in the buffer and its CR has not
+        // landed yet.
         this._scheduleContextReset(PTY_INJECT_CONTENTION_RETRY_MS);
         return;
       }
@@ -1386,6 +1817,11 @@ export class Session extends EventEmitter {
       this._appendLog(
         `[swarm-os] context ${pending.cmd} skipped — provider ${this.provider.id} has no context reset\n`,
       );
+      // D1 — nothing was written, so no PTY byte will ever re-arm the idle
+      // boundary. This branch took the boundary and gave nothing back; without
+      // this, an agent that stays silent would never have another one.
+      this._idleNotified = false;
+      this._scheduleIdleCheck();
       return;
     }
     // The reset shrinks the context, so restart the auto-compact accounting.
@@ -1437,6 +1873,14 @@ export class Session extends EventEmitter {
       // an armed reset can wait minutes for an idle boundary, and a reset the
       // provider does not support returns above without ever writing anything.
       this._contextUsage?.recordReset(pending.cmd);
+      // docs/auto-compact.md D2 step 1 — the agent's awareness of its inbox was
+      // just wiped (`/clear`) or summarised (`/compact`). Dropping the stamp
+      // makes the ONE idle-boundary rule ("signal when something is newer than
+      // the last signal") also mean "signal again after a reset", which is
+      // guarantee G. It replaces the `setTimeout(2000)` the Orchestrator used to
+      // arm here: the re-signal now happens when the compaction is genuinely
+      // over (the PTY goes quiet again), not when a fixed timer says so.
+      this._lastInboxSignalAt = null;
       // Hand off to the orchestrator so it can re-wake the agent if a `/clear`
       // left undelivered mail behind (the mailbox is server-side and survives).
       try {
@@ -1571,16 +2015,36 @@ export class Session extends EventEmitter {
       // Ordering guard, notice side: a `/clear` / `/compact` targets the same
       // idle boundary and the same prompt buffer. Armed-but-unfired counts as
       // busy (it will take this very boundary), and so does its in-flight
-      // two-step write.
-      const lineHeld = this._pendingContextReset !== null || this._contextResetFiring;
+      // two-step write — and, since docs/auto-compact.md §3.2, a mailbox
+      // signal's two-step write too.
+      //
+      // `dialogPending` (D5) is folded in here rather than given its own branch
+      // because the semantics are identical: the line is not ours to type on, so
+      // back off and try again until the deadline. What it must NOT do is fire
+      // anyway — the notice text would answer a permission dialog — nor resolve
+      // early, because the operator's deadline is the operator's to spend.
+      const dialogHeld = this.dialogPending;
+      const lineHeld =
+        dialogHeld ||
+        this._pendingContextReset !== null ||
+        this._contextResetFiring ||
+        this._signalFiring;
       if (idle && !lineHeld) {
         this._fireNotice();
         return;
       }
       if (t >= p.deadlineAt) {
+        // Distinct reason per cause: "the agent never stopped talking", "a
+        // reset owned the line" and "a human never answered a dialog" are three
+        // different things for whoever reads the outcome, and only the last one
+        // is fixed by someone walking over to the console.
         this._resolveNotice(
           'never_idle',
-          lineHeld ? 'deadline-while-context-reset-held-the-line' : 'deadline-busy',
+          dialogHeld
+            ? 'deadline-dialog-pending'
+            : lineHeld
+              ? 'deadline-while-context-reset-held-the-line'
+              : 'deadline-busy',
         );
         return;
       }
@@ -1633,6 +2097,13 @@ export class Session extends EventEmitter {
     if (!pending) return;
     this._noticeState = { id: pending.id, outcome };
     if (outcome !== 'fired') {
+      // D1 — the notice had claimed this idle boundary (D2 step 0 declines a
+      // boundary while one is armed) and is now giving it back without having
+      // written anything. Nothing else would produce another: an agent that
+      // emits no further PTY byte would never be evaluated again, and mail
+      // queued behind a cancelled notice would never be signalled.
+      this._idleNotified = false;
+      this._scheduleIdleCheck();
       this._appendLog(
         `[swarm-os] operator notice NOT delivered (${outcome}${reason ? `: ${reason}` : ''})\n`,
       );
@@ -1679,6 +2150,109 @@ export class Session extends EventEmitter {
    */
   get noticeState(): NoticeState | null {
     return this._noticeState;
+  }
+
+  // --- docs/auto-compact.md D1 — the idle boundary -----------------------
+  //
+  // The ONE new event this feature introduces: "this agent has just stopped
+  // working". Everything else (re-signalling an inbox, deciding an
+  // auto-compact, refreshing the gauge) hangs off it.
+  //
+  // Why PTY silence and not a provider callback. claude's `Notification` hook
+  // means "blocked on a human" or "idle for 60 s" — the OPPOSITE of "free to be
+  // compacted". codex and gemini have turn-complete callbacks, but gemini has no
+  // context tracker at all and opencode calls nothing back. A claude `Stop` hook
+  // would be claude-only and would touch the production-critical hook shell
+  // chain. PTY silence is the only signal all four providers share, and it is
+  // already the definition of "idle" for the mailbox, for context resets and for
+  // operator notices — every TUI redraws a spinner while a turn runs, so 2 s of
+  // silence is a prompt on screen.
+
+  /**
+   * (Re)arm the idle check. Same shape as `_scheduleContextReset`: ONE timer at
+   * a time, sized to the idle time that remains, re-checked on wake.
+   *
+   * The `_idleTimer` early return is the load-bearing part. This is called from
+   * the PTY data handler, i.e. potentially thousands of times a minute; a
+   * clear+set per chunk would churn a timer per byte burst for no benefit,
+   * because the callback already re-arms itself when it wakes up too early.
+   */
+  private _scheduleIdleCheck(): void {
+    if (this._onIdle === null) return;
+    // A terminal session has no boundary worth arming, and two arm sites fire
+    // AFTER the end: `_handleExit` clears this timer and then calls
+    // `_resolveNotice('aborted')`, which re-arms it; and a hook
+    // (`elicitation_response`) can land on a session that died a second ago.
+    if (this._isTerminal()) return;
+    // Already consumed for this period of silence — the next PTY byte (or an
+    // explicit arm site) lowers the flag.
+    if (this._idleNotified) return;
+    if (this._idleTimer !== null) return;
+    const wait = Math.max(1, this._idleThresholdMs - (Date.now() - this._idleSince));
+    const timer = setTimeout(() => {
+      this._idleTimer = null;
+      this._fireIdleBoundary();
+    }, wait);
+    // Never hold the process open for a boundary: shutdown paths clear it, and
+    // an agent that is about to die has no boundary worth waiting for.
+    timer.unref?.();
+    this._idleTimer = timer;
+  }
+
+  /**
+   * D2 step 0 — decide whether THIS moment of silence is a boundary the
+   * Orchestrator may act on, then hand it over exactly once.
+   *
+   * The four exclusions live here, in the Session, for two reasons: they are
+   * all Session state, and a boundary they decline must NOT be marked consumed.
+   * A declined boundary comes back on its own — through the echo of the reset
+   * that took it, through the keystroke that closes the dialog, or through
+   * `_resolveNotice`. If we set `_idleNotified` here, the agent would have to
+   * speak again to ever get another one, which for an idle agent means never.
+   */
+  private _fireIdleBoundary(): void {
+    const onIdle = this._onIdle;
+    if (onIdle === null) return;
+    if (this._idleNotified) return;
+    // The agent spoke while we slept: sleep out the remaining gap instead of
+    // polling. Same re-arm loop as the reset and notice timers.
+    if (Date.now() - this._idleSince < this._idleThresholdMs) {
+      this._scheduleIdleCheck();
+      return;
+    }
+    // `paused` is never idle (`messaging.isIdle`): a SIGSTOP'd process cannot
+    // drain its tty. `starting` has no prompt yet, and the terminal states have
+    // no PTY at all. `resume()` re-arms for the paused case.
+    if (this._status !== 'running' && this._status !== 'waiting') return;
+    // A stop is in flight. The status stays `running` for the whole SIGTERM
+    // grace window, so without this the quiet of a dying process reads as a
+    // task boundary and the handler signals an inbox nobody will ever drain,
+    // or arms a `/compact` on a PTY that is closing.
+    if (this._stopRequested) return;
+    // D5 — a dialog is on screen. Not a free boundary: everything the handler
+    // would do ends in a write.
+    if (this.dialogPending) return;
+    // A reset owns this boundary (armed, or mid two-step write). The two timers
+    // expire at the same instant by construction — both are `_idleSince +
+    // idleMs` — so this is the common case, not a corner one, and the reset
+    // wins: it was armed first and it is the thing that changes the context the
+    // handler is about to reason about.
+    if (this.hasPendingContextReset) return;
+    // Same for an armed operator notice: it is about to take this boundary.
+    if (this.hasPendingNotice) return;
+    this._idleNotified = true;
+    try {
+      onIdle(this);
+    } catch (err) {
+      // The handler is the Orchestrator's; a bug in it may not take an agent
+      // down, and must not leave the boundary un-consumed either (that would
+      // re-enter the same bug on the next byte).
+      log.warn({
+        event: 'session.idle_callback_failed',
+        sessionId: this.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
   }
 
   /**
@@ -1738,6 +2312,11 @@ export class Session extends EventEmitter {
     if (!this.agent) {
       this._setStatus('killed');
       this._endedAt ??= new Date().toISOString();
+      // `_handleExit` will never run on this path — there is no process to
+      // exit — so the idle timer has to be released here or it outlives the
+      // session (it is `unref`'d, so it would not hold the process up, but it
+      // would still call back into a dead session).
+      this._clearIdleTimer();
       // Terminal state with no process: `_handleExit` will never run, so this is
       // the ONLY place this session's on-disk artifacts can be reclaimed. Same
       // three steps as `_handleExit`, same order (MCP block first — for a
@@ -1846,6 +2425,20 @@ export class Session extends EventEmitter {
     this._statusBeforePause = null;
     this._setStatus(restored);
     this._appendLog(`[swarm-os] RESUME (SIGCONT) — ${reason}\n`);
+    // Re-base the silence clock, same argument as `clearDialogPending`: a
+    // process SIGSTOP'd mid-turn has an `_idleSince` as old as the pause, so
+    // the timers below would fire at +1 ms — before the woken CLI has emitted
+    // the first byte of the turn it was frozen in the middle of.
+    this._idleSince = Date.now();
+    // D1 — a resumed agent whose PTY stays silent would otherwise never be
+    // evaluated again: no byte, no boundary. It is evaluated at THIS boundary,
+    // then at the end of its next turn.
+    this._idleNotified = false;
+    this._scheduleIdleCheck();
+    // D5 — a reset parked by `_scheduleContextReset` while the process was
+    // SIGSTOP'd is not re-armed by anything else. Same for one that was simply
+    // waiting: its timer was consumed by the hold.
+    this._scheduleContextReset();
     return true;
   }
 
@@ -2004,9 +2597,21 @@ export class Session extends EventEmitter {
     this._pid = agent.pid;
     this._setStatus('running');
 
+    // D1 — the spawn is an arm site without a PTY byte behind it: the agent may
+    // print nothing at all (a CLI that boots straight to a prompt on a resumed
+    // session), and without this it would have no first boundary.
+    this._idleNotified = false;
+    this._scheduleIdleCheck();
+
     this._agentDataDisp = agent.onData((d) => {
       this._lastActivityAt = new Date().toISOString();
       this._idleSince = Date.now();
+      // D1 — the agent is talking: this period of silence is over, and a new
+      // boundary is owed at the end of the burst. `_scheduleIdleCheck` is a
+      // no-op while a timer is already armed, so this costs one comparison per
+      // chunk and never a timer churn.
+      this._idleNotified = false;
+      this._scheduleIdleCheck();
       this._appendLog(d);
       // Context-management backstop: track output volume since the last reset
       // and auto-arm a /compact once it crosses the configured threshold.
@@ -2071,6 +2676,8 @@ export class Session extends EventEmitter {
     }
     this._pendingContextReset = null;
     this._contextResetFiring = false;
+    // D1 — the PTY whose silence it was measuring is gone.
+    this._clearIdleTimer();
     // Same for an armed operator notice (D.5). No-op when it already fired —
     // `_resolveNotice` returns early on an empty slot, so a `fired` outcome
     // recorded moments ago survives the exit and stays reportable.
@@ -2095,6 +2702,23 @@ export class Session extends EventEmitter {
     // this is mainly defensive against subscribers that might forget to
     // unregister.
     this.removeAllListeners('exit');
+  }
+
+  /** True once this session has reached a state it can never leave. */
+  private _isTerminal(): boolean {
+    return (
+      this._status === 'exited' ||
+      this._status === 'killed' ||
+      this._status === 'failed' ||
+      this._status === 'interrupted'
+    );
+  }
+
+  /** D1 — release the idle timer (exit, or a stop with no process). */
+  private _clearIdleTimer(): void {
+    if (this._idleTimer === null) return;
+    clearTimeout(this._idleTimer);
+    this._idleTimer = null;
   }
 
   private _setStatus(s: SessionStatus): void {

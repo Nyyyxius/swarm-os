@@ -386,6 +386,36 @@ export class Mailbox {
   }
 
   /**
+   * Epoch ms of the NEWEST message queued for `sid`, or `null` when the queue
+   * is empty (docs/auto-compact.md §3.2).
+   *
+   * Exists for exactly one rule, at the idle boundary: re-signal the inbox only
+   * when something arrived AFTER the last signal we sent
+   * (`Session.lastInboxSignalAt`). That is what caps the wake-ups at one per
+   * message — an agent that keeps ignoring its inbox is not nudged again at
+   * every boundary for the rest of its life.
+   *
+   * Scans the queue rather than reading the last element: `rehydrateMailbox`
+   * re-pushes persisted rows with their ORIGINAL `ts`, so insertion order is
+   * not timestamp order across a restart. Bounded by `maxSize` (100), O(n) on
+   * integers, once per boundary.
+   *
+   * A row whose `ts` does not parse is skipped rather than treated as `now`:
+   * inventing a fresh timestamp for a corrupt one would re-signal forever.
+   */
+  newestTs(sid: string): number | null {
+    const q = this.inboxes.get(sid);
+    if (!q || q.length === 0) return null;
+    let newest: number | null = null;
+    for (const m of q) {
+      const t = Date.parse(m.ts);
+      if (Number.isNaN(t)) continue;
+      if (newest === null || t > newest) newest = t;
+    }
+    return newest;
+  }
+
+  /**
    * Monotonic count of draining `read()` calls served for `sid` since this
    * mailbox was constructed — see the `reads` field for the full contract.
    *

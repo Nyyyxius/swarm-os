@@ -893,6 +893,9 @@ write_env() {
   env_kv  SWARM_OS_MAX_ORCHESTRATORS "${SWARM_OS_MAX_ORCHESTRATORS:-10}"
   env_kv  SWARM_OS_MAX_WORKERS_PER_ORCH "${SWARM_OS_MAX_WORKERS_PER_ORCH:-20}"
   env_kv  SWARM_OS_LOG_LEVEL "${SWARM_OS_LOG_LEVEL:-info}"
+  # SWARM_OS_IDE_ENABLED is only a FIRST-BOOT seed default: after the first boot
+  # the DB governs and the IDE is toggled from the Plugins screen (built-in
+  # feature, docs/builtin-features.md). Written here just to seed that state.
   env_kv  SWARM_OS_IDE_ENABLED "${SWARM_OS_IDE_ENABLED:-true}"
   env_kv  SWARM_OS_IDE_PORT "${SWARM_OS_IDE_PORT:-8790}"
 

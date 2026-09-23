@@ -60,7 +60,18 @@ export function emitMailboxMessage(
  * matter what; the signal is just a hint.
  */
 
-export const SIGNAL_TEXT = '[swarm-os] new message in inbox — call team.read_inbox to fetch';
+/**
+ * The mailbox wake-up text. It MOVED to `session.ts`
+ * (docs/auto-compact.md §3.2) — with `Session.signalInbox()` as the single gate
+ * every injector goes through, the constant belongs next to the method that
+ * types it. Re-exported here because this module's importers (`preamble.ts`
+ * bakes it into every agent's instructions, `spawner`, `skills/activation`,
+ * `mailbox-persistence`) have used this path since Phase 3.
+ *
+ * No runtime cycle: `Session` is imported as a TYPE above, so nothing of this
+ * module is loaded by `session.ts`.
+ */
+export { SIGNAL_TEXT } from './session.js';
 
 export class MessageError extends Error {
   /** HTTP status (REST) — MCP code is derived in tools.ts. */
@@ -157,14 +168,26 @@ export function isIdle(session: Session, now: number, idleThresholdMs: number): 
 }
 
 /**
- * Inject the signal into the recipient's PTY. Wraps the text in `\n…\n` so
- * it always lands on its own line (terminals can be mid-write at any
- * column). Best-effort: the underlying `notifySignal` swallows write errors.
+ * Inject the wake-up signal into the recipient's PTY.
+ *
+ * Routed through `Session.signalInbox()` since docs/auto-compact.md §3.2: it is
+ * the one place that knows whether the prompt buffer is free (no dialog on
+ * screen, no half-typed `/compact`, no half-typed notice or signal) and it
+ * stamps `lastInboxSignalAt` so the idle boundary can tell "already nudged for
+ * this message" from "new mail since".
+ *
+ * A `false` is NOT a failure and the caller reports it as `signalled: false`,
+ * same as before: the mailbox push is the source of truth, and the boundary
+ * re-signals as soon as the line frees up because this message's `ts` is newer
+ * than the stamp.
  */
 function injectSignal(session: Session): boolean {
   try {
-    session.notifySignal(SIGNAL_TEXT);
-    return true;
+    const sent = session.signalInbox();
+    if (!sent) {
+      log.debug({ event: 'notifySignal.line_busy', sessionId: session.id });
+    }
+    return sent;
   } catch (err) {
     log.error({
       event: 'notifySignal.failed',

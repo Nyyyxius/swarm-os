@@ -12,8 +12,9 @@ import { CronsPage } from './components/CronsPage';
 import { CodeGraphPage } from './components/CodeGraphPage';
 import IdeOverlay from './components/desktop/IdeOverlay';
 import PluginPanelHost from './components/desktop/PluginPanelHost';
-import { SwarmControllerProvider } from './controller/SwarmController';
+import { SwarmControllerProvider, useSwarmController } from './controller/SwarmController';
 import { useShellMode } from './hooks/useShellMode';
+import { type FeatureName } from './api/client';
 
 type Route =
   | { kind: 'list' }
@@ -82,6 +83,134 @@ function setHashRoute(route: Route): void {
   if (window.location.hash !== target) {
     window.location.hash = target;
   }
+}
+
+/**
+ * Which built-in feature governs a route (docs/builtin-features.md). A route
+ * absent from this map is never feature-gated (list/detail/roles/plugins/
+ * skills/crons/panel). `graph` maps to `codegraph`.
+ */
+const ROUTE_FEATURE: Partial<Record<Route['kind'], FeatureName>> = {
+  memory: 'memory',
+  board: 'board',
+  approvals: 'approvals',
+  monitoring: 'monitoring',
+  graph: 'codegraph',
+  ide: 'ide',
+};
+
+interface RoutedOverlaysProps {
+  route: Route;
+  setRoute: (r: Route) => void;
+  isMobile: boolean;
+  cronsRoleFilter: string | null;
+  setCronsRoleFilter: (r: string | null) => void;
+}
+
+/**
+ * Shell + route overlays, rendered UNDER the controller so it can read the
+ * built-in feature map. Two feature-driven behaviours live here (D10):
+ *
+ *   1. **Redirect** — a deep-linked route whose feature is KNOWN-disabled bounces
+ *      back to the list (same idiom as the mobile-ide redirect in `App`).
+ *   2. **Fetch gate** — a feature-gated overlay opens ONLY once the snapshot
+ *      confirms the feature enabled. While `features` is `null` (unknown) the
+ *      overlay stays closed, so NO page fetch fires on a deep-link before we
+ *      know the feature is on — that is what avoids a `FEATURE_DISABLED` frame.
+ */
+function RoutedOverlays({
+  route, setRoute, isMobile, cronsRoleFilter, setCronsRoleFilter,
+}: RoutedOverlaysProps) {
+  const { features } = useSwarmController();
+
+  const routeFeature = ROUTE_FEATURE[route.kind];
+  useEffect(() => {
+    if (routeFeature && features && features[routeFeature] === false) {
+      setRoute({ kind: 'list' });
+    }
+  }, [routeFeature, features, setRoute]);
+
+  // Open a gated overlay only when the snapshot is known AND the feature is on.
+  const gatedOpen = (kind: Route['kind'], feat: FeatureName): boolean =>
+    route.kind === kind && features != null && features[feat] === true;
+
+  return (
+    <>
+      {isMobile ? <MobileShell /> : <DesktopShell />}
+
+      {/* RolesPage overlay — not feature-gated. Its APPROVALS section is hidden
+          when the approvals feature is off (the server keeps accepting
+          `approval_json` as an inert field). */}
+      <RolesPage
+        open={route.kind === 'roles'}
+        onClose={() => setRoute({ kind: 'list' })}
+        onOpenCrons={(roleId) => {
+          setCronsRoleFilter(roleId);
+          setRoute({ kind: 'crons', id: null });
+        }}
+        approvalsVisible={features?.approvals !== false}
+      />
+
+      <MemoryPage
+        open={gatedOpen('memory', 'memory')}
+        onClose={() => setRoute({ kind: 'list' })}
+      />
+
+      <BoardPage
+        open={gatedOpen('board', 'board')}
+        onClose={() => setRoute({ kind: 'list' })}
+      />
+
+      <ApprovalsPage
+        open={gatedOpen('approvals', 'approvals')}
+        onClose={() => setRoute({ kind: 'list' })}
+      />
+
+      <MonitoringPage
+        open={gatedOpen('monitoring', 'monitoring')}
+        onClose={() => setRoute({ kind: 'list' })}
+      />
+
+      {/* PluginsPage — not feature-gated (it is where features are managed). */}
+      <PluginsPage
+        open={route.kind === 'plugins'}
+        onClose={() => setRoute({ kind: 'list' })}
+      />
+
+      <SkillsPage
+        open={route.kind === 'skills'}
+        onClose={() => setRoute({ kind: 'list' })}
+      />
+
+      <CodeGraphPage
+        open={gatedOpen('graph', 'codegraph')}
+        onClose={() => setRoute({ kind: 'list' })}
+      />
+
+      <CronsPage
+        open={route.kind === 'crons'}
+        cronId={route.kind === 'crons' ? route.id : null}
+        roleFilter={cronsRoleFilter}
+        onClearRoleFilter={() => setCronsRoleFilter(null)}
+        onSelectCron={(id) => setRoute({ kind: 'crons', id })}
+        onClose={() => setRoute({ kind: 'list' })}
+      />
+
+      {/* IDE overlay — desktop-only AND feature-gated. */}
+      {!isMobile && gatedOpen('ide', 'ide') && (
+        <IdeOverlay onClose={() => setRoute({ kind: 'list' })} />
+      )}
+
+      {/* Plugin UI panel overlay (feature B.3). */}
+      {route.kind === 'panel' && (
+        <PluginPanelHost
+          pluginName={route.plugin}
+          panelId={route.panel}
+          onClose={() => setRoute({ kind: 'plugins' })}
+        />
+      )}
+    </>
+  );
 }
 
 /**
@@ -158,98 +287,15 @@ export default function App() {
           shellMode={shellMode}
           setShellMode={setShellMode}
         >
-          {isMobile ? <MobileShell /> : <DesktopShell />}
-
-          {/* RolesPage overlay — supported on both shells (responsive). `open`
-              gates rendering, so it's safe to always mount. */}
-          <RolesPage
-            open={route.kind === 'roles'}
-            onClose={() => setRoute({ kind: 'list' })}
-            onOpenCrons={(roleId) => {
-              setCronsRoleFilter(roleId);
-              setRoute({ kind: 'crons', id: null });
-            }}
+          {/* Shell + overlays live UNDER the provider so they can read the
+              built-in feature map for redirect + fetch-gating (D10). */}
+          <RoutedOverlays
+            route={route}
+            setRoute={setRoute}
+            isMobile={isMobile}
+            cronsRoleFilter={cronsRoleFilter}
+            setCronsRoleFilter={setCronsRoleFilter}
           />
-
-          {/* MemoryPage overlay — shared knowledge graph. Responsive, safe to
-              always mount (gated by `open`), same pattern as RolesPage. */}
-          <MemoryPage
-            open={route.kind === 'memory'}
-            onClose={() => setRoute({ kind: 'list' })}
-          />
-
-          {/* BoardPage overlay — durable task board (Kanban). Desktop-only,
-              read-only for the web surface (Phase 4). */}
-          <BoardPage
-            open={route.kind === 'board'}
-            onClose={() => setRoute({ kind: 'list' })}
-          />
-
-          {/* ApprovalsPage overlay — approval-gate queue + history (Phase 5.3).
-              Always-mounted gated by `open`, same pattern as BoardPage. */}
-          <ApprovalsPage
-            open={route.kind === 'approvals'}
-            onClose={() => setRoute({ kind: 'list' })}
-          />
-
-          {/* MonitoringPage overlay — per-agent context / throughput / inbox
-              (docs/monitoring-agents.md). Always-mounted gated by `open`, same
-              pattern as ApprovalsPage; its polling and its clock tick are both
-              gated by `open`, so a closed page issues no request and does not
-              re-render. */}
-          <MonitoringPage
-            open={route.kind === 'monitoring'}
-            onClose={() => setRoute({ kind: 'list' })}
-          />
-
-          {/* PluginsPage overlay — responsive, safe to always mount (gated by `open`). */}
-          <PluginsPage
-            open={route.kind === 'plugins'}
-            onClose={() => setRoute({ kind: 'list' })}
-          />
-
-          {/* SkillsPage overlay — skills library management (Lot 1b). Always-
-              mounted gated by `open`, same pattern as PluginsPage. */}
-          <SkillsPage
-            open={route.kind === 'skills'}
-            onClose={() => setRoute({ kind: 'list' })}
-          />
-
-          {/* CodeGraphPage overlay — code knowledge graph (Graphify P4). Always-
-              mounted gated by `open`, same pattern as BoardPage. */}
-          <CodeGraphPage
-            open={route.kind === 'graph'}
-            onClose={() => setRoute({ kind: 'list' })}
-          />
-
-          {/* CronsPage overlay — agent cadences (docs/crons-agents.md). Always
-              mounted gated by `open`; the poll of `useCrons` is gated by the
-              same flag, so a closed screen issues no request. The selected
-              cron is carried BY THE ROUTE (`#/crons/<id>` is a deep link),
-              while the role filter is component state fed by `onOpenCrons`. */}
-          <CronsPage
-            open={route.kind === 'crons'}
-            cronId={route.kind === 'crons' ? route.id : null}
-            roleFilter={cronsRoleFilter}
-            onClearRoleFilter={() => setCronsRoleFilter(null)}
-            onSelectCron={(id) => setRoute({ kind: 'crons', id })}
-            onClose={() => setRoute({ kind: 'list' })}
-          />
-
-          {/* IDE overlay is desktop-only (the #/ide redirect keeps mobile off it). */}
-          {!isMobile && route.kind === 'ide' && (
-            <IdeOverlay onClose={() => setRoute({ kind: 'list' })} />
-          )}
-
-          {/* Plugin UI panel overlay (feature B.3) — responsive, mounted only
-              while the panel route is active. */}
-          {route.kind === 'panel' && (
-            <PluginPanelHost
-              pluginName={route.plugin}
-              panelId={route.panel}
-              onClose={() => setRoute({ kind: 'plugins' })}
-            />
-          )}
         </SwarmControllerProvider>
       </main>
     </div>

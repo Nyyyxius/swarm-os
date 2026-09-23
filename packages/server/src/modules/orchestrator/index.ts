@@ -8,7 +8,14 @@ import {
 } from './session.js';
 import { Mailbox } from './mailbox.js';
 import { buildPreamble, type PluginToolSummary, type SkillFragment } from './preamble.js';
-import { emitMailboxMessage, SIGNAL_TEXT } from './messaging.js';
+import type { FeatureName } from '../features/registry.js';
+import { emitMailboxMessage } from './messaging.js';
+import {
+  AUTO_COMPACT_INSTRUCTIONS,
+  decideAutoCompact,
+  type AutoCompactDecision,
+  type AutoCompactInput,
+} from './auto-compact.js';
 import { eventBus } from '../../events.js';
 import { withModule } from '../../logger.js';
 import type { AgentProcess } from './agent-process.js';
@@ -173,6 +180,13 @@ export interface OrchestratorDeps {
    */
   pluginTools?: () => readonly PluginToolSummary[];
   /**
+   * Built-in feature snapshot (true = enabled). MIRRORS `pluginTools` — a thunk
+   * so a toggle mid-team is seen at each spawn. Not consumed yet: Lots 4/5/8 will
+   * pass it to `buildPreamble` (feature-section stripping) and gate the board
+   * auto-card. Held here now so `index.ts` can wire it end-to-end. Omitted ⇒ none.
+   */
+  features?: () => Record<FeatureName, boolean>;
+  /**
    * Resolver for the skills active on this team's role (docs/plan-skills-
    * importables.md §2.1, durable channel). Called at EACH spawn so the preamble
    * reflects the CURRENT activation. Mirrors `pluginTools`. Omitted ⇒ none.
@@ -185,6 +199,18 @@ export interface OrchestratorDeps {
    * Omitted in unit tests that don't exercise the board ⇒ no auto-cards.
    */
   taskboard?: TaskboardStore;
+  /**
+   * docs/auto-compact.md D7 — resolves the auto-compact threshold, in percent,
+   * for a team's role. Same style as `pluginTools` / `features`: a FUNCTION, not
+   * a number, because it is called at EVERY idle boundary of every session and a
+   * role edited while the fleet runs must apply at the next one — this server
+   * runs 24/7 and a restart is not an acceptable way to change a percentage.
+   *
+   * `roleId` is the team's (`Orchestrator.roleId`), possibly `null`; the
+   * implementation answers the instance default for a null, unknown or deleted
+   * role. Omitted (every unit test, every embedder) ⇒ `config.autoCompactPct`.
+   */
+  autoCompact?: { thresholdPctFor(roleId: string | null): number };
 }
 
 export interface StartOptions {
@@ -357,12 +383,18 @@ export class Orchestrator {
   readonly persistence: Persistence;
   private readonly _onHideRequested: ((orchestratorId: string) => void) | null;
   private readonly _pluginTools: (() => readonly PluginToolSummary[]) | null;
+  // Built-in feature snapshot thunk. Stored (mirroring `_pluginTools`) but not
+  // read yet — Lots 4/5/8 consume it. `void`-referenced in the constructor so
+  // the wiring is exercised without changing any behaviour in Lot 1.
+  private readonly _features: (() => Record<FeatureName, boolean>) | null;
   private readonly _taskboard: TaskboardStore | null;
   private readonly _skills:
     | ((orchestratorId: string, sessionId: string) => readonly SkillFragment[])
     | null;
   /** Monitoring — model context limits (`null` ⇒ the pinned table answers). */
   private readonly _modelCatalogue: ModelCatalogue | null;
+  /** docs/auto-compact.md D7 — live per-role threshold resolver, or `null`. */
+  private readonly _autoCompact: { thresholdPctFor(roleId: string | null): number } | null;
   /** Monitoring — bounded transcript tail reader for this team's transport. */
   private readonly _tailReader: ContextUsageWiring['readTail'];
   /** Monitoring — ranged transcript reader (Lot 11, token accounting). */
@@ -456,8 +488,13 @@ export class Orchestrator {
     this.persistence = deps.persistence ?? new NoOpPersistence();
     this._onHideRequested = deps.onHideRequested ?? null;
     this._pluginTools = deps.pluginTools ?? null;
+    this._features = deps.features ?? null;
+    // Consumed at buildPreamble time (feature-section stripping / stale-mention
+    // lint, D5) via `this._features?.()`; Lot 5 also reads it to gate the board
+    // auto-card. `null` (no thunk wired) ⇒ every feature treated as enabled.
     this._taskboard = deps.taskboard ?? null;
     this._skills = deps.skills ?? null;
+    this._autoCompact = deps.autoCompact ?? null;
     this._modelCatalogue = deps.modelCatalogue ?? null;
     // Monitoring — one reader per orchestrator, shared by its sessions: the
     // transport cannot change under a live team, and the closure holds nothing
@@ -600,6 +637,8 @@ export class Orchestrator {
       mcpToolName: (n) => provider.mcpToolName(n),
       pluginTools: this._readPluginTools(),
       skills: this._readSkills(sessionId),
+      // Strip OFF features' preamble sections + lint stale mentions (D5).
+      features: this._features?.() ?? null,
     });
 
     const lead = new Session({
@@ -626,6 +665,8 @@ export class Orchestrator {
       agentProcessOverride: opts.agentProcessOverride,
       onStateChange: (s, force) => this._onSessionState(s, force),
       onContextReset: (s, cmd) => this._onSessionContextReset(s, cmd),
+      // docs/auto-compact.md D1/D2 — the task boundary of this agent.
+      onIdle: (s) => this._onSessionIdle(s),
       idleThresholdMs: this.config.idleThresholdMs,
       autoCompactBytes: this.config.contextAutoCompactBytes,
       // Phase 4: lead session writes a per-session settings.json injecting
@@ -748,6 +789,8 @@ export class Orchestrator {
       mcpToolName: (n) => provider.mcpToolName(n),
       pluginTools: this._readPluginTools(),
       skills: this._readSkills(leadRow.id),
+      // Strip OFF features' preamble sections + lint stale mentions (D5).
+      features: this._features?.() ?? null,
     });
 
     const lead = new Session({
@@ -777,6 +820,8 @@ export class Orchestrator {
       mcpPort: this.config.mcpPort,
       onStateChange: (s, force) => this._onSessionState(s, force),
       onContextReset: (s, cmd) => this._onSessionContextReset(s, cmd),
+      // docs/auto-compact.md D1/D2 — the task boundary of this agent.
+      onIdle: (s) => this._onSessionIdle(s),
       idleThresholdMs: this.config.idleThresholdMs,
       autoCompactBytes: this.config.contextAutoCompactBytes,
       hookToken: this.config.hookToken,
@@ -929,6 +974,8 @@ export class Orchestrator {
       mcpToolName: (n) => provider.mcpToolName(n),
       pluginTools: this._readPluginTools(),
       skills: this._readSkills(sessionId),
+      // Strip OFF features' preamble sections + lint stale mentions (D5).
+      features: this._features?.() ?? null,
     });
 
     const worker = new Session({
@@ -957,6 +1004,8 @@ export class Orchestrator {
       agentProcessOverride: spec.agentProcessOverride,
       onStateChange: (s, force) => this._onSessionState(s, force),
       onContextReset: (s, cmd) => this._onSessionContextReset(s, cmd),
+      // docs/auto-compact.md D1/D2 — the task boundary of this agent.
+      onIdle: (s) => this._onSessionIdle(s),
       idleThresholdMs: this.config.idleThresholdMs,
       autoCompactBytes: this.config.contextAutoCompactBytes,
       hookToken: this.config.hookToken,
@@ -989,7 +1038,15 @@ export class Orchestrator {
     // `existingId`, and its card already lives in SQLite) gets a `todo` card
     // auto-assigned to it, so the operator always sees the task in flight.
     // Best-effort: a board failure must NEVER fail a spawn (24/7 safety).
-    if (this._taskboard && spec.existingId == null) {
+    // D8.5 — also consult the feature registry via the `features` thunk so a
+    // disabled board writes no card. Default true when no thunk is wired (unit
+    // tests): optional chaining short-circuits to `undefined`, and
+    // `undefined !== false` is true.
+    if (
+      this._taskboard &&
+      spec.existingId == null &&
+      this._features?.().board !== false
+    ) {
       try {
         this._taskboard.createAutoCardForWorker({
           orchestratorId: this.id,
@@ -1025,29 +1082,222 @@ export class Orchestrator {
   }
 
   /**
-   * Fired right after a session injected a `/clear` or `/compact`. A `/clear`
-   * wipes the agent's awareness of its inbox, but the mailbox itself is
-   * server-side and survives. If undelivered mail is still queued, re-emit the
-   * idle wake-up signal (after a short grace so the reset finishes processing)
-   * so the agent calls `team.read_inbox` instead of silently dropping it.
+   * Fired right after a session injected a `/clear` or `/compact`.
+   *
+   * It used to re-signal the inbox here behind a `setTimeout(2000)` — a guess
+   * at how long a `/clear` takes to process, which was too short for a
+   * `/compact` (a model call) and therefore only ever covered `/clear`.
+   * docs/auto-compact.md D2 step 1 replaced it with something exact:
+   * `Session._fireContextReset` drops `lastInboxSignalAt` as the command
+   * reaches the PTY, and the NEXT idle boundary — i.e. the moment the
+   * compaction is genuinely over and the PTY goes quiet — re-signals whatever
+   * is still queued. One rule, both commands, no timer.
+   *
+   * Kept as a hook (rather than unwired) because it is the one callback that
+   * observes a reset actually landing, and `SessionInit.onContextReset` is part
+   * of the Session's published surface.
    */
   private _onSessionContextReset(session: Session, cmd: ContextResetCommand): void {
-    if (cmd !== '/clear') return;
-    if (this.mailbox.size(session.id) === 0) return;
-    setTimeout(() => {
-      // Re-check: the session may have died, or drained its inbox, in the gap.
-      if (!this._isActive(session)) return;
-      if (this.mailbox.size(session.id) === 0) return;
+    log.debug({
+      event: 'session.context_reset_observed',
+      orchId: this.id,
+      sessionId: session.id,
+      cmd,
+      inboxCount: this.mailbox.size(session.id),
+    });
+  }
+
+  // --- docs/auto-compact.md D2 — the idle boundary handler ----------------
+
+  /**
+   * The agent named by `session` has just gone idle, and the Session has
+   * already vouched that the line is free (step 0 of D2 lives in
+   * `Session._fireIdleBoundary`: right status, no dialog, no armed reset, no
+   * armed notice). Three steps, synchronous, in this order.
+   *
+   * Synchronous on purpose: everything it reads is a cached snapshot or an
+   * O(1) queue length, and an `async` handler re-entered by a second boundary
+   * would have to carry its own lock for no benefit at all.
+   */
+  private _onSessionIdle(session: Session): void {
+    const queued = this.mailbox.size(session.id);
+    // --- 1. The inbox signal. This IS guarantee G. -----------------------
+    //
+    // "Signal when something arrived after the last signal we sent" doubles as
+    // "signal again after a context reset", because `_fireContextReset` drops
+    // the stamp to `null` on submission. One rule covers both, and the cap it
+    // implies is exactly one nudge per message: an agent that ignores its inbox
+    // is not re-poked at every boundary for the rest of its life.
+    //
+    // It also closes the hole the mailbox has had since Phase 3 — a message
+    // that arrives MID-TURN is never signalled (`messaging.sendMessage` only
+    // injects when the recipient is already idle), so it waited for the agent
+    // to poll. It is now delivered at the end of that turn.
+    if (queued > 0) {
+      const newest = this.mailbox.newestTs(session.id);
+      const stamp = session.lastInboxSignalAt;
+      if (stamp === null || (newest !== null && newest > stamp)) {
+        try {
+          if (!session.signalInbox()) {
+            // Refused because the line is busy (a half-typed injection). Not an
+            // error: the stamp was not moved either, so the next boundary
+            // retries this very message.
+            log.debug({
+              event: 'session.inbox_signal_deferred',
+              orchId: this.id,
+              sessionId: session.id,
+              inboxCount: queued,
+            });
+          }
+        } catch (err) {
+          log.warn({
+            event: 'session.inbox_signal_failed',
+            orchId: this.id,
+            sessionId: session.id,
+            error: err instanceof Error ? err.message : String(err),
+          });
+        }
+      }
+    }
+    // --- 2. The auto-compact decision ------------------------------------
+    const decision = this._decideSessionAutoCompact(session, queued);
+    // --- 3. Freshen the gauge for the NEXT boundary ----------------------
+    //
+    // Fire-and-forget and TTL-gated (15 s) — deliberately NOT a forced
+    // `refresh()`. A sample up to one TTL old delays a decision by at most one
+    // boundary, and only ever in the safe direction: the context grows between
+    // two resets, so an old sample under-reports and compacts LATE, never
+    // wrongly. Forcing a read would put the SSH transcript reads on this
+    // boundary's cadence instead of the TTL's.
+    //
+    // Skipped when the feature is OFF for this team. A fleet running
+    // `SWARM_OS_AUTO_COMPACT_PCT=0` (or a role at 0) has nothing to decide, and
+    // this read is a transcript tail — one SSH round trip per agent per TTL for
+    // a number nobody asked for. Before this feature the only caller was
+    // `toView()`, i.e. an open UI tab; `disabled` keeps exactly that bargain.
+    if (!decision.fire && decision.reason === 'disabled') return;
+    session.maybeRefreshContextUsage();
+  }
+
+  /**
+   * Step 2 of D2 — run the pure decision, log it the way an operator can act
+   * on, and arm the `/compact` when it says so.
+   */
+  private _decideSessionAutoCompact(session: Session, inboxCount: number): AutoCompactDecision {
+    const thresholdPct = this._autoCompactThresholdPct();
+    const usage = session.contextUsage;
+    const input: AutoCompactInput = {
+      thresholdPct,
+      usage,
+      floorTokens: session.contextFloorTokens,
+      inboxCount,
+      resetPending: session.hasPendingContextReset,
+      dialogPending: session.dialogPending,
+    };
+    const decision = decideAutoCompact(input);
+    // The rounded percentage, for the logs only — `null` when there is nothing
+    // honest to print (gemini, an unknown model window, a session with no turn
+    // yet). Never invented.
+    const pct = usage?.pct != null ? Math.round(usage.pct * 100) : null;
+
+    if (!decision.fire) {
+      // C3 starving C1: the agent has mail it has never read, and that alone is
+      // what is keeping it from being compacted. Re-run the SAME pure function
+      // with an empty inbox to find out — once per session, until the next
+      // actual arming, because the fix is human (or the agent finally reading
+      // its inbox), not another log line.
+      if (
+        decision.reason === 'inbox-pending' &&
+        !session.autoCompactStarvedWarned &&
+        decideAutoCompact({ ...input, inboxCount: 0 }).fire
+      ) {
+        session.autoCompactStarvedWarned = true;
+        log.warn({
+          event: 'session.auto_compact_starved',
+          orchId: this.id,
+          sessionId: session.id,
+          inboxCount,
+          thresholdPct,
+          ...(pct !== null ? { pct } : {}),
+        });
+      }
+      // "Why is my agent not compacting" is answered by the FIRST reason that
+      // stopped it, and an agent sitting below its threshold produces one of
+      // these per boundary forever — so `info` on a CHANGE of reason, `debug`
+      // otherwise. The line carries the dialog type for `blocked`, which is the
+      // one reason whose fix is a human walking to a console.
+      const changed = session.lastAutoCompactSkipReason !== decision.reason;
+      session.lastAutoCompactSkipReason = decision.reason;
+      const entry = {
+        event: 'session.auto_compact_skipped',
+        orchId: this.id,
+        sessionId: session.id,
+        reason: decision.reason,
+        ...(pct !== null ? { pct } : {}),
+        ...(decision.reason === 'blocked' && session.dialogPendingType !== null
+          ? { notificationType: session.dialogPendingType }
+          : {}),
+      };
+      if (changed) log.info(entry);
+      else log.debug(entry);
+      return decision;
+    }
+
+    // It fires at the NEXT boundary — which is right now if the agent is still
+    // idle, or after the current turn if a message woke it in between. Refused
+    // (`false`) only on a race with another armer; nothing to log loudly, the
+    // next boundary answers `reset-pending`.
+    const armed = session.requestContextReset('/compact', {
+      idleMs: this.config.idleThresholdMs,
+      instructions: AUTO_COMPACT_INSTRUCTIONS,
+    });
+    if (!armed) return decision;
+    session.lastAutoCompactSkipReason = null;
+    session.autoCompactStarvedWarned = false;
+    // Same channel as `context /compact armed`, so an operator attached to the
+    // console sees the decision and its two figures, not just its effect.
+    session.appendServerLogLine(
+      `[swarm-os] auto-compact armed — context ${decision.pct}% ≥ ${thresholdPct}%`,
+    );
+    log.info({
+      event: 'session.auto_compact_armed',
+      orchId: this.id,
+      sessionId: session.id,
+      pct: decision.pct,
+      thresholdPct,
+      floorTokens: session.contextFloorTokens,
+    });
+    eventBus.emitEvent({
+      kind: 'session.auto_compact',
+      orchestratorId: this.id,
+      sessionId: session.id,
+      payload: { pct: decision.pct, thresholdPct },
+    });
+    return decision;
+  }
+
+  /**
+   * D6 — the threshold in force for this team RIGHT NOW, in percent.
+   *
+   * Re-read at every boundary and never cached: a role edited while the fleet
+   * runs must apply at the next boundary of each of its agents. A resolver that
+   * throws (a store mid-migration, a plugin-supplied one) costs the override,
+   * never the boundary — we fall back to the instance default rather than
+   * skipping the decision.
+   */
+  private _autoCompactThresholdPct(): number {
+    if (this._autoCompact !== null) {
       try {
-        session.notifySignal(SIGNAL_TEXT);
+        return this._autoCompact.thresholdPctFor(this.roleId);
       } catch (err) {
         log.warn({
-          event: 'context_reset.resignal_failed',
-          sessionId: session.id,
+          event: 'orch.auto_compact_threshold_unavailable',
+          orchId: this.id,
           error: err instanceof Error ? err.message : String(err),
         });
       }
-    }, 2000);
+    }
+    return this.config.autoCompactPct;
   }
 
   /**
@@ -1674,10 +1924,13 @@ export class Orchestrator {
     // Idle-signal the lead (best-effort). We bypass `messaging.sendMessage`
     // here to avoid the active-recipient check (the lead is by definition
     // the recipient — and this is server-internal book-keeping anyway).
+    // Through `signalInbox` since docs/auto-compact.md §3.2 — this site used to
+    // carry a LITERAL copy of `SIGNAL_TEXT` and no guard at all, so a worker
+    // dying while the lead had a permission dialog on screen answered it.
     try {
       const idleMs = Date.now() - lead.idleSince;
       if (idleMs >= this.config.idleThresholdMs) {
-        lead.notifySignal('[swarm-os] new message in inbox — call team.read_inbox to fetch');
+        lead.signalInbox();
       }
     } catch {
       /* best-effort */

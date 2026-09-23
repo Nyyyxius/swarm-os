@@ -34,6 +34,7 @@ import type {
 import type { Spawner } from '../../modules/spawner/index.js';
 import type { NotificationHookSemantics } from '../../modules/providers/types.js';
 import type { ApprovalStore, CreateApprovalInput, ApprovalRequest } from '../../modules/approvals/store.js';
+import type { FeatureRegistry } from '../../modules/features/registry.js';
 
 /** Local double rather than the integration helper — keeps `src` self-contained. */
 class RecordingNotifier implements Notifier {
@@ -97,6 +98,17 @@ interface FakeSession {
   transcripts: string[];
   /** Monitoring — every codex `thread-id` the route handed over, in order. */
   threadIds: string[];
+  /**
+   * docs/auto-compact.md D5 — every `markDialogPending` type and every
+   * `clearDialogPending` source the route produced, in order. The guard is
+   * pure bookkeeping on the Session, so recording the CALLS is the whole
+   * assertion surface; `Session`'s own behaviour behind them is covered by
+   * `modules/orchestrator/idle-boundary.test.ts`.
+   */
+  dialogCalls: Array<{ op: 'mark'; type: string } | { op: 'clear'; source: string }>;
+  dialogPendingUntypedWarned: boolean;
+  /** D4 — how many times `SessionStart` marked the gauge stale. */
+  staleMarks: number;
 }
 
 /**
@@ -125,6 +137,7 @@ function fakeStack(
   const resets: Array<{ cmd: string; idleMs: number }> = [];
   const transcripts: string[] = [];
   const threadIds: string[] = [];
+  const dialogCalls: FakeSession['dialogCalls'] = [];
   const session = {
     id: 'sess-1',
     name: 'lead',
@@ -157,6 +170,19 @@ function fakeStack(
     setAgentThreadId: (threadId: string) => {
       threadIds.push(threadId);
     },
+    // docs/auto-compact.md D5 / D4.
+    dialogCalls,
+    dialogPendingUntypedWarned: false,
+    staleMarks: 0,
+    markDialogPending(type: string) {
+      dialogCalls.push({ op: 'mark', type });
+    },
+    clearDialogPending(source: string) {
+      dialogCalls.push({ op: 'clear', source });
+    },
+    markContextStale() {
+      session.staleMarks += 1;
+    },
   };
   // The PER-ORCH notifier (docs §2.2) — distinct from the global one passed to
   // the router. The P3 enriched approval embed goes here, the legacy
@@ -186,6 +212,7 @@ async function serve(
   notifier: RecordingNotifier,
   compactOnWaiting: boolean,
   approvals?: RecordingApprovals,
+  features?: Pick<FeatureRegistry, 'isEnabled'>,
 ): Promise<string> {
   const app = express();
   app.use(express.json());
@@ -199,6 +226,7 @@ async function serve(
         idleThresholdMs: 2_000,
       },
       approvals as unknown as ApprovalStore | undefined,
+      features as unknown as FeatureRegistry | undefined,
     ),
   );
   const server = createServer(app);
@@ -219,6 +247,7 @@ async function fire(
     approvals?: RecordingApprovals;
     message?: string;
     roleApproval?: Record<string, unknown> | null;
+    features?: Pick<FeatureRegistry, 'isEnabled'>;
   } = {},
 ): Promise<{
   res: Response;
@@ -235,7 +264,13 @@ async function fire(
     ...('roleApproval' in opts ? { roleApproval: opts.roleApproval } : {}),
   });
   const notifier = new RecordingNotifier();
-  const base = await serve(spawner, notifier, opts.compactOnWaiting ?? false, opts.approvals);
+  const base = await serve(
+    spawner,
+    notifier,
+    opts.compactOnWaiting ?? false,
+    opts.approvals,
+    opts.features,
+  );
   const events: SwarmEvent[] = [];
   unsubscribe = eventBus.onEvent((ev) => events.push(ev));
   const res = await fetch(`${base}/hooks/notification`, {
@@ -381,6 +416,62 @@ describe('POST /hooks/notification — approval gate (P1)', () => {
     expect(res.status).toBe(200);
     expect(events.filter((e) => e.kind === 'session.status_changed')).toHaveLength(1);
     expect(notifier.events).toHaveLength(1);
+  });
+});
+
+describe('POST /hooks/notification — approvals feature OFF (D9 fallback)', () => {
+  // The feature toggle gates ONLY the approval-creation site. With approvals
+  // disabled a normally-arming session records NOTHING, yet the whole
+  // pre-approvals fallback still runs: the `waiting` badge event, the legacy
+  // Discord ping, and (below) the /compact safety net.
+  const OFF: Pick<FeatureRegistry, 'isEnabled'> = { isEnabled: (n) => n !== 'approvals' };
+
+  it('records NO approval but STILL flips the badge + notifies', async () => {
+    const approvals = new RecordingApprovals();
+    const { res, body, events, notifier, orchNotifier, approvals: seen } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'default',
+      approvals,
+      features: OFF,
+      message: 'Claude needs your permission to use Bash',
+    });
+    expect(res.status).toBe(200);
+    expect(body).toEqual({ ok: true });
+    // The gate skipped createRequest entirely — no persisted approval.
+    expect(seen!.created).toHaveLength(0);
+    // …and the enriched approval embed is NOT posted (no approval to notify).
+    expect(orchNotifier.events).toHaveLength(0);
+    // …but the pre-approvals path is byte-identical: badge + legacy ping.
+    expect(events.filter((e) => e.kind === 'session.status_changed')).toHaveLength(1);
+    expect(notifier.events).toHaveLength(1);
+    expect(notifier.events[0]?.kind).toBe('session.waiting');
+  });
+
+  it('still arms the /compact safety net (fallback is untouched by the gate)', async () => {
+    const approvals = new RecordingApprovals();
+    const { session } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'default',
+      approvals,
+      features: OFF,
+      compactOnWaiting: true,
+    });
+    expect(session.resets).toEqual([{ cmd: '/compact', idleMs: 2_000 }]);
+  });
+
+  it('records the approval when the SAME registry has approvals ON', async () => {
+    // Control: the only difference from the first case is the flag, proving the
+    // gate — not some other guard — is what suppressed the creation above.
+    const approvals = new RecordingApprovals();
+    const ON: Pick<FeatureRegistry, 'isEnabled'> = { isEnabled: () => true };
+    const { approvals: seen } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'default',
+      approvals,
+      features: ON,
+      message: 'Claude needs your permission to use Bash',
+    });
+    expect(seen!.created).toHaveLength(1);
   });
 });
 
@@ -724,5 +815,257 @@ describe('POST /hooks/notification — codex thread-id (Lot 6)', () => {
     });
     expect(status).toBe(200);
     expect(session.threadIds).toEqual([THREAD]);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// docs/auto-compact.md D5 — the dialog guard
+// ---------------------------------------------------------------------------
+
+/**
+ * What the hook actually posts: the CLI's stdin, re-stringified into `message`
+ * by the shared hook command. `notification_type` is the field this whole
+ * section is about — read out of claude 2.1.142 (pinned in the image) and
+ * 2.1.270 (the host CLI), both of which emit it.
+ */
+function notificationPayload(notificationType?: string): string {
+  return JSON.stringify({
+    hook_event_name: 'Notification',
+    message: 'Claude needs your permission to use Bash',
+    ...(notificationType !== undefined ? { notification_type: notificationType } : {}),
+  });
+}
+
+describe('POST /hooks/notification — dialog guard (docs/auto-compact.md D5)', () => {
+  it('raises the flag on permission_prompt', async () => {
+    // THE case the guard exists for: a dialog is on screen, and anything the
+    // server types into that prompt buffer validates the highlighted option.
+    const { session } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'default',
+      message: notificationPayload('permission_prompt'),
+    });
+    expect(session.dialogCalls).toEqual([{ op: 'mark', type: 'permission_prompt' }]);
+  });
+
+  it('raises the flag on worker_permission_prompt too', async () => {
+    const { session } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'default',
+      message: notificationPayload('worker_permission_prompt'),
+    });
+    expect(session.dialogCalls).toEqual([{ op: 'mark', type: 'worker_permission_prompt' }]);
+  });
+
+  it('raises the flag on elicitation_dialog', async () => {
+    const { session } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'default',
+      message: notificationPayload('elicitation_dialog'),
+    });
+    expect(session.dialogCalls).toEqual([{ op: 'mark', type: 'elicitation_dialog' }]);
+  });
+
+  it('raises the flag on elicitation_url_dialog', async () => {
+    const { session } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'default',
+      message: notificationPayload('elicitation_url_dialog'),
+    });
+    expect(session.dialogCalls).toEqual([{ op: 'mark', type: 'elicitation_url_dialog' }]);
+  });
+
+  it('raises the flag on agent_needs_input', async () => {
+    // This is what covers `AskUserQuestion` in a bypass session: the CLI has no
+    // permission dialog to show there, but it still waits on a human, and
+    // anything typed into that prompt answers the question.
+    const { session } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'bypassPermissions',
+      message: notificationPayload('agent_needs_input'),
+    });
+    expect(session.dialogCalls).toEqual([{ op: 'mark', type: 'agent_needs_input' }]);
+  });
+
+  it('does NOT raise it on idle_prompt', async () => {
+    // `idle_prompt` is "Claude is waiting for your input" after 60 s of
+    // inactivity — i.e. EVERY idle agent in the fleet. Treating it as a dialog
+    // would freeze mail signals, resets and notices fleet-wide, which is the
+    // exact opposite of what this feature is for.
+    const { session } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'default',
+      message: notificationPayload('idle_prompt'),
+    });
+    expect(session.dialogCalls).toEqual([]);
+  });
+
+  it('does nothing at all on an informational type (push_notification)', async () => {
+    const { session } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'default',
+      message: notificationPayload('push_notification'),
+    });
+    expect(session.dialogCalls).toEqual([]);
+  });
+
+  it('LOWERS the flag on elicitation_response', async () => {
+    // The only automatic way down. An MCP elicitation cancelled on a timeout is
+    // closed without anybody typing, so without this notification the guard
+    // would stand for the rest of the session's life.
+    const { session } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'default',
+      message: notificationPayload('elicitation_response'),
+    });
+    expect(session.dialogCalls).toEqual([{ op: 'clear', source: 'elicitation' }]);
+  });
+
+  it('LOWERS the flag on elicitation_complete', async () => {
+    const { session } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'default',
+      message: notificationPayload('elicitation_complete'),
+    });
+    expect(session.dialogCalls).toEqual([{ op: 'clear', source: 'elicitation' }]);
+  });
+
+  it('fails CLOSED on an unknown type — but only where a dialog is possible', async () => {
+    const prompting = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'default',
+      message: notificationPayload('some_future_dialog'),
+    });
+    expect(prompting.session.dialogCalls).toEqual([{ op: 'mark', type: 'some_future_dialog' }]);
+  });
+
+  it('leaves a bypass session alone on an unknown type', async () => {
+    // The asymmetry that makes fail-closed safe: a bypassPermissions session
+    // shows no permission dialog at all, so blocking it on a type we have never
+    // seen would freeze a whole fleet's mail for nothing.
+    const { session } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'bypassPermissions',
+      message: notificationPayload('some_future_dialog'),
+    });
+    expect(session.dialogCalls).toEqual([]);
+  });
+
+  it('falls back to the permission MODE when the field is absent (prompting claude)', async () => {
+    const { session } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'default',
+      message: notificationPayload(),
+    });
+    expect(session.dialogCalls).toEqual([{ op: 'mark', type: 'untyped' }]);
+    // Loud once per session: this path is a regression against today's
+    // behaviour (an untyped `idle_prompt` freezes the session until a human
+    // types), so it must never be silent.
+    expect(session.dialogPendingUntypedWarned).toBe(true);
+  });
+
+  it('falls back to nothing for a bypass session with no field', async () => {
+    const { session } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'bypassPermissions',
+      message: notificationPayload(),
+    });
+    expect(session.dialogCalls).toEqual([]);
+    expect(session.dialogPendingUntypedWarned).toBe(false);
+  });
+
+  it('never touches a codex/gemini session — they show no dialogs', async () => {
+    // `needs-human` semantics are claude's; the fallback asks
+    // `isPromptingMode`, which is `false` for every other provider by
+    // construction (their only permission mode is bypassPermissions).
+    const { session } = await fire('needs-human', {
+      provider: 'codex',
+      permissionMode: 'bypassPermissions',
+      message: notificationPayload(),
+    });
+    expect(session.dialogCalls).toEqual([]);
+  });
+
+  it('raises the flag BEFORE the waiting event reaches the bus', async () => {
+    // Ordering matters: an automation listening for `waiting` must not be able
+    // to answer the dialog before the flag that protects it exists. Asserted
+    // through the guard's own side effect — by the time the event is observed,
+    // the mark has already been recorded.
+    const { events, session } = await fire('needs-human', {
+      provider: 'claude',
+      permissionMode: 'default',
+      message: notificationPayload('permission_prompt'),
+    });
+    expect(session.dialogCalls).toEqual([{ op: 'mark', type: 'permission_prompt' }]);
+    expect(events.filter((e) => e.kind === 'session.status_changed')).toHaveLength(1);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// docs/auto-compact.md D4 — SessionStart(source) re-bases the gauge
+// ---------------------------------------------------------------------------
+
+/** The same `SessionStart` body, with the `source` field under test (D4). */
+function sessionStartWithSource(source?: string): string {
+  return JSON.stringify({
+    session_id: '566a03de-207e-46a4-b772-25d47de95e6c',
+    transcript_path: '/tmp/t.jsonl',
+    cwd: '/workspace/demo',
+    hook_event_name: 'SessionStart',
+    ...(source !== undefined ? { source } : {}),
+  });
+}
+
+describe('POST /hooks/notification — session.transcript source (D4)', () => {
+  it('marks the gauge stale when the CLI restarted after a compact', async () => {
+    // Claude Code's OWN internal auto-compact fires mid-turn with no server
+    // involvement. Without this, the decision's premise — "the context only
+    // grows between two resets" — is false, and an inherited over-threshold
+    // snapshot would arm a redundant `/compact` on a context that is already
+    // fresh.
+    const { spawner, session } = fakeStack('needs-human');
+    const { status } = await post(spawner, {
+      orch_id: 'orch-1',
+      session_id: 'sess-1',
+      kind: 'session.transcript',
+      message: sessionStartWithSource('compact'),
+    });
+    expect(status).toBe(200);
+    expect(session.staleMarks).toBe(1);
+  });
+
+  it('marks it stale after a clear too', async () => {
+    const { spawner, session } = fakeStack('needs-human');
+    await post(spawner, {
+      orch_id: 'orch-1',
+      session_id: 'sess-1',
+      kind: 'session.transcript',
+      message: sessionStartWithSource('clear'),
+    });
+    expect(session.staleMarks).toBe(1);
+  });
+
+  it('leaves it alone on a normal startup', async () => {
+    const { spawner, session } = fakeStack('needs-human');
+    await post(spawner, {
+      orch_id: 'orch-1',
+      session_id: 'sess-1',
+      kind: 'session.transcript',
+      message: sessionStartWithSource('startup'),
+    });
+    expect(session.staleMarks).toBe(0);
+    // The path is still adopted — the two reads are independent.
+    expect(session.transcripts).toEqual(['/tmp/t.jsonl']);
+  });
+
+  it('leaves it alone when the payload carries no source at all', async () => {
+    const { spawner, session } = fakeStack('needs-human');
+    await post(spawner, {
+      orch_id: 'orch-1',
+      session_id: 'sess-1',
+      kind: 'session.transcript',
+      message: sessionStartWithSource(),
+    });
+    expect(session.staleMarks).toBe(0);
   });
 });

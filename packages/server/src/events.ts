@@ -1,9 +1,15 @@
 import { EventEmitter } from 'node:events';
+// Type-only (erased at runtime): `modules/features/registry` imports the value
+// `SwarmEventBus` from HERE, so this arrow must never carry a runtime edge or
+// the two would form an import cycle. TS handles the type-level cycle fine.
+import type { FeatureName, FeatureState } from './modules/features/registry.js';
 
 /**
  * Core event kinds emitted by the server itself. `plugin.host.changed` is a
  * built-in surfaced when a plugin's enable/status changes — its minimal
  * payload `{ name, status, enabled }` lets the UI patch a row without a refetch.
+ * `feature.changed` is the same idea for the six built-in features: its payload
+ * `{ name, state }` lets the web patch its feature map without a refetch.
  */
 export type BuiltinSwarmEventKind =
   | 'orchestrator.created'
@@ -13,7 +19,8 @@ export type BuiltinSwarmEventKind =
   | 'session.status_changed'
   | 'session.exited'
   | 'mailbox.message'
-  | 'plugin.host.changed';
+  | 'plugin.host.changed'
+  | 'feature.changed';
 
 /**
  * Shared-memory (knowledge graph) event kinds. Emitted by `MemoryStore` via the
@@ -72,6 +79,22 @@ export type ApprovalSwarmEventKind = 'approval.requested' | 'approval.resolved';
 export type BudgetSwarmEventKind = 'session.budget_exceeded';
 
 /**
+ * Auto-compact event kind (docs/auto-compact.md, D8). Emitted by
+ * `Orchestrator._onSessionIdle` at the exact moment a `/compact` is ARMED for
+ * an agent whose context crossed its role's threshold while it sat idle with an
+ * empty inbox — never when the command actually reaches the PTY, which happens
+ * at the following idle boundary and is already visible through
+ * `contextResetPending`.
+ *
+ * Deliberately NOT wired to a toast in the web (docs/auto-compact.md §6): on a
+ * 24/7 fleet every agent crosses its threshold several times a day, and a toast
+ * per crossing is noise about something the operator asked the server to do.
+ * The frame exists so a dashboard or a plugin can COUNT compactions; the badge
+ * already covers the UI.
+ */
+export type AutoCompactSwarmEventKind = 'session.auto_compact';
+
+/**
  * Code-graph (Graphify integration) event kinds. Emitted by `GraphStore` via the
  * event bus and rebroadcast on `/ws/events` so the web code-graph page (P4) can
  * patch a scope row without a refetch. GLOBAL to the deployment (like memory) —
@@ -96,6 +119,7 @@ export type SwarmEventKind =
   | ApprovalSwarmEventKind
   | CodegraphSwarmEventKind
   | BudgetSwarmEventKind
+  | AutoCompactSwarmEventKind
   | `plugin.${string}`;
 
 /** Payload of `memory.node_created` / `memory.node_updated` / `memory.node_deleted`. */
@@ -159,6 +183,21 @@ export interface BudgetExceededPayload {
   action: 'notify' | 'pause';
 }
 
+/**
+ * Payload of `session.auto_compact` (docs/auto-compact.md, D8).
+ *
+ * `pct` is the occupancy that triggered the arming, as an INTEGER percentage
+ * (0..100) — the same rounding the decision itself used, so a consumer can
+ * never see a frame whose figures fail the `pct >= thresholdPct` test that
+ * produced it. `thresholdPct` is the value in force for that agent's role at
+ * that instant (roles are read live, so two frames seconds apart may legitimately
+ * carry different thresholds).
+ */
+export interface AutoCompactEventPayload {
+  pct: number;
+  thresholdPct: number;
+}
+
 export interface SwarmEvent {
   kind: SwarmEventKind;
   ts: string;
@@ -172,6 +211,16 @@ export interface PluginHostChangedPayload {
   name: string;
   status: string;
   enabled: boolean;
+}
+
+/**
+ * Payload of the built-in `feature.changed` event. Emitted by `FeatureRegistry`
+ * on every enable/disable/uninstall so the web can patch its feature map (and
+ * flush the approvals/budget toast stacks) without a refetch (D10).
+ */
+export interface FeatureChangedPayload {
+  name: FeatureName;
+  state: FeatureState;
 }
 
 /**

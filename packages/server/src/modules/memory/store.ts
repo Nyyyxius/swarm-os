@@ -430,6 +430,16 @@ export class MemoryStore {
   private readonly embedQueue = new Set<string>();
   private embedDraining: Promise<void> | null = null;
 
+  // Purge safety (docs/builtin-features.md D8.2). When `closed` is true EVERY
+  // write throws (`upsertNote`/`addLink`/`deleteNote`) and the embedding path is
+  // a no-op, so a concurrent writer — notably a `CodegraphMemoryNotes` sweep,
+  // whose errors it catches best-effort — cannot recreate the vault during/after
+  // the `rm`. The registry flips the feature to `uninstalled` only AFTER
+  // `purge()` returns, so `isEnabled('memory')` is still true through the purge:
+  // `closed` (not the getter) is what prevents resurrection. Reset to false by
+  // `open()` on (re-)enable — the descriptor's `start()` calls it.
+  private closed = false;
+
   private readonly getVectorStmt;
   private readonly upsertVectorStmt;
   private readonly deleteVectorStmt;
@@ -620,6 +630,16 @@ export class MemoryStore {
     }
   }
 
+  /** Throw when the store is closed for purge — every write path calls this. */
+  private assertOpen(): void {
+    if (this.closed) {
+      throw new MemoryError(
+        'memory store is closed (feature purge in progress)',
+        'MEMORY_CLOSED',
+      );
+    }
+  }
+
   private normalizeType(type: string): MemoryNoteType {
     return (MEMORY_NOTE_TYPES as readonly string[]).includes(type)
       ? (type as MemoryNoteType)
@@ -769,6 +789,7 @@ export class MemoryStore {
    * note exists, a mismatch throws `MemoryConflictError`.
    */
   upsertNote(input: UpsertNoteInput): { name: string; version: number } {
+    this.assertOpen();
     this.assertValidName(input.name);
     const type = this.normalizeType(input.type);
     const existing = this.getNodeStmt.get(input.name) ?? null;
@@ -974,6 +995,7 @@ export class MemoryStore {
    * `relation:: [[target]]` instead. Returns false on failure (logged).
    */
   addLink(from: string, to: string, relation?: string | null): boolean {
+    this.assertOpen();
     try {
       if (!from || !to) throw new MemoryError('from and to are required', 'INVALID_LINK');
       const rel = relation && relation.length > 0 ? relation : DEFAULT_LINK_RELATION;
@@ -998,6 +1020,7 @@ export class MemoryStore {
 
   /** Delete a note: its file, its index row, its FTS entry, and all its edges. */
   deleteNote(name: string): boolean {
+    this.assertOpen();
     try {
       const row = this.getNodeStmt.get(name);
       const type = row ? this.normalizeType(row.type) : 'reference';
@@ -1035,6 +1058,7 @@ export class MemoryStore {
 
   /** Enqueue a note for background (re)embedding. Non-blocking, never throws. */
   private enqueueEmbed(name: string): void {
+    if (this.closed) return; // purge in progress — never re-populate vectors
     if (!this.semanticEnabled) return;
     this.embedQueue.add(name);
     this.kickEmbedDrain();
@@ -1072,6 +1096,7 @@ export class MemoryStore {
   /** Compute + persist one note's vector. Never throws (logs on failure). */
   private async embedNode(name: string): Promise<void> {
     try {
+      if (this.closed) return; // purge in progress — never write a vector row
       if (!this.semanticEnabled) return;
       const row = this.getNodeStmt.get(name);
       if (!row) return; // deleted meanwhile
@@ -1231,6 +1256,135 @@ export class MemoryStore {
       ...h,
       via: 'fts' as const,
     }));
+  }
+
+  // --- purge lifecycle (docs/builtin-features.md D8 — Lot 6) -----------------
+
+  /** Absolute path of the `.md` vault (`<dataDir>/memory`). */
+  get vaultPath(): string {
+    return this.vaultDir;
+  }
+
+  /** True once `close()` has run — every write throws until `open()`. */
+  isClosed(): boolean {
+    return this.closed;
+  }
+
+  /**
+   * Enter closed mode: every subsequent write (`upsertNote`/`addLink`/
+   * `deleteNote`) throws and the embedding path is a no-op, so nothing can
+   * recreate the vault while `purge()` archives, DELETEs and `rm`s it (D8.2).
+   * Idempotent.
+   */
+  close(): void {
+    if (this.closed) return;
+    this.closed = true;
+    log.info({ event: 'memory.closed' });
+  }
+
+  /**
+   * Re-open the store for writes after a re-enable / reinstall. The 'memory'
+   * descriptor's `start()` calls this: a reinstall runs `purge()` (which
+   * `close()`s) THEN `start()`, so the store must become writable again here.
+   * Idempotent.
+   */
+  open(): void {
+    if (!this.closed) return;
+    this.closed = false;
+    log.info({ event: 'memory.opened' });
+  }
+
+  /**
+   * Archive the vault + a JSON dump of the SQLite mirror under
+   * `<dataDir>/backups/feature-memory-<ts>/` BEFORE a purge (D8.1). The `.md`
+   * vault is the SOURCE OF TRUTH and is NOT covered by the `BackupScheduler`
+   * (which snapshots only the SQLite file), so a memory uninstall is otherwise
+   * irreversible. Best-effort: never throws, and a partial failure is logged but
+   * must NOT block the purge. Returns the archive directory, or `null` on total
+   * failure. Reads only — safe to call while `closed`.
+   */
+  archive(): string | null {
+    const dataDir = path.dirname(this.vaultDir);
+    const stamp = new Date().toISOString().replace(/[:.]/g, '-');
+    const dir = path.join(dataDir, 'backups', `feature-memory-${stamp}`);
+    try {
+      const vaultOut = path.join(dir, 'vault');
+      fs.mkdirSync(vaultOut, { recursive: true });
+      // 1) Copy the vault `.md` files — the uncovered source of truth.
+      let files: string[] = [];
+      try {
+        files = fs.readdirSync(this.vaultDir).filter((f) => f.endsWith('.md'));
+      } catch (err) {
+        log.warn({ event: 'memory.archive_readdir_failed', error: String(err) });
+      }
+      for (const f of files) {
+        try {
+          fs.copyFileSync(path.join(this.vaultDir, f), path.join(vaultOut, f));
+        } catch (err) {
+          log.warn({ event: 'memory.archive_copy_failed', file: f, error: String(err) });
+        }
+      }
+      // 2) Dump the SQLite mirror (nodes + edges + vectors) as JSON for forensics
+      //    / manual recovery. Vectors are base64 (BLOB); they are re-derivable by
+      //    re-embedding, so this is a bonus, not the recovery path.
+      try {
+        const nodes = this.listAllStmt.all();
+        const edges = this.allEdgesStmt.all();
+        const vectors = this.db
+          .prepare<[], VectorRow>(
+            'SELECT name, dim, model, vector, updated_at FROM memory_vectors',
+          )
+          .all()
+          .map((v) => ({
+            name: v.name,
+            dim: v.dim,
+            model: v.model,
+            updated_at: v.updated_at,
+            vector: Buffer.isBuffer(v.vector) ? v.vector.toString('base64') : null,
+          }));
+        fs.writeFileSync(
+          path.join(dir, 'memory-tables.json'),
+          JSON.stringify({ archivedAt: Date.now(), nodes, edges, vectors }, null, 2),
+          'utf8',
+        );
+      } catch (err) {
+        log.warn({ event: 'memory.archive_dump_failed', error: String(err) });
+      }
+      log.info({ event: 'memory.archived', dir, files: files.length });
+      return dir;
+    } catch (err) {
+      log.warn({ event: 'memory.archive_failed', error: String(err) });
+      return null;
+    }
+  }
+
+  /**
+   * Purge ALL memory data (docs/builtin-features.md D7/D8) — a DELETE of the four
+   * owned tables, NEVER a DROP: the prepared statements stay valid so a re-enable
+   * finds the store already present and simply empty (this is the invariant the
+   * "re-write post-purge works" test guards). `memory_fts` is a REGULAR (content)
+   * fts5 table, so it is cleared with a plain `DELETE FROM memory_fts` — the same
+   * per-row idiom the rest of this store already uses (`ftsDeleteStmt`), which
+   * fully drops its index/shadow rows for a content table. (The fts5
+   * `'delete-all'` command only works on contentless/external-content tables and
+   * would throw here, rolling the whole purge back.) The embedding queue is
+   * cleared too. Wrapped in a transaction; never throws (a purge hiccup must not
+   * crash the 24/7 server). The vault `.md` files are the caller's responsibility
+   * (the descriptor `rm`s them after `close()` + drain).
+   */
+  purgeAll(): void {
+    try {
+      this.db.transaction(() => {
+        this.db.exec('DELETE FROM memory_nodes');
+        this.db.exec('DELETE FROM memory_edges');
+        this.db.exec('DELETE FROM memory_vectors');
+        this.db.exec('DELETE FROM memory_fts');
+      })();
+      this.embedQueue.clear();
+      log.info({ event: 'memory.purged' });
+    } catch (err) {
+      log.warn({ event: 'memory.purge_all_failed', error: String(err) });
+    }
   }
 }
 

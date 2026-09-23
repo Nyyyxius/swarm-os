@@ -261,10 +261,15 @@ export async function bootTestStack(opts: TestStackOptions = {}): Promise<TestSt
   // drive `tick()` synchronously to avoid 60 s waits, and starting the
   // interval would risk spurious ticks during the test.
   const aggregator = new MessagesAggregator(spawner);
-  // S8 — bus collector. Same policy as the aggregator above — tests drive
-  // `tick()` manually. The collector is still instantiated so MCP requests
-  // can record latency/error counts even without an interval running.
-  const busMetrics = new BusMetricsCollector(spawner);
+  // S8 — bus collector. Since Lot 7 (docs/builtin-features.md D6) the collector
+  // only records when ARMED (`active`), mirroring production where
+  // `featureRegistry.startEnabled()` arms it iff `monitoring` is enabled. So we
+  // `start()` it here to arm the MCP instrumentation — but with a huge `tickMs`
+  // so the auto-interval never fires during a test: the integration tests still
+  // drive `tick()` manually (and `start()` resets `_ticksSinceStart` to 0, so
+  // their exact tick-count assertions are unchanged). `teardown()` stops it.
+  const busMetrics = new BusMetricsCollector(spawner, { tickMs: 3_600_000 });
+  busMetrics.start();
   // Backup scheduler — instantiated so the /backup routes resolve, but NOT
   // started (tests force snapshots via the HTTP route, not the interval).
   const backup = new BackupScheduler({

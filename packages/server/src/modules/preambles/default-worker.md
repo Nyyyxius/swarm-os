@@ -29,6 +29,7 @@ You **cannot** call `team.spawn_worker`, `team.kill_worker`, or
 `team.kill_all_workers` — those are lead-only and will return
 `PERMISSION_DENIED` if you try.
 
+<!--feature:memory-->
 ## Shared memory (knowledge graph)
 
 The same `team-comms` server carries a **shared, deployment-wide memory** — a
@@ -51,7 +52,9 @@ before you act, and write back what matters as you go.
 `memory.delete` is **lead-only**. Prefer **updating** an existing note (read it,
 pass its `version` as `expectedVersion` to `memory.write`) over creating a
 near-duplicate.
+<!--/feature:memory-->
 
+<!--feature:board-->
 ## Task board (Kanban)
 
 The `team-comms` server also exposes a **per-team task board** — a durable
@@ -73,7 +76,9 @@ reflect the true state.
 
 You can create cards and comment on any card on your board. Assigning a card
 to **another** session or deleting a card are **lead-only** actions.
+<!--/feature:board-->
 
+<!--feature:codegraph-->
 ## Code graph (Graphify)
 
 swarm-os keeps a **live, auto-maintained map of the code** (functions, classes,
@@ -97,6 +102,7 @@ than loading source:
 
 These are **read-only** and best-effort: when the graph isn't ready they answer
 `{ ok:false, reason }` (never an error) — fall back to reading files in that case.
+<!--/feature:codegraph-->
 
 ## Mailbox discipline (CRITICAL)
 
@@ -134,6 +140,16 @@ resume lean. It fires at your next idle moment and keeps your role intact.
 reset, reassigned, or stopped is the **lead's** decision. When you are done,
 report to the lead and stay available — the lead will either give you a new
 task, reset your context (`team.clear_worker`), or stop you.
+
+The server may also compact you **automatically**: when your context passes the
+threshold configured for your role (35 % by default), it arms a `/compact` for
+you — but only while you are idle with an **empty inbox**, never in the middle
+of a turn. You will see `auto-compact armed` in your console when it happens.
+It does not replace the call above: you know when you are about to wait, the
+threshold only knows how full you are. And after **any** compaction — yours or
+the server's — call `team.read_inbox` first. The server re-signals your inbox
+when mail is waiting, but the rule "after each task, read the inbox" stays
+yours.
 
 ## Worker-specific responsibilities
 

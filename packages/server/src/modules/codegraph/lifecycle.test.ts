@@ -4,9 +4,13 @@ import * as os from 'node:os';
 import * as path from 'node:path';
 
 // Mock the CLI runner: change-detection is what we test, not graphify itself.
+// `graphJsonPath` is a pure path helper (memory-notes.ts imports it to locate a
+// scope's graph.json); keep the real shape so the memory-getter tests can drive
+// the note-write path — the file never exists here, so topHubs just returns [].
 vi.mock('./graphify.js', () => ({
   runUpdate: vi.fn(async () => ({ ok: true, nodeCount: 5, edgeCount: 4 })),
   probeGraphify: vi.fn(() => ({ available: true, version: 'mock' })),
+  graphJsonPath: (indexDir: string) => `${indexDir}/graphify-out/graph.json`,
 }));
 
 /**
@@ -63,6 +67,7 @@ vi.mock('node:fs', async (importOriginal) => {
 });
 
 import { SwarmDb } from '../db/index.js';
+import { MemoryStore } from '../memory/store.js';
 import { GraphStore } from './store.js';
 import {
   startCodegraphJanitor,
@@ -70,6 +75,7 @@ import {
   type CodegraphJanitorHandle,
 } from './lifecycle.js';
 import { runUpdate } from './graphify.js';
+import { scopeNoteName } from './memory-notes.js';
 import { projectScopeId, WORKSPACE_ROOT_SCOPE_ID } from './discovery.js';
 
 const runUpdateMock = runUpdate as unknown as Mock;
@@ -535,5 +541,68 @@ describe('codegraph janitor watch accelerator', () => {
     start();
     await waitFor(appIndexed);
     expect(watchReg.created).toHaveLength(0);
+  });
+});
+
+describe('codegraph janitor — memory getter (D8.3)', () => {
+  it('consults the getter on each write; null ⇒ never resurrects a disabled vault', async () => {
+    const mem = new MemoryStore(db, { dataDir });
+    let memoryOn = true;
+    const app = path.join(workspaceRoot, 'app');
+    write(path.join(app, 'index.ts'), 'export const a = 1;');
+    const id = projectScopeId('app');
+
+    const h = start({ memory: () => (memoryOn ? mem : null) });
+    // Getter returned the store → the per-scope note is written by the sweep.
+    await waitFor(() => mem.readNote(scopeNoteName(id)) !== null);
+
+    // Simulate memory being disabled AFTER this janitor started: flip the getter
+    // off, drop the note, change the source so the next sweep re-indexes, and
+    // assert the sweep does NOT recreate the note (no vault resurrection).
+    mem.deleteNote(scopeNoteName(id));
+    memoryOn = false;
+    const callsBefore = callsForSource(app);
+    write(path.join(app, 'index.ts'), 'export const a = 2;');
+    await h.sweepNow();
+    expect(callsForSource(app)).toBeGreaterThan(callsBefore); // re-index really ran
+    expect(mem.readNote(scopeNoteName(id))).toBeNull();
+  });
+
+  it('an absent getter (memory dep undefined) is a safe no-op', async () => {
+    const app = path.join(workspaceRoot, 'app');
+    write(path.join(app, 'index.ts'), 'export const a = 1;');
+    const h = start(); // no `memory` override
+    await expect(h.sweepNow()).resolves.toBeUndefined();
+    expect(callsForSource(app)).toBeGreaterThan(0); // indexing still ran
+  });
+});
+
+describe('codegraph janitor — stop() drains in-flight runs (D8.4)', () => {
+  it('aborts the graphify child and only resolves once the run settled', async () => {
+    const app = path.join(workspaceRoot, 'app');
+    write(path.join(app, 'index.ts'), 'export const a = 1;');
+
+    let aborted = false;
+    // A run that never resolves on its own — only when its AbortSignal fires (or
+    // is already aborted). This is exactly the window stop() must close before a
+    // purge() could rm the index dir under a live build.
+    runUpdateMock.mockImplementation(
+      (input: { signal?: AbortSignal }) =>
+        new Promise((resolve) => {
+          const done = (): void => {
+            aborted = true;
+            resolve({ ok: false, error: 'aborted', timedOut: true });
+          };
+          if (input.signal?.aborted) return done();
+          input.signal?.addEventListener('abort', done);
+        }),
+    );
+
+    const h = start();
+    // Wait until the immediate sweep has reached (and is blocked inside) runUpdate.
+    await waitFor(() => runUpdateMock.mock.calls.length > 0);
+    // stop() must abort the run and resolve only after it settled.
+    await h.stop();
+    expect(aborted).toBe(true);
   });
 });

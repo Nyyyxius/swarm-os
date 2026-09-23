@@ -1,8 +1,13 @@
 import { useEffect, useMemo, useState } from 'react';
 import { usePlugins } from '../hooks/usePlugins';
+import { useFeatures } from '../hooks/useFeatures';
 import { useShellMode } from '../hooks/useShellMode';
 import { useSwarmController } from '../controller/SwarmController';
-import { HttpError, type PluginView, type PluginStatus } from '../api/client';
+import {
+  HttpError,
+  type PluginView, type PluginStatus,
+  type FeatureName, type FeatureState, type FeatureView,
+} from '../api/client';
 import { PermissionsDialog } from './plugins/PermissionsDialog';
 import { PluginConfigForm } from './plugins/PluginConfigForm';
 import { InstallPluginModal } from './plugins/InstallPluginModal';
@@ -48,6 +53,180 @@ function messageOf(err: unknown): string {
     return body?.last_error || body?.error || err.message;
   }
   return err instanceof Error ? err.message : String(err);
+}
+
+// ── BUILT-IN features (docs/builtin-features.md) ────────────────────────────
+// A built-in has NO source/version/commit/capabilities/upgrade — none of those
+// notions exist for code compiled into the image — so it gets its OWN row
+// component rather than reusing the plugin row.
+
+const FEATURE_STATE_COLOR: Record<FeatureState, string> = {
+  enabled: 'var(--ok)',
+  disabled: 'var(--text-dim)',
+  uninstalled: 'var(--bad)',
+};
+
+/**
+ * D7 purge scope per feature, enumerated NAMELY in the uninstall confirm so the
+ * operator sees exactly which tables and directories disappear. Deliberately
+ * NOT the plugin confirm text (which speaks of a "plugin folder" + "kv + config"
+ * — false for a built-in).
+ */
+const FEATURE_PURGE: Record<FeatureName, string> = {
+  ide:
+    'Supprime <dataDir>/ide/server-data (données du serveur IDE). Le payload VS Code (ide/cli) et le secret ide-token sont CONSERVÉS.',
+  codegraph:
+    'Supprime la table codegraph_scopes, le répertoire <dataDir>/codegraph/, et les notes memory managées (hub « codegraph » + « codegraph-<scope> »).',
+  board:
+    'Supprime les 3 tables du board : taskboard_cards, taskboard_deps, taskboard_events.',
+  memory:
+    'Archive puis supprime les 4 tables memory (memory_nodes, memory_edges, memory_fts, memory_vectors) ET le vault <dataDir>/memory/*.md. Irréversible.',
+  monitoring:
+    'Aucune donnée persistante supprimée (les rings d’observabilité sont en mémoire). La comptabilité (session_token_daily) et les budgets de rôle sont CONSERVÉS.',
+  approvals:
+    'Supprime les tables approval_requests et approval_events, et remet roles.approval_json à NULL. Les budgets de rôle sont CONSERVÉS.',
+};
+
+function FeatureStateBadge({ state }: { state: FeatureState }) {
+  return (
+    <span
+      className="tag-pill"
+      style={{ color: FEATURE_STATE_COLOR[state], borderColor: FEATURE_STATE_COLOR[state] }}
+    >
+      {state.toUpperCase()}
+    </span>
+  );
+}
+
+/** One built-in feature row + its ENABLE / DISABLE / UNINSTALL controls. */
+function BuiltinFeatureRow({
+  feature,
+  busy,
+  onEnable,
+  onDisable,
+  onUninstall,
+}: {
+  feature: FeatureView;
+  busy: boolean;
+  onEnable: (f: FeatureView) => void;
+  onDisable: (f: FeatureView) => void;
+  onUninstall: (f: FeatureView) => void;
+}) {
+  return (
+    <div className="role-item builtin-item" style={{ cursor: 'default' }}>
+      <div className="r-name">{feature.displayName.toUpperCase()}</div>
+      <div className="r-id">{feature.description}</div>
+      <div className="r-tags">
+        <FeatureStateBadge state={feature.state} />
+      </div>
+      <div style={{ display: 'flex', gap: 6, marginTop: 8 }}>
+        {feature.state === 'uninstalled' ? (
+          // install+enable on an `uninstalled` feature (D3) — one INSTALL button.
+          <button
+            className="btn"
+            style={{ color: 'var(--amber)' }}
+            disabled={busy}
+            onClick={() => onEnable(feature)}
+          >
+            INSTALL
+          </button>
+        ) : feature.state === 'enabled' ? (
+          <button className="btn" disabled={busy} onClick={() => onDisable(feature)}>
+            DISABLE
+          </button>
+        ) : (
+          <button
+            className="btn"
+            style={{ color: 'var(--amber)' }}
+            disabled={busy}
+            onClick={() => onEnable(feature)}
+          >
+            ENABLE
+          </button>
+        )}
+        {feature.state !== 'uninstalled' && (
+          <button className="btn danger" disabled={busy} onClick={() => onUninstall(feature)}>
+            UNINSTALL
+          </button>
+        )}
+      </div>
+    </div>
+  );
+}
+
+/**
+ * BUILT-IN section shown ABOVE the plugin list. Reads the richer `FeatureView[]`
+ * via `useFeatures` (refetched on the controller's `featuresRev`), and drives
+ * the lifecycle through the controller verbs — the `feature.changed` frame then
+ * refreshes both this list and the app-wide feature map.
+ */
+function BuiltinFeaturesSection() {
+  const c = useSwarmController();
+  const { features, loading, refresh } = useFeatures(c.featuresRev);
+  const [busy, setBusy] = useState<FeatureName | null>(null);
+  const [rowError, setRowError] = useState<string | null>(null);
+
+  async function run(name: FeatureName, verb: () => Promise<void>): Promise<void> {
+    setRowError(null);
+    setBusy(name);
+    try {
+      await verb();
+      await refresh();
+    } catch (e) {
+      setRowError(messageOf(e));
+    } finally {
+      setBusy(null);
+    }
+  }
+
+  const onEnable = (f: FeatureView) => void run(f.name, () => c.enableFeature(f.name));
+  const onDisable = (f: FeatureView) => void run(f.name, () => c.disableFeature(f.name));
+  const onUninstall = (f: FeatureView) => {
+    if (
+      !confirm(
+        `Désinstaller « ${f.displayName} » ?\n\n${FEATURE_PURGE[f.name]}\n\nCette action est irréversible.`,
+      )
+    ) {
+      return;
+    }
+    void run(f.name, () => c.uninstallFeature(f.name));
+  };
+
+  // Old server without the feature registry (GET /features 404s) → render
+  // nothing rather than an empty header.
+  if (!loading && features.length === 0) return null;
+
+  return (
+    <div className="builtin-features">
+      <div
+        className="field-help"
+        style={{ padding: '12px 20px 6px', letterSpacing: '0.12em', color: 'var(--text-dim)' }}
+      >
+        BUILT-IN
+      </div>
+      {rowError && (
+        <div className="field-warn" style={{ margin: '6px 12px' }} role="alert">
+          {rowError}
+        </div>
+      )}
+      {features.map((f) => (
+        <BuiltinFeatureRow
+          key={f.name}
+          feature={f}
+          busy={busy === f.name}
+          onEnable={onEnable}
+          onDisable={onDisable}
+          onUninstall={onUninstall}
+        />
+      ))}
+      <div
+        className="field-help"
+        style={{ padding: '12px 20px 6px', letterSpacing: '0.12em', color: 'var(--text-dim)' }}
+      >
+        PLUGINS
+      </div>
+    </div>
+  );
 }
 
 export function PluginsPage({ open, onClose }: Props) {
@@ -201,6 +380,7 @@ export function PluginsPage({ open, onClose }: Props) {
         </div>
 
         <div className="roles-list">
+          <BuiltinFeaturesSection />
           {loading && plugins.length === 0 && (
             <div className="field-help" style={{ padding: '14px 20px' }}>
               loading…

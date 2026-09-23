@@ -11,6 +11,7 @@ import type {
 import { isDiscordConnector, BUDGET_ACTIONS } from '../../modules/roles/index.js';
 import type { BudgetAction } from '../../modules/roles/index.js';
 import type { Config, EffortLevel, PermissionMode } from '../../config.js';
+import { DEFAULT_AUTO_COMPACT_PCT } from '../../config.js';
 import {
   PASSWORD_SENTINEL,
   redactConfigForRead,
@@ -89,6 +90,7 @@ interface RoleBody {
   autoRemoveDeadWorkersDelayMs?: unknown;
   costBudgetUsd?: unknown;
   budgetAction?: unknown;
+  autoCompactPct?: unknown;
 }
 
 /**
@@ -284,6 +286,37 @@ function parseBudgetAction(
     return { ok: false, error: `budgetAction must be one of ${BUDGET_ACTIONS.join('|')}` };
   }
   return { ok: true, value: x as BudgetAction };
+}
+
+/**
+ * Validate the OPTIONAL `autoCompactPct` (docs/auto-compact.md §3.3). `null` =
+ * clear the override and go back to inheriting `config.autoCompactPct`.
+ * Otherwise an INTEGER in 0..100, where `0` means "never auto-compact this
+ * role".
+ *
+ * Strict on both counts, and deliberately so:
+ *
+ *  - the string `"35"` is REJECTED rather than coerced. A field the UI sends
+ *    from an `<input type="number">` is the classic place for a string to slip
+ *    through, and a value stored as text would come back out of SQLite as
+ *    something `toAutoCompactPct` refuses — i.e. the role would silently revert
+ *    to inheriting, with the form still showing 35;
+ *  - `3.5` is REJECTED rather than rounded. The threshold is compared against
+ *    a rounded percentage, so a fractional one is meaningless — and rounding it
+ *    for the operator would store a number they never typed.
+ *
+ * Unlike `costBudgetUsd`, `0` is a LEGAL value here: the destructive reading of
+ * zero ("act immediately") is the budget's problem, not this field's, where
+ * zero simply switches the feature off.
+ */
+function parseAutoCompactPct(
+  x: unknown,
+): { ok: true; value: number | null } | { ok: false; error: string } {
+  if (x === null) return { ok: true, value: null };
+  if (typeof x !== 'number' || !Number.isInteger(x) || x < 0 || x > 100) {
+    return { ok: false, error: 'autoCompactPct must be null or an integer between 0 and 100' };
+  }
+  return { ok: true, value: x };
 }
 
 /** Parse result — `status` lets a caller map an unknown type to 422 vs 400. */
@@ -510,6 +543,19 @@ export function createRolesRouter(
         ...maskRole(r, connectorRegistry),
         cronCount: counts.get(r.id) ?? 0,
       })),
+      // Instance-level fallbacks the roles screen needs to RENDER a role that
+      // inherits: a `null` threshold has to read "Inherits (35 %)", and the
+      // browser has no other way to learn the 35. Additive and separate from
+      // the `roles` array on purpose — the day this setting moves from an env
+      // var into `instance_settings`, only the value behind this key changes
+      // and the web half never notices. Same shape as `GET /providers`.
+      //
+      // The `??` is not dead code despite the non-optional type: route tests
+      // (and any future caller) mount this router with a hand-built partial
+      // `Config` cast, and serving `undefined` would drop the key from the JSON
+      // — the browser would then render "Inherits (undefined %)" rather than a
+      // number. The floor is the same constant `loadConfig` falls back to.
+      defaults: { autoCompactPct: config.autoCompactPct ?? DEFAULT_AUTO_COMPACT_PCT },
     });
   });
 
@@ -611,6 +657,16 @@ export function createRolesRouter(
       budgetAction = r.value;
     }
 
+    // Auto-compact threshold (docs/auto-compact.md §3.3). Optional; the store
+    // defaults to `null` = inherit the instance value. The dialog always SENDS
+    // the field — `null` included — so that clearing it is expressible.
+    let autoCompactPct: number | null | undefined;
+    if (body.autoCompactPct !== undefined) {
+      const r = parseAutoCompactPct(body.autoCompactPct);
+      if (!r.ok) return res.status(400).json({ error: r.error });
+      autoCompactPct = r.value;
+    }
+
     const init: RoleInit = {
       label: body.label,
       leadPrompt: lp.value,
@@ -628,6 +684,7 @@ export function createRolesRouter(
       ...(autoRemoveDelay !== undefined ? { autoRemoveDeadWorkersDelayMs: autoRemoveDelay } : {}),
       ...(costBudget !== undefined ? { costBudgetUsd: costBudget } : {}),
       ...(budgetAction !== undefined ? { budgetAction } : {}),
+      ...(autoCompactPct !== undefined ? { autoCompactPct } : {}),
     };
     const role = store.create(init);
     res.status(201).json({ role: maskRole(role, connectorRegistry) });
@@ -765,6 +822,14 @@ export function createRolesRouter(
       const r = parseBudgetAction(body.budgetAction);
       if (!r.ok) return res.status(400).json({ error: r.error });
       patch.budgetAction = r.value;
+    }
+    // Auto-compact threshold. `null` is a meaningful patch value — it clears the
+    // per-role override and hands the role back to the instance default — so it
+    // goes through the parser rather than being skipped.
+    if (body.autoCompactPct !== undefined) {
+      const r = parseAutoCompactPct(body.autoCompactPct);
+      if (!r.ok) return res.status(400).json({ error: r.error });
+      patch.autoCompactPct = r.value;
     }
     const updated = store.update(req.params.id, patch);
     if (!updated) {

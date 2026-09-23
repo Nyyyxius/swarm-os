@@ -189,4 +189,21 @@ export class CodegraphMemoryNotes {
     const description = 'Index of the auto-maintained code graphs (Graphify) in this deployment.';
     upsertIfChanged(this.memory, HUB_NOTE_NAME, description, body, null);
   }
+
+  /**
+   * Drop EVERY managed note — the `codegraph` hub plus one `codegraph-<scope>`
+   * per known scope. Used by the codegraph feature PURGE (docs/builtin-features.md
+   * D7) so an uninstall leaves no orphaned `codegraph`/`codegraph-*` note behind
+   * in a still-enabled memory vault. Reuses the per-scope drop; best-effort,
+   * never throws. Must run BEFORE the scope rows are deleted (it reads them).
+   */
+  removeAll(): void {
+    if (!this.memory) return;
+    for (const scope of this.store.listScopes()) this.removeScope(scope.id);
+    try {
+      if (this.memory.readNote(HUB_NOTE_NAME)) this.memory.deleteNote(HUB_NOTE_NAME);
+    } catch (err) {
+      log.warn({ event: 'codegraph.note_delete_failed', scopeId: HUB_NOTE_NAME, error: String(err) });
+    }
+  }
 }

@@ -914,8 +914,15 @@ describe('Session + Orchestrator — codex context usage', () => {
     expect(lead.contextUsage).toBeNull();
 
     writeRollout(THREAD_A, usageEvent({ last: 11_626, window: 258_400 }));
-    orch.toView();
-    await waitUntil(() => lead.contextUsage !== null);
+    // PUMP the heartbeat rather than calling it once. Since docs/auto-compact.md
+    // D2, the idle boundary also calls `maybeRefreshContextUsage` — and the two
+    // share ONE TTL stamp, so a single `toView()` landing inside the window the
+    // boundary just opened is deferred rather than served. That is precisely
+    // what the 3 s UI poll does in production, where the next poll picks it up.
+    await waitUntil(() => {
+      orch.toView();
+      return lead.contextUsage !== null;
+    });
     expect(lead.toView().contextUsage).toMatchObject({
       usedTokens: 11_626,
       limitTokens: 258_400,

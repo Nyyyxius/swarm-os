@@ -168,6 +168,19 @@ export interface RoleRow {
    * an unintended pause.
    */
   budget_action: string;
+  /**
+   * Auto-compact threshold (docs/auto-compact.md §3.3) — percent of the context
+   * window past which the server arms a `/compact` on an idle agent of this
+   * role. INTEGER and nullable WITH NO DEFAULT, same reasoning as
+   * `cost_budget_usd` above: NULL means "inherit the instance default"
+   * (`config.autoCompactPct`), which is a different instruction from `0`
+   * ("never auto-compact this role"). A `DEFAULT 0` would silently opt every
+   * pre-existing role OUT of the feature on upgrade — the exact opposite of
+   * what shipping it means — and any other constant default would freeze
+   * today's number into the schema. Every inherited row backfills to NULL,
+   * i.e. to whatever the instance is configured for, at each boundary.
+   */
+  auto_compact_pct: number | null;
   created_at: string;
   updated_at: string;
 }
@@ -785,14 +798,14 @@ export class SwarmDb {
         default_model, default_effort, default_permission_mode, default_provider,
         connectors_json, schedule, schedule_message, approval_json, skills_json,
         auto_remove_dead_workers, auto_remove_dead_workers_delay_ms,
-        cost_budget_usd, budget_action,
+        cost_budget_usd, budget_action, auto_compact_pct,
         created_at, updated_at
       ) VALUES (
         @id, @label, @lead_prompt, @lead_preamble, @worker_preamble, @worker_count,
         @default_model, @default_effort, @default_permission_mode, @default_provider,
         @connectors_json, @schedule, @schedule_message, @approval_json, @skills_json,
         @auto_remove_dead_workers, @auto_remove_dead_workers_delay_ms,
-        @cost_budget_usd, @budget_action,
+        @cost_budget_usd, @budget_action, @auto_compact_pct,
         @created_at, @updated_at
       )
     `);
@@ -816,6 +829,7 @@ export class SwarmDb {
         auto_remove_dead_workers_delay_ms = @auto_remove_dead_workers_delay_ms,
         cost_budget_usd = @cost_budget_usd,
         budget_action = @budget_action,
+        auto_compact_pct = @auto_compact_pct,
         updated_at = @updated_at
       WHERE id = @id
     `);
@@ -931,6 +945,14 @@ export class SwarmDb {
       // amount gets the non-destructive outcome.
       { table: 'roles',         column: 'cost_budget_usd',                   ddl: 'ALTER TABLE roles ADD COLUMN cost_budget_usd REAL' },
       { table: 'roles',         column: 'budget_action',                     ddl: "ALTER TABLE roles ADD COLUMN budget_action TEXT NOT NULL DEFAULT 'notify'" },
+      // Auto-compact threshold per role (docs/auto-compact.md D6/§3.3). Same
+      // additive, migrations-only convention, and NULLABLE WITH NO DEFAULT for
+      // the same reason as `cost_budget_usd`: NULL = "inherit the instance
+      // default", which is NOT the same instruction as `0` = "never compact
+      // this role". A constant default would either opt every existing role out
+      // of a feature that ships ON, or freeze today's percentage into the
+      // schema where an env var could no longer move it.
+      { table: 'roles',         column: 'auto_compact_pct',                  ddl: 'ALTER TABLE roles ADD COLUMN auto_compact_pct INTEGER' },
       // Agent monitoring (docs/monitoring-agents.md, Lot 1) — cumulative count
       // of inbox messages each agent has drained. Nullable with no default:
       // NULL means "this row predates the counter", which is honestly
@@ -1496,6 +1518,29 @@ export class SwarmDb {
         error: err instanceof Error ? err.message : String(err),
       });
       return false;
+    }
+  }
+
+  /**
+   * Clear the per-role approval override on EVERY role (`approval_json = NULL`).
+   * Backs `RoleStore.clearApprovalSettings()`, itself called by the `approvals`
+   * feature descriptor's purge() (docs/builtin-features.md D7): uninstalling
+   * approvals must not leave stale role overrides behind. Returns the number of
+   * rows touched. Never throws (runs on the 24/7 purge path); prepared inline as
+   * this is a rare admin op. Only `approval_json` is cleared — a role's budget
+   * config (`cost_budget_usd`/`budget_action`) is out of scope (D7).
+   */
+  clearAllRoleApprovalSettings(): number {
+    try {
+      const res = this.db.prepare('UPDATE roles SET approval_json = NULL').run();
+      return res.changes;
+    } catch (err) {
+      log.warn({
+        event: 'db.write_failed',
+        op: 'clearAllRoleApprovalSettings',
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return 0;
     }
   }
 

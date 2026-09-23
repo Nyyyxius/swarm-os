@@ -496,5 +496,86 @@ describe('useEvents — Lot 14 budget breaches', () => {
     });
     expect(result.current.waiting).toHaveLength(1);
   });
+
+  it('clearBudgets flushes the whole stack in one gesture', async () => {
+    const { result } = renderHook(() => useEvents());
+    const ws = await waitForSocket();
+    act(() => {
+      ws.emit(frame());
+      ws.emit(frame({ orchestratorId: 'o2', payload: { teamName: 'NOVA', action: 'notify' } }));
+    });
+    await waitFor(() => {
+      expect(result.current.budgets).toHaveLength(2);
+    });
+
+    act(() => { result.current.clearBudgets(); });
+    await waitFor(() => {
+      expect(result.current.budgets).toHaveLength(0);
+    });
+  });
+});
+
+// ── Built-in features · feature.changed ─────────────────────────────────────
+//
+// The controller patches its feature MAP straight from { name, state } (no
+// refetch, D10). The hook's only job is to validate the frame and forward a
+// well-formed transition; a malformed one is dropped.
+
+describe('useEvents — feature.changed', () => {
+  it('fires onFeatureChanged on a well-formed frame', async () => {
+    const onFeatureChanged = vi.fn();
+    renderHook(() => useEvents({ onFeatureChanged }));
+    const ws = await waitForSocket();
+
+    act(() => {
+      ws.emit({
+        kind: 'feature.changed',
+        ts: '2026-09-03T10:00:00.000Z',
+        payload: { name: 'memory', state: 'disabled' },
+      });
+    });
+
+    await waitFor(() => {
+      expect(onFeatureChanged).toHaveBeenCalledTimes(1);
+    });
+    expect(onFeatureChanged).toHaveBeenCalledWith({
+      kind: 'feature.changed',
+      ts: '2026-09-03T10:00:00.000Z',
+      name: 'memory',
+      state: 'disabled',
+    });
+  });
+
+  it('drops a frame with an unknown feature name', async () => {
+    const onFeatureChanged = vi.fn();
+    renderHook(() => useEvents({ onFeatureChanged }));
+    const ws = await waitForSocket();
+
+    act(() => {
+      ws.emit({
+        kind: 'feature.changed',
+        ts: '2026-09-03T10:00:00.000Z',
+        payload: { name: 'not-a-feature', state: 'disabled' },
+      });
+    });
+    await Promise.resolve();
+    expect(onFeatureChanged).not.toHaveBeenCalled();
+  });
+
+  it('drops a frame with an unknown state', async () => {
+    const onFeatureChanged = vi.fn();
+    renderHook(() => useEvents({ onFeatureChanged }));
+    const ws = await waitForSocket();
+
+    act(() => {
+      ws.emit({
+        kind: 'feature.changed',
+        ts: '2026-09-03T10:00:00.000Z',
+        payload: { name: 'ide', state: 'wobbly' },
+      });
+    });
+    await Promise.resolve();
+    expect(onFeatureChanged).not.toHaveBeenCalled();
+  });
 });
 

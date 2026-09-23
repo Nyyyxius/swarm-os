@@ -7,7 +7,6 @@ import type {
 import type { Message, MailboxPersistHook } from './mailbox.js';
 import type { Persistence } from './persistence.js';
 import type { Spawner } from '../spawner/index.js';
-import { SIGNAL_TEXT } from './messaging.js';
 
 const log = withModule('mailbox-persistence');
 
@@ -171,7 +170,13 @@ export function rehydrateMailbox(spawner: Spawner, db: SwarmDb): {
       const sess = orch.getSession(sid);
       if (!sess) continue;
       try {
-        sess.notifySignal(SIGNAL_TEXT);
+        // docs/auto-compact.md §3.2 — through the single gate, so a session
+        // whose PTY is busy with a half-typed injection is not garbled. A
+        // refusal is not a loss: rehydrated rows keep their ORIGINAL `ts`, and
+        // the idle boundary re-signals anything newer than the last stamp.
+        if (!sess.signalInbox()) {
+          log.debug({ event: 'mailbox.wake_line_busy', orchId: orch.id, sessionId: sid });
+        }
       } catch (err) {
         log.warn({
           event: 'mailbox.wake_failed',

@@ -145,6 +145,7 @@ describe('BusMetricsCollector — latency_ms', () => {
     vi.useRealTimers();
     const sp = fakeSpawner();
     const c = new BusMetricsCollector(sp);
+    c.start(); // arm — instrumentation is a no-op until the collector is active.
     const t0 = c.recordRequestStart();
     // Burn a tiny bit of CPU so duration > 0 but stays bounded.
     let acc = 0;
@@ -156,11 +157,13 @@ describe('BusMetricsCollector — latency_ms', () => {
     // 1 second — assert a generous upper bound to stay non-flaky on CI.
     expect(s.latency_ms).toBeGreaterThan(0);
     expect(s.latency_ms).toBeLessThan(1_000);
+    c.stop();
   });
 
   it('averages across many requests in the same slot', () => {
     const sp = fakeSpawner();
     const c = new BusMetricsCollector(sp);
+    c.start(); // arm — instrumentation is a no-op until the collector is active.
     for (let i = 0; i < 10; i++) {
       const t0 = c.recordRequestStart();
       c.recordRequestEnd(t0, true);
@@ -169,6 +172,7 @@ describe('BusMetricsCollector — latency_ms', () => {
     // 10 records done, all in the same (current) slot. Mean is whatever it
     // is — just confirm the structure (no division by zero, non-negative).
     expect(s.latency_ms).toBeGreaterThanOrEqual(0);
+    c.stop();
   });
 
   it('averages across slots once we have ticked', () => {
@@ -217,31 +221,37 @@ describe('BusMetricsCollector — err_rate_pct', () => {
   it('returns 0 when all requests succeeded', () => {
     const sp = fakeSpawner();
     const c = new BusMetricsCollector(sp);
+    c.start(); // arm — instrumentation is a no-op until the collector is active.
     for (let i = 0; i < 7; i++) {
       const t0 = c.recordRequestStart();
       c.recordRequestEnd(t0, true);
     }
     expect(c.snapshot().err_rate_pct).toBe(0);
+    c.stop();
   });
 
   it('computes the percentage across mixed outcomes', () => {
     const sp = fakeSpawner();
     const c = new BusMetricsCollector(sp);
+    c.start(); // arm — instrumentation is a no-op until the collector is active.
     for (let i = 0; i < 10; i++) {
       const t0 = c.recordRequestStart();
       c.recordRequestEnd(t0, i < 8); // 8 OK, 2 errors
     }
     expect(c.snapshot().err_rate_pct).toBe(20);
+    c.stop();
   });
 
   it('returns 100 when every request failed', () => {
     const sp = fakeSpawner();
     const c = new BusMetricsCollector(sp);
+    c.start(); // arm — instrumentation is a no-op until the collector is active.
     for (let i = 0; i < 3; i++) {
       const t0 = c.recordRequestStart();
       c.recordRequestEnd(t0, false);
     }
     expect(c.snapshot().err_rate_pct).toBe(100);
+    c.stop();
   });
 
   it('aggregates errors across slots', () => {
@@ -389,6 +399,70 @@ describe('BusMetricsCollector — interval-driven smoke test', () => {
     expect(s.latency_ms).toBeGreaterThanOrEqual(0);
     expect(s.throughput_msg_per_s).toBeGreaterThan(0);
     expect(s.window_seconds).toBe(60);
+    c.stop();
+  });
+});
+
+// docs/builtin-features.md D6 — when the `monitoring` feature is off the
+// collector is stopped (or never started), and the MCP server keeps calling
+// record* on every tool call. Those calls MUST be true no-ops so a frozen slot
+// never gets inflated, and a re-enable MUST reset the ring so no throughput
+// spike leaks the idle-gap message growth.
+describe('BusMetricsCollector — `active` flag (monitoring toggle, D6)', () => {
+  it('records nothing before start() (armed only between start and stop)', () => {
+    const sp = fakeSpawner();
+    const c = new BusMetricsCollector(sp);
+    // Never started — mirrors `monitoring` seeded disabled at boot.
+    for (let i = 0; i < 10; i++) {
+      const t = c.recordRequestStart();
+      expect(t).toBe(0n); // sentinel — no hrtime read while disarmed
+      c.recordRequestEnd(t, false); // all errors — would be 100% if recorded
+    }
+    const s = c.snapshot();
+    expect(s.err_rate_pct).toBe(0);
+    expect(s.latency_ms).toBe(0);
+  });
+
+  it('is a true no-op after stop() — instrumentation never pollutes the frozen slot', () => {
+    const sp = fakeSpawner();
+    const c = new BusMetricsCollector(sp, { tickMs: 1000 });
+    c.start();
+    c.stop(); // monitoring disabled — collector disarmed but MCP keeps calling.
+    for (let i = 0; i < 50; i++) {
+      const t = c.recordRequestStart();
+      expect(t).toBe(0n);
+      c.recordRequestEnd(t, false);
+    }
+    const s = c.snapshot();
+    expect(s.err_rate_pct).toBe(0); // nothing recorded → 0, not 100
+    expect(s.latency_ms).toBe(0);
+  });
+
+  it('resets ring + ticks on restart — no throughput spike after a re-enable', () => {
+    const sp = fakeSpawner();
+    const orch = addOrch(sp, 'a', 0);
+    const c = new BusMetricsCollector(sp, { tickMs: 1000 });
+    c.start();
+    // Build up a real throughput history: 10 ticks, +50 messages each.
+    for (let i = 0; i < 10; i++) {
+      orch.mailbox.messagesTotal += 50;
+      c.tick();
+    }
+    expect(c.snapshot().throughput_msg_per_s).toBeGreaterThan(0);
+
+    // Disable → the orch keeps receiving messages while monitoring is off.
+    c.stop();
+    orch.mailbox.messagesTotal += 5000; // huge idle-period growth
+
+    // Re-enable: start() must reset the ring + ticks so the 5000-message idle
+    // growth is NOT reported as a one-off (newest − oldest) spike.
+    c.start();
+    expect(c.snapshot().throughput_msg_per_s).toBe(0);
+
+    // A single fresh tick now measures ONLY the delta since re-enable.
+    orch.mailbox.messagesTotal += 30;
+    c.tick();
+    expect(c.snapshot().throughput_msg_per_s).toBe(30);
     c.stop();
   });
 });

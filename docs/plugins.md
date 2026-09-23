@@ -14,6 +14,14 @@ disable / uninstall happen live — no restart, no interruption of running teams
 > *accidental* crashes (a throw in a callback is caught, counted, and after a
 > crash-loop the plugin is quarantined), not against malice.
 
+> **Built-in features share this screen.** Beyond third-party plugins (folders
+> under `/data/plugins`), six of swarm-os's own core features — IDE, Code graph,
+> Board, Memory, Monitoring, Approvals — are managed from the same **Plugins**
+> page, in a dedicated **BUILT-IN** section: enable / disable / uninstall /
+> reinstall, live, without a restart. They stay compiled into the image (only
+> their lifecycle is pilotable, not their code), so they are not authored like
+> the plugins below. See **[builtin-features.md](./builtin-features.md)**.
+
 ---
 
 ## 1. Anatomy of a plugin

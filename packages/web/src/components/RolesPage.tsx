@@ -44,6 +44,9 @@ import {
 import {
   budgetFieldValue, budgetSummary, parseCostBudget, toBudgetAction,
 } from '../lib/budget';
+import {
+  autoCompactFieldValue, autoCompactSummary, parseAutoCompactPct,
+} from '../lib/autoCompact';
 import { DiscordOnboarding } from './DiscordOnboarding';
 import { useShellMode } from '../hooks/useShellMode';
 import { useProviders } from '../hooks/useProviders';
@@ -75,6 +78,14 @@ interface Props {
    * existing render site of `RolesPage` require a provider.
    */
   onOpenCrons?: (roleId: string) => void;
+  /**
+   * Feature « approvals » active (docs/builtin-features.md). `false` masque la
+   * section APPROVALS (le serveur continue d'accepter `approval_json` — champ
+   * inerte tant que la feature est off). Passée en PROP (comme `onOpenCrons`)
+   * plutôt que lue via le contrôleur, pour ne pas coupler RolesPage au
+   * provider. Défaut `true` : on n'ampute rien tant que l'état est inconnu.
+   */
+  approvalsVisible?: boolean;
 }
 
 /**
@@ -93,10 +104,12 @@ type SectionId =
   | 'connectors'
   | 'approvals'
   | 'autoCleanup'
+  | 'autocompact'
   | 'budget';
 
-export function RolesPage({ open, onClose, onOpenCrons }: Props) {
-  const { roles, loading, error, create, update, destroy } = useRoles();
+export function RolesPage({ open, onClose, onOpenCrons, approvalsVisible = true }: Props) {
+  const { roles, loading, error, create, update, destroy, autoCompactDefaultPct } =
+    useRoles();
   const { isMobile } = useShellMode();
   const [selectedRoleId, setSelectedRoleId] = useState<string | null>(null);
   const [editingSection, setEditingSection] = useState<SectionId | null>(null);
@@ -215,6 +228,10 @@ export function RolesPage({ open, onClose, onOpenCrons }: Props) {
         // duplicating is to get the same guard rails on a variant.
         costBudgetUsd: role.costBudgetUsd ?? null,
         budgetAction: toBudgetAction(role.budgetAction),
+        // `null` stays `null`: the copy inherits the instance default exactly
+        // like its original did, and a role taken out of auto-compact (`0`)
+        // stays out of it.
+        autoCompactPct: role.autoCompactPct ?? null,
       });
       setSelectedRoleId(r.id);
       setEditingSection(null);
@@ -414,18 +431,29 @@ export function RolesPage({ open, onClose, onOpenCrons }: Props) {
               onSave={(body) => patchSelected(body)}
             />
 
-            <ApprovalsSection
-              role={role}
-              editing={editingSection === 'approvals'}
-              onEdit={() => setEditingSection('approvals')}
-              onCancel={() => setEditingSection(null)}
-              onSave={(body) => patchSelected(body)}
-            />
+            {approvalsVisible && (
+              <ApprovalsSection
+                role={role}
+                editing={editingSection === 'approvals'}
+                onEdit={() => setEditingSection('approvals')}
+                onCancel={() => setEditingSection(null)}
+                onSave={(body) => patchSelected(body)}
+              />
+            )}
 
             <AutoCleanupSection
               role={role}
               editing={editingSection === 'autoCleanup'}
               onEdit={() => setEditingSection('autoCleanup')}
+              onCancel={() => setEditingSection(null)}
+              onSave={(body) => patchSelected(body)}
+            />
+
+            <AutoCompactSection
+              role={role}
+              defaultPct={autoCompactDefaultPct}
+              editing={editingSection === 'autocompact'}
+              onEdit={() => setEditingSection('autocompact')}
               onCancel={() => setEditingSection(null)}
               onSave={(body) => patchSelected(body)}
             />
@@ -1202,6 +1230,114 @@ function AutoCleanupSection({
             Un worker terminé (killed / exited / failed) est retiré de l’affichage (soft-delete,
             comme le bouton « REMOVE ») une fois ce délai écoulé depuis sa fin. Les leads et les
             sessions actives ne sont jamais touchés. Désactivé par défaut.
+          </div>
+          {error && (
+            <div
+              className="field-warn"
+              style={{ color: 'var(--bad)', borderLeftColor: 'var(--bad)' }}
+            >
+              {error}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ──────────────────────────── AUTO-COMPACT ──────────────────────────────────
+/**
+ * Per-role auto-compact threshold (docs/auto-compact.md, §3.5) — structurally
+ * the same section as `AutoCleanupSection` above, for the same kind of
+ * setting: something the server does on its own, to every agent of this role,
+ * with no operator in the loop.
+ *
+ * Three states in one field (§3.3): empty = inherit the instance value (shown
+ * in the read-only line so "inherit" is never an opaque word), `0` = never
+ * auto-compact this role, `1..100` = the threshold.
+ */
+function AutoCompactSection({
+  role,
+  defaultPct,
+  editing,
+  onEdit,
+  onCancel,
+  onSave,
+}: {
+  role: RoleView;
+  /** Instance default (`GET /roles` → `defaults.autoCompactPct`). */
+  defaultPct: number;
+  editing: boolean;
+  onEdit: () => void;
+  onCancel: () => void;
+  onSave: (body: Partial<RoleInput>) => Promise<void>;
+}) {
+  const [pct, setPct] = useState('');
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setPct(autoCompactFieldValue(role.autoCompactPct));
+    setError(null);
+  }, [role.id, editing]);
+
+  async function save() {
+    setError(null);
+    const parsed = parseAutoCompactPct(pct);
+    if (!parsed.ok) {
+      setError(parsed.error);
+      return;
+    }
+    try {
+      // Sent even as `null`: emptying the field is the only way back to
+      // inheriting, and a field that is only sent when filled can set a
+      // threshold and never remove one.
+      await onSave({ autoCompactPct: parsed.value });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  return (
+    <div className="role-section">
+      <h3>
+        <span>AUTO-COMPACT</span>
+        {editing ? (
+          <span style={{ display: 'flex', gap: 6 }}>
+            <button className="h-edit" onClick={onCancel}>
+              CANCEL
+            </button>
+            <button className="h-edit" onClick={() => void save()} style={{ color: 'var(--amber)' }}>
+              SAVE
+            </button>
+          </span>
+        ) : (
+          <button className="h-edit" onClick={onEdit}>
+            EDIT
+          </button>
+        )}
+      </h3>
+
+      {!editing ? (
+        <div className="cfg-pre">{autoCompactSummary(role.autoCompactPct, defaultPct)}</div>
+      ) : (
+        <>
+          <div className="field" style={{ maxWidth: 220 }}>
+            <label>SEUIL DE CONTEXTE (%)</label>
+            <input
+              type="number"
+              min={0}
+              max={100}
+              value={pct}
+              onChange={(e) => setPct(e.target.value)}
+              placeholder={String(defaultPct)}
+            />
+          </div>
+          <div className="field-help" style={{ marginTop: 8 }}>
+            Le serveur arme « /compact » quand le contexte de l’agent dépasse ce pourcentage de
+            sa fenêtre, seulement quand l’agent est idle avec une inbox vide, jamais au milieu
+            d’un tour. Vide = valeur de l’instance. 0 = désactivé pour ce rôle. En dessous du
+            socle post-compaction (≈ 15-20 % sur claude), l’agent est re-compacté tous les
+            10 points de croissance.
           </div>
           {error && (
             <div

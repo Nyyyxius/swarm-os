@@ -197,6 +197,39 @@ describe('CommandLauncher — garde Ctrl+K', () => {
   });
 });
 
+describe('CommandLauncher — filtrage par built-in features', () => {
+  // Toutes activées sauf celle du cas testé — la carte doit couvrir les 6.
+  const allOn = {
+    ide: true, codegraph: true, board: true,
+    memory: true, monitoring: true, approvals: true,
+  } as const;
+
+  it('retire l’item dont la feature est explicitement désactivée', () => {
+    renderLauncher({ features: { ...allOn, monitoring: false } });
+    expect(screen.queryByText('MONITORING')).toBeNull();
+    // Les items non liés à une feature restent (ROLES) et une autre feature on aussi.
+    expect(screen.getByText('ROLES')).toBeInTheDocument();
+    expect(screen.getByText('MEMORY')).toBeInTheDocument();
+  });
+
+  it('features=null (inconnu) ne filtre rien', () => {
+    renderLauncher({ features: null });
+    expect(screen.getByText('MONITORING')).toBeInTheDocument();
+    expect(screen.getByText('IDE')).toBeInTheDocument();
+  });
+
+  it('le filtrage ne réordonne pas — ↓↓↵ atteint toujours MEMORY', () => {
+    // new-team, roles, memory : les deux premiers ne sont liés à aucune
+    // feature, donc jamais filtrés — l'ordre relatif est préservé.
+    const { onPick } = renderLauncher({ features: { ...allOn, ide: false, board: false } });
+    const input = search();
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    fireEvent.keyDown(input, { key: 'ArrowDown' });
+    fireEvent.keyDown(input, { key: 'Enter' });
+    expect(onPick).toHaveBeenCalledWith<[LauncherActionId]>('memory');
+  });
+});
+
 describe('CommandLauncher — item UPDATE', () => {
   it('n’affiche aucun compteur chiffré — aucune source honnête à ce jour', () => {
     // Le badge du prototype n'est pas porté : `approvalToasts` repart de zéro

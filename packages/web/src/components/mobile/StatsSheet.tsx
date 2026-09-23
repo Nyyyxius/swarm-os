@@ -36,7 +36,10 @@ export default function StatsSheet({ open, onClose }: StatsSheetProps) {
   const perOrchSparks = serverMsgs?.per_orchestrator ?? null;
   const activeTeams = filterActive(c.orchestrators);
   const ended = filterEnded(c.orchestrators).slice(0, ENDED_DISPLAY_CAP);
-  const bus = useBusHealth(3_000);
+  // Monitoring feature off (docs/builtin-features.md) → the /metrics surface is
+  // 404: hide its tile + bus grid and cut the poll. `null` (unknown) stays on.
+  const monitoringOn = c.features?.monitoring !== false;
+  const bus = useBusHealth(3_000, monitoringOn);
 
   function pickTeam(targetSessionId: string) {
     onClose();
@@ -89,13 +92,15 @@ export default function StatsSheet({ open, onClose }: StatsSheetProps) {
         <div className="m-graph"><BigGraph data={flow.history} /></div>
 
         <h3 className="m-sec">Agents</h3>
-        <button type="button" className="m-team-row mon-link-row" onClick={openMonitoring}>
-          <div className="m-tr-name">MONITORING</div>
-          <div className="m-tr-count">→</div>
-          <div className="m-tr-meta">
-            <span>CONTEXT · THROUGHPUT · INBOX PER AGENT</span>
-          </div>
-        </button>
+        {monitoringOn && (
+          <button type="button" className="m-team-row mon-link-row" onClick={openMonitoring}>
+            <div className="m-tr-name">MONITORING</div>
+            <div className="m-tr-count">→</div>
+            <div className="m-tr-meta">
+              <span>CONTEXT · THROUGHPUT · INBOX PER AGENT</span>
+            </div>
+          </button>
+        )}
         <button type="button" className="m-team-row mon-link-row" onClick={openCrons}>
           <div className="m-tr-name">CRONS</div>
           <div className="m-tr-count">→</div>
@@ -169,21 +174,25 @@ export default function StatsSheet({ open, onClose }: StatsSheetProps) {
           </>
         )}
 
-        <h3 className="m-sec">Bus health</h3>
-        <div className="m-bus-grid">
-          {busCells.map((cell) => (
-            <div key={cell.k} className="m-bus-cell">
-              <div className="m-bus-k">{cell.k}</div>
-              <div
-                className="m-bus-v"
-                style={{ color: cell.warn && cell.v !== '—' && Number(cell.v) > 0 ? 'var(--warn)' : 'var(--text)' }}
-              >
-                {cell.v}
-                {cell.u && cell.v !== '—' && <span className="m-bus-u">{cell.u}</span>}
-              </div>
+        {monitoringOn && (
+          <>
+            <h3 className="m-sec">Bus health</h3>
+            <div className="m-bus-grid">
+              {busCells.map((cell) => (
+                <div key={cell.k} className="m-bus-cell">
+                  <div className="m-bus-k">{cell.k}</div>
+                  <div
+                    className="m-bus-v"
+                    style={{ color: cell.warn && cell.v !== '—' && Number(cell.v) > 0 ? 'var(--warn)' : 'var(--text)' }}
+                  >
+                    {cell.v}
+                    {cell.u && cell.v !== '—' && <span className="m-bus-u">{cell.u}</span>}
+                  </div>
+                </div>
+              ))}
             </div>
-          ))}
-        </div>
+          </>
+        )}
       </div>
     </Sheet>
   );

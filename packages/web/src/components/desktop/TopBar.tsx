@@ -4,6 +4,7 @@ import { ICON } from './icons';
 import CommandLauncher, { type LauncherActionId } from './CommandLauncher';
 import { formatClock, formatMsgCount, formatUptimeShort } from '../../lib/format';
 import { useInstanceSettings } from '../../hooks/useInstanceSettings';
+import { type FeatureName } from '../../api/client';
 
 /** Forme attendue par la TopBar pour chaque team-pill. */
 export interface TopBarTeam {
@@ -86,6 +87,12 @@ interface Props {
   /** Vrai quand une modale (couche z-index 100) est ouverte : ⌘K doit rester
    *  inerte, sinon le panneau se monte derrière elle. */
   menuBlocked?: boolean;
+  /**
+   * Carte de visibilité des built-in features (docs/builtin-features.md),
+   * passée au launcher pour filtrer les destinations désactivées. `null` =
+   * inconnu (rien n'est filtré tant que le snapshot n'est pas hydraté).
+   */
+  features?: Record<FeatureName, boolean> | null;
 }
 
 const EMPTY_FLASH_SET: ReadonlySet<string> = new Set();
@@ -93,7 +100,7 @@ const EMPTY_FLASH_SET: ReadonlySet<string> = new Set();
 export default function TopBar({
   teams, selectedTeamId, flashTeamIds, totalAgents, info,
   onSelectTeam, onNewTeam, onOpenRoles, onOpenMemory, onOpenBoard, onOpenApprovals, onOpenGraph, onOpenMonitoring, onOpenPlugins, onOpenSkills, onOpenCrons, onOpenIde, onOpenSettings,
-  onOpenUpdates, onOpenAppearance, menuBlocked,
+  onOpenUpdates, onOpenAppearance, menuBlocked, features,
 }: Props) {
   const flashSet = flashTeamIds ?? EMPTY_FLASH_SET;
   const [now, setNow] = useState(new Date());
@@ -272,6 +279,7 @@ export default function TopBar({
       onPick={handlePick}
       updateAvailable={info.updateAvailable}
       updateLatest={info.updateLatest}
+      features={features}
     />
     </>
   );

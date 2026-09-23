@@ -572,3 +572,50 @@ describe('cost per card without a lookup wired', () => {
     expect(store.getCard(card.id)!.costUsd).toBeCloseTo(2.5, 6);
   });
 });
+
+describe('purgeAll (docs/builtin-features.md D7)', () => {
+  /** Count rows in one of the three owned tables. */
+  function count(table: string): number {
+    return (db.db.prepare(`SELECT COUNT(*) AS n FROM ${table}`).get() as { n: number }).n;
+  }
+
+  it('DELETEs cards, deps AND events across every team', () => {
+    const a1 = store.createCard({ orchestratorId: ORCH_A, title: 'A1', createdBy: LEAD });
+    const a2 = store.createCard({ orchestratorId: ORCH_A, title: 'A2', createdBy: LEAD });
+    store.createCard({ orchestratorId: ORCH_B, title: 'B1', createdBy: LEAD });
+    // A dependency edge (taskboard_deps) + a comment (extra taskboard_events row).
+    store.addDep({ cardId: a1.id, dependsOnId: a2.id, actorSessionId: LEAD });
+    store.comment({ id: a1.id, text: 'note', actorSessionId: LEAD });
+
+    expect(count('taskboard_cards')).toBeGreaterThan(0);
+    expect(count('taskboard_deps')).toBeGreaterThan(0);
+    expect(count('taskboard_events')).toBeGreaterThan(0);
+
+    store.purgeAll();
+
+    expect(count('taskboard_cards')).toBe(0);
+    expect(count('taskboard_deps')).toBe(0);
+    expect(count('taskboard_events')).toBe(0);
+    expect(store.listCards({ orchestratorId: ORCH_A })).toHaveLength(0);
+    expect(store.listCards({ orchestratorId: ORCH_B })).toHaveLength(0);
+    expect(store.listTeams()).toHaveLength(0);
+  });
+
+  it('is a DELETE, not a DROP — the store stays writable after a purge (re-enable)', () => {
+    store.createCard({ orchestratorId: ORCH_A, title: 'before', createdBy: LEAD });
+    store.purgeAll();
+
+    // The prepared statements must still be valid: a fresh create + read works,
+    // which is exactly what a board re-enable relies on (store already present,
+    // simply empty).
+    const revived = store.createCard({ orchestratorId: ORCH_A, title: 'after', createdBy: LEAD });
+    expect(store.getCard(revived.id)?.title).toBe('after');
+    expect(store.listCards({ orchestratorId: ORCH_A })).toHaveLength(1);
+  });
+
+  it('never throws (idempotent on an already-empty board)', () => {
+    expect(() => store.purgeAll()).not.toThrow();
+    expect(() => store.purgeAll()).not.toThrow();
+    expect(count('taskboard_cards')).toBe(0);
+  });
+});

@@ -42,6 +42,8 @@ function role(over: Partial<RoleView> = {}): RoleView {
 // the same). Anchor on the caption instead of demanding an exact match.
 const budgetInput = () =>
   screen.getByLabelText(/^cost budget \(usd\)/) as HTMLInputElement;
+const autoCompactInput = () =>
+  screen.getByLabelText(/^auto-compact \(%\)/) as HTMLInputElement;
 const actionButton = (label: string) =>
   screen.getByRole('radio', { name: label });
 
@@ -179,6 +181,97 @@ describe('RoleDialog · COST BUDGET section', () => {
       autoRemoveDeadWorkers: true,
       autoRemoveDeadWorkersDelayMs: 900_000,
       costBudgetUsd: 50,
+    });
+  });
+});
+
+// ── AUTO-COMPACT (docs/auto-compact.md, Lot 2) ──────────────────────────────
+//
+// Same failure mode as the budget, mirrored: here the feature is ON by default
+// (35 % instance-wide), so the value that must survive intact is the one that
+// turns it OFF. Three states have to reach `onSubmit` distinctly — `null`
+// (inherit), `0` (never compact this role) and an integer — and a threshold
+// the server would reject must not leave the dialog looking saved.
+describe('RoleDialog · AUTO-COMPACT field', () => {
+  it('opens empty (inherit) and says what an empty field is worth', () => {
+    renderDialog();
+    expect(autoCompactInput().value).toBe('');
+    expect(
+      screen.getByText(/Vide = valeur de l’instance \(35 % par défaut\)/),
+    ).toBeTruthy();
+  });
+
+  it('submits null — not 0 — when left empty, so the role keeps inheriting', async () => {
+    const onSubmit = renderDialog();
+    fillLabel();
+    save();
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    expect(onSubmit.mock.calls[0]?.[0]).toMatchObject({ autoCompactPct: null });
+    expect(onSubmit.mock.calls[0]?.[0].autoCompactPct).toBeNull();
+  });
+
+  it('submits 0 as 0 — the per-role opt-out, not an empty field', async () => {
+    const onSubmit = renderDialog();
+    fillLabel();
+    fireEvent.change(autoCompactInput(), { target: { value: '0' } });
+    save();
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    expect(onSubmit.mock.calls[0]?.[0]).toMatchObject({ autoCompactPct: 0 });
+  });
+
+  it('submits a threshold as an integer', async () => {
+    const onSubmit = renderDialog();
+    fillLabel();
+    fireEvent.change(autoCompactInput(), { target: { value: '40' } });
+    save();
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    expect(onSubmit.mock.calls[0]?.[0]).toMatchObject({ autoCompactPct: 40 });
+  });
+
+  it('refuses a threshold above 100 instead of submitting one the server rejects', async () => {
+    const onSubmit = renderDialog();
+    fillLabel();
+    fireEvent.change(autoCompactInput(), { target: { value: '101' } });
+    save();
+
+    expect(
+      await screen.findByText(/Le seuil doit être un entier entre 0 et 100/),
+    ).toBeTruthy();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('pre-fills from an existing role, 0 included', () => {
+    renderDialog(role({ autoCompactPct: 20 }));
+    expect(autoCompactInput().value).toBe('20');
+  });
+
+  it('keeps a disabled role disabled across an edit', async () => {
+    const onSubmit = renderDialog(role({ autoCompactPct: 0 }));
+    expect(autoCompactInput().value).toBe('0');
+    save();
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    expect(onSubmit.mock.calls[0]?.[0].autoCompactPct).toBe(0);
+  });
+
+  it('opens on inherit for a role from a server predating the feature', async () => {
+    const onSubmit = renderDialog(role());
+    expect(autoCompactInput().value).toBe('');
+    save();
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    expect(onSubmit.mock.calls[0]?.[0].autoCompactPct).toBeNull();
+  });
+
+  it('leaves the budget field it sits next to untouched', async () => {
+    const onSubmit = renderDialog(role({ costBudgetUsd: 50, autoCompactPct: 25 }));
+    save();
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    expect(onSubmit.mock.calls[0]?.[0]).toMatchObject({
+      costBudgetUsd: 50,
+      autoCompactPct: 25,
     });
   });
 });

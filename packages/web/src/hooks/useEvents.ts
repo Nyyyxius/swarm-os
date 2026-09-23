@@ -1,5 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { api, type BudgetAction } from '../api/client';
+import { api, type BudgetAction, type FeatureName, type FeatureState } from '../api/client';
 import { toBudgetAction } from '../lib/budget';
 
 /**
@@ -205,6 +205,19 @@ export interface CodegraphEvent {
   payload?: { scopeId?: string; [k: string]: unknown };
 }
 
+/**
+ * Normalized `feature.changed` frame — a built-in feature's lifecycle state
+ * changed (docs/builtin-features.md D10). Payload carries `{ name, state }`;
+ * the controller patches its in-memory feature map directly from it (no
+ * refetch). Same shape/plumbing as `plugin.host.changed`.
+ */
+export interface FeatureChangedEvent {
+  kind: 'feature.changed';
+  ts: string;
+  name: FeatureName;
+  state: FeatureState;
+}
+
 export interface UseEventsOptions {
   /** Callback fired on every well-formed mailbox.message frame. */
   onMailboxMessage?: (ev: MailboxMessageEvent) => void;
@@ -224,6 +237,8 @@ export interface UseEventsOptions {
   onApprovalResolved?: (ev: ApprovalEvent) => void;
   /** Callback fired on every code.graph.* frame (Graphify P4). */
   onGraphEvent?: (ev: CodegraphEvent) => void;
+  /** Callback fired on every feature.changed frame (built-in features). */
+  onFeatureChanged?: (ev: FeatureChangedEvent) => void;
 }
 
 const AUTO_DISMISS_MS = 30_000;
@@ -238,6 +253,7 @@ export function useEvents(opts: UseEventsOptions = {}): {
   clearApprovals: () => void;
   budgets: BudgetNotice[];
   dismissBudget: (id: string) => void;
+  clearBudgets: () => void;
 } {
   const [connected, setConnected] = useState(false);
   const [waiting, setWaiting] = useState<WaitingNotice[]>([]);
@@ -258,6 +274,7 @@ export function useEvents(opts: UseEventsOptions = {}): {
   const onApprReqRef = useRef<UseEventsOptions['onApprovalRequested']>(opts.onApprovalRequested);
   const onApprResRef = useRef<UseEventsOptions['onApprovalResolved']>(opts.onApprovalResolved);
   const onGraphRef = useRef<UseEventsOptions['onGraphEvent']>(opts.onGraphEvent);
+  const onFeatureRef = useRef<UseEventsOptions['onFeatureChanged']>(opts.onFeatureChanged);
   useEffect(() => { onMailRef.current = opts.onMailboxMessage; }, [opts.onMailboxMessage]);
   useEffect(() => { onCreatedRef.current = opts.onSessionCreated; }, [opts.onSessionCreated]);
   useEffect(() => { onOrchCreatedRef.current = opts.onOrchestratorCreated; }, [opts.onOrchestratorCreated]);
@@ -267,6 +284,7 @@ export function useEvents(opts: UseEventsOptions = {}): {
   useEffect(() => { onApprReqRef.current = opts.onApprovalRequested; }, [opts.onApprovalRequested]);
   useEffect(() => { onApprResRef.current = opts.onApprovalResolved; }, [opts.onApprovalResolved]);
   useEffect(() => { onGraphRef.current = opts.onGraphEvent; }, [opts.onGraphEvent]);
+  useEffect(() => { onFeatureRef.current = opts.onFeatureChanged; }, [opts.onFeatureChanged]);
 
   const cancelTimer = (id: string): void => {
     const t = timersRef.current.get(id);
@@ -303,6 +321,13 @@ export function useEvents(opts: UseEventsOptions = {}): {
   // a paused team, which is an explicit operator gesture on the team itself.
   const dismissBudget = (id: string): void => {
     setBudgets((b) => b.filter((n) => n.id !== id));
+  };
+
+  // Flush the whole budget stack in one gesture — the controller calls this
+  // when the `monitoring` feature is turned off, so notices pointing at a
+  // now-hidden cost surface do not linger (mirror of `clearApprovals`).
+  const clearBudgets = (): void => {
+    setBudgets([]);
   };
 
   useEffect(() => {
@@ -421,6 +446,28 @@ export function useEvents(opts: UseEventsOptions = {}): {
                     status: typeof p?.status === 'string' ? p.status : '',
                     enabled: p?.enabled === true,
                   });
+                }
+
+                // Built-in features — feature.changed: the controller patches
+                // its in-memory feature map from { name, state } (no refetch,
+                // D10). Validated here so the callback only ever sees a
+                // well-formed transition; a malformed frame is dropped.
+                if (ev.kind === 'feature.changed') {
+                  const p = ev.payload as { name?: string; state?: string } | undefined;
+                  const name = p?.name;
+                  const state = p?.state;
+                  if (
+                    (name === 'ide' || name === 'codegraph' || name === 'board'
+                      || name === 'memory' || name === 'monitoring' || name === 'approvals')
+                    && (state === 'enabled' || state === 'disabled' || state === 'uninstalled')
+                  ) {
+                    onFeatureRef.current?.({
+                      kind: 'feature.changed',
+                      ts: ev.ts,
+                      name,
+                      state,
+                    });
+                  }
                 }
 
                 // Shared memory graph — memory.* frames drive a live refresh
@@ -597,6 +644,6 @@ export function useEvents(opts: UseEventsOptions = {}): {
   return {
     connected, waiting, dismiss, clear,
     approvals, dismissApproval, clearApprovals,
-    budgets, dismissBudget,
+    budgets, dismissBudget, clearBudgets,
   };
 }

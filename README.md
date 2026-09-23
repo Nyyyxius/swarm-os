@@ -182,8 +182,14 @@ OpenRouter key in SETTINGS ▸ OPENROUTER for `opencode`. Two accepted
 degradations to know before choosing: `gemini` and `opencode` have no
 `--effort` equivalent, and `codex`/`gemini`/`opencode` sessions never reach the
 `waiting` state (their callbacks fire at every turn boundary, or not at all),
-which makes `SWARM_OS_COMPACT_ON_WAITING` a no-op for them —
-`SWARM_OS_AUTO_COMPACT_BYTES` is the knob that works everywhere.
+which makes `SWARM_OS_COMPACT_ON_WAITING` a no-op for them. Context is kept
+lean by the **context-threshold auto-compact** instead (`docs/auto-compact.md`):
+an agent whose context passes its role's threshold (35 % by default,
+`SWARM_OS_AUTO_COMPACT_PCT` / per-role `autoCompactPct`, `0` = off) is
+`/compact`-ed at its next idle boundary, only with an empty inbox, and any mail
+that arrives meanwhile is re-signaled once the compaction is over. It works
+for claude, codex and opencode; gemini has no context gauge and is never
+auto-compacted.
 
 Full reference — per-CLI contract, capabilities, host prerequisites, what the
 spikes proved and what they could not: `docs/providers.md`.

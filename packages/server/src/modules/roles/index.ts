@@ -226,6 +226,26 @@ export function toBudgetAction(raw: string | null | undefined): BudgetAction {
   return raw === 'pause' ? 'pause' : DEFAULT_BUDGET_ACTION;
 }
 
+/**
+ * Narrow a persisted `auto_compact_pct` to `null | 0..100`.
+ *
+ * Anything that is not an integer in range — a `250` or a `35.5` from a
+ * hand-edited row or a downgrade, a NaN out of a corrupted file — reads as
+ * `null`, i.e. "inherit the instance default". Never as an arbitrary
+ * threshold: a stored `250` would silently mean "never compact" and a stored
+ * `-5` "compact on every boundary", and in both cases the operator would be
+ * looking at a role that ignores the only number they can see. Degrading to
+ * the documented instance default is the one outcome that is explainable.
+ *
+ * The route (`http/routes/roles.ts parseAutoCompactPct`) rejects those values
+ * at the door with a 400; this is the read-side half of the same rule, for
+ * rows that never came through the route.
+ */
+export function toAutoCompactPct(raw: number | null | undefined): number | null {
+  if (typeof raw !== 'number' || !Number.isInteger(raw) || raw < 0 || raw > 100) return null;
+  return raw;
+}
+
 export interface Role {
   id: string;
   label: string;
@@ -289,6 +309,26 @@ export interface Role {
   costBudgetUsd: number | null;
   /** What happens at the crossing. Always set; `notify` unless stored otherwise. */
   budgetAction: BudgetAction;
+  /**
+   * Auto-compact threshold (docs/auto-compact.md D6): the percentage of its
+   * context window an agent of this role may reach before the server arms a
+   * `/compact` at its next idle boundary (idle AND inbox empty — never mid-turn).
+   *
+   * Three distinct states, and the difference between the first two is the
+   * whole point of the field:
+   *
+   *   - `null` — INHERIT the instance default (`config.autoCompactPct`, 35 by
+   *     default). This is what every role reads until someone sets a number,
+   *     and what a role goes back to when the form is cleared;
+   *   - `0` — auto-compact DISABLED for this role, whatever the instance says.
+   *     An explicit opt-out, not an absence of setting;
+   *   - `1..100` — this role's own threshold, which wins over the instance.
+   *
+   * Resolved live at every boundary (`role.autoCompactPct ?? config.autoCompactPct`),
+   * never cached: editing a role takes effect on its running agents without a
+   * restart, which is the only acceptable behaviour on a fleet that never stops.
+   */
+  autoCompactPct: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -317,6 +357,12 @@ export interface RoleInit {
   autoRemoveDeadWorkersDelayMs?: number;
   costBudgetUsd?: number | null;
   budgetAction?: BudgetAction;
+  /**
+   * Omitted = the store's default (`null` = inherit the instance threshold).
+   * An explicit `null` on a PATCH means "go back to inheriting" — see
+   * `RoleStore.update`, where `undefined` and `null` are NOT interchangeable.
+   */
+  autoCompactPct?: number | null;
 }
 
 export type RolePatch = Partial<RoleInit>;
@@ -370,6 +416,7 @@ function rowToRole(row: RoleRow): Role {
         ? row.cost_budget_usd
         : null,
     budgetAction: toBudgetAction(row.budget_action),
+    autoCompactPct: toAutoCompactPct(row.auto_compact_pct),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -396,6 +443,7 @@ function roleToRow(r: Role): RoleRow {
     auto_remove_dead_workers_delay_ms: r.autoRemoveDeadWorkersDelayMs,
     cost_budget_usd: r.costBudgetUsd,
     budget_action: r.budgetAction,
+    auto_compact_pct: r.autoCompactPct,
     created_at: r.createdAt,
     updated_at: r.updatedAt,
   };
@@ -433,6 +481,9 @@ export class RoleStore {
         init.autoRemoveDeadWorkersDelayMs ?? DEFAULT_AUTO_REMOVE_DEAD_WORKERS_DELAY_MS,
       costBudgetUsd: init.costBudgetUsd ?? null,
       budgetAction: init.budgetAction ?? DEFAULT_BUDGET_ACTION,
+      // `??` is correct HERE (unlike in `update`): on a create there is no
+      // previous value, so "omitted" and "explicitly null" both mean inherit.
+      autoCompactPct: init.autoCompactPct ?? null,
       createdAt: now,
       updatedAt: now,
     };
@@ -487,6 +538,12 @@ export class RoleStore {
       costBudgetUsd:
         patch.costBudgetUsd !== undefined ? patch.costBudgetUsd : existing.costBudgetUsd,
       budgetAction: patch.budgetAction !== undefined ? patch.budgetAction : existing.budgetAction,
+      // Same load-bearing `!== undefined` as the budget above: `null` is a
+      // MEANINGFUL patch value (back to inheriting the instance threshold), so
+      // a `??` here would make "clear the field" a silent no-op and leave the
+      // role pinned to a number the operator just erased.
+      autoCompactPct:
+        patch.autoCompactPct !== undefined ? patch.autoCompactPct : existing.autoCompactPct,
       updatedAt: new Date().toISOString(),
     };
     this.db.updateRole(roleToRow(updated));
@@ -495,5 +552,18 @@ export class RoleStore {
 
   delete(id: string): boolean {
     return this.db.deleteRole(id);
+  }
+
+  /**
+   * Clear the approval-gate override on EVERY role (`roles.approval_json = NULL`),
+   * so a role falls back to the built-in default arming. Called by the `approvals`
+   * feature descriptor's purge() when the feature is UNINSTALLED
+   * (docs/builtin-features.md D7): the per-role override is approval-subsystem
+   * data and must not survive its data purge. A clean store method rather than a
+   * raw UPDATE from the descriptor. Returns the number of roles touched. Budget
+   * config (`costBudgetUsd`/`budgetAction`) is deliberately left intact (D7).
+   */
+  clearApprovalSettings(): number {
+    return this.db.clearAllRoleApprovalSettings();
   }
 }

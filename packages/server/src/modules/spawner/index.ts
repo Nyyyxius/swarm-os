@@ -7,6 +7,7 @@ import {
   type StartOptions,
 } from '../orchestrator/index.js';
 import type { PluginToolSummary } from '../orchestrator/preamble.js';
+import type { FeatureName } from '../features/registry.js';
 import { eventBus } from '../../events.js';
 import { withModule } from '../../logger.js';
 import type { Config, EffortLevel, PermissionMode } from '../../config.js';
@@ -34,12 +35,7 @@ import type { SkillsSubsystem } from '../skills/index.js';
 import type { SkillFragment } from '../orchestrator/preamble.js';
 import { buildApprovalReplyResolver } from '../approvals/reply.js';
 import { buildApprovalReactionResolver } from '../approvals/reaction.js';
-import {
-  isIdle,
-  SIGNAL_TEXT,
-  pushToLeadInbox,
-  emitMailboxMessage,
-} from '../orchestrator/messaging.js';
+import { isIdle, pushToLeadInbox, emitMailboxMessage } from '../orchestrator/messaging.js';
 
 const log = withModule('spawner');
 
@@ -192,6 +188,13 @@ export interface SpawnerDeps {
    */
   pluginTools?: () => readonly PluginToolSummary[];
   /**
+   * Built-in feature snapshot (true = enabled). MIRRORS `pluginTools` — a thunk,
+   * not a value, so a toggle mid-team is seen at each spawn. Forwarded verbatim
+   * to each `Orchestrator`. Not consumed yet (Lots 4/5/8 gate on it); posed here
+   * so `index.ts` can wire it. Absent in unit tests ⇒ no feature gating.
+   */
+  features?: () => Record<FeatureName, boolean>;
+  /**
    * The shared knowledge-graph store, GLOBAL to the deployment. Held on the
    * Spawner because it is the one long-lived object every surface (MCP tools via
    * `ToolContext`, REST) already reaches. Absent in unit tests that don't
@@ -231,6 +234,7 @@ export interface SpawnerDeps {
 export class Spawner {
   private readonly orchestrators = new Map<string, Orchestrator>();
   private readonly pluginTools: (() => readonly PluginToolSummary[]) | null;
+  private readonly features: (() => Record<FeatureName, boolean>) | null;
   /**
    * update_system D.5 — bookkeeping for the current `warnLeads()` round, keyed
    * by notice id. Carries (a) the text/sender so `leadNoticeStatus` can
@@ -309,6 +313,7 @@ export class Spawner {
     this.connectorRegistry = deps.connectorRegistry ?? null;
     this.providerRegistry = deps.providerRegistry ?? createBuiltinProviderRegistry(config);
     this.pluginTools = deps.pluginTools ?? null;
+    this.features = deps.features ?? null;
     this.providerAvailability = new ProviderAvailabilityCache({
       registry: this.providerRegistry,
       config,
@@ -348,6 +353,27 @@ export class Spawner {
   private subscribeConnector(orch: Orchestrator, connector: Connector): void {
     const provider = this.connectorRegistry?.get(connector.type);
     if (!provider) return;
+    // Approval reply/reaction resolvers (docs/builtin-features.md D9). Built ONCE
+    // per subscription (they close over this orch id) when the store came up at
+    // boot, then attached UNCONDITIONALLY below so a subscription wired while
+    // approvals was on keeps honouring a LATER enable/disable WITHOUT a
+    // re-subscribe. The flag is read AT CALL TIME: when approvals is off (or the
+    // store failed to open) the resolver neutralises to `{ consumed: false }`, so
+    // a Discord reply falls through to the lead inbox exactly as in the
+    // pre-approvals world. Fail-open when no feature registry is wired.
+    const approvalStore = this.approvals;
+    const approvalsEnabled = (): boolean =>
+      approvalStore != null && (this.features == null || this.features().approvals !== false);
+    const replyResolver = approvalStore
+      ? buildApprovalReplyResolver({ spawner: this, store: approvalStore, orchestratorId: orch.id })
+      : null;
+    const reactionResolver = approvalStore
+      ? buildApprovalReactionResolver({
+          spawner: this,
+          store: approvalStore,
+          orchestratorId: orch.id,
+        })
+      : null;
     const sub: PluginOrchSubscription = {
       orchestratorId: orch.id,
       getLeadSessionId: () => orch.leadSessionId,
@@ -385,26 +411,24 @@ export class Spawner {
         const lead = orch.getSession(leadId);
         if (!lead) return;
         if (!isIdle(lead, Date.now(), this.config.idleThresholdMs)) return;
-        lead.notifySignal(SIGNAL_TEXT);
+        // docs/auto-compact.md §3.2 — single gate: a connector delivery must
+        // never be typed into a permission dialog or into a half-written
+        // `/compact`. A refusal is not a loss — the message is already in the
+        // mailbox, and the idle boundary re-signals anything newer than the
+        // last stamp.
+        if (!lead.signalInbox()) {
+          log.debug({ event: 'spawner.notify_lead_line_busy', orchId: orch.id, sessionId: lead.id });
+        }
       },
-      // P4: when the approval store is wired, attach a reply-router so a native
-      // Discord reply on this orch's channel resolves the matching pending
-      // approval (via the shared core) instead of landing in the lead inbox.
-      ...(this.approvals
-        ? {
-            tryConsumeApprovalReply: buildApprovalReplyResolver({
-              spawner: this,
-              store: this.approvals,
-              orchestratorId: orch.id,
-            }),
-            // P5: sibling resolver for ✅/♾️/❌ reactions on the approval card.
-            tryConsumeApprovalReaction: buildApprovalReactionResolver({
-              spawner: this,
-              store: this.approvals,
-              orchestratorId: orch.id,
-            }),
-          }
-        : {}),
+      // P4: a native Discord reply on this orch's channel resolves the matching
+      // pending approval (via the shared core) instead of landing in the lead
+      // inbox — but ONLY while approvals is enabled (D9), decided per call.
+      tryConsumeApprovalReply: (input) =>
+        replyResolver && approvalsEnabled() ? replyResolver(input) : { consumed: false },
+      // P5: sibling resolver for ✅/♾️/❌ reactions on the approval card. Same
+      // call-time toggle. (The built-in bot posts no reactions; a plugin may.)
+      tryConsumeApprovalReaction: (input) =>
+        reactionResolver && approvalsEnabled() ? reactionResolver(input) : { consumed: false },
     };
     void Promise.resolve()
       .then(() => provider.subscribeOrch(connectorConfig(connector), sub))
@@ -512,7 +536,19 @@ export class Spawner {
         this.hideOrchestrator(id);
       },
       ...(this.pluginTools ? { pluginTools: this.pluginTools } : {}),
+      ...(this.features ? { features: this.features } : {}),
       ...(this.taskboard ? { taskboard: this.taskboard } : {}),
+      // docs/auto-compact.md D6/D7 — the per-role auto-compact threshold,
+      // resolved LIVE at every idle boundary. No cache on purpose: an operator
+      // editing a role must see it apply at the next boundary of every agent
+      // of that role, with no restart — this fleet runs 24/7. A null roleId, a
+      // deleted role or a role that never set the field all fall back to the
+      // instance default.
+      autoCompact: {
+        thresholdPctFor: (roleId) =>
+          (roleId ? this.roleStore?.get(roleId)?.autoCompactPct : null) ??
+          this.config.autoCompactPct,
+      },
       skills: (orchestratorId, sessionId) =>
         this.resolveSkillsFor(spec.roleId ?? null, orchestratorId, sessionId),
     });
@@ -1073,7 +1109,19 @@ export class Spawner {
         modelCatalogue: this.modelCatalogue,
         onHideRequested: (id) => this.hideOrchestrator(id),
         ...(this.pluginTools ? { pluginTools: this.pluginTools } : {}),
+        ...(this.features ? { features: this.features } : {}),
         ...(this.taskboard ? { taskboard: this.taskboard } : {}),
+        // docs/auto-compact.md D6/D7 — the per-role auto-compact threshold,
+        // resolved LIVE at every idle boundary. No cache on purpose: an operator
+        // editing a role must see it apply at the next boundary of every agent
+        // of that role, with no restart — this fleet runs 24/7. A null roleId, a
+        // deleted role or a role that never set the field all fall back to the
+        // instance default.
+          autoCompact: {
+          thresholdPctFor: (roleId) =>
+            (roleId ? this.roleStore?.get(roleId)?.autoCompactPct : null) ??
+            this.config.autoCompactPct,
+        },
         skills: (orchestratorId, sessionId) =>
           this.resolveSkillsFor(init.roleId ?? null, orchestratorId, sessionId),
       });

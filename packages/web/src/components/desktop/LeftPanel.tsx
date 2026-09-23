@@ -80,6 +80,13 @@ interface Props {
   onSelectAgent?: (sessionId: string) => void;
   /** Pied de la section AGENT CONTEXT → page `#/monitoring`. */
   onOpenMonitoring?: () => void;
+  /**
+   * Feature « monitoring » active (docs/builtin-features.md). `false` masque le
+   * lien → MONITORING et la carte BUS HEALTH (surface `/metrics/*` désormais en
+   * 404) et coupe le poll `/metrics/bus`. Défaut `true` : tant que l'état n'est
+   * pas connu on n'ampute rien.
+   */
+  monitoringEnabled?: boolean;
 }
 
 export default function LeftPanel({
@@ -89,6 +96,7 @@ export default function LeftPanel({
   messageFlowSource = 's4-client',
   onSelectAgent,
   onOpenMonitoring,
+  monitoringEnabled = true,
 }: Props) {
   // ── MESSAGE FLOW (S4 client par défaut, S9 server si demandé) ──────────
   const flow = useMessageFlow(orchestrators, messageFlowSource);
@@ -106,8 +114,8 @@ export default function LeftPanel({
   // ended rows. Pas besoin de garder la valeur ; l'effet de bord suffit.
   useNow(30_000);
 
-  // ── BUS HEALTH (S8, 3 s) ──────────────────────────────────────────────
-  const busHealth = useBusHealth(3_000);
+  // ── BUS HEALTH (S8, 3 s) — poll coupé quand monitoring est off ────────
+  const busHealth = useBusHealth(3_000, monitoringEnabled);
 
   // ── AGENT CONTEXT (top N par pression de contexte, toutes teams) ──────
   // Zéro requête supplémentaire : `orchestrators` porte déjà `contextUsage`
@@ -192,13 +200,15 @@ export default function LeftPanel({
             <div className="pl-ctx-empty">— no context telemetry —</div>
           )}
         </div>
-        <button
-          type="button"
-          className="pl-ctx-more"
-          onClick={() => onOpenMonitoring?.()}
-        >
-          {contextOverflow > 0 ? `+${contextOverflow} MORE → MONITORING` : '→ MONITORING'}
-        </button>
+        {monitoringEnabled && (
+          <button
+            type="button"
+            className="pl-ctx-more"
+            onClick={() => onOpenMonitoring?.()}
+          >
+            {contextOverflow > 0 ? `+${contextOverflow} MORE → MONITORING` : '→ MONITORING'}
+          </button>
+        )}
       </div>
 
       {/* ============ PER-TEAM TRAFFIC ============ */}
@@ -302,6 +312,9 @@ export default function LeftPanel({
       )}
 
       {/* ============ BUS HEALTH (S8, refresh 3 s) ============ */}
+      {/* Surface pur-monitoring : masquée quand la feature est off (les
+          endpoints /metrics/* répondent alors 404). */}
+      {monitoringEnabled && (
       <div className="pl-section">
         <h3>BUS HEALTH</h3>
         <div
@@ -340,6 +353,7 @@ export default function LeftPanel({
           />
         </div>
       </div>
+      )}
     </aside>
   );
 }

@@ -83,6 +83,7 @@ Notes:
 - Treat Discord posts as user-facing: prefer short, friendly replies and
   keep operational details for `team.send_message`.
 
+<!--feature:memory-->
 ## Shared memory (knowledge graph)
 
 The same `team-comms` server carries a **shared, deployment-wide memory** — a
@@ -110,7 +111,9 @@ Prefer **updating** an existing note over creating a near-duplicate: read it
 first, then pass its `version` as `expectedVersion` to `memory.write` so a
 concurrent write by another agent is detected instead of silently lost. Keep
 notes small and well-linked.
+<!--/feature:memory-->
 
+<!--feature:board-->
 ## Task board (Kanban)
 
 The `team-comms` server also exposes a **per-team task board** — a durable
@@ -138,7 +141,9 @@ tracking who does what, and lets the web UI and other leads see the live state.
 
 Cards are per-team. A card's `version` field guards concurrent edits —
 re-read and retry on a `VERSION_CONFLICT` error.
+<!--/feature:board-->
 
+<!--feature:codegraph-->
 ## Code graph (Graphify)
 
 swarm-os keeps a **live, auto-maintained map of the code** (functions, classes,
@@ -162,6 +167,7 @@ cheaper in tokens and time than loading source:
 
 These are **read-only** and best-effort: when the graph isn't ready they answer
 `{ ok:false, reason }` (never an error) — fall back to reading files in that case.
+<!--/feature:codegraph-->
 
 ## Mailbox discipline (CRITICAL)
 
@@ -207,6 +213,16 @@ Both fire at your **next idle moment** (so they never garble work in
 progress) and are idempotent — calling again while one is queued returns
 `{ scheduled: false }`. After a clear, if mail is still queued the server
 re-signals your inbox, so nothing is lost.
+
+The server may also compact you **automatically**: when your context passes the
+threshold configured for your role (35 % by default), it arms a `/compact` for
+you — but only while you are idle with an **empty inbox**, never in the middle
+of a turn. You will see `auto-compact armed` in your console when it happens.
+This does not replace the two tools above: you know when a task is finished,
+the threshold only knows how full you are, so keep calling them at your own
+boundaries. And after **any** compaction — yours or the server's — call
+`team.read_inbox` first. The server re-signals your inbox when mail is waiting,
+but the rule "after each task, read the inbox" stays yours.
 
 When a worker tells you it has **finished its task**, decide what happens to
 it — the worker will NOT reset itself:

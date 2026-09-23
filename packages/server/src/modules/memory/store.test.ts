@@ -576,3 +576,150 @@ describe('MemoryStore semantic search', () => {
     expect(hits[0]?.name).toBe('alpha');
   });
 });
+
+// --- Lot 6: purge lifecycle (close / open / purgeAll / archive) -------------
+describe('MemoryStore purge lifecycle (Lot 6)', () => {
+  const write = (s: MemoryStore, name: string, body = 'hello world') =>
+    s.upsertNote({ name, description: 'd', type: 'project', body, createdBy: 's', team: null });
+
+  it('purgeAll empties the SQLite mirror AND FTS, and re-write still works (DELETE, not DROP)', () => {
+    write(store, 'note-a', 'the quick brown fox');
+    write(store, 'note-b', 'jumps over the lazy dog');
+    expect(store.list().length).toBe(2);
+    expect(store.search('quick').map((h) => h.name)).toContain('note-a');
+
+    store.purgeAll();
+
+    // Tables are empty and FTS returns nothing (fts5 'delete-all' cleared it).
+    expect(store.list()).toEqual([]);
+    expect(store.search('quick')).toEqual([]);
+    expect(store.graph().nodes).toEqual([]);
+
+    // THE invariant this lot must guarantee: the prepared statements are still
+    // valid after a purge (it was a DELETE, never a DROP), so a re-install can
+    // write into the same store and FTS re-populates.
+    const res = write(store, 'note-c', 'a fresh start after purge');
+    expect(res.version).toBe(1);
+    expect(store.readNote('note-c')?.body.trim()).toBe('a fresh start after purge');
+    expect(store.search('fresh')[0]?.name).toBe('note-c');
+  });
+
+  it('purgeAll also clears the semantic vectors', async () => {
+    const s = new MemoryStore(db, {
+      dataDir: dir,
+      eventBus: bus,
+      embeddings: new FakeEmbeddingProvider(),
+    });
+    s.upsertNote({
+      name: 'db-note',
+      description: 'database',
+      type: 'project',
+      body: 'database schema',
+      createdBy: 's',
+      team: null,
+    });
+    await s.flushEmbeddings();
+    expect((await s.searchSemantic('database')).length).toBeGreaterThan(0);
+
+    s.purgeAll();
+    expect(await s.searchSemantic('database')).toEqual([]);
+  });
+
+  it('throws on EVERY write path while closed (write / link / delete)', () => {
+    write(store, 'existing');
+    store.close();
+    expect(store.isClosed()).toBe(true);
+
+    expect(() => write(store, 'blocked')).toThrow(MemoryError);
+    expect(() => store.addLink('existing', 'other')).toThrow(MemoryError);
+    expect(() => store.deleteNote('existing')).toThrow(MemoryError);
+
+    // The thrown error carries the dedicated code so a caller can react.
+    try {
+      write(store, 'blocked2');
+      throw new Error('should have thrown');
+    } catch (err) {
+      expect(err).toBeInstanceOf(MemoryError);
+      expect((err as MemoryError).code).toBe('MEMORY_CLOSED');
+    }
+  });
+
+  it('a concurrent codegraph-style write while closed does NOT resurrect the vault', () => {
+    // Mirrors CodegraphMemoryNotes.writeNote, which catches its own errors
+    // best-effort: the throw from the closed store is swallowed and no `.md`
+    // file is (re)created — the exact anti-resurrection guarantee of D8.2.
+    store.close();
+    let caught = false;
+    try {
+      store.upsertNote({
+        name: 'codegraph-hub',
+        description: 'code map',
+        type: 'reference',
+        body: 'managed note',
+        createdBy: 'codegraph',
+        team: null,
+      });
+    } catch {
+      caught = true; // codegraph catches + logs, returns false
+    }
+    expect(caught).toBe(true);
+    expect(fs.existsSync(vaultFile('codegraph-hub'))).toBe(false);
+  });
+
+  it('open() re-enables writes after close() (re-enable / reinstall path)', () => {
+    store.close();
+    expect(() => write(store, 'x')).toThrow(MemoryError);
+    store.open();
+    expect(store.isClosed()).toBe(false);
+    const res = write(store, 'y', 'writable again');
+    expect(res.version).toBe(1);
+    expect(store.readNote('y')?.body.trim()).toBe('writable again');
+  });
+
+  it('archive() copies the vault .md + a table dump under backups/feature-memory-*', () => {
+    write(store, 'keep-me', 'archive this body');
+    write(store, 'keep-me-2', 'and this one too');
+
+    const archiveDir = store.archive();
+    expect(archiveDir).not.toBeNull();
+
+    const backupsRoot = path.join(dir, 'backups');
+    const archives = fs.readdirSync(backupsRoot).filter((f) => f.startsWith('feature-memory-'));
+    expect(archives.length).toBe(1);
+    const base = path.join(backupsRoot, archives[0]!);
+
+    // Vault .md files are copied verbatim (the uncovered source of truth).
+    expect(fs.existsSync(path.join(base, 'vault', 'keep-me.md'))).toBe(true);
+    expect(fs.existsSync(path.join(base, 'vault', 'keep-me-2.md'))).toBe(true);
+    expect(fs.readFileSync(path.join(base, 'vault', 'keep-me.md'), 'utf8')).toContain(
+      'archive this body',
+    );
+
+    // The SQLite mirror is dumped as JSON for forensics / manual recovery.
+    const dump = JSON.parse(
+      fs.readFileSync(path.join(base, 'memory-tables.json'), 'utf8'),
+    ) as { nodes: Array<{ name: string }> };
+    expect(dump.nodes.map((n) => n.name).sort()).toEqual(['keep-me', 'keep-me-2']);
+  });
+
+  it('full purge sequence (archive → close → drain → purgeAll → rm) leaves nothing behind', async () => {
+    write(store, 'doomed', 'about to be purged');
+    expect(fs.existsSync(vaultFile('doomed'))).toBe(true);
+
+    // The exact sequence the 'memory' descriptor's purge() runs.
+    store.archive();
+    store.close();
+    await store.flushEmbeddings();
+    store.purgeAll();
+    fs.rmSync(store.vaultPath, { recursive: true, force: true });
+
+    expect(store.list()).toEqual([]);
+    expect(store.search('purged')).toEqual([]);
+    expect(fs.existsSync(store.vaultPath)).toBe(false);
+    // The archive survives the purge (recovery path).
+    const archives = fs
+      .readdirSync(path.join(dir, 'backups'))
+      .filter((f) => f.startsWith('feature-memory-'));
+    expect(archives.length).toBe(1);
+  });
+});

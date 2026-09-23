@@ -1398,6 +1398,25 @@ export class ContextUsageTracker {
    */
   #generation = 0;
   /**
+   * docs/auto-compact.md D3 — the running MINIMUM of every `usedTokens` this
+   * tracker has ACCEPTED since the last generation bump, i.e. since the context
+   * was last reset or retargeted. `null` when nothing has been accepted yet.
+   *
+   * The minimum, not the first sample, and that choice is the whole point.
+   * On claude the first non-stale reading after a `/compact` is still the
+   * PRE-compaction figure: the transcript is rewritten in place, the cursor
+   * catches up, and `#run` accepts that number as fresh (§2 of the plan). A
+   * floor pinned to the first sample would therefore freeze at the previous
+   * PEAK, and the auto-compact hysteresis built on it would drift +10 points
+   * at every compaction until it never fired again. The minimum absorbs that
+   * bogus reading — growth 0 at the post-compaction boundary — and the first
+   * real turn brings the floor down to the true post-compaction size.
+   *
+   * Only the auto-compact decision reads it; nothing here is serialized, and
+   * the history rings are untouched.
+   */
+  #floorTokens: number | null = null;
+  /**
    * Lot 9 — the rolling history, oldest first. Provider-agnostic by
    * construction: claude, codex and opencode all reach the same ring through
    * the same `#run`, because it is the TRACKER that accepts a sample, not the
@@ -1504,6 +1523,10 @@ export class ContextUsageTracker {
     if (!had) return;
     this.#stale = true;
     this.#generation++;
+    // D3 — the floor describes the conversation we are leaving. A rotation
+    // means the next reading measures a DIFFERENT context, so keeping the old
+    // minimum would compare two unrelated numbers.
+    this.#floorTokens = null;
     // The target changed: the TTL of the OLD one must not delay the first read
     // of the new one.
     this.#refreshStartedAtMs = null;
@@ -1530,6 +1553,10 @@ export class ContextUsageTracker {
   markStale(): void {
     this.#stale = true;
     this.#generation++;
+    // D3 — same rebase as `retarget`, for the reset case: whatever we counted
+    // belongs to the context that was just thrown away, and the floor of the
+    // NEW one is whatever the first accepted reading turns out to be.
+    this.#floorTokens = null;
     this.#refreshStartedAtMs = null;
     try {
       this.#source.invalidate?.();
@@ -1636,6 +1663,15 @@ export class ContextUsageTracker {
     return limit !== null && Number.isFinite(limit) && limit > 0 ? limit : null;
   }
 
+  /**
+   * docs/auto-compact.md D3 — the smallest occupancy measured since the last
+   * reset, or `null` when nothing has been measured since. See `#floorTokens`
+   * for why it is a minimum rather than a first sample.
+   */
+  get floorTokens(): number | null {
+    return this.#floorTokens;
+  }
+
   /** Synchronous, cache-only. `null` until a turn has actually been read. */
   snapshot(): ContextUsageView | null {
     const used = this.#usedTokens;
@@ -1725,6 +1761,14 @@ export class ContextUsageTracker {
       return;
     }
     this.#usedTokens = reading.usedTokens;
+    // D3 — the floor tracks accepted readings only, which is why it is stamped
+    // HERE and not next to `#samples`: an `empty` or `unavailable` read measured
+    // nothing, and letting it touch the floor would make the anti-loop depend on
+    // how often a transcript happened to be mid-write.
+    this.#floorTokens =
+      this.#floorTokens === null
+        ? reading.usedTokens
+        : Math.min(this.#floorTokens, reading.usedTokens);
     const limit = reading.limitTokens;
     if (typeof limit === 'number' && Number.isFinite(limit) && limit > 0) {
       this.#sourceLimitTokens = Math.floor(limit);

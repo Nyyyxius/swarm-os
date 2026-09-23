@@ -306,6 +306,7 @@ describe('provider columns — round-trip through the UPSERT', () => {
         auto_remove_dead_workers_delay_ms: 600000,
         cost_budget_usd: null,
         budget_action: 'notify',
+        auto_compact_pct: null,
         created_at: now,
         updated_at: now,
       });
@@ -330,6 +331,7 @@ describe('provider columns — round-trip through the UPSERT', () => {
         auto_remove_dead_workers_delay_ms: 600000,
         cost_budget_usd: null,
         budget_action: 'notify',
+        auto_compact_pct: null,
         created_at: now,
         updated_at: new Date().toISOString(),
       });
@@ -355,6 +357,7 @@ describe('provider columns — round-trip through the UPSERT', () => {
         auto_remove_dead_workers_delay_ms: 600000,
         cost_budget_usd: null,
         budget_action: 'notify',
+        auto_compact_pct: null,
         created_at: now,
         updated_at: new Date().toISOString(),
       });

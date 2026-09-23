@@ -93,6 +93,7 @@ remote shell sources.
 | PTY submit | two-step: text, then a lone `\r` at +150 ms | two-step | two-step | single write is enough |
 | MCP tool naming | `team.whoami` (canonical kept) | `team_whoami` | `mcp_team-comms_team.whoami` | `team_team_whoami` |
 | Context usage (monitoring) | transcript `.jsonl` — path via `SessionStart` hook, last main-chain assistant `message.usage` (`verify-claude-sessionstart.report.md`) | rollout `.jsonl` in the live `CODEX_HOME` — `last_token_usage.total_tokens` / `model_context_window`, keyed on the notify `thread-id` (`verify-codex-rollout.report.md`) | **none** (excluded by design) | control plane HTTP — `tokens.total` of the last *completed* assistant message, session re-resolved every poll; **local only** (`verify-opencode-tokens.report.md`) |
+| Auto-compact at threshold (`docs/auto-compact.md`) | yes — transcript gauge | yes — rollout gauge | **never** (no gauge; `/compact` still works by hand and via MCP) | yes — control-plane gauge, local transport only |
 
 Notes the table cannot hold:
 
@@ -161,7 +162,7 @@ session's provider (`http/routes/hooks.ts`):
 
 | Semantic | Providers | What the server does |
 |---|---|---|
-| `needs-human` | claude | badge → `waiting`, Discord notification, `SWARM_OS_COMPACT_ON_WAITING` armed |
+| `needs-human` | claude | badge → `waiting`, Discord notification, `SWARM_OS_COMPACT_ON_WAITING` armed; a `notification_type` other than `idle_prompt`/`auth_success`/`agent_completed` marks the session `dialogPending` — no server line (inbox signal, `/compact`, `/clear`, notice) is typed into the PTY until a human keystroke clears it (`docs/auto-compact.md` D5) |
 | `turn-complete` | codex, gemini | logged, **and nothing else** |
 | *none* | opencode | nothing at all |
 
@@ -178,10 +179,13 @@ agent nobody is waiting on.
 - **`SWARM_OS_COMPACT_ON_WAITING` does nothing for it.**
 
 This is an accepted degradation, not a bug: those CLIs have no "I am blocked on
-a human" signal to give. The knob that still works for every provider is
-`SWARM_OS_AUTO_COMPACT_BYTES`, which arms a `/compact` once a session has
-produced that many bytes since its last reset and fires it at the next idle
-boundary. If you rely on compaction, use the volume-driven one.
+a human" signal to give. Compaction does not depend on it: the primary
+automatic path is the **context-threshold auto-compact** (`docs/auto-compact.md`,
+`SWARM_OS_AUTO_COMPACT_PCT` / per-role `autoCompactPct`, default 35 %), which
+reads each provider's context-usage source and arms `/compact` at the idle
+boundary — it works for claude, codex and opencode, and never fires for gemini
+(no context-usage source). `SWARM_OS_AUTO_COMPACT_BYTES` (volume-driven) remains
+as a secondary backstop.
 
 The UI carries the same statement per provider, so it is visible in the
 team-creation dialog rather than discovered while wondering why a team looks

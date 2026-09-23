@@ -391,6 +391,18 @@ export interface RoleView {
   costBudgetUsd?: number | null;
   /** What the server does at the crossing. Absent = `notify`. */
   budgetAction?: BudgetAction;
+  /**
+   * Auto-compact threshold (docs/auto-compact.md, §3.3) — the share of its
+   * context window an agent of this role may fill before the server arms
+   * `/compact` at its next idle boundary (empty inbox, never mid-turn).
+   *
+   *   - `null` (or absent, on a server predating the feature) = INHERIT the
+   *     instance default, carried by `GET /roles` as `defaults.autoCompactPct`;
+   *   - `0` = disabled for this role — deliberately distinct from `null`;
+   *   - `1..100` = the threshold, in percent, as an INTEGER (the server
+   *     answers 400 on `3.5` and on the string `"35"`).
+   */
+  autoCompactPct?: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -564,6 +576,32 @@ export interface PluginInstallResult {
   isUpgrade: boolean;
   /** Manifest capabilities not yet granted (re-present for approval on upgrade). */
   newCapabilities: string[];
+}
+
+/**
+ * ── Built-in features (docs/builtin-features.md) ──────────────────────────
+ * The six core surfaces that became enable/disable/uninstall-able like plugins
+ * (their code stays compiled in — only the lifecycle is steerable). Wire mirror
+ * of the server's `FeatureView` (`modules/features/registry.ts`). `/features`
+ * lives BEHIND the auth gate on purpose (D10): `/info` is public and must not
+ * leak which surfaces an instance runs.
+ */
+export type FeatureName =
+  | 'ide' | 'codegraph' | 'board' | 'memory' | 'monitoring' | 'approvals';
+
+/**
+ * `uninstalled` = `disabled` + data purged. `enable` on `uninstalled` is the
+ * documented install+enable (idempotent, the built-in tables are recreated
+ * with `CREATE TABLE IF NOT EXISTS`).
+ */
+export type FeatureState = 'enabled' | 'disabled' | 'uninstalled';
+
+export interface FeatureView {
+  name: FeatureName;
+  displayName: string;
+  description: string;
+  state: FeatureState;
+  updatedAt: string;
 }
 
 /**
@@ -1762,7 +1800,17 @@ export const api = {
     field: 'leadPrompt' | 'leadPreamble' | 'workerPreamble';
     text: string;
   }) => request<{ text: string }>('POST', '/ai/improve-text', body),
-  listRoles: () => request<{ roles: RoleView[] }>('GET', '/roles'),
+  /**
+   * `defaults` carries the INSTANCE value a role inherits when its own field
+   * is `null` (today: `autoCompactPct`, docs/auto-compact.md §3.3). Optional
+   * on purpose — a server predating the feature sends `{ roles }` alone, and
+   * so do the fixtures that mock this call.
+   */
+  listRoles: () =>
+    request<{ roles: RoleView[]; defaults?: { autoCompactPct: number } }>(
+      'GET',
+      '/roles',
+    ),
   getRole: (id: string) => request<{ role: RoleView }>('GET', `/roles/${id}`),
   createRole: (body: Partial<RoleInput> & { label: string }) =>
     request<{ role: RoleView }>('POST', '/roles', body),
@@ -1930,6 +1978,18 @@ export const api = {
     request<{ plugin: PluginView }>('PUT', `/plugins/${name}/config`, config),
   uninstallPlugin: (name: string, purge = false) =>
     request<void>('DELETE', `/plugins/${name}${purge ? '?purge=true' : ''}`),
+  // ---- Built-in features (docs/builtin-features.md) -------------------------
+  // Behind the auth gate (D10). `enableFeature` on an `uninstalled` feature is
+  // the documented install+enable. The front never refetches its feature map
+  // off these responses: it patches on the `feature.changed` WS frame instead.
+  listFeatures: () => request<{ features: FeatureView[] }>('GET', '/features'),
+  enableFeature: (name: FeatureName) =>
+    request<{ feature: FeatureView }>('POST', `/features/${name}/enable`),
+  disableFeature: (name: FeatureName) =>
+    request<{ feature: FeatureView }>('POST', `/features/${name}/disable`),
+  /** Uninstall = disable + purge the feature's data (DELETE, never DROP). */
+  uninstallFeature: (name: FeatureName) =>
+    request<{ feature: FeatureView }>('DELETE', `/features/${name}`),
   // ---- Plugins (J3 install from source / upgrade) --------------------------
   installPlugin: (source: InstallSourceInput) =>
     request<PluginInstallResult>('POST', '/plugins/install', source),

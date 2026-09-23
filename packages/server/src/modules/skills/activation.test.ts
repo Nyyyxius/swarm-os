@@ -43,7 +43,19 @@ function fakeStore(rows: Record<string, SkillRow>): SkillStore {
 
 function fakeSession(id: string, status: string) {
   const signals: string[] = [];
-  return { id, status, notifySignal: (t: string) => signals.push(t), signals };
+  // docs/auto-compact.md §3.2 — hot activation now goes through the single
+  // injection gate (`signalInbox`) rather than typing `SIGNAL_TEXT` itself, so
+  // a notice is never written into a permission dialog or a half-typed
+  // `/compact`. `true` here is "the line was free".
+  return {
+    id,
+    status,
+    signalInbox: () => {
+      signals.push('signal');
+      return true;
+    },
+    signals,
+  };
 }
 
 function fakeOrch(sessions: ReturnType<typeof fakeSession>[]) {
