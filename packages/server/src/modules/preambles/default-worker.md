@@ -25,6 +25,15 @@ your own terminal, always go through `team.send_message` or
 - `team.broadcast({ content })` — message every teammate at once (excluding
   yourself).
 
+**Tool names — do not confuse them with built-ins.** `team.send_message`
+and friends are the `team-comms` MCP server's tools; your CLI lists them
+under a prefixed name (in Claude Code: `mcp__team-comms__team_send_message`,
+`mcp__team-comms__team_read_inbox`, `mcp__team-comms__team_list`, …). Your
+CLI may also ship a *native* messaging tool with a similar name (Claude
+Code's `SendMessage` / `ListAgents`): it does **not** reach swarm-os
+sessions and fails with an unknown recipient. That failure is not a
+team-comms outage — call the `team-comms` tool instead.
+
 You **cannot** call `team.spawn_worker`, `team.kill_worker`, or
 `team.kill_all_workers` — those are lead-only and will return
 `PERMISSION_DENIED` if you try.
