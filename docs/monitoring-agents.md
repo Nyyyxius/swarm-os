@@ -177,6 +177,27 @@ Ordre : 0 → 1 → 2 → 3 → 4 → 5 → (6 ∥ 7) → 8. Chaque lot livrable
 | `SWARM_OS_AUTO_COMPACT_BYTES` | `0` | (existant) backstop volumétrique **secondaire** — aveugle au contexte réel ; le seuil en % ci-dessus est le chemin automatique primaire. |
 | `SWARM_OS_COST_ROLLUP_INTERVAL_MS` | `3600000` | Cadence du janitor de rollup quotidien (Lot 15) qui alimente `session_token_daily`. `0` = off (l'export ne sert plus que l'historique déjà écrit). Rien n'est perdu à cette cadence : chaque tick classe ce que le précédent n'a pas classé, le repère étant en SQLite. |
 
+## Appels par agent — registre `session_calls` (v0.10.3)
+
+Chaque appel API d'un agent **claude** est enregistré et tracé, sans aucune charge côté agent (ni prompt, ni outil, ni hook) : tout vient du transcript `.jsonl` que le serveur lit déjà.
+
+**Capture.** `scanTranscriptRange` émet un `TranscriptCall` au point exact où un tour est facturé (même dédoublonnage par `message.id`, drain post-`/clear` inclus, sidechains incluses et marquées). Sont ignorés les messages `<synthetic>` (écrits par le CLI, jamais envoyés au modèle) et les usages entièrement nuls. `ts` = horodatage de la ligne du transcript (et non l'heure de lecture) : une lecture tardive range l'appel là où il a eu lieu. codex, opencode et gemini n'émettent rien.
+
+**Table** (`schema.sql`, `CREATE TABLE IF NOT EXISTS` : additive, sans migration de colonnes) : `session_id, orchestrator_id, session_type ('lead'|'worker', dénormalisé pour le split lead/workers sans jointure), ts (epoch ms, INTEGER), message_id, model, input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens, context_tokens (= input + cache_creation + cache_read), is_sidechain`. `UNIQUE(session_id, message_id)` + `INSERT OR IGNORE` : une relecture (redémarrage, `/clear`, fichier réécrit) ne crée jamais de doublon. Index `(session_id, ts)`, `(orchestrator_id, ts)`, `(ts)`. Rétention **14 jours**, purgée **à l'insertion au plus une fois par heure** (`CallLedger`, `modules/metrics/call-usage.ts`), sans timer ; les appels déjà hors horizon ne sont pas écrits. Pas de clé étrangère : le registre survit aux lignes qu'il nomme.
+
+**Déclencheurs de lecture — sans navigateur.** Avant v0.10.3, le transcript n'était lu que par `toView()` (poll `/orchestrators` de l'UI) et, pour la lead seulement, à la frontière d'inactivité quand l'auto-compact était actif. Les workers (auto-compact désactivé par défaut) n'étaient donc **jamais lus sans UI**, et aucune lecture n'avait lieu à la sortie : les derniers tours d'un worker terminé ou tué étaient perdus (appels ET compteurs `tokens_*`). Désormais :
+- **frontière d'inactivité** (`Orchestrator._onSessionIdle` → `Session.catchUpContextUsage` → `ContextUsageTracker.catchUp`) : lecture incrémentale (les octets depuis le curseur) à chaque fin de tour, **quel que soit l'auto-compact**, TTL ignoré (au plus une par période de silence), garde en vol et plafond global conservés, jusqu'à 4 lectures de 1 Mo si le curseur est en retard ;
+- **sortie de l'agent** (`Session._handleExit` → `flush`) : attend la lecture en vol, puis lit jusqu'au rattrapage complet (16 lectures de 1 Mo max), statut ignoré.
+Ce sont des événements, pas un calendrier : la doctrine « pas de timer » tient. Limite restante : un arrêt brutal du serveur ne relit pas ce qui n'a pas été atteint. La relecture au redémarrage ne rattrape que si le CLI reprend le même fichier.
+
+**API.**
+- `GET /sessions/:id/calls?window=1h|24h|3d|14d` (défaut 24h) → `{window, since, until, aggregated, bucketMs, calls: [{t, n, model, input, cacheWrite, cacheRead, output, context, sidechain?}], hourly: [{t, calls}], totals}`. Au-delà de 600 appels, agrégation SQL en tranches rondes (10 s … 1 h) : sommes + `n`, `context` = **max** de la tranche. Répond aussi pour un agent retiré (connu de la DB) ; 404 seulement si l'id n'est connu nulle part.
+- `GET /orchestrators/:id/call-usage?window=…&bucket=5m|hour|day` (défaut `hour`) et `GET /metrics/call-usage` (toutes équipes, plus `teams: [{orchestratorId, name, calls, …}]`) → séries **denses** `lead` / `workers` `[{t, calls, input, cacheWrite, cacheRead, output}]` + totaux, agrégées en SQL (`GROUP BY ts / bucket, session_type`). Plus de 1000 tranches → 400 `TOO_MANY_BUCKETS`.
+
+**UI.** Bande agent : section **API CALLS** sous la courbe de contexte (une barre par appel, tokens empilés NEW IN / CACHE WRITE / CACHE READ / OUTPUT, ligne CONTEXT SENT coupée sur les pauses, infobulle par appel, CALLS / H sur le même axe temps, totaux, fenêtre 1H/24H/3D/14D ; en mode agrégé la barre est l'appel moyen de la tranche). Page MONITORING : panneau **CALL USAGE** (appels ou tokens par tranche, lead et workers empilés, sélecteur d'équipe ou ALL TEAMS, puces par équipe), poll de 60 s page ouverte seulement.
+
+**Coût mesuré** (140 000 lignes = 14 nuits × 10 000 appels, 7 équipes) : agent 24h ≈ 3 ms, équipe 14j ≈ 14 ms, flotte 24h ≈ 12 ms, flotte 14j ≈ 160 ms (série + totaux par équipe), purge horaire ≈ 25 ms, insertion ≈ 4 ms par lot de 500.
+
 ## Cas limites
 
 - SSH : tail via hostExec (jamais de throw) ; échec → snapshot précédent + `stale`. Les hooks postent depuis l'HÔTE → `SWARM_OS_HOOK_URL` requis (voir knobs), sinon aucun `transcript_path` n'arrive jamais et les CTX restent `—`.
