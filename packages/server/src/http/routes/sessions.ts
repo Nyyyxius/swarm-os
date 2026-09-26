@@ -10,6 +10,7 @@ import {
   parseContextHistoryWindow,
 } from '../../modules/orchestrator/context-usage.js';
 import { rowToSessionView } from '../../modules/orchestrator/persistence.js';
+import { parseCallWindow } from '../../modules/metrics/call-usage.js';
 import type { Config } from '../../config.js';
 
 /**
@@ -320,6 +321,35 @@ export function createSessionsRouter(spawner: Spawner, config: Config): Router {
         .filter((r) => r.t >= since)
         .map((r) => ({ t: new Date(r.t).toISOString(), cmd: r.cmd })),
     });
+  });
+
+  /**
+   * Per-call ledger — one agent's API calls over `window` (1h|24h|3d|14d,
+   * default 24h), from `session_calls`. Single calls up to 600, SQL time
+   * buckets past that (`aggregated: true`). Served for ended and removed agents
+   * too: the ledger is SQLite, and a killed worker's calls are exactly what an
+   * operator comes back to look at. 404 only when the id is known nowhere.
+   */
+  router.get('/sessions/:id/calls', (req: Request<{ id: string }>, res: Response) => {
+    const window = parseCallWindow(req.query.window);
+    if (window === null) {
+      res.status(400).json({ error: "query.window must be '1h', '24h', '3d' or '14d'" });
+      return;
+    }
+    const id = req.params.id;
+    let known = spawner.findSession(id) !== null;
+    if (!known) {
+      try {
+        known = spawner.persistence.db.getSession(id) !== null;
+      } catch {
+        known = false;
+      }
+    }
+    if (!known) {
+      res.status(404).json({ error: 'SESSION_UNKNOWN' });
+      return;
+    }
+    res.json(spawner.callLedger.sessionCalls(id, window));
   });
 
   // Soft-delete from the map. Session must be terminal (killed/exited/failed).

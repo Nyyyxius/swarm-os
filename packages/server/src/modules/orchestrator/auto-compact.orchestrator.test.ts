@@ -509,17 +509,16 @@ describe('auto-compact — guarantee G: the mail comes back', () => {
   });
 });
 
-describe('auto-compact — what a boundary costs when the feature is OFF', () => {
+describe('auto-compact — a boundary reads the transcript whatever the feature says', () => {
   /**
-   * Step 3 of D2 refreshes the gauge so the NEXT boundary has a fresher sample.
-   * On a fleet running `SWARM_OS_AUTO_COMPACT_PCT=0` there is no next decision
-   * to feed, and the read is a transcript tail — one SSH round trip per agent
-   * per TTL for a number nobody asked for. Before this feature the only caller
-   * was `toView()`, i.e. an open UI tab; `disabled` keeps exactly that bargain.
+   * Step 3 of D2 used to skip the read when auto-compact was OFF, leaving
+   * `toView()` — an open UI tab — as the only reader. The per-call ledger
+   * (`session_calls`) changed that bargain: with no browser open, nothing
+   * would ever read a worker's transcript. The boundary is now the
+   * server-side trigger for every claude agent, auto-compact or not.
    *
    * Both tests below drive the session through boundaries ONLY — no
-   * `orch.toView()` anywhere — so the gauge moving (or not) is proof of what
-   * step 3 did.
+   * `orch.toView()` anywhere — so the gauge moving is proof of what step 3 did.
    */
   function pointAtTranscript(team: Team, usedTokens: number): void {
     const file = path.join(tmpRoot, 'transcript.jsonl');
@@ -528,12 +527,14 @@ describe('auto-compact — what a boundary costs when the feature is OFF', () =>
     team.lead.setTranscriptPath(file);
   }
 
-  it('reads nothing at a boundary when the threshold is 0', async () => {
+  it('reads at a boundary even when the threshold is 0', async () => {
     const team = makeTeam({ thresholdPct: 0 });
     pointAtTranscript(team, 50_000);
-    await turn(team);
-    await turn(team);
-    expect(team.lead.contextUsage).toBeNull();
+    for (let i = 0; i < 10 && team.lead.contextUsage === null; i++) {
+      await turn(team);
+    }
+    expect(team.lead.contextUsage?.usedTokens).toBe(50_000);
+    expect(team.lead.hasPendingContextReset).toBe(false);
   });
 
   it('…but the boundary IS the heartbeat when it is on', async () => {
@@ -946,16 +947,20 @@ describe('auto-compact — workers use the WORKER threshold (v0.10.1)', () => {
     expect(team.lead.hasPendingContextReset).toBe(true);
   });
 
-  it('a worker at 0 does not pay a transcript read at its boundaries', async () => {
-    // D2 step 3's bargain, extended to workers: `disabled` ⇒ no gauge refresh
-    // from the boundary. Only boundaries here, no `toView()`.
+  it('a worker at 0 is still read at its boundaries (per-call ledger), never compacted', async () => {
+    // The ledger needs every worker turn even with no UI open and auto-compact
+    // OFF — the production default for workers. Only boundaries here, no
+    // `toView()`.
     const team = makeTeam();
     const { worker, pty } = addWorker(team);
     const file = path.join(tmpRoot, `transcript-${worker.id}.jsonl`);
     fs.appendFileSync(file, transcript(50_000, 'msg-w'));
     worker.setTranscriptPath(file);
-    await turnOf(pty);
-    await turnOf(pty);
-    expect(worker.contextUsage).toBeNull();
+    for (let i = 0; i < 10 && worker.contextUsage === null; i++) {
+      await turnOf(pty);
+    }
+    expect(worker.contextUsage?.usedTokens).toBe(50_000);
+    expect(worker.hasPendingContextReset).toBe(false);
+    expect(worker.lastAutoCompactSkipReason).toBe('disabled');
   });
 });

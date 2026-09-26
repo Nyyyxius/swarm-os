@@ -420,6 +420,66 @@ export interface SessionTokenDailyExportRow {
   cost_usd: number | null;
 }
 
+/**
+ * One row of `session_calls` — ONE API call of a claude agent, as its
+ * transcript recorded it (see the table comment in `schema.sql`). `ts` is epoch
+ * ms; `is_sidechain` is 0/1.
+ */
+export interface SessionCallRow {
+  session_id: string;
+  orchestrator_id: string;
+  session_type: 'lead' | 'worker';
+  ts: number;
+  message_id: string;
+  model: string | null;
+  input_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  output_tokens: number;
+  context_tokens: number;
+  is_sidechain: number;
+}
+
+/**
+ * Calls of one session folded into a time bucket — what `GET
+ * /sessions/:id/calls` serves when a window holds more calls than a chart can
+ * draw. Token buckets are SUMS; `context_max` is the largest context sent in
+ * the bucket (a max, not a mean, so a peak is never smoothed away); `model` is
+ * the bucket's model when it had exactly one (`model_count`), else null.
+ */
+export interface SessionCallBucketRow {
+  t: number;
+  calls: number;
+  input_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  output_tokens: number;
+  context_max: number;
+  model: string | null;
+  model_count: number;
+}
+
+/** Calls and token sums per time bucket and per kind of agent. */
+export interface CallUsageBucketRow {
+  t: number;
+  session_type: 'lead' | 'worker';
+  calls: number;
+  input_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  output_tokens: number;
+}
+
+/** Calls and token sums of one team over a window. */
+export interface CallUsageTeamRow {
+  orchestrator_id: string;
+  calls: number;
+  input_tokens: number;
+  cache_creation_tokens: number;
+  cache_read_tokens: number;
+  output_tokens: number;
+}
+
 const TERMINAL_ORCH = new Set<OrchestratorStatusRow>(['stopped', 'failed']);
 const TERMINAL_SESSION = new Set<SessionStatusRow>([
   'exited',
@@ -467,6 +527,14 @@ export class SwarmDb {
   private readonly lastTokenCumsStmt;
   private readonly exportTokenDailyStmt;
   private readonly deleteOldTokenDailyStmt;
+  private readonly insertCallStmt;
+  private readonly deleteOldCallsStmt;
+  private readonly countSessionCallsStmt;
+  private readonly listSessionCallsStmt;
+  private readonly bucketSessionCallsStmt;
+  private readonly callSeriesByOrchStmt;
+  private readonly callSeriesAllStmt;
+  private readonly callTeamsStmt;
 
   constructor(dataDir: string) {
     fs.mkdirSync(dataDir, { recursive: true });
@@ -811,6 +879,99 @@ export class SwarmDb {
     // chronological one — no date parsing, and the index answers it.
     this.deleteOldTokenDailyStmt = this.db.prepare<[string]>(`
       DELETE FROM session_token_daily WHERE day < ?
+    `);
+
+    // Per-call ledger (`session_calls`). OR IGNORE on the UNIQUE
+    // (session_id, message_id): the transcript reader re-reads a file from 0
+    // after a restart or a rewrite, and a call it has already filed must stay
+    // one row.
+    this.insertCallStmt = this.db.prepare<SessionCallRow>(`
+      INSERT OR IGNORE INTO session_calls (
+        session_id, orchestrator_id, session_type, ts, message_id, model,
+        input_tokens, cache_creation_tokens, cache_read_tokens, output_tokens,
+        context_tokens, is_sidechain
+      ) VALUES (
+        @session_id, @orchestrator_id, @session_type, @ts, @message_id, @model,
+        @input_tokens, @cache_creation_tokens, @cache_read_tokens, @output_tokens,
+        @context_tokens, @is_sidechain
+      )
+    `);
+    // Retention — answered by `idx_session_calls_ts`.
+    this.deleteOldCallsStmt = this.db.prepare<[number]>(`
+      DELETE FROM session_calls WHERE ts < ?
+    `);
+    // The per-agent reads all ride `idx_session_calls_session_ts`.
+    this.countSessionCallsStmt = this.db.prepare<[string, number, number], { n: number }>(`
+      SELECT COUNT(*) AS n FROM session_calls
+      WHERE session_id = ? AND ts >= ? AND ts < ?
+    `);
+    this.listSessionCallsStmt = this.db.prepare<[string, number, number], SessionCallRow>(`
+      SELECT * FROM session_calls
+      WHERE session_id = ? AND ts >= ? AND ts < ?
+      ORDER BY ts ASC, message_id ASC
+    `);
+    // Integer division: `ts` is INTEGER and the bucket is CAST to one (the
+    // driver binds a JS number as REAL, which would make `/` a real division
+    // and every call its own bucket), so `/` floors.
+    this.bucketSessionCallsStmt = this.db.prepare<
+      { session_id: string; since: number; until: number; bucket: number },
+      SessionCallBucketRow
+    >(`
+      SELECT
+        (ts / CAST(@bucket AS INTEGER)) * CAST(@bucket AS INTEGER) AS t,
+        COUNT(*)                     AS calls,
+        SUM(input_tokens)            AS input_tokens,
+        SUM(cache_creation_tokens)   AS cache_creation_tokens,
+        SUM(cache_read_tokens)       AS cache_read_tokens,
+        SUM(output_tokens)           AS output_tokens,
+        MAX(context_tokens)          AS context_max,
+        MAX(model)                   AS model,
+        COUNT(DISTINCT model)        AS model_count
+      FROM session_calls
+      WHERE session_id = @session_id AND ts >= @since AND ts < @until
+      GROUP BY t
+      ORDER BY t ASC
+    `);
+    // Team / fleet series: `idx_session_calls_orch_ts` for one team,
+    // `idx_session_calls_ts` for all of them. Lead and workers are split on the
+    // denormalised `session_type` — no join with `sessions`.
+    const seriesSelect = `
+      SELECT
+        (ts / CAST(@bucket AS INTEGER)) * CAST(@bucket AS INTEGER) AS t,
+        session_type                 AS session_type,
+        COUNT(*)                     AS calls,
+        SUM(input_tokens)            AS input_tokens,
+        SUM(cache_creation_tokens)   AS cache_creation_tokens,
+        SUM(cache_read_tokens)       AS cache_read_tokens,
+        SUM(output_tokens)           AS output_tokens
+      FROM session_calls`;
+    this.callSeriesByOrchStmt = this.db.prepare<
+      { orchestrator_id: string; since: number; until: number; bucket: number },
+      CallUsageBucketRow
+    >(`${seriesSelect}
+      WHERE orchestrator_id = @orchestrator_id AND ts >= @since AND ts < @until
+      GROUP BY t, session_type
+      ORDER BY t ASC
+    `);
+    this.callSeriesAllStmt = this.db.prepare<
+      { since: number; until: number; bucket: number },
+      CallUsageBucketRow
+    >(`${seriesSelect}
+      WHERE ts >= @since AND ts < @until
+      GROUP BY t, session_type
+      ORDER BY t ASC
+    `);
+    this.callTeamsStmt = this.db.prepare<[number, number], CallUsageTeamRow>(`
+      SELECT
+        orchestrator_id,
+        COUNT(*)                     AS calls,
+        SUM(input_tokens)            AS input_tokens,
+        SUM(cache_creation_tokens)   AS cache_creation_tokens,
+        SUM(cache_read_tokens)       AS cache_read_tokens,
+        SUM(output_tokens)           AS output_tokens
+      FROM session_calls
+      WHERE ts >= ? AND ts < ?
+      GROUP BY orchestrator_id
     `);
 
     this.insertRoleStmt = this.db.prepare<RoleRow>(`
@@ -1301,6 +1462,123 @@ export class SwarmDb {
         error: err instanceof Error ? err.message : String(err),
       });
       return 0;
+    }
+  }
+
+  // --- Per-call ledger (`session_calls`) ----------------------------------
+
+  /**
+   * File a batch of calls in ONE transaction; returns how many were new.
+   * Duplicates (same session, same message id) are ignored, never an error.
+   * Swallow-and-log like every other write: a lost batch costs the chart a few
+   * bars, and must never cost the transcript read that produced it.
+   */
+  insertSessionCalls(rows: readonly SessionCallRow[]): number {
+    if (rows.length === 0) return 0;
+    try {
+      let inserted = 0;
+      this.db.transaction(() => {
+        for (const row of rows) inserted += this.insertCallStmt.run(row).changes;
+      })();
+      return inserted;
+    } catch (err) {
+      log.warn({
+        event: 'db.write_failed',
+        op: 'insertSessionCalls',
+        count: rows.length,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return 0;
+    }
+  }
+
+  /** Retention: drop every call strictly older than `cutoffMs` (epoch ms). */
+  deleteSessionCallsBefore(cutoffMs: number): number {
+    try {
+      return this.deleteOldCallsStmt.run(cutoffMs).changes;
+    } catch (err) {
+      log.warn({
+        event: 'db.write_failed',
+        op: 'deleteSessionCallsBefore',
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return 0;
+    }
+  }
+
+  /** How many calls one session made in `[sinceMs, untilMs)`. */
+  countSessionCalls(sessionId: string, sinceMs: number, untilMs: number): number {
+    try {
+      return this.countSessionCallsStmt.get(sessionId, sinceMs, untilMs)?.n ?? 0;
+    } catch (err) {
+      log.warn({ event: 'db.read_failed', op: 'countSessionCalls', error: String(err) });
+      return 0;
+    }
+  }
+
+  /** Every call of one session in `[sinceMs, untilMs)`, oldest first. */
+  listSessionCalls(sessionId: string, sinceMs: number, untilMs: number): SessionCallRow[] {
+    try {
+      return this.listSessionCallsStmt.all(sessionId, sinceMs, untilMs);
+    } catch (err) {
+      log.warn({ event: 'db.read_failed', op: 'listSessionCalls', error: String(err) });
+      return [];
+    }
+  }
+
+  /** One session's calls folded into `bucketMs` buckets, oldest first. */
+  sessionCallBuckets(
+    sessionId: string,
+    sinceMs: number,
+    untilMs: number,
+    bucketMs: number,
+  ): SessionCallBucketRow[] {
+    try {
+      return this.bucketSessionCallsStmt.all({
+        session_id: sessionId,
+        since: sinceMs,
+        until: untilMs,
+        bucket: Math.max(1, Math.floor(bucketMs)),
+      });
+    } catch (err) {
+      log.warn({ event: 'db.read_failed', op: 'sessionCallBuckets', error: String(err) });
+      return [];
+    }
+  }
+
+  /**
+   * Calls and tokens per `bucketMs` bucket, split lead / worker — for one team
+   * (`orchestratorId`) or the whole fleet (`null`).
+   */
+  callUsageSeries(
+    orchestratorId: string | null,
+    sinceMs: number,
+    untilMs: number,
+    bucketMs: number,
+  ): CallUsageBucketRow[] {
+    const bucket = Math.max(1, Math.floor(bucketMs));
+    try {
+      return orchestratorId === null
+        ? this.callSeriesAllStmt.all({ since: sinceMs, until: untilMs, bucket })
+        : this.callSeriesByOrchStmt.all({
+          orchestrator_id: orchestratorId,
+          since: sinceMs,
+          until: untilMs,
+          bucket,
+        });
+    } catch (err) {
+      log.warn({ event: 'db.read_failed', op: 'callUsageSeries', error: String(err) });
+      return [];
+    }
+  }
+
+  /** Calls and tokens per team over `[sinceMs, untilMs)`. */
+  callUsageByTeam(sinceMs: number, untilMs: number): CallUsageTeamRow[] {
+    try {
+      return this.callTeamsStmt.all(sinceMs, untilMs);
+    } catch (err) {
+      log.warn({ event: 'db.read_failed', op: 'callUsageByTeam', error: String(err) });
+      return [];
     }
   }
 
@@ -1825,4 +2103,23 @@ CREATE TABLE IF NOT EXISTS session_token_daily (
   PRIMARY KEY (day, session_id)
 );
 CREATE INDEX IF NOT EXISTS idx_session_token_daily_day ON session_token_daily(day);
+
+CREATE TABLE IF NOT EXISTS session_calls (
+  session_id TEXT NOT NULL,
+  orchestrator_id TEXT NOT NULL,
+  session_type TEXT NOT NULL,
+  ts INTEGER NOT NULL,
+  message_id TEXT NOT NULL,
+  model TEXT,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  context_tokens INTEGER NOT NULL DEFAULT 0,
+  is_sidechain INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_session_calls_msg ON session_calls(session_id, message_id);
+CREATE INDEX IF NOT EXISTS idx_session_calls_session_ts ON session_calls(session_id, ts);
+CREATE INDEX IF NOT EXISTS idx_session_calls_orch_ts ON session_calls(orchestrator_id, ts);
+CREATE INDEX IF NOT EXISTS idx_session_calls_ts ON session_calls(ts);
 `;

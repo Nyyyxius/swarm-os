@@ -176,9 +176,12 @@ export interface Config {
    *
    * There is no timer: the read is triggered by `Orchestrator.toView()`, i.e.
    * by the UI's existing 3 s `/orchestrators` poll, so this is what keeps the
-   * poll from turning into one file read per session per 3 s. `0` disables the
-   * tracker entirely — nothing is ever read and every gauge shows `—`.
-   * Default 15 000. Env: `SWARM_OS_CONTEXT_USAGE_TTL_MS`.
+   * poll from turning into one file read per session per 3 s. Two server-side
+   * reads bypass it, both events rather than a schedule: an agent's idle
+   * boundary (once per turn) and its exit (once per life) — they keep the
+   * per-call ledger and the token totals complete with no browser open. `0`
+   * disables the tracker entirely — nothing is ever read, every gauge shows `—`
+   * and no call is recorded. Default 15 000. Env: `SWARM_OS_CONTEXT_USAGE_TTL_MS`.
    */
   contextUsageTtlMs: number;
   /**

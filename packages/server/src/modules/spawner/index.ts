@@ -15,6 +15,7 @@ import type { Session, SessionType } from '../orchestrator/session.js';
 import type { Notifier } from '../notify/index.js';
 import { DiscordWebhookNotifier } from '../notify/discord.js';
 import type { Persistence, ResumableState } from '../orchestrator/persistence.js';
+import { CallLedger } from '../metrics/call-usage.js';
 import { NoOpNotifier } from '../notify/null.js';
 import { NoOpPersistence } from '../orchestrator/persistence.js';
 import type { RoleStore, Role, Connector } from '../roles/index.js';
@@ -275,6 +276,11 @@ export class Spawner {
    * deployment running with the kill switch). Read by `GET /providers` only.
    */
   readonly modelCatalogue: ModelCatalogue | null;
+  /**
+   * Per-call ledger (`session_calls`) — one for the whole process, handed to
+   * every Orchestrator (writes) and read by the call-usage routes.
+   */
+  readonly callLedger: CallLedger;
 
   /**
    * The shared knowledge-graph store (docs/memoire-partagee.md), or `null` when
@@ -319,6 +325,7 @@ export class Spawner {
       config,
     });
     this.modelCatalogue = deps.modelCatalogue ?? null;
+    this.callLedger = new CallLedger(this.persistence.db);
     this.memory = deps.memory ?? null;
     this.taskboard = deps.taskboard ?? null;
     this.skills = deps.skills ?? null;
@@ -529,6 +536,7 @@ export class Spawner {
       providerRegistry: this.providerRegistry,
       // Monitoring — model context limits for the context-usage gauges.
       modelCatalogue: this.modelCatalogue,
+      callLedger: this.callLedger,
       // KILL UI flow on the lead: when the operator clicked KILL we ask the
       // orchestrator to call us back once it reaches terminal, so we can soft
       // delete the whole team from the map in one shot.
@@ -1158,6 +1166,7 @@ export class Spawner {
         persistence: this.persistence,
         providerRegistry: this.providerRegistry,
         modelCatalogue: this.modelCatalogue,
+        callLedger: this.callLedger,
         onHideRequested: (id) => this.hideOrchestrator(id),
         ...(this.pluginTools ? { pluginTools: this.pluginTools } : {}),
         ...(this.features ? { features: this.features } : {}),

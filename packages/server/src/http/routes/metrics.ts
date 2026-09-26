@@ -37,6 +37,13 @@ import {
   type CostExportRow,
 } from '../../modules/metrics/cost-export.js';
 import type { OrchestratorTokenSumRow } from '../../modules/db/index.js';
+import {
+  parseCallBucket,
+  parseCallWindow,
+  type CallBucket,
+  type CallUsageView,
+  type CallWindow,
+} from '../../modules/metrics/call-usage.js';
 
 /**
  * Lot 12 — everything `/metrics/costs` needs, as a structural type rather than
@@ -68,6 +75,12 @@ export interface TeamCostsDeps {
    * `db.sessionTokenDailySince`.
    */
   dailySince?: (sinceDay: string) => readonly CostExportRow[];
+  /**
+   * Per-call ledger — the fleet-wide series behind `GET /metrics/call-usage`
+   * (`CallLedger.callUsage(null, …)`, teams named). `null` ⇒ the window ×
+   * bucket combination is too fine (400). Optional: absent ⇒ no route.
+   */
+  callUsage?: (window: CallWindow, bucket: CallBucket) => CallUsageView | null;
 }
 
 export function createMetricsRouter(
@@ -141,6 +154,29 @@ export function createMetricsRouter(
         `attachment; filename="${costExportFilename('csv')}"`,
       );
       res.send(toCostExportCsv(rows));
+    });
+  }
+
+  // Per-call ledger — calls and tokens per bucket for EVERY team, lead and
+  // workers apart, plus one total per team (the MONITORING panel's selector).
+  // Aggregated in SQL; polled by the panel only while the page is open.
+  if (teamCosts?.callUsage) {
+    const callUsage = teamCosts.callUsage;
+    router.get('/metrics/call-usage', (req: Request, res: Response) => {
+      const window = parseCallWindow(req.query.window);
+      const bucket = parseCallBucket(req.query.bucket);
+      if (window === null || bucket === null) {
+        res.status(400).json({
+          error: "query.window must be '1h', '24h', '3d' or '14d'; query.bucket '5m', 'hour' or 'day'",
+        });
+        return;
+      }
+      const view = callUsage(window, bucket);
+      if (view === null) {
+        res.status(400).json({ error: 'TOO_MANY_BUCKETS' });
+        return;
+      }
+      res.json(view);
     });
   }
 

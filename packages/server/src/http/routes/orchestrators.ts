@@ -13,6 +13,7 @@ import {
 } from '../../modules/orchestrator/persistence.js';
 import type { SessionView } from '../../modules/orchestrator/session.js';
 import { buildSessionCostViews } from '../../modules/metrics/costs.js';
+import { parseCallBucket, parseCallWindow } from '../../modules/metrics/call-usage.js';
 import {
   resolveAgentDefaults,
   resolveProviderId,
@@ -488,6 +489,42 @@ export function createOrchestratorsRouter(spawner: Spawner, config: Config): Rou
         spawner.modelCatalogue?.costRates(providerId, modelId) ?? null,
       ),
     });
+  });
+
+  /**
+   * Per-call ledger — one team's calls and tokens per bucket, lead and workers
+   * apart (`GROUP BY` in SQL over `session_calls`). `window` 1h|24h|3d|14d
+   * (default 24h), `bucket` 5m|hour|day (default hour); a combination over
+   * 1000 buckets is a 400. Answers for ended teams too (history is SQLite).
+   */
+  router.get('/orchestrators/:id/call-usage', (req: Request<{ id: string }>, res: Response) => {
+    const window = parseCallWindow(req.query.window);
+    const bucket = parseCallBucket(req.query.bucket);
+    if (window === null || bucket === null) {
+      res.status(400).json({
+        error: "query.window must be '1h', '24h', '3d' or '14d'; query.bucket '5m', 'hour' or 'day'",
+      });
+      return;
+    }
+    const orchId = req.params.id;
+    let known = spawner.get(orchId) !== undefined;
+    if (!known) {
+      try {
+        known = spawner.persistence.db.getOrchestrator(orchId) !== null;
+      } catch {
+        known = false;
+      }
+    }
+    if (!known) {
+      res.status(404).json({ error: 'not found' });
+      return;
+    }
+    const view = spawner.callLedger.callUsage(orchId, window, bucket);
+    if (view === null) {
+      res.status(400).json({ error: 'TOO_MANY_BUCKETS' });
+      return;
+    }
+    res.json(view);
   });
 
   router.get('/orchestrators/:id/sessions', (req: Request<{ id: string }>, res: Response) => {

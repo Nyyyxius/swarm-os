@@ -475,6 +475,14 @@ export function createApp(
       // roll-up writes, never the live sessions: the export is history, and
       // history is what SQLite holds.
       dailySince: (sinceDay) => spawner.persistence.db.sessionTokenDailySince(sinceDay),
+      // Per-call ledger — `/metrics/call-usage`. Team names from the live map
+      // first, then the DB row (an ended team keeps its history).
+      callUsage: (window, bucket) =>
+        spawner.callLedger.callUsage(null, window, bucket, (orchId) => {
+          const live = spawner.get(orchId);
+          if (live) return live.name;
+          return spawner.persistence.db.getOrchestrator(orchId)?.name ?? null;
+        }),
     }),
   );
   // Operator backup: force a snapshot now + list existing snapshots. Same

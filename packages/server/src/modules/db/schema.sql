@@ -216,3 +216,39 @@ CREATE TABLE IF NOT EXISTS session_token_daily (
 -- already serves that, but the index is what keeps the 90-day GC
 -- (`WHERE day < ?`) from degrading into a full table scan on a large history.
 CREATE INDEX IF NOT EXISTS idx_session_token_daily_day ON session_token_daily(day);
+
+-- Per-call ledger (docs/monitoring-agents.md, « Appels par agent ») — ONE row per
+-- API call of a claude agent, read from its transcript `.jsonl` at the exact
+-- point where the call is billed (same `message.id` de-duplication, sidechains
+-- included and flagged). Feeds the per-call chart of an agent and the hourly
+-- lead / workers series of a team or of the whole fleet.
+--
+-- `ts` is epoch ms (INTEGER, so an hour bucket is `ts / 3600000` in SQL, no date
+-- parsing) and is the transcript line's own timestamp: the reader can run late,
+-- the call is filed where it happened. `context_tokens` = input + cache_creation
+-- + cache_read, i.e. the prompt that was sent. `session_type` ('lead'|'worker')
+-- is denormalised so the lead / workers split is a GROUP BY without a join.
+--
+-- UNIQUE (session_id, message_id) + INSERT OR IGNORE: a re-read after a restart,
+-- a `/clear` drain or a rewritten file never files a call twice. Retention: 14
+-- days, purged at insertion at most once an hour (no timer). No foreign key,
+-- like `session_token_daily`: the ledger outlives the rows it names.
+CREATE TABLE IF NOT EXISTS session_calls (
+  session_id TEXT NOT NULL,
+  orchestrator_id TEXT NOT NULL,
+  session_type TEXT NOT NULL,              -- lead|worker
+  ts INTEGER NOT NULL,                     -- epoch ms, transcript timestamp
+  message_id TEXT NOT NULL,
+  model TEXT,
+  input_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_creation_tokens INTEGER NOT NULL DEFAULT 0,
+  cache_read_tokens INTEGER NOT NULL DEFAULT 0,
+  output_tokens INTEGER NOT NULL DEFAULT 0,
+  context_tokens INTEGER NOT NULL DEFAULT 0,
+  is_sidechain INTEGER NOT NULL DEFAULT 0
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_session_calls_msg ON session_calls(session_id, message_id);
+-- One agent's chart, one team's series, the fleet series + the retention purge.
+CREATE INDEX IF NOT EXISTS idx_session_calls_session_ts ON session_calls(session_id, ts);
+CREATE INDEX IF NOT EXISTS idx_session_calls_orch_ts ON session_calls(orchestrator_id, ts);
+CREATE INDEX IF NOT EXISTS idx_session_calls_ts ON session_calls(ts);

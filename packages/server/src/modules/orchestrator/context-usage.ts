@@ -36,7 +36,11 @@
  * NO TIMER, by the same doctrine as `providers/catalogue.ts` and
  * `providers/availability.ts`: `Orchestrator.toView()` calls `maybeRefresh()`,
  * and the UI already polls `/orchestrators` every 3 s. The heartbeat exists; a
- * scheduler would only add a lifecycle to shut down.
+ * scheduler would only add a lifecycle to shut down. Two EVENTS read without a
+ * browser: an agent's idle boundary (`catchUp` — a turn just ended, its calls
+ * are on disk) and its exit (`flush` — the last chance to read the final
+ * turns). They are what keeps the per-call ledger (`TranscriptCall`,
+ * `session_calls`) and the token totals complete on an unwatched instance.
  *
  * A HISTORY, NOT A TIMER (Lot 9). The same tracker keeps two bounded rings —
  * accepted samples and resets that actually fired — trimmed to 72 h on append
@@ -145,6 +149,21 @@ export const TRANSCRIPT_RANGE_BYTES = 1024 * 1024;
  * de-duplicator, not a history.
  */
 export const TRANSCRIPT_USAGE_ID_MEMORY = 64;
+
+/**
+ * Reads one idle-boundary catch-up may chain while the source says it is still
+ * behind (`ContextUsageTracker.catchUp`). 4 × `TRANSCRIPT_RANGE_BYTES` = 4 MiB
+ * per turn boundary — far more than a turn writes, so a cursor cannot drift
+ * behind for good, and still bounded so one boundary cannot become a scan.
+ */
+export const CATCH_UP_MAX_READS = 4;
+
+/**
+ * Reads the final flush of an EXITING session may chain (`flush`). Larger than
+ * a boundary's budget because it is the last chance: after it, nothing will
+ * ever read this transcript again, and whatever is left is lost.
+ */
+export const FLUSH_MAX_READS = 16;
 
 /** Refreshes in flight right now, all trackers included. */
 let activeRefreshes = 0;
@@ -341,6 +360,64 @@ export interface TranscriptScan {
    * never summed — so a caught-up incremental reader can serve the gauge too.
    */
   gaugeUsedTokens: number | null;
+  /**
+   * One entry per API call billed here for the FIRST time — the same ids as
+   * `countedIds`, minus the ones that were not calls at all (see
+   * {@link transcriptCallOf}). Feeds the per-call ledger (`session_calls`).
+   */
+  calls: TranscriptCall[];
+}
+
+/**
+ * ONE API call, as the transcript recorded it — the row behind the per-call
+ * chart of the MONITORING page (`session_calls`, docs/monitoring-agents.md).
+ *
+ * Built at exactly the point where a turn is billed, so a call is emitted iff
+ * its tokens entered the totals: same `message.id` de-duplication, same
+ * sidechain policy (INCLUDED — a sub-agent's call is still a call this agent
+ * paid for; `isSidechain` lets a consumer tell them apart).
+ *
+ * `ts` is the line's own `timestamp`, not the time we read it: the reader can
+ * run minutes late (it is driven by polls and idle boundaries, never a timer),
+ * and the chart must place the call where it happened. `null` when the line
+ * carries no parseable timestamp — the ledger then stamps the read time.
+ */
+export interface TranscriptCall {
+  messageId: string;
+  ts: number | null;
+  model: string | null;
+  input: number;
+  cacheWrite: number;
+  cacheRead: number;
+  output: number;
+  isSidechain: boolean;
+}
+
+/**
+ * The call a billed assistant line describes, or `null` when it describes none.
+ *
+ * Two shapes are refused, both observed in Claude Code transcripts: the
+ * `<synthetic>` assistant messages the CLI writes itself (API errors, "no
+ * response requested"), which never reached a model, and a usage block of four
+ * zeros — a line with nothing to draw is not a call worth a row.
+ */
+function transcriptCallOf(
+  row: Record<string, unknown>,
+  message: Record<string, unknown> | null,
+  messageId: string,
+  tokens: { input: number; cacheWrite: number; cacheRead: number; output: number },
+): TranscriptCall | null {
+  const model = typeof message?.model === 'string' && message.model.length > 0 ? message.model : null;
+  if (model === '<synthetic>') return null;
+  if (tokens.input + tokens.cacheWrite + tokens.cacheRead + tokens.output === 0) return null;
+  const parsedTs = typeof row.timestamp === 'string' ? Date.parse(row.timestamp) : NaN;
+  return {
+    messageId,
+    ts: Number.isFinite(parsedTs) ? parsedTs : null,
+    model,
+    ...tokens,
+    isSidechain: row.isSidechain === true,
+  };
 }
 
 /**
@@ -366,15 +443,16 @@ export function scanTranscriptRange(
 ): TranscriptScan {
   const delta = emptyTokenUsage();
   const countedIds: string[] = [];
+  const calls: TranscriptCall[] = [];
   let gaugeUsedTokens: number | null = null;
   if (typeof text !== 'string' || text.length === 0) {
-    return { consumedBytes: 0, delta, countedIds, gaugeUsedTokens };
+    return { consumedBytes: 0, delta, countedIds, gaugeUsedTokens, calls };
   }
   const lastNewline = text.lastIndexOf('\n');
   // Not one complete line yet: consume nothing, so the partial line is re-read
   // whole at the next poll rather than parsed (and lost) as a broken fragment.
   if (lastNewline < 0) {
-    return { consumedBytes: 0, delta, countedIds, gaugeUsedTokens };
+    return { consumedBytes: 0, delta, countedIds, gaugeUsedTokens, calls };
   }
   const complete = text.slice(0, lastNewline + 1);
   // Bytes, not characters: the cursor is a byte offset into the file. Slicing on
@@ -419,8 +497,10 @@ export function scanTranscriptRange(
     delta.out += output;
     delta.cacheRead += cacheRead;
     delta.cacheWrite += cacheWrite;
+    const call = transcriptCallOf(row, message, id, { input, cacheWrite, cacheRead, output });
+    if (call !== null) calls.push(call);
   }
-  return { consumedBytes, delta, countedIds, gaugeUsedTokens };
+  return { consumedBytes, delta, countedIds, gaugeUsedTokens, calls };
 }
 
 // ---------------------------------------------------------------------------
@@ -702,6 +782,13 @@ export interface TokenUsageReading {
    * everywhere else, which leaves the estimate in charge.
    */
   reportedCostUsd?: number;
+  /**
+   * The API calls behind `tokens`, one per newly billed `message.id` — claude
+   * only (the transcript is the one source that sees individual calls). Same
+   * exactly-once contract as `tokens`: the source hands each call over in the
+   * read that moved its cursor past it, and never again.
+   */
+  calls?: TranscriptCall[];
 }
 
 /**
@@ -773,6 +860,14 @@ export interface ContextUsageSource {
    * the old number and proudly mark it fresh.
    */
   invalidate?(): void;
+  /**
+   * `true` when the source KNOWS it has unread input — a cursor still behind
+   * the end of its file, a rotated file still owed its final read. Lets a
+   * caller that must not lose anything (a session exiting, an idle boundary)
+   * keep reading until it has caught up, instead of trusting one bounded read.
+   * Absent ⇒ one read always says everything the source has to say.
+   */
+  readonly behind?: boolean;
 }
 
 /**
@@ -854,6 +949,12 @@ export class TranscriptContextSource implements ContextUsageSource {
     return this.#offset;
   }
 
+  /** See `ContextUsageSource.behind`. Only meaningful with a ranged reader. */
+  get behind(): boolean {
+    if (this.#readRange === null || this.#path === null) return false;
+    return !this.#caughtUp || this.#pendingDrain !== null;
+  }
+
   /**
    * A new file to follow — `/clear` rotates the transcript (spike S4).
    *
@@ -889,7 +990,7 @@ export class TranscriptContextSource implements ContextUsageSource {
     const filePath = this.#path;
     if (filePath === null) return { kind: 'empty' };
 
-    let tokens: TokenUsageCounters | null = null;
+    let tokens: BillSlice | null = null;
     if (this.#readRange !== null) {
       // The tail of the file a rotation left behind, billed before anything
       // else — it is owed, and one poll later it would be unreachable.
@@ -899,7 +1000,10 @@ export class TranscriptContextSource implements ContextUsageSource {
         // The drain still counts: it measured a different file, successfully.
         return { kind: 'unavailable', reason: 'unreadable', ...withTokens(drained) };
       }
-      tokens = addTokenUsage(drained, scanned);
+      tokens = {
+        delta: addTokenUsage(drained.delta, scanned.delta),
+        calls: [...drained.calls, ...scanned.calls],
+      };
       // The cursor has seen the whole file, so it knows the newest turn as well
       // as any tail read would — and it remembers it between polls, so a quiet
       // agent keeps its gauge fresh instead of going stale for want of new
@@ -941,10 +1045,10 @@ export class TranscriptContextSource implements ContextUsageSource {
    * with the second line of an already-billed turn. `scanTranscriptRange` also
    * de-duplicates within the slice, which covers every other repetition.
    */
-  async #drain(): Promise<TokenUsageCounters> {
+  async #drain(): Promise<BillSlice> {
     const pending = this.#pendingDrain;
     const readRange = this.#readRange;
-    if (pending === null || readRange === null) return emptyTokenUsage();
+    if (pending === null || readRange === null) return emptyBillSlice();
     this.#pendingDrain = null;
     let chunk: TranscriptRange | null = null;
     try {
@@ -952,11 +1056,12 @@ export class TranscriptContextSource implements ContextUsageSource {
     } catch {
       chunk = null;
     }
-    if (chunk === null) return emptyTokenUsage();
+    if (chunk === null) return emptyBillSlice();
     // A file that SHRANK under its old cursor tells us nothing we can bill: the
     // bytes we were owed are gone, and re-reading from 0 would re-bill.
-    if (chunk.size !== null && chunk.size < pending.offset) return emptyTokenUsage();
-    return scanTranscriptRange(chunk.text, pending.seen).delta;
+    if (chunk.size !== null && chunk.size < pending.offset) return emptyBillSlice();
+    const scan = scanTranscriptRange(chunk.text, pending.seen);
+    return { delta: scan.delta, calls: scan.calls };
   }
 
   /**
@@ -964,9 +1069,9 @@ export class TranscriptContextSource implements ContextUsageSource {
    * cursor by what was actually consumed. `'unreadable'` is the only failure —
    * everything else is a (possibly zero) delta.
    */
-  async #advance(filePath: string): Promise<TokenUsageCounters | 'unreadable'> {
+  async #advance(filePath: string): Promise<BillSlice | 'unreadable'> {
     const readRange = this.#readRange;
-    if (readRange === null) return emptyTokenUsage();
+    if (readRange === null) return emptyBillSlice();
     const epoch = this.#epoch;
     const offset = this.#offset;
     let chunk: TranscriptRange | null = null;
@@ -981,7 +1086,7 @@ export class TranscriptContextSource implements ContextUsageSource {
     }
     // A rotation landed while we were reading: these bytes belong to a file the
     // cursor no longer points into. Bill nothing, move nothing.
-    if (this.#epoch !== epoch || this.#path !== filePath) return emptyTokenUsage();
+    if (this.#epoch !== epoch || this.#path !== filePath) return emptyBillSlice();
 
     // The file is SHORTER than our cursor: it was replaced or rewritten under
     // the same name. Restart at 0 — but KEEP the id memory, which is the only
@@ -989,7 +1094,7 @@ export class TranscriptContextSource implements ContextUsageSource {
     if (chunk.size !== null && chunk.size < offset) {
       this.#offset = 0;
       this.#caughtUp = false;
-      return emptyTokenUsage();
+      return emptyBillSlice();
     }
 
     const scan = scanTranscriptRange(chunk.text, this.#ids);
@@ -1011,8 +1116,18 @@ export class TranscriptContextSource implements ContextUsageSource {
     // line the writer has not finished flushing would buy nothing.
     this.#caughtUp =
       chunk.size !== null ? offset + chunk.bytes >= chunk.size : chunk.bytes < this.#rangeBytes;
-    return scan.delta;
+    return { delta: scan.delta, calls: scan.calls };
   }
+}
+
+/** What one ranged read billed: the token delta and the calls behind it. */
+interface BillSlice {
+  delta: TokenUsageCounters;
+  calls: TranscriptCall[];
+}
+
+function emptyBillSlice(): BillSlice {
+  return { delta: emptyTokenUsage(), calls: [] };
 }
 
 /**
@@ -1022,8 +1137,12 @@ export class TranscriptContextSource implements ContextUsageSource {
  * measure nothing new, and every source keeps the same rule so a caller can
  * treat "has `tokens`" as "something was billed".
  */
-function withTokens(tokens: TokenUsageCounters | null): TokenUsageReading {
-  return tokens === null || isZeroTokenUsage(tokens) ? {} : { tokens };
+function withTokens(bill: BillSlice | null): TokenUsageReading {
+  if (bill === null) return {};
+  return {
+    ...(isZeroTokenUsage(bill.delta) ? {} : { tokens: bill.delta }),
+    ...(bill.calls.length > 0 ? { calls: bill.calls } : {}),
+  };
 }
 
 // ---------------------------------------------------------------------------
@@ -1326,6 +1445,20 @@ export interface ContextUsageWiring {
    * money is a view-time multiplication.
    */
   costRates?: () => TokenCostRates | null;
+  /**
+   * Per-call ledger (`session_calls`). The `Session` hands its own identity with
+   * every batch, so one sink serves a whole team. Absent ⇒ calls are simply not
+   * recorded; the gauge and the totals are unaffected. claude only in practice:
+   * the transcript is the one source that emits calls.
+   */
+  recordCalls?: (session: CallLedgerSession, calls: readonly TranscriptCall[]) => void;
+}
+
+/** Who a batch of calls belongs to — what the ledger stores beside each call. */
+export interface CallLedgerSession {
+  id: string;
+  orchestratorId: string;
+  type: 'lead' | 'worker';
 }
 
 /**
@@ -1367,6 +1500,13 @@ export interface ContextUsageTrackerOptions extends ContextUsageWiring {
    * session persists them in different columns.
    */
   onReportedCost?: (deltaUsd: number) => void;
+  /**
+   * Per-call ledger — called with the API calls a read billed for the first
+   * time (claude only: see `TokenUsageReading.calls`). Same rules as
+   * `onTokenUsage`: never called empty, fired before the generation guard, and
+   * a throwing sink cannot break the read path.
+   */
+  onCalls?: (calls: TranscriptCall[]) => void;
 }
 
 export class ContextUsageTracker {
@@ -1388,6 +1528,8 @@ export class ContextUsageTracker {
   /** Epoch ms stamped at the START of a refresh, so a slow read cannot pile up. */
   #refreshStartedAtMs: number | null = null;
   #inFlight = false;
+  /** The read in flight, so a final `flush` can wait for it to land first. */
+  #inFlightPromise: Promise<void> | null = null;
   #warnedAtMs: number | null = null;
   /**
    * Bumped whenever what we are reading stops describing the live context (a
@@ -1442,6 +1584,7 @@ export class ContextUsageTracker {
   /** Lot 13 — the same, in dollars the provider itself quoted. */
   #reportedCostUsd = 0;
   readonly #onReportedCost: ((deltaUsd: number) => void) | null;
+  readonly #onCalls: ((calls: TranscriptCall[]) => void) | null;
   /**
    * Lot 13 — the account quota, LAST reading wins and nothing accumulates.
    *
@@ -1459,6 +1602,7 @@ export class ContextUsageTracker {
     this.#now = opts.now ?? (() => Date.now());
     this.#onTokenUsage = opts.onTokenUsage ?? null;
     this.#onReportedCost = opts.onReportedCost ?? null;
+    this.#onCalls = opts.onCalls ?? null;
     this.#source =
       opts.source ??
       new TranscriptContextSource({
@@ -1708,17 +1852,72 @@ export class ContextUsageTracker {
       // retries rather than waiting out a TTL nobody spent.
       return;
     }
-    this.#refreshStartedAtMs = now;
+    void this.#start(1);
+  }
+
+  /**
+   * Read NOW — TTL ignored — and keep reading while the source says it is still
+   * behind, up to `maxReads`. Never rejects.
+   *
+   * Called at an agent's idle boundary (`Orchestrator._onSessionIdle`): the
+   * moment a turn has just ended is exactly when its calls are on disk and
+   * unread, and it comes at most once per period of silence, i.e. once per
+   * turn — an event, not a schedule. This is what keeps the per-call ledger
+   * complete when no browser is polling `/orchestrators`.
+   *
+   * The in-flight flag and the global cap still apply: a read already running
+   * will bill what it reaches, and a saturated fleet defers to the next poll
+   * or boundary. Neither loses anything — the cursor keeps its place and the
+   * calls carry their own timestamps, so a late read files them where they
+   * happened.
+   */
+  catchUp(maxReads: number = CATCH_UP_MAX_READS): Promise<void> {
+    if (!this.enabled) return Promise.resolve();
+    if (!this.#source.ready) return Promise.resolve();
+    if (this.#inFlight) return Promise.resolve();
+    if (activeRefreshes >= CONTEXT_USAGE_MAX_CONCURRENT_REFRESH) return Promise.resolve();
+    return this.#start(maxReads);
+  }
+
+  /**
+   * The LAST read of a session whose process just exited. Waits for a read in
+   * flight to land (it may have started before the final bytes were written),
+   * then reads until the source has caught up, up to `maxReads`. Ignores the
+   * TTL and the global cap — it happens once per session life, and skipping it
+   * would lose the final turns of every worker that finishes or is killed.
+   * Never rejects.
+   */
+  async flush(maxReads: number = FLUSH_MAX_READS): Promise<void> {
+    if (!this.enabled) return;
+    if (!this.#source.ready) return;
+    const pending = this.#inFlightPromise;
+    if (pending !== null) await pending;
+    if (this.#inFlight) return;
+    await this.#start(maxReads);
+  }
+
+  /** One exclusive run of 1..maxReads reads, under the in-flight flag. */
+  #start(maxReads: number): Promise<void> {
+    this.#refreshStartedAtMs = this.#now();
     this.#inFlight = true;
     activeRefreshes++;
-    void this.#run()
+    const reads = Math.max(1, Math.floor(maxReads));
+    const run = (async () => {
+      for (let i = 0; i < reads; i++) {
+        await this.#run();
+        if (this.#source.behind !== true) break;
+      }
+    })()
       .catch(() => {
         /* `#run` cannot reject — belt to its braces */
       })
       .finally(() => {
         this.#inFlight = false;
+        this.#inFlightPromise = null;
         activeRefreshes--;
       });
+    this.#inFlightPromise = run;
+    return run;
   }
 
   /** Never rejects. Every failure keeps the previous snapshot and marks it stale. */
@@ -1737,6 +1936,7 @@ export class ContextUsageTracker {
     // GAUGE, not the invoice. Dropping the delta here would silently lose spend
     // on exactly the polls where an agent is being reset the most.
     this.#bill(reading.tokens);
+    this.#emitCalls(reading.calls);
     // Lot 13 — same placement, same argument. The dollars are half of the same
     // invoice, and the quota is an ACCOUNT-level level reading that a context
     // reset has no opinion about whatsoever.
@@ -1806,6 +2006,16 @@ export class ContextUsageTracker {
       this.#onTokenUsage(clean);
     } catch {
       /* a mirror may not break the read path */
+    }
+  }
+
+  /** Hand newly billed calls to the ledger. Empty is silence; a sink may not throw. */
+  #emitCalls(calls: TranscriptCall[] | undefined): void {
+    if (calls === undefined || calls.length === 0 || this.#onCalls === null) return;
+    try {
+      this.#onCalls(calls);
+    } catch {
+      /* a ledger may not break the read path */
     }
   }
 

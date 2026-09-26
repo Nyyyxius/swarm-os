@@ -38,6 +38,7 @@ import {
   type RolloutLister,
 } from './context-usage.js';
 import { createLocalRolloutLister, createSshRolloutLister } from './context-usage-codex.js';
+import { CallLedger } from '../metrics/call-usage.js';
 import { createBuiltinProviderRegistry } from '../providers/index.js';
 import { modelContextLimit, modelCostRates, type ModelCatalogue } from '../providers/catalogue.js';
 import { DEFAULT_PROVIDER_ID } from '../providers/ids.js';
@@ -160,6 +161,13 @@ export interface OrchestratorDeps {
    * `—` rather than a made-up denominator.
    */
   modelCatalogue?: ModelCatalogue | null;
+  /**
+   * Per-call ledger (`session_calls`) shared by every team of the process —
+   * the Spawner owns it, so the hourly retention purge is one clock, not one
+   * per team. Absent ⇒ one is built over `persistence.db` (a no-op over the
+   * `NoOpPersistence` stub).
+   */
+  callLedger?: CallLedger;
   /**
    * Invoked once when the orchestrator first reaches a terminal status
    * (`stopped` / `failed`) AND `setHideOnExit(true)` was called beforehand
@@ -422,6 +430,8 @@ export class Orchestrator {
   private readonly _rangeReader: ContextUsageWiring['readRange'];
   /** Monitoring — codex rollout lister for this team's transport. */
   private readonly _rolloutLister: RolloutLister;
+  /** Monitoring — per-call ledger (`session_calls`). */
+  private readonly _callLedger: CallLedger;
 
   /** All sessions, including terminated ones, indexed by id. */
   private readonly sessions = new Map<string, Session>();
@@ -444,6 +454,10 @@ export class Orchestrator {
       readTail: this._tailReader,
       readRange: this._rangeReader,
       listRollouts: this._rolloutLister,
+      // Per-call ledger — only the claude transcript source ever emits calls.
+      recordCalls: (session, calls) => {
+        this._callLedger.record(session, calls);
+      },
     };
   }
 
@@ -518,6 +532,7 @@ export class Orchestrator {
     this._autoCompact = deps.autoCompact ?? null;
     this._toolPolicy = deps.toolPolicy ?? null;
     this._modelCatalogue = deps.modelCatalogue ?? null;
+    this._callLedger = deps.callLedger ?? new CallLedger(this.persistence.db);
     // Monitoring — one reader per orchestrator, shared by its sessions: the
     // transport cannot change under a live team, and the closure holds nothing
     // per-session. SSH sessions read the transcript in the HOST's namespace.
@@ -1229,23 +1244,24 @@ export class Orchestrator {
       }
     }
     // --- 2. The auto-compact decision ------------------------------------
-    const decision = this._decideSessionAutoCompact(session, queued);
-    // --- 3. Freshen the gauge for the NEXT boundary ----------------------
+    this._decideSessionAutoCompact(session, queued);
+    // --- 3. Read what the turn just wrote ----------------------------------
     //
-    // Fire-and-forget and TTL-gated (15 s) — deliberately NOT a forced
-    // `refresh()`. A sample up to one TTL old delays a decision by at most one
-    // boundary, and only ever in the safe direction: the context grows between
-    // two resets, so an old sample under-reports and compacts LATE, never
-    // wrongly. Forcing a read would put the SSH transcript reads on this
-    // boundary's cadence instead of the TTL's.
+    // A turn has just ended, so its API calls are on disk and unread. This is
+    // the server-side trigger of the per-call ledger (`session_calls`) and of
+    // the token totals: without it, an instance nobody is watching would read
+    // NO worker transcript at all (`toView()` — the other trigger — runs on the
+    // UI's poll, and workers default to auto-compact OFF), and a restart would
+    // drop whatever the cursor had not reached.
     //
-    // Skipped when the feature is OFF for this team. A fleet running
-    // `SWARM_OS_AUTO_COMPACT_PCT=0` (or a role at 0) has nothing to decide, and
-    // this read is a transcript tail — one SSH round trip per agent per TTL for
-    // a number nobody asked for. Before this feature the only caller was
-    // `toView()`, i.e. an open UI tab; `disabled` keeps exactly that bargain.
-    if (!decision.fire && decision.reason === 'disabled') return;
-    session.maybeRefreshContextUsage();
+    // Fire-and-forget, TTL ignored, at most one per period of silence — i.e.
+    // one incremental read (the bytes since the cursor, not a scan) per turn,
+    // chained only while the cursor is behind. The in-flight flag and the
+    // global cap still hold. It also freshens the gauge for the NEXT
+    // auto-compact decision, which only ever makes that decision better
+    // informed. Not decided by `decision`: the ledger wants every turn whatever
+    // the auto-compact settings.
+    session.catchUpContextUsage();
   }
 
   /**

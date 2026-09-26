@@ -24,6 +24,7 @@ import {
   type ContextUsageSource,
   type ContextUsageWiring,
   type TokenUsageCounters,
+  type TranscriptCall,
 } from './context-usage.js';
 import { estimateTokenCostUsd, type TokenCostRates } from '../providers/catalogue.js';
 // Type-only: the DECISION lives in `auto-compact.ts`, which imports
@@ -1242,9 +1243,21 @@ export class Session extends EventEmitter {
         ...wiring,
         onTokenUsage: (delta) => this.recordTokenUsage(delta),
         onReportedCost: (usd) => this.recordReportedCost(usd),
+        onCalls: (calls) => this._recordCalls(calls),
       });
     }
     this._contextUsage.setTranscriptPath(filePath);
+  }
+
+  /**
+   * Per-call ledger — forward the calls a transcript read billed for the first
+   * time to the Orchestrator's sink, stamped with who made them. Never throws:
+   * the tracker already guards its callbacks, and this adds no failure mode.
+   */
+  private _recordCalls(calls: readonly TranscriptCall[]): void {
+    const sink = this._contextUsageWiring?.recordCalls;
+    if (!sink || calls.length === 0) return;
+    sink({ id: this.id, orchestratorId: this.orchestratorId, type: this.type }, calls);
   }
 
   /**
@@ -1283,6 +1296,27 @@ export class Session extends EventEmitter {
   maybeRefreshContextUsage(): void {
     if (this._status !== 'running' && this._status !== 'waiting') return;
     this._contextUsage?.maybeRefresh();
+  }
+
+  /**
+   * Catch-up read at an idle boundary — TTL ignored, chained while the cursor
+   * is behind (`ContextUsageTracker.catchUp`). The server-side trigger that
+   * keeps the per-call ledger and the token totals complete with no browser
+   * open: a turn just ended, its calls are on disk, read them now. Fire and
+   * forget, never throws. LIVE sessions only, like `maybeRefreshContextUsage`.
+   */
+  catchUpContextUsage(): void {
+    if (this._status !== 'running' && this._status !== 'waiting') return;
+    void this._contextUsage?.catchUp();
+  }
+
+  /**
+   * The final read, once the process has exited — see
+   * `ContextUsageTracker.flush`. Resolves when it has landed (tests await it);
+   * `_handleExit` fires and forgets. Never rejects.
+   */
+  flushContextUsage(): Promise<void> {
+    return this._contextUsage?.flush() ?? Promise.resolve();
   }
 
   /** Cached occupancy, or `null` when nothing has been read yet. Synchronous. */
@@ -2855,6 +2889,13 @@ export class Session extends EventEmitter {
     });
     // Phase 4: final, forced persistence write so endedAt/exitCode land.
     this._notifyState(true);
+    // Monitoring — the last read of this agent's transcript. The turns it
+    // finished after the previous poll or boundary are still unbilled, and
+    // nothing will ever read this file again: without this, every worker that
+    // completes or is killed takes its final calls (and their tokens) with it.
+    // Fire and forget; the token delta lands through `recordTokenUsage`, whose
+    // write is not throttled any more now that `endedAt` is set.
+    void this.flushContextUsage();
     this.emit('exit', info);
     // Drop EventEmitter listeners — TerminalRoom registers `.once('exit')` so
     // this is mainly defensive against subscribers that might forget to
