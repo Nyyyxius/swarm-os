@@ -47,6 +47,9 @@ import {
 import {
   autoCompactFieldValue, autoCompactSummary, parseAutoCompactPct,
 } from '../lib/autoCompact';
+import {
+  hasToolRestrictions, parseToolList, toolListFieldValue, toolListSummary,
+} from '../lib/toolList';
 import { DiscordOnboarding } from './DiscordOnboarding';
 import { useShellMode } from '../hooks/useShellMode';
 import { useProviders } from '../hooks/useProviders';
@@ -105,6 +108,7 @@ type SectionId =
   | 'approvals'
   | 'autoCleanup'
   | 'autocompact'
+  | 'tools'
   | 'budget';
 
 export function RolesPage({ open, onClose, onOpenCrons, approvalsVisible = true }: Props) {
@@ -241,6 +245,12 @@ export function RolesPage({ open, onClose, onOpenCrons, approvalsVisible = true 
         // stays out of it.
         autoCompactPct: role.autoCompactPct ?? null,
         workerAutoCompactPct: role.workerAutoCompactPct ?? null,
+        // Same guard rails on the copy: a role restricted to a few tools must
+        // not duplicate into one that has them all.
+        leadTools: role.leadTools ?? null,
+        workerTools: role.workerTools ?? null,
+        leadMcpTools: role.leadMcpTools ?? null,
+        workerMcpTools: role.workerMcpTools ?? null,
       });
       setSelectedRoleId(r.id);
       setEditingSection(null);
@@ -327,6 +337,14 @@ export function RolesPage({ open, onClose, onOpenCrons, approvalsVisible = true 
                   <span className="tag-pill discord">DISCORD</span>
                 )}
                 {r.leadPrompt && <span className="tag-pill">LEAD-PROMPT</span>}
+                {hasToolRestrictions(r) && (
+                  <span
+                    className="tag-pill"
+                    title="Au moins une liste d’outils restreint ce rôle (section OUTILS)"
+                  >
+                    OUTILS RESTREINTS
+                  </span>
+                )}
                 {/* Cadence lives in the `crons` entity now (docs/crons-agents.md).
                     The badge counts them from `cronCount`, which `GET /roles`
                     already carries — no second poll. `stopPropagation` is not
@@ -464,6 +482,14 @@ export function RolesPage({ open, onClose, onOpenCrons, approvalsVisible = true 
               workerDefaultPct={workerAutoCompactDefaultPct}
               editing={editingSection === 'autocompact'}
               onEdit={() => setEditingSection('autocompact')}
+              onCancel={() => setEditingSection(null)}
+              onSave={(body) => patchSelected(body)}
+            />
+
+            <ToolsSection
+              role={role}
+              editing={editingSection === 'tools'}
+              onEdit={() => setEditingSection('tools')}
               onCancel={() => setEditingSection(null)}
               onSave={(body) => patchSelected(body)}
             />
@@ -1378,6 +1404,138 @@ function AutoCompactSection({
             socle post-compaction (≈ 15-20 % sur claude), l’agent est re-compacté tous les
             10 points de croissance. Les workers (tâches courtes, remis à zéro par leur lead)
             ont leur propre seuil, désactivé par défaut au niveau de l’instance.
+          </div>
+          {error && (
+            <div
+              className="field-warn"
+              style={{ color: 'var(--bad)', borderLeftColor: 'var(--bad)' }}
+            >
+              {error}
+            </div>
+          )}
+        </>
+      )}
+    </div>
+  );
+}
+
+// ─────────────────────────────── OUTILS ──────────────────────────────────────
+/**
+ * Tool lists per role (see `RoleView.leadTools`) — four free-text lists,
+ * parsed by `lib/toolList.ts`: one name per line or comma-separated, empty =
+ * all tools (`null`). Edited and saved together, like the two AUTO-COMPACT
+ * thresholds: they are one decision ("what can this team use"), and all four
+ * are sent on every SAVE, `null` included — emptying a field is the only way
+ * back to "all tools". Read at the next launch of a session, never hot.
+ */
+const TOOL_FIELDS = [
+  { key: 'leadTools', label: 'INTÉGRÉS — LEAD', summary: 'Intégrés — lead' },
+  { key: 'workerTools', label: 'INTÉGRÉS — WORKERS', summary: 'Intégrés — workers' },
+  { key: 'leadMcpTools', label: 'TEAM-COMMS — LEAD', summary: 'Team-comms — lead' },
+  { key: 'workerMcpTools', label: 'TEAM-COMMS — WORKERS', summary: 'Team-comms — workers' },
+] as const;
+
+type ToolFieldKey = (typeof TOOL_FIELDS)[number]['key'];
+
+function ToolsSection({
+  role,
+  editing,
+  onEdit,
+  onCancel,
+  onSave,
+}: {
+  role: RoleView;
+  editing: boolean;
+  onEdit: () => void;
+  onCancel: () => void;
+  onSave: (body: Partial<RoleInput>) => Promise<void>;
+}) {
+  const [drafts, setDrafts] = useState<Record<ToolFieldKey, string>>({
+    leadTools: '',
+    workerTools: '',
+    leadMcpTools: '',
+    workerMcpTools: '',
+  });
+  const [error, setError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setDrafts({
+      leadTools: toolListFieldValue(role.leadTools),
+      workerTools: toolListFieldValue(role.workerTools),
+      leadMcpTools: toolListFieldValue(role.leadMcpTools),
+      workerMcpTools: toolListFieldValue(role.workerMcpTools),
+    });
+    setError(null);
+  }, [role.id, editing]);
+
+  async function save() {
+    setError(null);
+    try {
+      await onSave({
+        leadTools: parseToolList(drafts.leadTools),
+        workerTools: parseToolList(drafts.workerTools),
+        leadMcpTools: parseToolList(drafts.leadMcpTools),
+        workerMcpTools: parseToolList(drafts.workerMcpTools),
+      });
+    } catch (e) {
+      setError(e instanceof Error ? e.message : String(e));
+    }
+  }
+
+  return (
+    <div className="role-section">
+      <h3>
+        <span>OUTILS</span>
+        {editing ? (
+          <span style={{ display: 'flex', gap: 6 }}>
+            <button className="h-edit" onClick={onCancel}>
+              CANCEL
+            </button>
+            <button className="h-edit" onClick={() => void save()} style={{ color: 'var(--amber)' }}>
+              SAVE
+            </button>
+          </span>
+        ) : (
+          <button className="h-edit" onClick={onEdit}>
+            EDIT
+          </button>
+        )}
+      </h3>
+
+      {!editing ? (
+        <div className="cfg-pre">
+          {TOOL_FIELDS.map((f) => `${f.summary} : ${toolListSummary(role[f.key])}`).join('\n')}
+        </div>
+      ) : (
+        <>
+          <div
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+              gap: 10,
+            }}
+          >
+            {TOOL_FIELDS.map((f) => (
+              <div className="field" key={f.key}>
+                <label>{f.label}</label>
+                <textarea
+                  value={drafts[f.key]}
+                  onChange={(e) => {
+                    const value = e.target.value;
+                    setDrafts((d) => ({ ...d, [f.key]: value }));
+                  }}
+                  placeholder="Vide = tous les outils"
+                />
+              </div>
+            ))}
+          </div>
+          <div className="field-help" style={{ marginTop: 8 }}>
+            Un nom par ligne ou séparés par des virgules. Outils intégrés : ceux de Claude Code
+            (Bash, Read, Edit, Write, WebFetch, WebSearch, Skill, TaskStop, Agent…). Outils
+            team-comms : leurs noms pointés (team.send_message, memory.search…) ; les essentiels
+            et les restrictions réservées aux leads sont appliqués d’office. Prend effet au
+            prochain lancement des sessions (nouveau worker, lead au prochain redémarrage ou
+            reprise), pas à chaud.
           </div>
           {error && (
             <div

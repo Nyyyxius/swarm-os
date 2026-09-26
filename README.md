@@ -193,6 +193,12 @@ per-role `workerAutoCompactPct`). After any server-fired `/compact` the agent
 is told to resume the work it had in progress
 (`SWARM_OS_CONTINUE_AFTER_COMPACT`, on by default). It works for claude, codex
 and opencode; gemini has no context gauge and is never auto-compacted.
+The per-call tool overhead is trimmed too (`docs/outils-par-role.md`): claude
+sessions keep on-demand tool loading (ToolSearch) except on haiku
+(`SWARM_OS_CLAUDE_TOOL_SEARCH=off|on|auto`), a role can pin the exact built-in
+tools of its lead and of its workers (`leadTools` / `workerTools`, passed as
+`--tools`) and narrow the team-comms tools they see (`leadMcpTools` /
+`workerMcpTools`), and workers never see lead-only team-comms tools.
 
 Full reference — per-CLI contract, capabilities, host prerequisites, what the
 spikes proved and what they could not: `docs/providers.md`.

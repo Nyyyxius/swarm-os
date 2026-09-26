@@ -10,6 +10,7 @@ import { registerMemoryTools } from './memory-tools.js';
 import { registerTaskboardTools } from './taskboard-tools.js';
 import { registerGraphTools } from './codegraph-tools.js';
 import { registerSkillsTools } from './skills-tools.js';
+import { filteredRegistrar, mcpToolPredicate } from './tool-filter.js';
 import type { Config } from '../../config.js';
 import type { MessagingDefaults } from '../orchestrator/messaging.js';
 import type { BusMetricsCollector } from '../metrics/busMetrics.js';
@@ -234,9 +235,36 @@ export class McpServer {
     // Phase-2 SDK idiom: per-request McpServer + stateless transport.
     // Stateless because the team-comms tools are synchronous reads with no
     // server-driven progress events to stream. See class doc for context.
-    const sdkServer = new SdkMcpServer(
+    const realServer = new SdkMcpServer(
       { name: 'swarm-os-team-comms', version: '0.2.0-phase2' },
       { capabilities: {} },
+    );
+    // docs/outils-par-role.md (v0.10.2) — only the tools this session may see
+    // are registered: lead-only ones never reach a worker, and the role's
+    // allow-list for this kind of agent (if any) applies on top of the core set.
+    // `sdkServer` is a registration-only view of `realServer`; the transport
+    // below is connected to the real one.
+    const isLead = ctx.session.id === ctx.orchestrator.leadSessionId;
+    let allowList: string[] | null = null;
+    try {
+      allowList = this.spawner.mcpToolsFor?.(ctx.orchestrator.roleId, isLead ? 'lead' : 'worker') ?? null;
+    } catch (err) {
+      // A store error must never cost an agent its mailbox: fall back to every tool.
+      log.warn({
+        event: 'mcp.tool_policy_failed',
+        sessionId: ctx.session.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+    }
+    const sdkServer = filteredRegistrar(
+      realServer,
+      mcpToolPredicate({
+        isLead,
+        allowList,
+        pluginLeadOnly: (this.pluginTools?.list() ?? [])
+          .filter((t) => t.leadOnly)
+          .map((t) => t.qualifiedName),
+      }),
     );
     registerTeamCommsTools(sdkServer, () => ctx);
     // Shared knowledge-graph tools (memory.*), registered right after the
@@ -278,7 +306,7 @@ export class McpServer {
     // the SDK closes them itself or the underlying socket dies first.
     res.on('close', () => {
       void transport.close();
-      void sdkServer.close();
+      void realServer.close();
     });
 
     // S8 — bracket the transport call with the bus-health collector. We
@@ -290,7 +318,7 @@ export class McpServer {
     const t0 = this.busMetrics?.recordRequestStart();
     let ok = true;
     try {
-      await sdkServer.connect(transport);
+      await realServer.connect(transport);
       // The streamable HTTP transport accepts a pre-parsed body so we don't
       // re-read the stream. For initialize requests we let the SDK echo
       // server capabilities; isInitializeRequest is exported so we can log

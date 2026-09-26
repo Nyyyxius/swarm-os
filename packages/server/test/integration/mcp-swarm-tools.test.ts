@@ -74,6 +74,29 @@ async function makeClient(orchId: string, secret: string): Promise<Client> {
   return c;
 }
 
+
+/**
+ * docs/outils-par-role.md (v0.10.2) — a lead-only tool is no longer even
+ * LISTED for a worker, so its call fails as an unknown tool instead of
+ * reaching the `requireLead` gate. Either way the worker is refused; both
+ * spellings of the refusal are accepted.
+ */
+async function expectRefused(
+  client: { listTools(): Promise<{ tools: { name: string }[] }>; callTool(r: { name: string; arguments: Record<string, unknown> }): Promise<unknown> },
+  name: string,
+  args: Record<string, unknown>,
+): Promise<void> {
+  const listed = await client.listTools();
+  expect(listed.tools.map((t) => t.name)).not.toContain(name);
+  let out: unknown;
+  try {
+    out = await client.callTool({ name, arguments: args });
+  } catch (err) {
+    out = err instanceof Error ? err.message : String(err);
+  }
+  expect(JSON.stringify(out)).toMatch(/PERMISSION_DENIED|not found/i);
+}
+
 describe('swarm.list_teams', () => {
   it('returns other active orchestrators, excludes the caller and stopped orchs', async () => {
     const a = createOrch('alpha');
@@ -117,11 +140,7 @@ describe('swarm.list_teams', () => {
     const worker = await addFakeWorker(a.orchestratorId);
     const workerClient = await makeClient(a.orchestratorId, worker.sessionSecret);
     try {
-      const denied = await workerClient.callTool({
-        name: 'swarm.list_teams',
-        arguments: {},
-      });
-      expect(JSON.stringify(denied)).toContain('PERMISSION_DENIED');
+      await expectRefused(workerClient, 'swarm.list_teams', {});
     } finally {
       await workerClient.close();
     }
@@ -177,11 +196,10 @@ describe('swarm.send_to_lead', () => {
     const worker = await addFakeWorker(a.orchestratorId);
     const workerClient = await makeClient(a.orchestratorId, worker.sessionSecret);
     try {
-      const denied = await workerClient.callTool({
-        name: 'swarm.send_to_lead',
-        arguments: { orchestrator_id: b.orchestratorId, content: 'hi' },
+      await expectRefused(workerClient, 'swarm.send_to_lead', {
+        orchestrator_id: b.orchestratorId,
+        content: 'hi',
       });
-      expect(JSON.stringify(denied)).toContain('PERMISSION_DENIED');
       // Confirm nothing landed in bravo's inbox.
       const bravo = stack.spawner.get(b.orchestratorId);
       expect(bravo?.mailbox.peek(b.leadId)).toHaveLength(0);
@@ -277,11 +295,7 @@ describe('swarm.broadcast_to_leads', () => {
     const worker = await addFakeWorker(a.orchestratorId);
     const workerClient = await makeClient(a.orchestratorId, worker.sessionSecret);
     try {
-      const denied = await workerClient.callTool({
-        name: 'swarm.broadcast_to_leads',
-        arguments: { content: 'hi' },
-      });
-      expect(JSON.stringify(denied)).toContain('PERMISSION_DENIED');
+      await expectRefused(workerClient, 'swarm.broadcast_to_leads', { content: 'hi' });
     } finally {
       await workerClient.close();
     }

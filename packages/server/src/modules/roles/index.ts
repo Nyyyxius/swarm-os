@@ -341,8 +341,59 @@ export interface Role {
    * (`role.workerAutoCompactPct ?? config.workerAutoCompactPct`).
    */
   workerAutoCompactPct: number | null;
+  /**
+   * Tool allow-lists (docs/outils-par-role.md, v0.10.2). `null` = every tool,
+   * the pre-0.10.2 behaviour; otherwise the EXACT list, applied at spawn.
+   *
+   *   - `leadTools` / `workerTools` — the provider's BUILT-IN tools (claude:
+   *     `--tools Bash,Read,…`; the others are dropped from the model's context,
+   *     not merely denied). MCP tools are NOT affected by this list.
+   *   - `leadMcpTools` / `workerMcpTools` — team-comms tools by canonical
+   *     dotted name (`team.send_message`, `memory.search`, `discord-agent.reply`),
+   *     filtered per request by the MCP server. `MCP_CORE_TOOLS` are always kept
+   *     and lead-only tools are always hidden from workers, whatever the list.
+   *
+   * Read when a session is spawned: a new worker picks an edit up at once, a
+   * running lead at its next (re)start.
+   */
+  leadTools: string[] | null;
+  workerTools: string[] | null;
+  leadMcpTools: string[] | null;
+  workerMcpTools: string[] | null;
   createdAt: string;
   updatedAt: string;
+}
+
+/**
+ * team-comms tools no allow-list can remove (docs/outils-par-role.md): without
+ * them an agent cannot find its lead, read its mailbox, report, or compact
+ * itself while it waits — a misconfigured list must never cost the team its
+ * coordination channel.
+ */
+export const MCP_CORE_TOOLS: readonly string[] = [
+  'team.whoami',
+  'team.list',
+  'team.send_message',
+  'team.read_inbox',
+  'team.context_compact',
+  'team.context_clear',
+];
+
+/**
+ * Read-side sanitising of a `*_tools_json` column: anything that is not a JSON
+ * array of non-empty strings (corrupt, hand-edited, `undefined` from a fixture
+ * predating the column) reads as `null` = every tool — never as "no tools".
+ */
+function toToolList(raw: string | null | undefined): string[] | null {
+  if (raw == null) return null;
+  try {
+    const parsed = JSON.parse(raw) as unknown;
+    if (!Array.isArray(parsed) || parsed.length === 0) return null;
+    if (!parsed.every((x) => typeof x === 'string' && x.trim() !== '')) return null;
+    return parsed as string[];
+  } catch {
+    return null;
+  }
 }
 
 /** Default grace period (ms) before a dead worker is reaped. 10 minutes. */
@@ -377,6 +428,11 @@ export interface RoleInit {
   autoCompactPct?: number | null;
   /** Same contract as `autoCompactPct`, for the workers (docs/auto-compact.md §8.2). */
   workerAutoCompactPct?: number | null;
+  /** Tool allow-lists (docs/outils-par-role.md). `null` = every tool. */
+  leadTools?: string[] | null;
+  workerTools?: string[] | null;
+  leadMcpTools?: string[] | null;
+  workerMcpTools?: string[] | null;
 }
 
 export type RolePatch = Partial<RoleInit>;
@@ -435,6 +491,10 @@ function rowToRole(row: RoleRow): Role {
     // never becomes an arbitrary threshold (and `undefined` — a row read
     // through a fixture predating the column — inherits too).
     workerAutoCompactPct: toAutoCompactPct(row.worker_auto_compact_pct),
+    leadTools: toToolList(row.lead_tools_json),
+    workerTools: toToolList(row.worker_tools_json),
+    leadMcpTools: toToolList(row.lead_mcp_tools_json),
+    workerMcpTools: toToolList(row.worker_mcp_tools_json),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -463,6 +523,10 @@ function roleToRow(r: Role): RoleRow {
     budget_action: r.budgetAction,
     auto_compact_pct: r.autoCompactPct,
     worker_auto_compact_pct: r.workerAutoCompactPct,
+    lead_tools_json: r.leadTools ? JSON.stringify(r.leadTools) : null,
+    worker_tools_json: r.workerTools ? JSON.stringify(r.workerTools) : null,
+    lead_mcp_tools_json: r.leadMcpTools ? JSON.stringify(r.leadMcpTools) : null,
+    worker_mcp_tools_json: r.workerMcpTools ? JSON.stringify(r.workerMcpTools) : null,
     created_at: r.createdAt,
     updated_at: r.updatedAt,
   };
@@ -504,6 +568,10 @@ export class RoleStore {
       // previous value, so "omitted" and "explicitly null" both mean inherit.
       autoCompactPct: init.autoCompactPct ?? null,
       workerAutoCompactPct: init.workerAutoCompactPct ?? null,
+      leadTools: init.leadTools ?? null,
+      workerTools: init.workerTools ?? null,
+      leadMcpTools: init.leadMcpTools ?? null,
+      workerMcpTools: init.workerMcpTools ?? null,
       createdAt: now,
       updatedAt: now,
     };
@@ -570,6 +638,13 @@ export class RoleStore {
         patch.workerAutoCompactPct !== undefined
           ? patch.workerAutoCompactPct
           : existing.workerAutoCompactPct,
+      // Same `!== undefined` contract: `null` = back to "every tool".
+      leadTools: patch.leadTools !== undefined ? patch.leadTools : existing.leadTools,
+      workerTools: patch.workerTools !== undefined ? patch.workerTools : existing.workerTools,
+      leadMcpTools:
+        patch.leadMcpTools !== undefined ? patch.leadMcpTools : existing.leadMcpTools,
+      workerMcpTools:
+        patch.workerMcpTools !== undefined ? patch.workerMcpTools : existing.workerMcpTools,
       updatedAt: new Date().toISOString(),
     };
     this.db.updateRole(roleToRow(updated));

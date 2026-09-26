@@ -60,6 +60,48 @@ import type {
 const log = withModule('session');
 
 /**
+ * Whether claude's on-demand tool loading (ToolSearch) stays ON for a session
+ * of `model` — docs/outils-par-role.md §1, v0.10.2.
+ *
+ * History: since 2026-07-04 every session ran with `ENABLE_TOOL_SEARCH=false`,
+ * because claude 2.1.201 deferred MCP tools behind a ToolSearch meta-tool and
+ * HAIKU failed the ToolSearch→call dance (a sentinel lost team-comms). The
+ * price, measured 2026-09-26 on claude 2.1.283: every built-in and team-comms
+ * tool definition inline on EVERY call — a first call of 55.5k tokens (sonnet)
+ * / 42.5k (opus) against 30.4k / 18.1k with ToolSearch on, and both models
+ * reached team-comms through ToolSearch without a miss.
+ *
+ * So: ON for every model except haiku, which keeps the inline pin.
+ * `SWARM_OS_CLAUDE_TOOL_SEARCH` overrides it for the whole instance:
+ * `off` = the pre-0.10.2 behaviour (inline for everybody — the rollback lever,
+ * no rebuild needed), `on` = ToolSearch for everybody, haiku included; any
+ * other value (or unset) = `auto`, the per-model rule.
+ */
+/**
+ * A role's built-in allow-list (`--tools`) must carry `ToolSearch` whenever
+ * on-demand loading is on — measured 2026-09-26 on claude 2.1.283 (sonnet,
+ * team-comms config): `--tools=Bash,Read` alone silently falls back to INLINE
+ * MCP tools (24.7k-token first call), `--tools=Bash,Read,ToolSearch` defers
+ * them (16.1k) and the model still reaches team-comms through ToolSearch.
+ * Appended here so no operator has to know it; `null` (every tool) and the
+ * haiku/off case are left untouched.
+ */
+export function withToolSearch(
+  tools: readonly string[] | null,
+  toolSearch: boolean,
+): readonly string[] | null {
+  if (!tools || tools.length === 0 || !toolSearch || tools.includes('ToolSearch')) return tools;
+  return [...tools, 'ToolSearch'];
+}
+
+export function toolSearchEnabled(model: string, override?: string | null): boolean {
+  const o = (override ?? '').trim().toLowerCase();
+  if (o === 'off' || o === 'false' || o === '0') return false;
+  if (o === 'on' || o === 'true' || o === '1') return true;
+  return !/haiku/i.test(model);
+}
+
+/**
  * Build the argv for `claude` per Phase 0 bis report.
  *
  * Phase 2 wires `--mcp-config=<absolute path to mcp.json>` so each session
@@ -88,6 +130,12 @@ export function buildClaudeArgs(opts: {
   resumeNotice?: string | null;
   /** Absolute path to the per-session mcp.json. Optional in test paths. */
   mcpConfigPath?: string | null;
+  /**
+   * docs/outils-par-role.md — exact list of BUILT-IN tools (`--tools`). `null`
+   * / absent / empty = claude's default set (the flag is not emitted: an empty
+   * `--tools ""` would strip every built-in tool, which no role asks for).
+   */
+  tools?: readonly string[] | null;
 }): string[] {
   const args: string[] = [
     '--model',
@@ -107,6 +155,12 @@ export function buildClaudeArgs(opts: {
   // bare `--mcp-config <path>` would.
   if (opts.preamble) {
     args.push('--append-system-prompt', opts.preamble);
+  }
+  if (opts.tools && opts.tools.length > 0) {
+    // `=` form, single token: `--tools` is VARIADIC (`<tools...>`), the same
+    // trap as `--mcp-config` below. The list only restricts BUILT-IN tools;
+    // MCP tools (team-comms) stay available — verified on claude 2.1.283.
+    args.push(`--tools=${opts.tools.join(',')}`);
   }
   if (opts.mcpConfigPath) {
     // `=` form is mandatory: `--mcp-config <path>` would consume the
@@ -663,6 +717,7 @@ export class ClaudeProvider implements AgentProvider {
    * through the `data` mapper; the cwd is `Session`'s business.
    */
   buildSpawn(req: SpawnRequest): PreparedSpawn {
+    const toolSearch = toolSearchEnabled(req.model, process.env.SWARM_OS_CLAUDE_TOOL_SEARCH);
     const args = buildClaudeArgs({
       model: req.model,
       effort: req.effort,
@@ -671,16 +726,11 @@ export class ClaudeProvider implements AgentProvider {
       preamble: req.preamble,
       resumeNotice: req.resumeNotice,
       mcpConfigPath: req.mcpConfigPath ? req.paths.data(req.mcpConfigPath) : null,
+      tools: withToolSearch(req.builtinTools ?? null, toolSearch),
     });
     const env: Record<string, string> = {};
     if (req.configDir) env.CLAUDE_CONFIG_DIR = req.paths.data(req.configDir);
-    // Force MCP tools INLINE (no ToolSearch deferral). claude 2.1.201
-    // defers MCP tools behind a ToolSearch meta-tool in interactive
-    // mode; smaller models (haiku) fail the ToolSearch→call dance and
-    // effectively lose team-comms (observed 2026-07-04: sentinel
-    // "unable to invoke MCP tools even after ToolSearch loads their
-    // schemas"). "false" pins the pre-2.1.2xx inline behaviour.
-    env.ENABLE_TOOL_SEARCH = 'false';
+    if (!toolSearch) env.ENABLE_TOOL_SEARCH = 'false';
     return { command: this.binary, args, env };
   }
 

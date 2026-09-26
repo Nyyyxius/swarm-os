@@ -284,6 +284,12 @@ export interface SpawnRequest {
   preamble: string | null;
   /** One-shot prefix for the positional prompt (the resume notice). */
   resumeNotice: string | null;
+  /**
+   * docs/outils-par-role.md — the BUILT-IN tools to expose (claude `--tools`).
+   * `null` / absent = the provider's default set. Providers without such a
+   * switch ignore it.
+   */
+  builtinTools?: readonly string[] | null;
   /** Container-side cwd. Translate through `paths.workspace` when referencing it. */
   cwd: string;
   /** Container path of the per-session config dir (null when unconfigured). */

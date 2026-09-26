@@ -11,6 +11,7 @@ import {
 } from '../api/client';
 import { budgetFieldValue, parseCostBudget, toBudgetAction } from '../lib/budget';
 import { autoCompactFieldValue, parseAutoCompactPct } from '../lib/autoCompact';
+import { parseToolList, toolListFieldValue } from '../lib/toolList';
 import { DiscordOnboarding } from './DiscordOnboarding';
 import { useProviders } from '../hooks/useProviders';
 import {
@@ -63,9 +64,22 @@ interface SubmitBody {
    * Always sent, for the same reason.
    */
   workerAutoCompactPct: number | null;
+  /**
+   * Tool lists (see `RoleView.leadTools`) — `null` = all tools, otherwise a
+   * NON-EMPTY list (`parseToolList` never yields `[]`, which the server 400s).
+   * Always sent, `null` included, for the same reason as the fields above:
+   * going back to "all tools" has to be expressible.
+   */
+  leadTools: string[] | null;
+  workerTools: string[] | null;
+  leadMcpTools: string[] | null;
+  workerMcpTools: string[] | null;
 }
 
 const INHERIT_LABEL = '(inherit global default)';
+
+/** Placeholder of the four tool-list fields: empty = no override. */
+const TOOLS_PLACEHOLDER = 'Vide = tous les outils';
 
 /**
  * The two budget outcomes, in the order they escalate. `PAUSE TEAM` rather
@@ -97,6 +111,7 @@ interface Props {
 // select is indistinguishable from an enabled one.
 const inputCls =
   'w-full bg-slate-950 border border-slate-700 rounded px-2 py-1 text-sm text-slate-100 focus:outline-none focus:border-emerald-500 disabled:opacity-50 disabled:cursor-not-allowed';
+const toolsCls = `${inputCls} min-h-[64px] resize-y font-mono text-xs`;
 
 export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }: Props) {
   const editing = !!initial;
@@ -126,6 +141,11 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
   // string so those two stay distinguishable while the operator types.
   const [autoCompact, setAutoCompact] = useState<string>('');
   const [workerAutoCompact, setWorkerAutoCompact] = useState<string>('');
+  // Tool lists, as typed: one name per line or comma-separated. Empty = all.
+  const [leadTools, setLeadTools] = useState<string>('');
+  const [workerTools, setWorkerTools] = useState<string>('');
+  const [leadMcpTools, setLeadMcpTools] = useState<string>('');
+  const [workerMcpTools, setWorkerMcpTools] = useState<string>('');
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
   const [availableSkills, setAvailableSkills] = useState<SkillView[]>([]);
   const [submitting, setSubmitting] = useState(false);
@@ -180,6 +200,11 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
       setAutoCompact(autoCompactFieldValue(initial.autoCompactPct));
       // Absent on a server predating v0.10.1 — read as "inherit".
       setWorkerAutoCompact(autoCompactFieldValue(initial.workerAutoCompactPct));
+      // Absent on a server predating tool lists — read as "all tools".
+      setLeadTools(toolListFieldValue(initial.leadTools));
+      setWorkerTools(toolListFieldValue(initial.workerTools));
+      setLeadMcpTools(toolListFieldValue(initial.leadMcpTools));
+      setWorkerMcpTools(toolListFieldValue(initial.workerMcpTools));
       setSelectedSkills((initial.skills ?? []).map((s) => s.name));
     } else {
       setLabel('');
@@ -200,6 +225,10 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
       setBudgetAction('notify');
       setAutoCompact('');
       setWorkerAutoCompact('');
+      setLeadTools('');
+      setWorkerTools('');
+      setLeadMcpTools('');
+      setWorkerMcpTools('');
       setSelectedSkills([]);
     }
   }, [open, initial]);
@@ -323,6 +352,10 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
         budgetAction,
         autoCompactPct: compact.value,
         workerAutoCompactPct: workerCompact.value,
+        leadTools: parseToolList(leadTools),
+        workerTools: parseToolList(workerTools),
+        leadMcpTools: parseToolList(leadMcpTools),
+        workerMcpTools: parseToolList(workerMcpTools),
       });
       onClose();
     } catch (err) {
@@ -587,6 +620,55 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
               reprise manuelle.
             </p>
           </div>
+
+          {/* ── OUTILS ──
+              Four free-text lists, parsed by `lib/toolList.ts`: one name per
+              line or comma-separated, empty = all tools (`null`). Read at the
+              next launch of a session, never hot-applied. */}
+          <div className="col-span-2 mt-2 border-t border-slate-700 pt-3">
+            <span className="block text-xs uppercase tracking-wide text-slate-400">
+              outils
+            </span>
+          </div>
+          <Field label="Outils intégrés — lead">
+            <textarea
+              className={toolsCls}
+              placeholder={TOOLS_PLACEHOLDER}
+              value={leadTools}
+              onChange={(e) => setLeadTools(e.target.value)}
+            />
+          </Field>
+          <Field label="Outils intégrés — workers">
+            <textarea
+              className={toolsCls}
+              placeholder={TOOLS_PLACEHOLDER}
+              value={workerTools}
+              onChange={(e) => setWorkerTools(e.target.value)}
+            />
+          </Field>
+          <Field label="Outils team-comms — lead">
+            <textarea
+              className={toolsCls}
+              placeholder={TOOLS_PLACEHOLDER}
+              value={leadMcpTools}
+              onChange={(e) => setLeadMcpTools(e.target.value)}
+            />
+          </Field>
+          <Field label="Outils team-comms — workers">
+            <textarea
+              className={toolsCls}
+              placeholder={TOOLS_PLACEHOLDER}
+              value={workerMcpTools}
+              onChange={(e) => setWorkerMcpTools(e.target.value)}
+            />
+          </Field>
+          <p className="col-span-2 text-[11px] text-slate-400">
+            Un nom par ligne ou séparés par des virgules. Outils intégrés : ceux de Claude Code
+            (Bash, Read, Edit, Write, WebFetch, WebSearch, Skill, TaskStop, Agent…). Outils
+            team-comms : leurs noms pointés (team.send_message, memory.search…) ; les essentiels
+            et les restrictions réservées aux leads sont appliqués d’office. Prend effet au
+            prochain lancement des sessions.
+          </p>
 
           <div className="col-span-2 mt-2">
             <DiscordOnboarding

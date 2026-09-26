@@ -543,6 +543,10 @@ export class Spawner {
       autoCompact: {
         thresholdPctFor: (roleId, sessionType) => this.autoCompactThresholdFor(roleId, sessionType),
       },
+      // docs/outils-par-role.md — per-role built-in tool allow-list, read at spawn.
+      toolPolicy: {
+        builtinToolsFor: (roleId, sessionType) => this.builtinToolsFor(roleId, sessionType),
+      },
       skills: (orchestratorId, sessionId) =>
         this.resolveSkillsFor(spec.roleId ?? null, orchestratorId, sessionId),
     });
@@ -632,6 +636,30 @@ export class Spawner {
       return role?.workerAutoCompactPct ?? this.config.workerAutoCompactPct;
     }
     return role?.autoCompactPct ?? this.config.autoCompactPct;
+  }
+
+  /**
+   * docs/outils-par-role.md — the BUILT-IN tool allow-list (claude `--tools`)
+   * for one kind of agent of a team of role `roleId`: `role.leadTools` or
+   * `role.workerTools`. `null` (no role, deleted role, field unset) = every
+   * tool. Read at each spawn, never cached.
+   */
+  builtinToolsFor(roleId: string | null, sessionType: SessionType): string[] | null {
+    const role = roleId ? this.roleStore?.get(roleId) : null;
+    if (!role) return null;
+    return (sessionType === 'worker' ? role.workerTools : role.leadTools) ?? null;
+  }
+
+  /**
+   * docs/outils-par-role.md — the team-comms allow-list for one kind of agent
+   * of a team of role `roleId` (`role.leadMcpTools` / `role.workerMcpTools`),
+   * `null` = every tool. Called by the MCP server on EVERY request (it rebuilds
+   * its tool set per request), so an edit applies to the next tool listing.
+   */
+  mcpToolsFor(roleId: string | null, sessionType: SessionType): string[] | null {
+    const role = roleId ? this.roleStore?.get(roleId) : null;
+    if (!role) return null;
+    return (sessionType === 'worker' ? role.workerMcpTools : role.leadMcpTools) ?? null;
   }
 
   /** Resolve the skills active for a session — the per-spawn preamble thunk. */
@@ -1139,6 +1167,10 @@ export class Spawner {
         autoCompact: {
           thresholdPctFor: (roleId, sessionType) =>
             this.autoCompactThresholdFor(roleId, sessionType),
+        },
+        // docs/outils-par-role.md — per-role built-in tool allow-list, read at spawn.
+        toolPolicy: {
+          builtinToolsFor: (roleId, sessionType) => this.builtinToolsFor(roleId, sessionType),
         },
         skills: (orchestratorId, sessionId) =>
           this.resolveSkillsFor(init.roleId ?? null, orchestratorId, sessionId),

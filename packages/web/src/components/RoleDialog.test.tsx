@@ -46,6 +46,8 @@ const autoCompactInput = () =>
   screen.getByLabelText(/^auto-compact \(%\)/) as HTMLInputElement;
 const workerAutoCompactInput = () =>
   screen.getByLabelText(/^auto-compact workers \(%\)/) as HTMLInputElement;
+const toolsInput = (label: string) =>
+  screen.getByLabelText(label) as HTMLTextAreaElement;
 const actionButton = (label: string) =>
   screen.getByRole('radio', { name: label });
 
@@ -344,5 +346,108 @@ describe('RoleDialog · AUTO-COMPACT WORKERS field', () => {
     save();
     await waitFor(() => expect(onSubmit).toHaveBeenCalled());
     expect(onSubmit.mock.calls[0]?.[0].workerAutoCompactPct).toBeNull();
+  });
+});
+
+// ── OUTILS (tool lists per role) ────────────────────────────────────────────
+//
+// Four free-text lists, two states each: `null` (all tools) and a non-empty
+// array. What must hold is what reaches `onSubmit`: an empty field is `null`
+// (never `[]`, which the server 400s), a typed list comes out clean, and an
+// existing role round-trips through the form unchanged.
+const TOOL_FIELDS = [
+  ['Outils intégrés — lead', 'leadTools'],
+  ['Outils intégrés — workers', 'workerTools'],
+  ['Outils team-comms — lead', 'leadMcpTools'],
+  ['Outils team-comms — workers', 'workerMcpTools'],
+] as const;
+
+describe('RoleDialog · OUTILS section', () => {
+  it('opens with four empty fields that say empty means all tools', () => {
+    renderDialog();
+    expect(screen.getByText('outils')).toBeTruthy();
+    for (const [label] of TOOL_FIELDS) {
+      expect(toolsInput(label).value).toBe('');
+      expect(toolsInput(label).placeholder).toBe('Vide = tous les outils');
+    }
+    expect(screen.getByText(/Prend effet au prochain lancement des sessions/)).toBeTruthy();
+  });
+
+  it('submits null — not [] — for every field left empty', async () => {
+    const onSubmit = renderDialog();
+    fillLabel();
+    // Blank-only content is still "empty".
+    fireEvent.change(toolsInput('Outils intégrés — workers'), { target: { value: ' \n , ' } });
+    save();
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    const body = onSubmit.mock.calls[0]?.[0];
+    for (const [, key] of TOOL_FIELDS) expect(body[key]).toBeNull();
+  });
+
+  it('turns commas and new lines into a clean, de-duplicated list', async () => {
+    const onSubmit = renderDialog();
+    fillLabel();
+    fireEvent.change(toolsInput('Outils intégrés — lead'), {
+      target: { value: ' Bash, Read\n\nEdit ,Bash\n  Write  ' },
+    });
+    fireEvent.change(toolsInput('Outils team-comms — workers'), {
+      target: { value: 'memory.search\nboard.list, memory.search' },
+    });
+    save();
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    const body = onSubmit.mock.calls[0]?.[0];
+    expect(body.leadTools).toEqual(['Bash', 'Read', 'Edit', 'Write']);
+    expect(body.workerMcpTools).toEqual(['memory.search', 'board.list']);
+    // The other two fields do not bleed into each other.
+    expect(body.workerTools).toBeNull();
+    expect(body.leadMcpTools).toBeNull();
+  });
+
+  it('pre-fills an existing role one entry per line, and saves it back unchanged', async () => {
+    const onSubmit = renderDialog(
+      role({
+        leadTools: ['Bash', 'Read'],
+        workerTools: null,
+        leadMcpTools: ['team.send_message', 'discord-agent.reply'],
+        workerMcpTools: ['memory.search'],
+      }),
+    );
+    expect(toolsInput('Outils intégrés — lead').value).toBe('Bash\nRead');
+    expect(toolsInput('Outils intégrés — workers').value).toBe('');
+    expect(toolsInput('Outils team-comms — lead').value).toBe(
+      'team.send_message\ndiscord-agent.reply',
+    );
+    expect(toolsInput('Outils team-comms — workers').value).toBe('memory.search');
+    save();
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    expect(onSubmit.mock.calls[0]?.[0]).toMatchObject({
+      leadTools: ['Bash', 'Read'],
+      workerTools: null,
+      leadMcpTools: ['team.send_message', 'discord-agent.reply'],
+      workerMcpTools: ['memory.search'],
+    });
+  });
+
+  it('clears an override back to null when the operator empties the field', async () => {
+    const onSubmit = renderDialog(role({ leadTools: ['Bash'], workerTools: ['Read'] }));
+    fireEvent.change(toolsInput('Outils intégrés — lead'), { target: { value: '' } });
+    save();
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    expect(onSubmit.mock.calls[0]?.[0].leadTools).toBeNull();
+    expect(onSubmit.mock.calls[0]?.[0].workerTools).toEqual(['Read']);
+  });
+
+  it('opens on "all tools" for a role from a server predating tool lists', async () => {
+    const onSubmit = renderDialog(role());
+    for (const [label] of TOOL_FIELDS) expect(toolsInput(label).value).toBe('');
+    save();
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    const body = onSubmit.mock.calls[0]?.[0];
+    for (const [, key] of TOOL_FIELDS) expect(body[key]).toBeNull();
   });
 });

@@ -219,6 +219,13 @@ export interface OrchestratorDeps {
    * lead's threshold for everybody, which is what v0.10.0 did.
    */
   autoCompact?: { thresholdPctFor(roleId: string | null, sessionType?: SessionType): number };
+  /**
+   * docs/outils-par-role.md (v0.10.2) — the BUILT-IN tool allow-list for one
+   * kind of agent of a team of role `roleId` (`null` = every tool). Read once
+   * per spawn, so a role edit reaches the next new worker at once and a lead at
+   * its next (re)start. Omitted (unit tests, embedders) ⇒ every tool.
+   */
+  toolPolicy?: { builtinToolsFor(roleId: string | null, sessionType: SessionType): string[] | null };
 }
 
 export interface StartOptions {
@@ -401,6 +408,10 @@ export class Orchestrator {
     | null;
   /** Monitoring — model context limits (`null` ⇒ the pinned table answers). */
   private readonly _modelCatalogue: ModelCatalogue | null;
+  /** docs/outils-par-role.md — per-role built-in tool allow-list, or `null`. */
+  private readonly _toolPolicy: {
+    builtinToolsFor(roleId: string | null, sessionType: SessionType): string[] | null;
+  } | null;
   /** docs/auto-compact.md D7 — live per-role threshold resolver, or `null`. */
   private readonly _autoCompact: {
     thresholdPctFor(roleId: string | null, sessionType?: SessionType): number;
@@ -505,6 +516,7 @@ export class Orchestrator {
     this._taskboard = deps.taskboard ?? null;
     this._skills = deps.skills ?? null;
     this._autoCompact = deps.autoCompact ?? null;
+    this._toolPolicy = deps.toolPolicy ?? null;
     this._modelCatalogue = deps.modelCatalogue ?? null;
     // Monitoring — one reader per orchestrator, shared by its sessions: the
     // transport cannot change under a live team, and the closure holds nothing
@@ -660,6 +672,7 @@ export class Orchestrator {
       name: `${this.name}-lead`,
       role: this.role,
       type: 'lead',
+      builtinTools: this._builtinToolsFor('lead'),
       cwd: this.init.lead.cwd,
       initialPrompt: this.init.lead.prompt,
       preamble,
@@ -824,6 +837,7 @@ export class Orchestrator {
       name: leadRow.name,
       role: leadRow.role,
       type: 'lead',
+      builtinTools: this._builtinToolsFor('lead'),
       cwd: leadRow.cwd,
       initialPrompt: leadRow.initial_prompt,
       preamble,
@@ -1017,6 +1031,7 @@ export class Orchestrator {
       name: spec.name,
       role: spec.role,
       type: 'worker',
+      builtinTools: this._builtinToolsFor('worker'),
       cwd,
       initialPrompt: spec.prompt,
       preamble: preambleText,
@@ -1397,6 +1412,25 @@ export class Orchestrator {
       payload: { pct: decision.pct, thresholdPct },
     });
     return decision;
+  }
+
+  /**
+   * docs/outils-par-role.md — the built-in tool allow-list for a session of
+   * `sessionType` in this team, or `null` (every tool). A resolver that THROWS
+   * (store error) degrades to `null`: a spawn must never fail over a tool list.
+   */
+  private _builtinToolsFor(sessionType: SessionType): string[] | null {
+    if (!this._toolPolicy) return null;
+    try {
+      return this._toolPolicy.builtinToolsFor(this.roleId, sessionType);
+    } catch (err) {
+      log.warn({
+        event: 'orchestrator.tool_policy_failed',
+        orchestratorId: this.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return null;
+    }
   }
 
   /**

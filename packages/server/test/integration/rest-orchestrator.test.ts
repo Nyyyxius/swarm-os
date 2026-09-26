@@ -222,13 +222,22 @@ describe('REST + MCP end-to-end (worker spawned via fake agent)', () => {
     expect(orch!.mailbox.peek(worker.id).length).toBe(1);
     expect(orch!.mailbox.peek(leadId).length).toBe(0);
 
-    // worker.spawn_worker → PERMISSION_DENIED (no real claude needed — the
-    // permission gate runs before the orchestrator.addWorker call).
-    const denied = await workerClient.callTool({
-      name: 'team.spawn_worker',
-      arguments: { name: 'rogue', role: 'r', prompt: 'p' },
-    });
-    expect(JSON.stringify(denied)).toContain('PERMISSION_DENIED');
+    // worker.spawn_worker → refused. Since v0.10.2 (docs/outils-par-role.md)
+    // the tool is not even listed for a worker, so the call fails as an
+    // unknown tool rather than at the `requireLead` gate.
+    const workerTools = (await workerClient.listTools()).tools.map((t) => t.name);
+    expect(workerTools).not.toContain('team.spawn_worker');
+    expect(workerTools).toContain('team.send_message');
+    let denied: unknown;
+    try {
+      denied = await workerClient.callTool({
+        name: 'team.spawn_worker',
+        arguments: { name: 'rogue', role: 'r', prompt: 'p' },
+      });
+    } catch (err) {
+      denied = err instanceof Error ? err.message : String(err);
+    }
+    expect(JSON.stringify(denied)).toMatch(/PERMISSION_DENIED|not found/i);
 
     // kill_worker
     const k1 = await leadClient.callTool({

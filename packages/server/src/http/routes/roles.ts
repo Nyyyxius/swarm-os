@@ -92,6 +92,59 @@ interface RoleBody {
   budgetAction?: unknown;
   autoCompactPct?: unknown;
   workerAutoCompactPct?: unknown;
+  leadTools?: unknown;
+  workerTools?: unknown;
+  leadMcpTools?: unknown;
+  workerMcpTools?: unknown;
+}
+
+/** The four tool allow-list fields of a role (docs/outils-par-role.md). */
+const TOOL_LIST_FIELDS = ['leadTools', 'workerTools', 'leadMcpTools', 'workerMcpTools'] as const;
+type ToolListField = (typeof TOOL_LIST_FIELDS)[number];
+
+/** Upper bound on one list — far above any real tool set, well below abuse. */
+const MAX_TOOL_LIST_LENGTH = 200;
+
+/**
+ * Validate one OPTIONAL tool allow-list (docs/outils-par-role.md). `null` =
+ * clear the list and go back to "every tool". Otherwise a NON-EMPTY array of
+ * non-empty strings, trimmed and de-duplicated in order. An empty array is
+ * refused rather than read as "no tool at all": the null/array split already
+ * says "all" vs "these", and a team silently stripped of every tool by a
+ * cleared text field is exactly the footgun this avoids.
+ */
+function parseToolList(
+  x: unknown,
+  field: ToolListField,
+): { ok: true; value: string[] | null } | { ok: false; error: string } {
+  if (x === null) return { ok: true, value: null };
+  const bad = {
+    ok: false as const,
+    error: `${field} must be null or a non-empty array of tool names (at most ${MAX_TOOL_LIST_LENGTH})`,
+  };
+  if (!Array.isArray(x) || x.length === 0 || x.length > MAX_TOOL_LIST_LENGTH) return bad;
+  const out: string[] = [];
+  for (const item of x) {
+    if (typeof item !== 'string') return bad;
+    const name = item.trim();
+    if (name === '' || name.length > 200 || /[\s,]/.test(name)) return bad;
+    if (!out.includes(name)) out.push(name);
+  }
+  return { ok: true, value: out };
+}
+
+/** Parse every tool-list field PRESENT on `body`; `undefined` ones are skipped. */
+function parseToolLists(
+  body: RoleBody,
+): { ok: true; value: Partial<Record<ToolListField, string[] | null>> } | { ok: false; error: string } {
+  const value: Partial<Record<ToolListField, string[] | null>> = {};
+  for (const f of TOOL_LIST_FIELDS) {
+    if (body[f] === undefined) continue;
+    const r = parseToolList(body[f], f);
+    if (!r.ok) return r;
+    value[f] = r.value;
+  }
+  return { ok: true, value };
 }
 
 /**
@@ -686,6 +739,9 @@ export function createRolesRouter(
       if (!r.ok) return res.status(400).json({ error: r.error });
       workerAutoCompactPct = r.value;
     }
+    // Tool allow-lists (docs/outils-par-role.md) — absent/null = every tool.
+    const tools = parseToolLists(body);
+    if (!tools.ok) return res.status(400).json({ error: tools.error });
 
     const init: RoleInit = {
       label: body.label,
@@ -706,6 +762,7 @@ export function createRolesRouter(
       ...(budgetAction !== undefined ? { budgetAction } : {}),
       ...(autoCompactPct !== undefined ? { autoCompactPct } : {}),
       ...(workerAutoCompactPct !== undefined ? { workerAutoCompactPct } : {}),
+      ...tools.value,
     };
     const role = store.create(init);
     res.status(201).json({ role: maskRole(role, connectorRegistry) });
@@ -858,6 +915,10 @@ export function createRolesRouter(
       if (!r.ok) return res.status(400).json({ error: r.error });
       patch.workerAutoCompactPct = r.value;
     }
+    // Tool allow-lists: `null` = back to every tool, absent = unchanged.
+    const tools = parseToolLists(body);
+    if (!tools.ok) return res.status(400).json({ error: tools.error });
+    Object.assign(patch, tools.value);
     const updated = store.update(req.params.id, patch);
     if (!updated) {
       res.status(404).json({ error: 'not found' });

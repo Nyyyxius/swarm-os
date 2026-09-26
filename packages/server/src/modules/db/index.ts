@@ -191,6 +191,17 @@ export interface RoleRow {
    * could no longer move it.
    */
   worker_auto_compact_pct: number | null;
+  /**
+   * Tool allow-lists per kind of agent (docs/outils-par-role.md, v0.10.2) —
+   * JSON arrays of names, NULLABLE with NO DEFAULT: NULL = "every tool", the
+   * behaviour of every role that predates the columns. `*_tools_json` are the
+   * provider's BUILT-IN tools (claude `--tools`), `*_mcp_tools_json` the
+   * team-comms tools (filtered by the MCP server per request).
+   */
+  lead_tools_json?: string | null;
+  worker_tools_json?: string | null;
+  lead_mcp_tools_json?: string | null;
+  worker_mcp_tools_json?: string | null;
   created_at: string;
   updated_at: string;
 }
@@ -809,6 +820,7 @@ export class SwarmDb {
         connectors_json, schedule, schedule_message, approval_json, skills_json,
         auto_remove_dead_workers, auto_remove_dead_workers_delay_ms,
         cost_budget_usd, budget_action, auto_compact_pct, worker_auto_compact_pct,
+        lead_tools_json, worker_tools_json, lead_mcp_tools_json, worker_mcp_tools_json,
         created_at, updated_at
       ) VALUES (
         @id, @label, @lead_prompt, @lead_preamble, @worker_preamble, @worker_count,
@@ -816,6 +828,7 @@ export class SwarmDb {
         @connectors_json, @schedule, @schedule_message, @approval_json, @skills_json,
         @auto_remove_dead_workers, @auto_remove_dead_workers_delay_ms,
         @cost_budget_usd, @budget_action, @auto_compact_pct, @worker_auto_compact_pct,
+        @lead_tools_json, @worker_tools_json, @lead_mcp_tools_json, @worker_mcp_tools_json,
         @created_at, @updated_at
       )
     `);
@@ -841,6 +854,10 @@ export class SwarmDb {
         budget_action = @budget_action,
         auto_compact_pct = @auto_compact_pct,
         worker_auto_compact_pct = @worker_auto_compact_pct,
+        lead_tools_json = @lead_tools_json,
+        worker_tools_json = @worker_tools_json,
+        lead_mcp_tools_json = @lead_mcp_tools_json,
+        worker_mcp_tools_json = @worker_mcp_tools_json,
         updated_at = @updated_at
       WHERE id = @id
     `);
@@ -969,6 +986,13 @@ export class SwarmDb {
       // `auto_compact_pct` above: every existing row backfills to NULL, i.e. to
       // the instance worker default (0 = off), which the env var can move.
       { table: 'roles',         column: 'worker_auto_compact_pct',           ddl: 'ALTER TABLE roles ADD COLUMN worker_auto_compact_pct INTEGER' },
+      // Tool allow-lists per kind of agent (docs/outils-par-role.md, v0.10.2).
+      // Additive, NULLABLE WITH NO DEFAULT: every existing row backfills to
+      // NULL = "every tool", i.e. exactly what it ran with before.
+      { table: 'roles',         column: 'lead_tools_json',                   ddl: 'ALTER TABLE roles ADD COLUMN lead_tools_json TEXT' },
+      { table: 'roles',         column: 'worker_tools_json',                 ddl: 'ALTER TABLE roles ADD COLUMN worker_tools_json TEXT' },
+      { table: 'roles',         column: 'lead_mcp_tools_json',               ddl: 'ALTER TABLE roles ADD COLUMN lead_mcp_tools_json TEXT' },
+      { table: 'roles',         column: 'worker_mcp_tools_json',             ddl: 'ALTER TABLE roles ADD COLUMN worker_mcp_tools_json TEXT' },
       // Agent monitoring (docs/monitoring-agents.md, Lot 1) — cumulative count
       // of inbox messages each agent has drained. Nullable with no default:
       // NULL means "this row predates the counter", which is honestly
@@ -1527,9 +1551,24 @@ export class SwarmDb {
 
   // --- Roles -------------------------------------------------------------
 
+  /**
+   * The tool allow-list columns (v0.10.2) are optional on `RoleRow` so a row
+   * built by code predating them still writes; better-sqlite3 refuses a named
+   * parameter that is missing, so they default to NULL (= every tool) here.
+   */
+  private static withToolColumns(row: RoleRow): RoleRow {
+    return {
+      ...row,
+      lead_tools_json: row.lead_tools_json ?? null,
+      worker_tools_json: row.worker_tools_json ?? null,
+      lead_mcp_tools_json: row.lead_mcp_tools_json ?? null,
+      worker_mcp_tools_json: row.worker_mcp_tools_json ?? null,
+    };
+  }
+
   insertRole(row: RoleRow): void {
     try {
-      this.insertRoleStmt.run(row);
+      this.insertRoleStmt.run(SwarmDb.withToolColumns(row));
     } catch (err) {
       log.warn({
         event: 'db.write_failed',
@@ -1543,7 +1582,7 @@ export class SwarmDb {
 
   updateRole(row: RoleRow): void {
     try {
-      this.updateRoleStmt.run(row);
+      this.updateRoleStmt.run(SwarmDb.withToolColumns(row));
     } catch (err) {
       log.warn({
         event: 'db.write_failed',

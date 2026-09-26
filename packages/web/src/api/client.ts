@@ -415,6 +415,31 @@ export interface RoleView {
    * Absent on a server predating v0.10.1 — read as "inherit".
    */
   workerAutoCompactPct?: number | null;
+  /**
+   * Tool lists per role. Four independent overrides, each read at the NEXT
+   * launch of a session (a new worker, or the lead on its next restart or
+   * resume), never hot-applied:
+   *
+   *   - `leadTools` / `workerTools`: Claude Code BUILT-IN tools allowed to the
+   *     team's lead / workers (`["Bash","Read","Edit","Write"]`), passed to the
+   *     CLI as `--tools`;
+   *   - `leadMcpTools` / `workerMcpTools`: team-comms (swarm-os MCP) tools
+   *     exposed to the lead / workers, by their canonical dotted names
+   *     (`team.send_message`, `memory.search`, `board.list`,
+   *     `discord-agent.reply`). The server always keeps the essentials
+   *     (`team.whoami`, `team.list`, `team.send_message`, `team.read_inbox`,
+   *     `team.context_compact`, `team.context_clear`) and always hides
+   *     lead-only tools from workers, whatever the list says.
+   *
+   * `null` (or absent, on a server predating the feature) = ALL tools, today's
+   * behaviour. On write, `null` clears the override and a NON-EMPTY array of
+   * non-empty strings sets it; an empty array is a 400 — which is why the form
+   * never sends one (`lib/toolList.ts` turns an empty field into `null`).
+   */
+  leadTools?: string[] | null;
+  workerTools?: string[] | null;
+  leadMcpTools?: string[] | null;
+  workerMcpTools?: string[] | null;
   createdAt: string;
   updatedAt: string;
 }

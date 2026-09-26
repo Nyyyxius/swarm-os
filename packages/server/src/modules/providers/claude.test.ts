@@ -358,20 +358,19 @@ describe('claude adapter — spawn (local transport)', () => {
       '--',
       'TASK',
     ]);
-    // Exactly two env vars — no more, no less. ENABLE_TOOL_SEARCH='false'
-    // pins the pre-2.1.2xx inline MCP tool behaviour (small models fail the
-    // ToolSearch→call dance and lose team-comms without it).
+    // Exactly one env var — no more, no less. Since v0.10.2 an OPUS session
+    // keeps claude's on-demand tool loading (ToolSearch): ENABLE_TOOL_SEARCH
+    // is only pinned to 'false' for haiku (docs/outils-par-role.md §1).
     expect(opts.env).toEqual({
       CLAUDE_CONFIG_DIR: s.claudeConfigDir,
-      ENABLE_TOOL_SEARCH: 'false',
     });
     expect(s.claudeConfigDir).toBe(path.join(claudeRuntimeDir, 'sessions', 'sess-0000'));
   });
 
-  it('still exports ENABLE_TOOL_SEARCH when no per-session config dir exists', () => {
+  it('exports no env at all when no per-session config dir exists (opus: ToolSearch on)', () => {
     makeSession({ hooks: false });
     const opts = captured.pty[0]!;
-    expect(opts.env).toEqual({ ENABLE_TOOL_SEARCH: 'false' });
+    expect(opts.env).toEqual({});
   });
 });
 
@@ -394,7 +393,6 @@ describe('claude adapter — spawn (ssh transport)', () => {
     // …while CLAUDE_CONFIG_DIR and --mcp-config go through dataDir → hostDataDir.
     expect(opts.remoteEnv).toEqual({
       CLAUDE_CONFIG_DIR: `${HOST_DATA_DIR}/.claude-runtime/sessions/sess-0000`,
-      ENABLE_TOOL_SEARCH: 'false',
     });
     expect(opts.args).toEqual([
       '--model',

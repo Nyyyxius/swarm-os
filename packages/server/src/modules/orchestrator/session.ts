@@ -334,6 +334,12 @@ export interface SessionInit {
   model: string;
   effort: EffortLevel;
   permissionMode: PermissionMode;
+  /**
+   * docs/outils-par-role.md — the provider's BUILT-IN tools this agent gets
+   * (claude `--tools`), resolved from its role at construction. `null` /
+   * absent = every tool (the historical behaviour).
+   */
+  builtinTools?: readonly string[] | null;
   logsDir: string; // <dataDir>/logs
   /** Per-session mcp.json runtime root (e.g. `/tmp/swarm-os`). */
   mcpRuntimeDir: string;
@@ -887,6 +893,8 @@ export class Session extends EventEmitter {
   readonly initialPromptRaw: string | null;
   /** One-shot resume notice prefixed to the positional prompt on spawn. */
   private readonly resumeNotice: string | null;
+  /** docs/outils-par-role.md — built-in tool allow-list (`null` = all). */
+  private readonly _builtinTools: readonly string[] | null;
 
   constructor(init: SessionInit) {
     super();
@@ -900,6 +908,7 @@ export class Session extends EventEmitter {
     this.initialPrompt = init.initialPrompt;
     this.initialPromptRaw = init.initialPrompt;
     this.resumeNotice = init.resumeNotice ?? null;
+    this._builtinTools = init.builtinTools ?? null;
     this.model = init.model;
     this.effort = init.effort;
     this.permissionMode = init.permissionMode;
@@ -2672,6 +2681,7 @@ export class Session extends EventEmitter {
           initialPrompt: this.initialPrompt,
           preamble: init.preamble,
           resumeNotice: this.resumeNotice,
+          builtinTools: this._builtinTools,
           cwd: this.cwd,
           configDir: this._sessionConfigDir,
           mcpConfigPath: this.mcpConfigPath,
