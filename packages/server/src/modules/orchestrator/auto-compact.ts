@@ -126,7 +126,12 @@ export function decideAutoCompact(input: AutoCompactInput): AutoCompactDecision 
   // no model window is known so there is no denominator. A threshold on a
   // number we do not have would be a guess, and this feature never guesses.
   const usage = input.usage;
-  if (usage === null || usage.pct === null) return { fire: false, reason: 'no-usage' };
+  // `stale` first for a reset that has not been followed by a call yet: the
+  // context was JUST shrunk, and there is no figure to compare anyway.
+  if (usage !== null && usage.awaitingCall !== undefined) return { fire: false, reason: 'stale' };
+  if (usage === null || usage.pct === null || usage.usedTokens === null) {
+    return { fire: false, reason: 'no-usage' };
+  }
   // `stale` — the last figure is known NOT to describe the live context (a
   // reset landed, a read failed, the transcript rotated). Waiting one TTL costs
   // one boundary; acting on it costs a redundant compaction.

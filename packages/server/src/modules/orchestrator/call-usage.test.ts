@@ -3,6 +3,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import {
+  CONTEXT_USAGE_MAX_CONCURRENT_REFRESH,
   ContextUsageTracker,
   TranscriptContextSource,
   scanTranscriptRange,
@@ -295,6 +296,33 @@ describe('ContextUsageTracker — onCalls, catchUp, flush', () => {
     release();
     await flushed;
     expect(calls).toEqual(['m1', 'm2']);
+  });
+
+  it('flush WAITS for a slot under the global cap — a mass kill never opens 6 reads at once', async () => {
+    let live = 0;
+    let peak = 0;
+    const trackers = Array.from({ length: 6 }, (_, i) => {
+      const files = { [TRANSCRIPT]: `${line({ id: `m${i}`, input: 1 })}\n` };
+      const plain = memoryRange(files);
+      const slow: TranscriptRangeReader = async (...args) => {
+        live++;
+        peak = Math.max(peak, live);
+        await new Promise((r) => setTimeout(r, 15));
+        live--;
+        return plain(...args);
+      };
+      const source = new TranscriptContextSource({ readRange: slow, readTail: async () => null });
+      source.retarget(TRANSCRIPT);
+      const calls: string[] = [];
+      const tracker = new ContextUsageTracker({
+        sessionId: `s${i}`, ttlMs: 3_600_000, source, onCalls: (b) => calls.push(...b.map((c) => c.messageId)),
+      });
+      return { tracker, calls };
+    });
+    await Promise.all(trackers.map((t) => t.tracker.flush()));
+    expect(peak).toBeLessThanOrEqual(CONTEXT_USAGE_MAX_CONCURRENT_REFRESH);
+    // …and nobody was skipped.
+    expect(trackers.map((t) => t.calls.length)).toEqual([1, 1, 1, 1, 1, 1]);
   });
 
   it('flush is a no-op for a tracker that never had a target', async () => {

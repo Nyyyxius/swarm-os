@@ -766,9 +766,10 @@ describe('ContextUsageTracker on a codex source', () => {
     tracker.markStale();
     tracker.maybeRefresh();
     await new Promise((r) => setTimeout(r, 20));
-    // Same file, same event: the number is still the pre-reset one, so it stays
-    // visible and stays STALE rather than being re-blessed as fresh.
-    expect(tracker.snapshot()).toMatchObject({ usedTokens: 50_000, stale: true });
+    // Same file, same event: the number is still the pre-reset one, so it is
+    // NOT served at all (v0.10.3) — an explicit "reset, awaiting a call" state
+    // instead, never re-blessed as fresh.
+    expect(tracker.snapshot()).toMatchObject({ usedTokens: null, pct: null, stale: true, awaitingCall: 'compact' });
   });
 });
 
@@ -980,7 +981,8 @@ describe('Session + Orchestrator — codex context usage', () => {
 
     orch.requestContextReset(lead.id, '/clear');
     await waitUntil(() => lead.contextUsage?.stale === true);
-    expect(lead.contextUsage).toMatchObject({ usedTokens: 11_626, stale: true });
+    // v0.10.3 — the pre-reset figure is never shown again.
+    expect(lead.contextUsage).toMatchObject({ usedTokens: null, pct: null, stale: true, awaitingCall: 'clear' });
   });
 });
 

@@ -19,6 +19,7 @@ import {
   ContextUsageTracker,
   addTokenUsage,
   isZeroTokenUsage,
+  normalizeContextResetKind,
   normalizeTokenUsage,
   type ContextUsageHistory,
   type ContextUsageSource,
@@ -482,7 +483,12 @@ export interface SessionInit {
  * has not produced a turn yet.
  */
 export interface ContextUsageView {
-  usedTokens: number;
+  /**
+   * Tokens in the live context. `null` ONLY while `awaitingCall` is set: the
+   * context was reset and no call has been made since, so there is no figure
+   * to give — the pre-reset one is dead, and none is invented.
+   */
+  usedTokens: number | null;
   /** Model context limit; `null` when the catalogue has no figure for it. */
   limitTokens: number | null;
   /** `min(1, used/limit)` — computed server-side; `null` without a limit. */
@@ -492,6 +498,13 @@ export interface ContextUsageView {
   updatedAt: string;
   /** True after a `/clear` until a new turn has been read back. */
   stale: boolean;
+  /**
+   * The context was just reset — `compact` (server-fired, typed by hand, or
+   * the CLI's own auto-compact, seen from the transcript's compact boundary)
+   * or `clear` — and no API call has been read since. `usedTokens` and `pct`
+   * are `null` meanwhile. Absent in every other state.
+   */
+  awaitingCall?: 'compact' | 'clear';
 }
 
 /**
@@ -1817,8 +1830,8 @@ export class Session extends EventEmitter {
    * compaction would arm a redundant `/compact` on a context that is already
    * fresh. For a reset the server DID arm this is a harmless second bump.
    */
-  markContextStale(): void {
-    this._contextUsage?.markStale();
+  markContextStale(kind: 'compact' | 'clear' = 'compact'): void {
+    this._contextUsage?.markStale(kind);
   }
 
   /**
@@ -2051,7 +2064,7 @@ export class Session extends EventEmitter {
       // ("Not enough messages to compact") fires no `SessionStart` at all
       // (spike S1d), so anything waiting on one would wait forever. The flag
       // clears by itself at the first turn read back from the transcript.
-      this._contextUsage?.markStale();
+      this._contextUsage?.markStale(normalizeContextResetKind(pending.cmd) ?? 'compact');
       // Lot 9 — and for the same reason, the graph's COMPACT/CLEAR marker is
       // stamped HERE, on the submitted command, not when the operator asked:
       // an armed reset can wait minutes for an idle boundary, and a reset the

@@ -1472,3 +1472,20 @@ describe('MONITORING · CALL USAGE panel', () => {
     expect(hoisted.getMetricsCallUsage).not.toHaveBeenCalled();
   });
 });
+
+describe('MONITORING · gauge after a reset (v0.10.3)', () => {
+  it('shows the reset state — never the old figure — until the next call', () => {
+    hoisted.orchestrators = [orch([sess({
+      contextUsage: {
+        usedTokens: null, limitTokens: 200_000, pct: null, basis: 'transcript',
+        updatedAt: '2026-08-30T10:00:00.000Z', stale: true, awaitingCall: 'compact',
+      },
+    })])];
+    const { container } = renderPage();
+    const row = firstRow(container);
+    expect(row.textContent).toContain('COMPACTED · NEXT CALL');
+    expect(row.textContent).not.toContain('STALE');
+    expect(row.querySelector('.mon-ctx-pct')?.textContent).toBe('—');
+    expect(row.querySelector('.mon-ctx-tokens')).toBeNull();
+  });
+});

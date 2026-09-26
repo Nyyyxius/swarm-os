@@ -112,6 +112,22 @@ export function formatTokensShort(n: number | null | undefined): string {
 }
 
 /**
+ * The tag of a gauge whose context was just reset and has made no call since
+ * (`ContextUsageView.awaitingCall`), or `null`. It REPLACES the STALE tag:
+ * there is no old number left to call stale — the server sends none.
+ */
+export function contextResetTag(
+  usage: { awaitingCall?: 'compact' | 'clear' } | null | undefined,
+): string | null {
+  if (!usage?.awaitingCall) return null;
+  return usage.awaitingCall === 'clear' ? 'CLEARED · NEXT CALL' : 'COMPACTED · NEXT CALL';
+}
+
+/** Tooltip twin of `contextResetTag`. */
+export const CONTEXT_RESET_TITLE =
+  'context was just reset — the next API call will give the new size (the old one is not shown)';
+
+/**
  * `156K/200K` — the used/limit pair shown under the percentage. When the
  * limit is unknown (`limitTokens: null` — model absent from the catalogue
  * and from the pinned fallbacks) we still show what we DID measure:

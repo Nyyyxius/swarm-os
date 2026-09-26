@@ -525,8 +525,8 @@ describe('ContextUsageTracker — staleness', () => {
     tracker.markStale();
     resolveRead!(TURN);
     await flush();
-    // Nothing committed: no number invented, and the stale flag stands.
-    expect(tracker.snapshot()).toBeNull();
+    // Nothing committed: no number invented, and the reset is said as such.
+    expect(tracker.snapshot()).toMatchObject({ usedTokens: null, pct: null, stale: true, awaitingCall: 'compact' });
   });
 
   it('markStale() re-opens the TTL — the number is known to be wrong NOW', async () => {
@@ -899,7 +899,8 @@ describe('Session + Orchestrator — context usage on the view', () => {
     // Fires at the next idle boundary (50 ms here) plus the two-step PTY write.
     orch.requestContextReset(lead.id, '/compact');
     await waitUntil(() => lead.contextUsage?.stale === true);
-    expect(lead.contextUsage).toMatchObject({ usedTokens: 200, stale: true });
+    // v0.10.3 — the pre-reset figure is never shown again.
+    expect(lead.contextUsage).toMatchObject({ usedTokens: null, pct: null, stale: true, awaitingCall: 'compact' });
   });
 
   it('stops reading once the session is dead', async () => {

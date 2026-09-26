@@ -198,6 +198,30 @@ Ce sont des événements, pas un calendrier : la doctrine « pas de timer » tie
 
 **Coût mesuré** (140 000 lignes = 14 nuits × 10 000 appels, 7 équipes) : agent 24h ≈ 3 ms, équipe 14j ≈ 14 ms, flotte 24h ≈ 12 ms, flotte 14j ≈ 160 ms (série + totaux par équipe), purge horaire ≈ 25 ms, insertion ≈ 4 ms par lot de 500.
 
+## Fraîcheur de la jauge et compact (v0.10.3)
+
+**Symptôme** : « contexte souvent inchangé après un compact ». **Cause mesurée** sur de vrais transcripts (CLI 2.1.2xx) : une compaction ne réécrit **pas** le fichier. Elle **ajoute** au même transcript une ligne `{type:"system", subtype:"compact_boundary", compactMetadata:{preTokens, postTokens}}` puis le résumé ; aucune ligne assistant ne suit avant le prochain appel. Le curseur incrémental resservait donc le dernier tour d'avant compact, et le tracker l'acceptait comme échantillon **frais** (`stale:false`). Après un `/compact` tiré par le serveur, c'était même la lecture suivante, avant que la compaction (~30–80 s) soit finie. Même chose pour la lecture de queue. Le chemin du fichier ne change pas au compact, `retarget` n'y pouvait rien.
+
+**Correctif** : la jauge n'affiche **jamais** l'ancien contexte après un reset.
+- `scanTranscriptRange` / la lecture de queue reconnaissent le `compact_boundary` du fil principal : s'il est postérieur au dernier tour, la source répond `empty` + `reset:'compact'` (couvre l'auto-compact interne du CLI et un `/compact` tapé à la main, sans dépendre d'aucun hook).
+- `markStale(kind)` (reset tiré par le serveur, `SessionStart` compact/clear) invalide la jauge côté source : toute ligne assistant horodatée **avant** l'invalidation est refusée ; seul un tour écrit après peut redonner un chiffre (couvre aussi un `/compact` refusé par le CLI).
+- `ContextUsageView` gagne `awaitingCall?: 'compact'|'clear'` ; pendant cet état `usedTokens` et `pct` valent `null`. L'UI affiche `COMPACTED · NEXT CALL` / `CLEARED · NEXT CALL` à la place du chiffre (tableau, bande, panneau droit, fiche mobile, panneau gauche). L'auto-compact répond `stale`. Le premier tour après le reset rétablit la vraie valeur.
+- **Pourquoi pas `postTokens`** : c'est la taille du résumé seul (~5–11 K mesurés), alors que le premier appel suivant envoie ~80–110 K (prompt système, outils, préambule, fichiers rattachés). L'afficher serait un chiffre faux ; `preTokens`, lui, égale bien l'ancienne jauge.
+
+**Chaîne de fraîcheur (mesurée dans le code)** :
+| Étape | Valeur |
+|---|---|
+| Poll UI `/orchestrators` | 3 s (page ouverte) ; la réponse porte le snapshot **d'avant** la lecture qu'elle déclenche → +≤ 3 s d'affichage |
+| TTL de lecture (`SWARM_OS_CONTEXT_USAGE_TTL_MS`) | 15 s, horodaté au début de la lecture |
+| Plafond global de lectures simultanées | 4 ; au-delà la session est reportée au poll suivant (+3 s) — 20 sessions dues au même instant : jusqu'à +12 s au premier cycle, puis étalées |
+| Frontière d'inactivité (fin de tour) | lecture immédiate (TTL ignoré) 2 s après la fin du tour (`SWARM_OS_IDLE_THRESHOLD_MS`) |
+| `contextSpark` | un point par lecture acceptée (≤ 1 / TTL / session), sur le même poll |
+| Bande historique / API CALLS / CALL USAGE | 30 s / 30 s / 60 s, page ouverte |
+
+Délai max appel → affichage : **≤ ~5 s en fin de tour** (2 s d'inactivité + lecture + ≤ 3 s de poll) ; **≤ ~18 s en milieu de tour** (TTL + poll), ~30 s au pire au premier cycle d'une flotte de 20 sessions synchronisées. Après un reset : l'état `… · NEXT CALL` s'affiche au poll suivant (≤ 3 s, `markStale` est synchrone), la vraie valeur ≤ ~5 s après la fin du premier tour post-reset (le nudge `SWARM_OS_CONTINUE_AFTER_COMPACT` en déclenche un). TTL laissé à 15 s : le cas signalé venait du compact, pas du TTL, et le baisser multiplierait les lectures SSH pendant qu'une page est ouverte.
+
+**Coût SSH** (`SWARM_OS_AGENT_TRANSPORT=ssh`) : les lectures passent par `hostExec` sur le mux ControlMaster (`ControlPersist=600`), pas par le montage. Une lecture = 1 client `ssh` local sur le mux + `sh`/`wc`/`tail`/`head` côté hôte (~4 ms mesurés côté hôte sur un transcript de 1,1 Mo ; client ssh multiplexé estimé ~10–30 ms). Au pic (~600 tours/h sur ~20 sessions) : ~600 lectures/h de plus, soit une toutes les 6 s. À comparer aux ~4 800 lectures/h qu'engendre déjà une page ouverte (20 sessions × 1 / 15 s). Le plafond global (4) s'applique aussi au `flush` de sortie, qui **attend** une place au lieu de la contourner : un kill massif n'ouvre jamais plus de 4 canaux simultanés sur le mux.
+
 ## Cas limites
 
 - SSH : tail via hostExec (jamais de throw) ; échec → snapshot précédent + `stale`. Les hooks postent depuis l'HÔTE → `SWARM_OS_HOOK_URL` requis (voir knobs), sinon aucun `transcript_path` n'arrive jamais et les CTX restent `—`.

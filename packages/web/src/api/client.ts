@@ -654,7 +654,12 @@ export interface FeatureView {
  * (`lib/contextPercent.ts`).
  */
 export interface ContextUsageView {
-  usedTokens: number;
+  /**
+   * Tokens in the live context. `null` ONLY while `awaitingCall` is set — the
+   * context was reset and no call has been read since; render the reset state,
+   * never an old figure.
+   */
+  usedTokens: number | null;
   /**
    * Model context window. `null` when the model is absent both from the
    * models.dev catalogue and from the pinned per-model fallbacks — in which
@@ -672,6 +677,12 @@ export interface ContextUsageView {
    * the number, muted, with a STALE tag.
    */
   stale: boolean;
+  /**
+   * v0.10.3 — the context was just reset (`compact` / `clear`) and no API call
+   * has been read since: `usedTokens` and `pct` are `null`. Render
+   * `contextResetTag()` instead of a figure. Absent otherwise.
+   */
+  awaitingCall?: 'compact' | 'clear';
 }
 
 /**

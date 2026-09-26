@@ -14,6 +14,7 @@ import {
 import {
   contextBarWidth, contextColorVar, contextLevel,
   formatContextPercent, formatContextTokens,
+  CONTEXT_RESET_TITLE, contextResetTag,
 } from '../../lib/contextPercent';
 import type { ContextUsageView } from '../../api/client';
 
@@ -290,7 +291,7 @@ export default function RightPanel({
       ? formatContextTokens(usage.usedTokens, usage.limitTokens)
       : null;
     const ctxTitle = usage
-      ? `context ${ctxPct} of window · ${ctxTokens ?? '—'} tokens · read from ${usage.basis} ${formatRelative(usage.updatedAt)}${ctxStale ? ' · STALE: awaiting the next turn after a reset' : ''}`
+      ? `context ${ctxPct} of window · ${ctxTokens ?? '—'} tokens · read from ${usage.basis} ${formatRelative(usage.updatedAt)}${usage.awaitingCall ? ` · ${CONTEXT_RESET_TITLE}` : ctxStale ? ' · STALE: awaiting the next turn after a reset' : ''}`
       : 'no context telemetry for this agent (provider without a readable transcript, or session not running)';
 
     // ── CRONS (docs/crons-agents.md §2.4) ────────────────────────────────
@@ -443,7 +444,9 @@ export default function RightPanel({
           <div className="pr-stat" title={ctxTitle}>
             <div className="v" style={{ color: ctxColor }}>
               {ctxPct}
-              {ctxStale && <span className="pr-ctx-stale">STALE</span>}
+              {contextResetTag(usage)
+                ? <span className="pr-ctx-stale" title={CONTEXT_RESET_TITLE}>{contextResetTag(usage)}</span>
+                : ctxStale && <span className="pr-ctx-stale">STALE</span>}
             </div>
             <div
               className="pill-bar pr-ctx-bar"

@@ -46,6 +46,7 @@ import {
 import {
   contextBarWidth, contextColorVar, contextLevel,
   formatContextPercent, formatContextTokens, CONTEXT_PLACEHOLDER,
+  CONTEXT_RESET_TITLE, contextResetTag,
 } from '../lib/contextPercent';
 import {
   AGENT_SORT_OPTIONS, buildAgentContextRows, sortAgentRows,
@@ -689,6 +690,7 @@ function MonitoringRow({
   const tokens = row.usage
     ? formatContextTokens(row.usage.usedTokens, row.usage.limitTokens)
     : null;
+  const resetTag = contextResetTag(row.usage);
 
   // Same matrix as the RightPanel buttons: a paused agent never reaches the
   // idle point the reset fires at, a terminated one has no PTY left, and an
@@ -773,7 +775,9 @@ function MonitoringRow({
             {formatContextPercent(row.pct)}
           </span>
           {tokens && <span className="mon-ctx-tokens">{tokens}</span>}
-          {stale && <span className="mon-tag stale">STALE</span>}
+          {resetTag
+            ? <span className="mon-tag stale" title={CONTEXT_RESET_TITLE}>{resetTag}</span>
+            : stale && <span className="mon-tag stale">STALE</span>}
           {row.resetPending && <span className="mon-tag armed">RESET ARMED</span>}
         </div>
         <div className="pill-bar mon-ctx-bar" style={{ opacity: stale ? 0.45 : 1 }}>

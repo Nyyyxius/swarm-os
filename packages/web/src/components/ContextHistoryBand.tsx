@@ -42,6 +42,7 @@ import { ICON } from './desktop/icons';
 import {
   CONTEXT_PLACEHOLDER, contextColorVar, contextLevel,
   formatContextPercent, formatContextTokens, formatTokensShort,
+  CONTEXT_RESET_TITLE, contextResetTag,
 } from '../lib/contextPercent';
 import {
   buildContextChart, contextFraction, CONTEXT_HISTORY_REFRESH_MS,
@@ -158,6 +159,9 @@ export default function ContextHistoryBand({ row, onClose }: Props) {
             {formatContextPercent(row.pct)}
           </span>
           {tokens && <span className="mon-hist-now-tokens">{tokens}</span>}
+          {contextResetTag(row.usage) && (
+            <span className="mon-tag stale" title={CONTEXT_RESET_TITLE}>{contextResetTag(row.usage)}</span>
+          )}
           {cost && row.tokens && (
             <span
               className="mon-hist-now-cost"

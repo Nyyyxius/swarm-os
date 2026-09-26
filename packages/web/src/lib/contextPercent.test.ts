@@ -20,7 +20,7 @@ import {
   contextLevel,
   formatContextPercent,
   formatContextTokens,
-  formatTokensShort,
+  formatTokensShort, contextResetTag,
 } from './contextPercent';
 
 describe('CONTEXT_PLACEHOLDER', () => {
@@ -159,5 +159,18 @@ describe('formatContextTokens', () => {
     expect(formatContextTokens(null, 200_000)).toBeNull();
     expect(formatContextTokens(undefined, undefined)).toBeNull();
     expect(formatContextTokens(Number.NaN, 200_000)).toBeNull();
+  });
+});
+
+describe('contextResetTag (v0.10.3)', () => {
+  it('names the reset while no call has been read since, nothing otherwise', () => {
+    expect(contextResetTag({ awaitingCall: 'compact' })).toBe('COMPACTED · NEXT CALL');
+    expect(contextResetTag({ awaitingCall: 'clear' })).toBe('CLEARED · NEXT CALL');
+    expect(contextResetTag({})).toBeNull();
+    expect(contextResetTag(null)).toBeNull();
+  });
+
+  it('renders no figure for the reset state (usedTokens null)', () => {
+    expect(formatContextTokens(null, 200_000)).toBeNull();
   });
 });

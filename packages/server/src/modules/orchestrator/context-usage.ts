@@ -168,6 +168,33 @@ export const FLUSH_MAX_READS = 16;
 /** Refreshes in flight right now, all trackers included. */
 let activeRefreshes = 0;
 
+/**
+ * Callers waiting for a slot under the cap — the exit `flush` only (a poll or a
+ * boundary simply defers). A queue of promises, not a timer: a slot is handed
+ * over the moment a read releases it. Under SSH every read is one channel on
+ * the shared ControlMaster mux, so killing twenty workers at once must not
+ * open twenty channels at once.
+ */
+const slotWaiters: Array<() => void> = [];
+
+function releaseRefreshSlot(): void {
+  activeRefreshes--;
+  const next = slotWaiters.shift();
+  if (next) next();
+}
+
+/**
+ * Take a slot, waiting for one if needed. The check and the increment run in
+ * the SAME synchronous continuation, so N callers woken together cannot all
+ * see one free slot and all take it.
+ */
+async function acquireRefreshSlot(): Promise<void> {
+  while (activeRefreshes >= CONTEXT_USAGE_MAX_CONCURRENT_REFRESH) {
+    await new Promise<void>((resolve) => slotWaiters.push(resolve));
+  }
+  activeRefreshes++;
+}
+
 // ---------------------------------------------------------------------------
 // Token accounting — the cumulative counters behind `SessionView.tokenUsage`
 // ---------------------------------------------------------------------------
@@ -300,6 +327,42 @@ export class MessageIdMemory {
 export function parseContextUsageFromTranscriptTail(
   text: string,
 ): { usedTokens: number } | null {
+  const found = scanTailForGauge(text);
+  return found !== null && found.kind === 'usage' ? { usedTokens: found.usedTokens } : null;
+}
+
+/**
+ * `true` for the line Claude Code APPENDS when a conversation is compacted —
+ * `{type:"system", subtype:"compact_boundary", compactMetadata:{preTokens,
+ * postTokens, …}}` — in the MAIN conversation. Measured on CLI 2.1.2xx: the
+ * compaction does not rewrite the file, it appends this boundary, the summary
+ * and the resumed turns to the same transcript.
+ *
+ * `postTokens` is NOT the new context size: it is the summary alone (~5-11 K
+ * measured), while the first call after the boundary sends ~80-110 K (system
+ * prompt, tools, preamble, re-attached files). So a boundary tells us the old
+ * figure is dead, never what the new one is.
+ */
+function isCompactBoundary(row: Record<string, unknown>): boolean {
+  return row.type === 'system' && row.subtype === 'compact_boundary' && row.isSidechain !== true;
+}
+
+/** Epoch ms of a transcript line's `timestamp`, `null` when absent/unparseable. */
+function lineTimestamp(row: Record<string, unknown>): number | null {
+  const t = typeof row.timestamp === 'string' ? Date.parse(row.timestamp) : NaN;
+  return Number.isFinite(t) ? t : null;
+}
+
+/**
+ * The newest thing a tail says about the MAIN context, scanning backwards:
+ * an assistant line's occupancy (`usage`, with its timestamp), or a compact
+ * boundary met FIRST — the context was just compacted and no call has been
+ * made since, so whatever came before is dead. `null` when the tail holds
+ * neither.
+ */
+function scanTailForGauge(
+  text: string,
+): { kind: 'usage'; usedTokens: number; at: number | null } | { kind: 'compacted' } | null {
   if (typeof text !== 'string' || text.length === 0) return null;
   const lines = text.split('\n');
   // Backwards: trap 1. The newest assistant line wins and we stop there — trap 2.
@@ -314,17 +377,21 @@ export function parseContextUsageFromTranscriptTail(
       continue;
     }
     const row = asRecord(parsed);
-    if (!row || row.type !== 'assistant') continue;
+    if (!row) continue;
+    if (isCompactBoundary(row)) return { kind: 'compacted' };
+    if (row.type !== 'assistant') continue;
     // Trap 3 — a sub-agent's window, not this agent's.
     if (row.isSidechain === true) continue;
     const usage = asRecord(asRecord(row.message)?.usage);
     if (!usage) continue;
     return {
+      kind: 'usage',
       usedTokens:
         tokenCount(usage.input_tokens) +
         tokenCount(usage.cache_read_input_tokens) +
         tokenCount(usage.cache_creation_input_tokens) +
         tokenCount(usage.output_tokens),
+      at: lineTimestamp(row),
     };
   }
   return null;
@@ -360,6 +427,14 @@ export interface TranscriptScan {
    * never summed — so a caught-up incremental reader can serve the gauge too.
    */
   gaugeUsedTokens: number | null;
+  /** Timestamp of the line behind `gaugeUsedTokens` (epoch ms), when it has one. */
+  gaugeAt: number | null;
+  /**
+   * `true` when a main-conversation compact boundary comes AFTER the last
+   * main assistant line of this slice (or the slice has a boundary and no
+   * such line): the context was compacted and no call has been made since.
+   */
+  compacted: boolean;
   /**
    * One entry per API call billed here for the FIRST time — the same ids as
    * `countedIds`, minus the ones that were not calls at all (see
@@ -445,14 +520,16 @@ export function scanTranscriptRange(
   const countedIds: string[] = [];
   const calls: TranscriptCall[] = [];
   let gaugeUsedTokens: number | null = null;
+  let gaugeAt: number | null = null;
+  let compacted = false;
   if (typeof text !== 'string' || text.length === 0) {
-    return { consumedBytes: 0, delta, countedIds, gaugeUsedTokens, calls };
+    return { consumedBytes: 0, delta, countedIds, gaugeUsedTokens, gaugeAt, compacted, calls };
   }
   const lastNewline = text.lastIndexOf('\n');
   // Not one complete line yet: consume nothing, so the partial line is re-read
   // whole at the next poll rather than parsed (and lost) as a broken fragment.
   if (lastNewline < 0) {
-    return { consumedBytes: 0, delta, countedIds, gaugeUsedTokens, calls };
+    return { consumedBytes: 0, delta, countedIds, gaugeUsedTokens, gaugeAt, compacted, calls };
   }
   const complete = text.slice(0, lastNewline + 1);
   // Bytes, not characters: the cursor is a byte offset into the file. Slicing on
@@ -474,7 +551,14 @@ export function scanTranscriptRange(
       continue;
     }
     const row = asRecord(parsed);
-    if (!row || row.type !== 'assistant') continue;
+    if (!row) continue;
+    // In order: the LATEST of "a turn" / "a compaction" decides what the
+    // gauge knows at the end of the slice.
+    if (isCompactBoundary(row)) {
+      compacted = true;
+      continue;
+    }
+    if (row.type !== 'assistant') continue;
     const message = asRecord(row.message);
     const usage = asRecord(message?.usage);
     if (!usage) continue;
@@ -486,6 +570,8 @@ export function scanTranscriptRange(
 
     if (row.isSidechain !== true) {
       gaugeUsedTokens = input + cacheRead + cacheWrite + output;
+      gaugeAt = lineTimestamp(row);
+      compacted = false;
     }
 
     const id = typeof message?.id === 'string' && message.id.length > 0 ? message.id : null;
@@ -500,7 +586,7 @@ export function scanTranscriptRange(
     const call = transcriptCallOf(row, message, id, { input, cacheWrite, cacheRead, output });
     if (call !== null) calls.push(call);
   }
-  return { consumedBytes, delta, countedIds, gaugeUsedTokens, calls };
+  return { consumedBytes, delta, countedIds, gaugeUsedTokens, gaugeAt, compacted, calls };
 }
 
 // ---------------------------------------------------------------------------
@@ -825,7 +911,16 @@ export type ContextUsageReading =
        */
       at?: number | null;
     })
-  | (ReadingSideChannel & { kind: 'empty' })
+  | (ReadingSideChannel & {
+      kind: 'empty';
+      /**
+       * The source KNOWS why it has nothing: the context was just reset and no
+       * call has been made since (claude: a compact boundary is the newest
+       * thing in the transcript). The tracker turns it into
+       * `ContextUsageView.awaitingCall` rather than a stale old figure.
+       */
+      reset?: ContextResetKind;
+    })
   | (ReadingSideChannel & { kind: 'unavailable'; reason: string });
 
 /**
@@ -920,6 +1015,17 @@ export class TranscriptContextSource implements ContextUsageSource {
    * window is dropped. A rotation must not be able to stall the live file.
    */
   #pendingDrain: { path: string; offset: number; seen: MessageIdMemory } | null = null;
+  /** The newest main-context event the cursor passed was a compact boundary. */
+  #compacted = false;
+  /**
+   * Epoch ms of the last `invalidate()` (a `/compact` or `/clear` reached the
+   * PTY, or `SessionStart` said the CLI compacted by itself), until a turn
+   * written AFTER it is read. While set, no assistant line older than it may
+   * feed the gauge: those describe the context that was just thrown away —
+   * the very figure that used to come back "fresh" after every compact.
+   */
+  #invalidatedAt: number | null = null;
+  readonly #now: () => number;
 
   constructor(
     opts: {
@@ -928,12 +1034,34 @@ export class TranscriptContextSource implements ContextUsageSource {
       /** Wire this to bill tokens; omit it for the gauge alone. */
       readRange?: TranscriptRangeReader;
       maxRangeBytes?: number;
+      /** Clock for `invalidate` (same host clock the CLI stamps lines with). */
+      now?: () => number;
     } = {},
   ) {
     this.#readTail = opts.readTail ?? createLocalTailReader();
     this.#maxBytes = opts.maxTailBytes ?? TRANSCRIPT_TAIL_BYTES;
     this.#readRange = opts.readRange ?? null;
     this.#rangeBytes = opts.maxRangeBytes ?? TRANSCRIPT_RANGE_BYTES;
+    this.#now = opts.now ?? (() => Date.now());
+  }
+
+  /**
+   * The live context was just thrown away. Forget the gauge and refuse every
+   * assistant line stamped before now — they are the pre-reset conversation,
+   * and re-serving one would mark the old figure fresh.
+   */
+  invalidate(): void {
+    this.#gauge = null;
+    this.#compacted = false;
+    this.#invalidatedAt = this.#now();
+  }
+
+  /** Whether a gauge line stamped `at` may describe the live context. */
+  #acceptsGaugeAt(at: number | null): boolean {
+    if (this.#invalidatedAt === null) return true;
+    // A line without a timestamp cannot be placed; the cursor only passes it
+    // after the reset if it was written after it — trust the order.
+    return at === null || at >= this.#invalidatedAt;
   }
 
   get target(): string | null {
@@ -981,6 +1109,7 @@ export class TranscriptContextSource implements ContextUsageSource {
     this.#offset = 0;
     this.#caughtUp = false;
     this.#gauge = null;
+    this.#compacted = false;
     this.#ids.clear();
     this.#epoch++;
     return true;
@@ -1011,8 +1140,8 @@ export class TranscriptContextSource implements ContextUsageSource {
       if (this.#caughtUp) {
         return this.#gauge === null
           ? // A transcript with no assistant turn yet — the normal state right
-            // after `/clear`.
-            { kind: 'empty', ...withTokens(tokens) }
+            // after `/clear` — or one whose newest event is a compaction.
+            { kind: 'empty', ...(this.#compacted ? { reset: 'compact' as const } : {}), ...withTokens(tokens) }
           : { kind: 'sample', usedTokens: this.#gauge, ...withTokens(tokens) };
       }
     }
@@ -1028,10 +1157,14 @@ export class TranscriptContextSource implements ContextUsageSource {
       text = null;
     }
     if (text === null) return { kind: 'unavailable', reason: 'unreadable', ...withTokens(tokens) };
-    const parsed = parseContextUsageFromTranscriptTail(text);
+    const parsed = scanTailForGauge(text);
     // The file is there but holds no assistant turn yet — the normal state of a
     // transcript freshly rotated by `/clear`.
     if (parsed === null) return { kind: 'empty', ...withTokens(tokens) };
+    // The newest thing in the file is a compaction: no call since.
+    if (parsed.kind === 'compacted') return { kind: 'empty', reset: 'compact', ...withTokens(tokens) };
+    // The newest turn predates the last reset: it is the old context.
+    if (!this.#acceptsGaugeAt(parsed.at)) return { kind: 'empty', ...withTokens(tokens) };
     return { kind: 'sample', usedTokens: parsed.usedTokens, ...withTokens(tokens) };
   }
 
@@ -1110,7 +1243,16 @@ export class TranscriptContextSource implements ContextUsageSource {
     }
     this.#offset = offset + consumed;
     for (const id of scan.countedIds) this.#ids.add(id);
-    if (scan.gaugeUsedTokens !== null) this.#gauge = scan.gaugeUsedTokens;
+    if (scan.compacted) {
+      // The newest main-context event of this slice is a compaction: whatever
+      // the cursor measured before it is dead, and nothing says what is alive.
+      this.#gauge = null;
+      this.#compacted = true;
+    } else if (scan.gaugeUsedTokens !== null && this.#acceptsGaugeAt(scan.gaugeAt)) {
+      this.#gauge = scan.gaugeUsedTokens;
+      this.#compacted = false;
+      this.#invalidatedAt = null;
+    }
     // "Seen every byte", not "consumed every byte": a slice that ends mid-line
     // still tells us nothing is hiding behind it, and re-reading the tail for a
     // line the writer has not finished flushing would buy nothing.
@@ -1525,6 +1667,13 @@ export class ContextUsageTracker {
   #sourceLimitTokens: number | null = null;
   #updatedAt: string | null = null;
   #stale = false;
+  /**
+   * The context was just reset (`compact` / `clear`) and no call has been read
+   * since. While set, the snapshot shows NO figure — the last one describes a
+   * context that no longer exists — but says why (`awaitingCall`). Cleared by
+   * the first accepted sample.
+   */
+  #awaiting: ContextResetKind | null = null;
   /** Epoch ms stamped at the START of a refresh, so a slow read cannot pile up. */
   #refreshStartedAtMs: number | null = null;
   #inFlight = false;
@@ -1608,6 +1757,7 @@ export class ContextUsageTracker {
       new TranscriptContextSource({
         readTail: opts.readTail,
         maxTailBytes: opts.maxTailBytes,
+        ...(opts.now ? { now: opts.now } : {}),
         ...(opts.readRange ? { readRange: opts.readRange } : {}),
         ...(opts.maxRangeBytes !== undefined ? { maxRangeBytes: opts.maxRangeBytes } : {}),
       });
@@ -1666,6 +1816,9 @@ export class ContextUsageTracker {
     if (!retarget.call(this.#source, next)) return;
     if (!had) return;
     this.#stale = true;
+    // A new target means a new conversation (claude: `/clear` rotated the
+    // transcript; codex: `/new` started a thread) that has made no call yet.
+    this.#awaiting = 'clear';
     this.#generation++;
     // D3 — the floor describes the conversation we are leaving. A rotation
     // means the next reading measures a DIFFERENT context, so keeping the old
@@ -1694,8 +1847,9 @@ export class ContextUsageTracker {
    * both keep serving the pre-reset conversation from the same place for a turn
    * or two, and only they can tell that measurement from a post-reset one.
    */
-  markStale(): void {
+  markStale(kind: ContextResetKind = 'compact'): void {
     this.#stale = true;
+    this.#awaiting = kind;
     this.#generation++;
     // D3 — same rebase as `retarget`, for the reset case: whatever we counted
     // belongs to the context that was just thrown away, and the floor of the
@@ -1816,11 +1970,32 @@ export class ContextUsageTracker {
     return this.#floorTokens;
   }
 
+  /**
+   * `compact` / `clear` while the context has been reset and no call has been
+   * read since (see `ContextUsageView.awaitingCall`), else `null`.
+   */
+  get awaitingCall(): ContextResetKind | null {
+    return this.#awaiting;
+  }
+
   /** Synchronous, cache-only. `null` until a turn has actually been read. */
   snapshot(): ContextUsageView | null {
+    const limitTokens = this.#resolvedLimit();
+    if (this.#awaiting !== null) {
+      // NEVER the pre-reset figure: an explicit "reset, waiting for the next
+      // call" state instead, which every surface renders as such.
+      return {
+        usedTokens: null,
+        limitTokens,
+        pct: null,
+        basis: this.#source.basis,
+        updatedAt: this.#updatedAt ?? new Date(this.#now()).toISOString(),
+        stale: true,
+        awaitingCall: this.#awaiting,
+      };
+    }
     const used = this.#usedTokens;
     if (used === null || this.#updatedAt === null) return null;
-    const limitTokens = this.#resolvedLimit();
     return {
       usedTokens: used,
       limitTokens,
@@ -1883,8 +2058,9 @@ export class ContextUsageTracker {
    * The LAST read of a session whose process just exited. Waits for a read in
    * flight to land (it may have started before the final bytes were written),
    * then reads until the source has caught up, up to `maxReads`. Ignores the
-   * TTL and the global cap — it happens once per session life, and skipping it
-   * would lose the final turns of every worker that finishes or is killed.
+   * TTL; WAITS for a slot under the global cap rather than skipping — skipping
+   * would lose the final turns of every worker that finishes or is killed, and
+   * bypassing would let a mass kill open one SSH channel per worker at once.
    * Never rejects.
    */
   async flush(maxReads: number = FLUSH_MAX_READS): Promise<void> {
@@ -1892,15 +2068,22 @@ export class ContextUsageTracker {
     if (!this.#source.ready) return;
     const pending = this.#inFlightPromise;
     if (pending !== null) await pending;
-    if (this.#inFlight) return;
-    await this.#start(maxReads);
+    await acquireRefreshSlot();
+    if (this.#inFlight) {
+      releaseRefreshSlot();
+      return;
+    }
+    await this.#start(maxReads, true);
   }
 
-  /** One exclusive run of 1..maxReads reads, under the in-flight flag. */
-  #start(maxReads: number): Promise<void> {
+  /**
+   * One exclusive run of 1..maxReads reads, under the in-flight flag.
+   * `slotHeld` ⇒ the caller already took the cap slot (`acquireRefreshSlot`).
+   */
+  #start(maxReads: number, slotHeld = false): Promise<void> {
     this.#refreshStartedAtMs = this.#now();
     this.#inFlight = true;
-    activeRefreshes++;
+    if (!slotHeld) activeRefreshes++;
     const reads = Math.max(1, Math.floor(maxReads));
     const run = (async () => {
       for (let i = 0; i < reads; i++) {
@@ -1914,7 +2097,7 @@ export class ContextUsageTracker {
       .finally(() => {
         this.#inFlight = false;
         this.#inFlightPromise = null;
-        activeRefreshes--;
+        releaseRefreshSlot();
       });
     this.#inFlightPromise = run;
     return run;
@@ -1958,9 +2141,16 @@ export class ContextUsageTracker {
       // freshly rotated by `/clear`. Whatever we last counted belongs to the
       // previous state, so it stays visible but stale.
       this.#stale = true;
+      // …unless the source knows the context was RESET (a compaction the CLI
+      // did by itself, or one typed by hand): then there is no figure at all.
+      if (reading.reset !== undefined) {
+        if (this.#awaiting === null) this.#floorTokens = null;
+        this.#awaiting = reading.reset;
+      }
       return;
     }
     this.#usedTokens = reading.usedTokens;
+    this.#awaiting = null;
     // D3 — the floor tracks accepted readings only, which is why it is stamped
     // HERE and not next to `#samples`: an `empty` or `unavailable` read measured
     // nothing, and letting it touch the floor would make the anti-loop depend on

@@ -587,7 +587,7 @@ describe('ContextUsageTracker — token totals', () => {
     tracker.maybeRefresh();
     tracker.markStale();
     await settle();
-    expect(tracker.snapshot()).toBeNull();
+    expect(tracker.snapshot()).toMatchObject({ usedTokens: null, pct: null, stale: true, awaitingCall: 'compact' });
     expect(tracker.tokenUsage).toMatchObject({ in: 4_000, out: 9 });
   });
 });
@@ -1171,7 +1171,7 @@ describe('ContextUsageTracker — reported cost and quota', () => {
     tracker.maybeRefresh();
     tracker.markStale();
     await settle();
-    expect(tracker.snapshot()).toBeNull();
+    expect(tracker.snapshot()).toMatchObject({ usedTokens: null, pct: null, stale: true, awaitingCall: 'compact' });
     expect(tracker.reportedCostUsd).toBe(2.5);
   });
 

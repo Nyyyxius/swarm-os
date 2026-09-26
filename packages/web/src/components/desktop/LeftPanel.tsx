@@ -169,7 +169,7 @@ export default function LeftPanel({
                 type="button"
                 className="pl-ctx-row"
                 onClick={() => onSelectAgent?.(r.sessionId)}
-                title={`${r.teamName} :: ${r.name} — ${formatContextPercent(r.pct)} of context window${stale ? ' (stale — awaiting the next turn after a reset)' : ''}${r.resetPending ? ' — reset armed' : ''}`}
+                title={`${r.teamName} :: ${r.name} — ${formatContextPercent(r.pct)} of context window${r.usage?.awaitingCall ? ` (${r.usage.awaitingCall === 'clear' ? 'cleared' : 'compacted'} — awaiting the next call)` : stale ? ' (stale — awaiting the next turn after a reset)' : ''}${r.resetPending ? ' — reset armed' : ''}`}
               >
                 <span className="pl-ctx-name">{r.name}</span>
                 <span className="pl-ctx-team">{r.teamName}</span>

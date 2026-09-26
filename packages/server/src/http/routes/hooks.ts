@@ -545,7 +545,7 @@ export function createHooksRouter(
       let contextMarkedStale = false;
       if (startSource === 'compact' || startSource === 'clear') {
         try {
-          session.markContextStale();
+          session.markContextStale(startSource);
           contextMarkedStale = true;
         } catch (err) {
           // Same rule as everything else on this path: never a 4xx, never a

@@ -26,6 +26,7 @@ import {
 import {
   contextBarWidth, contextColorVar, contextLevel,
   formatContextPercent, formatContextTokens,
+  CONTEXT_RESET_TITLE, contextResetTag,
 } from '../../lib/contextPercent';
 import { useSwarmController } from '../../controller/SwarmController';
 import type { AgentAction, RightPanelAgent, RightPanelTeam } from '../desktop/RightPanel';
@@ -280,7 +281,9 @@ export default function AgentSheet() {
                 }}
               >
                 {formatContextPercent(usage?.pct)}
-                {ctxStale && <span className="pr-ctx-stale">STALE</span>}
+                {contextResetTag(usage)
+                  ? <span className="pr-ctx-stale" title={CONTEXT_RESET_TITLE}>{contextResetTag(usage)}</span>
+                  : ctxStale && <span className="pr-ctx-stale">STALE</span>}
               </div>
               <div
                 className="pill-bar pr-ctx-bar"
