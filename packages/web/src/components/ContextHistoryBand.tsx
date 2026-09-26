@@ -31,8 +31,8 @@
 // not shipped yet is worse than one that quietly shows no curve.
 
 import {
-  useCallback, useEffect, useLayoutEffect, useMemo, useRef, useState,
-  type MouseEvent as ReactMouseEvent, type RefObject,
+  useCallback, useEffect, useMemo, useRef, useState,
+  type MouseEvent as ReactMouseEvent,
 } from 'react';
 import {
   api, apiErrorMessage,
@@ -50,10 +50,8 @@ import {
 } from '../lib/contextHistory';
 import type { AgentContextRow } from '../lib/agentContext';
 import { costBasisTitle, formatUsd } from '../lib/tokenCost';
-
-/** Fallback plot box, used until (and where) the DOM can be measured. */
-const FALLBACK_W = 880;
-const FALLBACK_H = 220;
+import { useElementBox } from '../hooks/useElementBox';
+import AgentCallsSection from './AgentCallsSection';
 
 interface Props {
   row: AgentContextRow;
@@ -203,6 +201,8 @@ export default function ContextHistoryBand({ row, onClose }: Props) {
       <footer className="mon-hist-foot">
         IN-MEMORY · LAST 3 DAYS · CLEARED ON SERVER RESTART
       </footer>
+
+      <AgentCallsSection sessionId={sessionId} provider={row.provider} />
     </section>
   );
 }
@@ -353,48 +353,4 @@ function ContextChartSvg({ chart, width, height, limitTokens, window: win }: Cha
       )}
     </>
   );
-}
-
-// ── plot sizing ──────────────────────────────────────────────────────────────
-
-/**
- * Measured pixel box of the plot container, so the SVG user space is 1:1
- * with CSS pixels.
- *
- * The alternative — a fixed `viewBox` with `preserveAspectRatio="none"`, as
- * `Sparkline` uses — stretches text and dashes by whatever the container
- * width happens to be, which is fine for a 100×16 glyph and unacceptable for
- * a plot carrying eight labels. 1:1 also means the HTML tooltip can be
- * positioned with the same X the SVG crosshair uses.
- *
- * Falls back to a sane box when the element cannot be measured (jsdom, and
- * the first paint before layout), so the chart is never geometry-less.
- */
-function useElementBox(ref: RefObject<HTMLElement | null>) {
-  const [box, setBox] = useState({ w: FALLBACK_W, h: FALLBACK_H });
-  useLayoutEffect(() => {
-    const el = ref.current;
-    if (!el) return;
-    const measure = () => {
-      const r = el.getBoundingClientRect();
-      if (r.width > 0 && r.height > 0) {
-        setBox((prev) => (
-          Math.abs(prev.w - r.width) < 0.5 && Math.abs(prev.h - r.height) < 0.5
-            ? prev
-            : { w: r.width, h: r.height }
-        ));
-      }
-    };
-    measure();
-    if (typeof ResizeObserver === 'undefined') {
-      // jsdom and very old browsers: a window listener still catches the
-      // panel/viewport resizes that matter.
-      globalThis.addEventListener('resize', measure);
-      return () => globalThis.removeEventListener('resize', measure);
-    }
-    const ro = new ResizeObserver(measure);
-    ro.observe(el);
-    return () => ro.disconnect();
-  }, [ref]);
-  return box;
 }

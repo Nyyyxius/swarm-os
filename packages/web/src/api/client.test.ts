@@ -543,3 +543,23 @@ describe('exportCosts (Lot 15)', () => {
     expect((err as HttpError).status).toBe(404);
   });
 });
+
+describe('per-call ledger endpoints', () => {
+  it('asks one agent’s calls with the window, id encoded', async () => {
+    setToken('t');
+    await api.sessionCalls('s/1', '14d');
+    expect(calls[calls.length - 1]!.url).toBe('/sessions/s%2F1/calls?window=14d');
+  });
+
+  it('asks one team’s series with window and bucket', async () => {
+    setToken('t');
+    await api.getOrchestratorCallUsage('o1', '24h', 'hour');
+    expect(calls[calls.length - 1]!.url).toBe('/orchestrators/o1/call-usage?window=24h&bucket=hour');
+  });
+
+  it('asks the fleet series under /metrics', async () => {
+    setToken('t');
+    await api.getMetricsCallUsage('1h', '5m');
+    expect(calls[calls.length - 1]!.url).toBe('/metrics/call-usage?window=1h&bucket=5m');
+  });
+});

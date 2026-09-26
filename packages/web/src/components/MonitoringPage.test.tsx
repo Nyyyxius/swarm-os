@@ -14,14 +14,14 @@
 //      moment they trigger an irreversible CLEAR.
 
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest';
-import { fireEvent, render, screen, waitFor } from '@testing-library/react';
+import { fireEvent, render, screen, waitFor, within } from '@testing-library/react';
 import { MonitoringPage } from './MonitoringPage';
 // Value import — the module is mocked below, but `importOriginal` keeps the
 // real `HttpError` class, which is what the EXPORT suite rejects with.
 import { HttpError } from '../api/client';
 import type {
-  ContextHistoryView, OrchestratorView, SessionCostRow, SessionView,
-  TeamCostRow, TokenUsageView,
+  CallUsageView, ContextHistoryView, OrchestratorView, SessionCallsView, SessionCostRow,
+  SessionView, TeamCostRow, TokenUsageView,
 } from '../api/client';
 
 const hoisted = vi.hoisted(() => ({
@@ -34,6 +34,9 @@ const hoisted = vi.hoisted(() => ({
   getMetricsCosts: vi.fn(),
   getOrchestratorCost: vi.fn(),
   exportCosts: vi.fn(),
+  sessionCalls: vi.fn(),
+  getMetricsCallUsage: vi.fn(),
+  getOrchestratorCallUsage: vi.fn(),
 }));
 
 vi.mock('../controller/SwarmController', () => ({
@@ -69,6 +72,10 @@ vi.mock('../api/client', async (importOriginal) => {
       // Lot 15 — the EXPORT buttons; unmocked it would reach `fetch` itself.
       exportCosts: hoisted.exportCosts,
       contextHistory: hoisted.contextHistory,
+      // Per-call ledger — the band's API CALLS strip and the CALL USAGE panel.
+      sessionCalls: hoisted.sessionCalls,
+      getMetricsCallUsage: hoisted.getMetricsCallUsage,
+      getOrchestratorCallUsage: hoisted.getOrchestratorCallUsage,
     },
   };
 });
@@ -187,6 +194,57 @@ function history(over: Partial<ContextHistoryView> = {}): ContextHistoryView {
   };
 }
 
+function calls(over: Partial<SessionCallsView> = {}): SessionCallsView {
+  const since = new Date(T0 - 24 * 3_600_000).toISOString();
+  return {
+    window: '24h',
+    since,
+    until: new Date(T0 + 60_000).toISOString(),
+    aggregated: false,
+    bucketMs: null,
+    calls: [
+      {
+        t: new Date(T0 - 60_000).toISOString(), n: 1, model: 'claude-opus-5-5',
+        input: 3, cacheWrite: 2_000, cacheRead: 100_000, output: 800, context: 102_003,
+        sidechain: false,
+      },
+      {
+        t: new Date(T0).toISOString(), n: 1, model: 'claude-opus-5-5',
+        input: 1, cacheWrite: 500, cacheRead: 102_800, output: 300, context: 103_301,
+        sidechain: false,
+      },
+    ],
+    hourly: [{ t: new Date(T0 - 3_600_000).toISOString(), calls: 1 }, { t: new Date(T0).toISOString(), calls: 1 }],
+    totals: {
+      calls: 2, input: 4, cacheWrite: 2_500, cacheRead: 202_800, output: 1_100, maxContext: 103_301,
+    },
+    ...over,
+  };
+}
+
+function callUsage(over: Partial<CallUsageView> = {}): CallUsageView {
+  const pt = (t: number, n: number) => ({
+    t: new Date(t).toISOString(), calls: n, input: n, cacheWrite: 10 * n, cacheRead: 1_000 * n, output: 5 * n,
+  });
+  return {
+    window: '24h',
+    bucket: 'hour',
+    bucketMs: 3_600_000,
+    since: new Date(T0 - 2 * 3_600_000).toISOString(),
+    until: new Date(T0 + 60_000).toISOString(),
+    lead: [pt(T0 - 2 * 3_600_000, 2), pt(T0 - 3_600_000, 0), pt(T0, 4)],
+    workers: [pt(T0 - 2 * 3_600_000, 5), pt(T0 - 3_600_000, 1), pt(T0, 9)],
+    totals: {
+      lead: { calls: 6, input: 6, cacheWrite: 60, cacheRead: 6_000, output: 30 },
+      workers: { calls: 15, input: 15, cacheWrite: 150, cacheRead: 15_000, output: 75 },
+    },
+    teams: [
+      { orchestratorId: 'o1', name: 'ATLAS', calls: 21, input: 21, cacheWrite: 210, cacheRead: 21_000, output: 105 },
+    ],
+    ...over,
+  };
+}
+
 const renderPage = () => render(<MonitoringPage open onClose={() => undefined} />);
 const firstRow = (container: HTMLElement) =>
   container.querySelector('tbody tr') as HTMLElement;
@@ -214,6 +272,12 @@ beforeEach(() => {
   hoisted.getOrchestratorCost.mockResolvedValue({ sessions: [] });
   hoisted.exportCosts.mockReset();
   hoisted.exportCosts.mockResolvedValue('day,orchestrator_id\n2026-08-30,o1\n');
+  hoisted.sessionCalls.mockReset();
+  hoisted.sessionCalls.mockResolvedValue(calls());
+  hoisted.getMetricsCallUsage.mockReset();
+  hoisted.getMetricsCallUsage.mockResolvedValue(callUsage());
+  hoisted.getOrchestratorCallUsage.mockReset();
+  hoisted.getOrchestratorCallUsage.mockResolvedValue(callUsage({ teams: undefined }));
   hoisted.pushNotice.mockClear();
   hoisted.onContextReset.mockClear();
   hoisted.selectAgent.mockClear();
@@ -326,7 +390,9 @@ describe('MONITORING · CONTEXT HISTORY band', () => {
     const { container } = renderPage();
     fireEvent.click(firstRow(container));
     await screen.findByText('CONTEXT HISTORY');
-    fireEvent.click(screen.getByRole('button', { name: '1H' }));
+    // Scoped: the API CALLS strip and the CALL USAGE panel have a 1H too.
+    const seg = screen.getByRole('group', { name: 'history window' });
+    fireEvent.click(within(seg).getByRole('button', { name: '1H' }));
     await waitFor(() => expect(hoisted.contextHistory).toHaveBeenCalledWith('s1', '1h'));
   });
 
@@ -1319,5 +1385,90 @@ describe('MONITORING · EXPORT block', () => {
     expect(hoisted.exportCosts).toHaveBeenCalledTimes(1);
     release('day\n');
     await waitFor(() => expect(exportBtn('CSV').disabled).toBe(false));
+  });
+});
+
+// ── API CALLS strip (per-call ledger) ──────────────────────────────────────
+
+describe('MONITORING · API CALLS strip in the agent band', () => {
+  it('fetches nothing until a row is clicked, then the default 24H window', async () => {
+    const { container } = renderPage();
+    expect(hoisted.sessionCalls).not.toHaveBeenCalled();
+    fireEvent.click(firstRow(container));
+    expect(await screen.findByText('API CALLS')).toBeTruthy();
+    expect(hoisted.sessionCalls).toHaveBeenCalledWith('s1', '24h');
+  });
+
+  it('draws one stacked bar per call and the context line over them', async () => {
+    const { container } = renderPage();
+    fireEvent.click(firstRow(container));
+    await waitFor(() => expect(container.querySelectorAll('.mon-calls-bar')).toHaveLength(2));
+    const strip = screen.getByLabelText('API calls');
+    const firstBar = strip.querySelector('.mon-calls-bar') as Element;
+    // NEW IN / CACHE WRITE / CACHE READ / OUTPUT, bottom to top.
+    expect(Array.from(firstBar.querySelectorAll('rect')).map((r) => r.getAttribute('class'))).toEqual([
+      'mon-calls-seg-input', 'mon-calls-seg-cacheWrite', 'mon-calls-seg-cacheRead', 'mon-calls-seg-output',
+    ]);
+    expect(strip.querySelector('.mon-calls-context')).toBeTruthy();
+    expect(strip.textContent).toContain('2 CALLS');
+    expect(strip.textContent).toContain('PERSISTED · 14 DAYS · CLAUDE ONLY');
+  });
+
+  it('refetches on its own window selector, which offers 14D', async () => {
+    const { container } = renderPage();
+    fireEvent.click(firstRow(container));
+    await screen.findByText('API CALLS');
+    const seg = screen.getByRole('group', { name: 'calls window' });
+    fireEvent.click(within(seg).getByRole('button', { name: '14D' }));
+    await waitFor(() => expect(hoisted.sessionCalls).toHaveBeenCalledWith('s1', '14d'));
+  });
+
+  it('says it when the server folded the window into buckets', async () => {
+    hoisted.sessionCalls.mockResolvedValue(calls({ aggregated: true, bucketMs: 300_000 }));
+    const { container } = renderPage();
+    fireEvent.click(firstRow(container));
+    expect(await screen.findByText(/5 MIN BUCKETS · BAR = MEAN CALL/)).toBeTruthy();
+  });
+
+  it('does not ask for a non-claude agent', async () => {
+    hoisted.orchestrators = [orch([sess({ provider: 'codex' })])];
+    const { container } = renderPage();
+    fireEvent.click(firstRow(container));
+    expect(await screen.findByText('— CLAUDE AGENTS ONLY —')).toBeTruthy();
+    expect(hoisted.sessionCalls).not.toHaveBeenCalled();
+  });
+});
+
+// ── CALL USAGE panel ───────────────────────────────────────────────────────
+
+describe('MONITORING · CALL USAGE panel', () => {
+  it('opens on every team, per hour over 24H, lead and workers stacked', async () => {
+    const { container } = renderPage();
+    await waitFor(() => expect(hoisted.getMetricsCallUsage).toHaveBeenCalledWith('24h', 'hour'));
+    await waitFor(() => expect(container.querySelectorAll('.mon-callusage-workers')).toHaveLength(3));
+    expect(container.querySelectorAll('.mon-callusage-lead')).toHaveLength(2);
+    const panel = screen.getByLabelText('Call usage');
+    expect(panel.textContent).toContain('LEAD 6 CALLS');
+    expect(panel.textContent).toContain('WORKERS 15 CALLS');
+  });
+
+  it('switches to one team from the selector or a team chip', async () => {
+    renderPage();
+    const chip = await screen.findByRole('button', { name: /ATLAS\s*21/ });
+    fireEvent.click(chip);
+    await waitFor(() =>
+      expect(hoisted.getOrchestratorCallUsage).toHaveBeenCalledWith('o1', '24h', 'hour'));
+  });
+
+  it('asks for 5-minute buckets on the 1H window', async () => {
+    renderPage();
+    const seg = await screen.findByRole('group', { name: 'call usage window' });
+    fireEvent.click(within(seg).getByRole('button', { name: '1H' }));
+    await waitFor(() => expect(hoisted.getMetricsCallUsage).toHaveBeenCalledWith('1h', '5m'));
+  });
+
+  it('does not poll while the page is closed', () => {
+    render(<MonitoringPage open={false} onClose={() => undefined} />);
+    expect(hoisted.getMetricsCallUsage).not.toHaveBeenCalled();
   });
 });

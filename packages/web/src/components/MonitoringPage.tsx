@@ -38,6 +38,7 @@ import Sparkline from './desktop/Sparkline';
 import ContextHistoryBand from './ContextHistoryBand';
 import SystemGauge from './SystemGauge';
 import TeamCostsSection from './TeamCostsSection';
+import CallUsagePanel from './CallUsagePanel';
 import { ICON } from './desktop/icons';
 import {
   formatRelative, formatUptime, statusChipClass, statusLabel,
@@ -579,6 +580,14 @@ export function MonitoringPage({ open, onClose }: Props) {
             mounted whatever the backend answers, so nothing on the page
             shifts when the endpoint appears. */}
         <TeamCostsSection snapshot={costs} />
+
+        {/* CALL USAGE — API calls and tokens per hour, lead and workers apart,
+            for one team or all of them (persisted ledger, 14 days). Next to
+            TEAM COSTS because it is the same question at a finer grain: what
+            the money above was spent ON, hour by hour. Its own team selector,
+            independent of the table filter: the ledger includes teams and
+            workers the table no longer shows. */}
+        <CallUsagePanel open={open} orchestrators={orchestrators} />
 
         {/* CONTEXT HISTORY — under the KPI band on desktop, which is also
             above the table on a phone (the column collapses, the order

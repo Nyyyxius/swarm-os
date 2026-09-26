@@ -794,6 +794,87 @@ export interface ContextHistoryView {
   resets: ContextHistoryReset[];
 }
 
+// ── Per-call ledger (`session_calls`) ────────────────────────────────────────
+
+/** Windows of the per-call endpoints — the server 400s anything else. */
+export type CallWindow = '1h' | '24h' | '3d' | '14d';
+
+/** Bucket sizes of the team / fleet series — the server 400s anything else. */
+export type CallBucket = '5m' | 'hour' | 'day';
+
+/** The four token buckets of a call (or of a sum of calls). */
+export interface CallTokens {
+  /** Fresh input tokens — the cache misses. */
+  input: number;
+  /** Tokens written to the prompt cache. */
+  cacheWrite: number;
+  /** Tokens read from the prompt cache. */
+  cacheRead: number;
+  output: number;
+}
+
+/**
+ * One bar of an agent's call chart: ONE call (`n === 1`), or — when the
+ * window holds more than ~600 — every call of a time bucket (`n > 1`, token
+ * buckets are SUMS, `context` is the bucket's LARGEST context).
+ */
+export interface CallPoint extends CallTokens {
+  /** ISO — the call's own time, or the start of its bucket. */
+  t: string;
+  n: number;
+  /** `null` when unknown or when a bucket mixed several models. */
+  model: string | null;
+  /** Context sent: input + cache write + cache read. */
+  context: number;
+  /** Single calls only — a sub-agent's call. */
+  sidechain?: boolean;
+}
+
+/** `GET /sessions/:id/calls?window=…` — persisted 14 days, claude only. */
+export interface SessionCallsView {
+  window: CallWindow;
+  since: string;
+  until: string;
+  aggregated: boolean;
+  bucketMs: number | null;
+  calls: CallPoint[];
+  /** Calls per hour — hours with at least one call only. */
+  hourly: { t: string; calls: number }[];
+  totals: CallTokens & { calls: number; maxContext: number };
+}
+
+export interface CallSeriesPoint extends CallTokens {
+  t: string;
+  calls: number;
+}
+
+export interface CallUsageTeam extends CallTokens {
+  orchestratorId: string;
+  name: string | null;
+  calls: number;
+}
+
+/**
+ * `GET /orchestrators/:id/call-usage` and `GET /metrics/call-usage` — calls
+ * and tokens per bucket, lead and workers apart. `lead`/`workers` are DENSE
+ * (every bucket of the window, zeros included) and index-aligned. `teams` is
+ * present on the fleet variant only.
+ */
+export interface CallUsageView {
+  window: CallWindow;
+  bucket: CallBucket;
+  bucketMs: number;
+  since: string;
+  until: string;
+  lead: CallSeriesPoint[];
+  workers: CallSeriesPoint[];
+  totals: {
+    lead: CallTokens & { calls: number };
+    workers: CallTokens & { calls: number };
+  };
+  teams?: CallUsageTeam[];
+}
+
 export interface SessionView {
   id: string;
   orchestratorId: string;
@@ -2224,6 +2305,25 @@ export const api = {
    */
   getMetricsCosts: () =>
     request<TeamCostsSnapshot>('GET', '/metrics/costs'),
+  /**
+   * Per-call ledger — one agent's API calls over `window`. Answers for ended
+   * and removed agents too (SQLite, 14 days). 404 on an unknown id AND on a
+   * server predating the ledger; the band treats both as "no chart".
+   */
+  sessionCalls: (sessionId: string, window: CallWindow) =>
+    request<SessionCallsView>(
+      'GET',
+      `/sessions/${encodeURIComponent(sessionId)}/calls?window=${window}`,
+    ),
+  /** Per-call ledger — one team's calls and tokens per bucket, lead / workers. */
+  getOrchestratorCallUsage: (orchId: string, window: CallWindow, bucket: CallBucket) =>
+    request<CallUsageView>(
+      'GET',
+      `/orchestrators/${encodeURIComponent(orchId)}/call-usage?window=${window}&bucket=${bucket}`,
+    ),
+  /** Per-call ledger — the same for every team, plus one total per team. */
+  getMetricsCallUsage: (window: CallWindow, bucket: CallBucket) =>
+    request<CallUsageView>('GET', `/metrics/call-usage?window=${window}&bucket=${bucket}`),
   /**
    * Monitoring Lot 12 — per-session ventilation for ONE team, fetched when
    * its row is expanded. Not polled: the panel is a drill-down, and re-asking

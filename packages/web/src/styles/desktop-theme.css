@@ -2551,6 +2551,99 @@
     letter-spacing: 0.14em; color: var(--text-mute);
   }
 
+  /* ── API CALLS strip (per-call ledger) ── */
+  /* The lower half of the agent band: same well, same header grammar, a
+     separate ledger (persisted, 14 days). One colour per token bucket, each
+     from an existing token — NEW IN is the dear bucket (--bad), CACHE READ
+     the cheap one (--info, faded because it dwarfs the others), OUTPUT
+     --ok. The context line keeps the band's amber: it is the same quantity
+     the curve above plots, one call at a time. */
+  .mon-calls { border-top: 1px solid var(--border); display: flex; flex-direction: column; }
+  .mon-calls-kpi {
+    font-family: "Geist Mono", monospace; font-size: 9px;
+    letter-spacing: 0.10em; color: var(--text-dim); white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+  .mon-calls-seg { margin-left: auto; }
+  .mon-calls-legend, .mon-calls-totals, .mon-callusage-totals {
+    display: flex; flex-wrap: wrap; gap: 4px 14px; padding: 6px 12px 0;
+    font-family: "Geist Mono", monospace; font-size: 8.5px;
+    letter-spacing: 0.12em; color: var(--text-mute);
+  }
+  .mon-calls-totals { padding: 6px 12px 8px; }
+  .mon-calls-totals b, .mon-callusage-totals b {
+    color: var(--text); font-weight: 400; font-variant-numeric: tabular-nums;
+  }
+  .mon-calls-legend-item { display: inline-flex; align-items: center; gap: 5px; }
+  .mon-calls-swatch {
+    display: inline-block; width: 8px; height: 8px; margin-right: 5px;
+    vertical-align: -1px; border-radius: 1px;
+  }
+  .mon-calls-swatch.input      { background: var(--bad); }
+  .mon-calls-swatch.cacheWrite { background: var(--warn); }
+  .mon-calls-swatch.cacheRead  { background: var(--info); opacity: 0.55; }
+  .mon-calls-swatch.output     { background: var(--ok); }
+  .mon-calls-swatch.context    { height: 2px; width: 12px; vertical-align: 2px; background: var(--amber); }
+  .mon-calls-swatch.lead       { background: var(--amber); }
+  .mon-calls-swatch.workers    { background: var(--info); opacity: 0.7; }
+
+  .mon-calls-plot { position: relative; height: 170px; padding: 0 4px; }
+  .mon-calls-seg-input      { fill: var(--bad); }
+  .mon-calls-seg-cacheWrite { fill: var(--warn); }
+  .mon-calls-seg-cacheRead  { fill: var(--info); opacity: 0.55; }
+  .mon-calls-seg-output     { fill: var(--ok); }
+  .mon-calls-bar.on rect, .mon-callusage-bar.on rect { filter: brightness(1.35); }
+  .mon-calls-context {
+    fill: none; stroke: var(--amber); stroke-width: 1.2;
+    stroke-linejoin: round; stroke-linecap: round; opacity: 0.9;
+  }
+  .mon-calls-strip {
+    position: relative; height: 46px; padding: 0 4px;
+    border-top: 1px dashed var(--border);
+  }
+  .mon-calls-strip-label {
+    position: absolute; right: 16px; top: 4px;
+    font-family: "Geist Mono", monospace; font-size: 7.5px;
+    letter-spacing: 0.14em; color: var(--text-mute);
+  }
+  .mon-calls-hour { fill: var(--amber); opacity: 0.55; }
+  .mon-calls-tip { min-width: 170px; }
+  .mon-calls-tip-model {
+    margin-top: 2px; font-size: 9px; letter-spacing: 0.06em; color: var(--text-dim);
+  }
+  .mon-calls-tip-grid {
+    margin-top: 4px; display: grid; grid-template-columns: auto auto;
+    gap: 2px 12px; font-size: 9px; letter-spacing: 0.06em; color: var(--text-mute);
+  }
+  .mon-calls-tip-grid b {
+    color: var(--text); font-weight: 400; text-align: right;
+    font-variant-numeric: tabular-nums;
+  }
+  .mon-calls-tip-grid em { color: var(--text-mute); font-style: normal; }
+
+  /* ── CALL USAGE panel (team / fleet series) ── */
+  .mon-callusage-head {
+    display: flex; align-items: center; gap: 10px; flex-wrap: wrap;
+    padding: 8px 12px; border-bottom: 1px solid var(--border);
+  }
+  .mon-callusage-team { max-width: 220px; }
+  .mon-callusage-bucket { margin-left: auto; }
+  .mon-callusage-plot { position: relative; height: 160px; padding: 0 4px; }
+  .mon-callusage-lead    { fill: var(--amber); opacity: 0.85; }
+  .mon-callusage-workers { fill: var(--info); opacity: 0.7; }
+  .mon-callusage-teams {
+    display: flex; flex-wrap: wrap; gap: 6px; padding: 6px 12px 9px;
+    border-top: 1px solid var(--border);
+    font-family: "Geist Mono", monospace; font-size: 8.5px; letter-spacing: 0.10em;
+  }
+  .mon-callusage-teamchip {
+    background: none; border: 1px solid var(--border); border-radius: 2px;
+    color: var(--text-dim); padding: 2px 7px; cursor: pointer;
+    font: inherit; letter-spacing: inherit;
+  }
+  .mon-callusage-teamchip b { color: var(--text); font-weight: 400; margin-left: 4px; }
+  .mon-callusage-teamchip:hover { border-color: var(--border-strong); color: var(--amber); }
+
   /* Selected row: the band's amber edge, echoed at the other end of the
      link so it is obvious WHICH row the chart belongs to. */
   .mon-table tbody tr.mon-row-open td { background: var(--panel-elev); }
@@ -2806,6 +2899,7 @@
     .mon-hist-head { gap: 8px; padding: 8px 10px; }
     .mon-hist-now { margin-left: 0; }
     .mon-hist-plot { height: 160px; }
+    .mon-calls-plot, .mon-callusage-plot { height: 130px; }
     .mon-hist-foot { font-size: 8px; letter-spacing: 0.10em; }
 
     /* System gauges (Lot 10): the two-column collapse already gives them the
