@@ -57,6 +57,12 @@ interface SubmitBody {
    * going back to inheriting has to be expressible.
    */
   autoCompactPct: number | null;
+  /**
+   * Same, for the team's WORKERS (docs/auto-compact.md §8.2, v0.10.1). `null`
+   * inherits `SWARM_OS_WORKER_AUTO_COMPACT_PCT`, which ships at `0` (off).
+   * Always sent, for the same reason.
+   */
+  workerAutoCompactPct: number | null;
 }
 
 const INHERIT_LABEL = '(inherit global default)';
@@ -119,6 +125,7 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
   // Empty string = inherit the instance threshold; `'0'` = disabled. Kept as a
   // string so those two stay distinguishable while the operator types.
   const [autoCompact, setAutoCompact] = useState<string>('');
+  const [workerAutoCompact, setWorkerAutoCompact] = useState<string>('');
   const [selectedSkills, setSelectedSkills] = useState<string[]>([]);
   const [availableSkills, setAvailableSkills] = useState<SkillView[]>([]);
   const [submitting, setSubmitting] = useState(false);
@@ -171,6 +178,8 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
       // Absent on a server predating auto-compact — read as "inherit", and `0`
       // as the explicit opt-out it is, never as an empty field.
       setAutoCompact(autoCompactFieldValue(initial.autoCompactPct));
+      // Absent on a server predating v0.10.1 — read as "inherit".
+      setWorkerAutoCompact(autoCompactFieldValue(initial.workerAutoCompactPct));
       setSelectedSkills((initial.skills ?? []).map((s) => s.name));
     } else {
       setLabel('');
@@ -190,6 +199,7 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
       setCostBudget('');
       setBudgetAction('notify');
       setAutoCompact('');
+      setWorkerAutoCompact('');
       setSelectedSkills([]);
     }
   }, [open, initial]);
@@ -292,6 +302,8 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
       // server answers 400 on a non-integer and the role would look saved.
       const compact = parseAutoCompactPct(autoCompact);
       if (!compact.ok) throw new Error(compact.error);
+      const workerCompact = parseAutoCompactPct(workerAutoCompact);
+      if (!workerCompact.ok) throw new Error(workerCompact.error);
       await onSubmit({
         label: label.trim(),
         leadPrompt: leadPrompt.trim() ? leadPrompt : null,
@@ -310,6 +322,7 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
         costBudgetUsd: budget.value,
         budgetAction,
         autoCompactPct: compact.value,
+        workerAutoCompactPct: workerCompact.value,
       });
       onClose();
     } catch (err) {
@@ -500,7 +513,27 @@ export function RoleDialog({ open, onClose, onSubmit, initial, containerStyle }:
             <p className="mt-1 text-[11px] text-slate-400">
               Le serveur arme « /compact » quand le contexte de l’agent dépasse ce pourcentage
               de sa fenêtre, seulement quand l’agent est idle avec une inbox vide. Vide = valeur
-              de l’instance (35 % par défaut). 0 = désactivé pour ce rôle.
+              de l’instance (35 % par défaut). 0 = désactivé pour ce rôle. S’applique à la lead.
+            </p>
+          </Field>
+
+          {/* ── AUTO-COMPACT WORKERS (docs/auto-compact.md §8.2, v0.10.1) ──
+              Right next to the lead's, same three states, but the instance
+              value an empty field inherits is OFF: workers run short, linear
+              tasks and are reset by their lead, not by a threshold. */}
+          <Field label="auto-compact workers (%)">
+            <input
+              className={inputCls}
+              type="number"
+              min={0}
+              max={100}
+              placeholder="0"
+              value={workerAutoCompact}
+              onChange={(e) => setWorkerAutoCompact(e.target.value)}
+            />
+            <p className="mt-1 text-[11px] text-slate-400">
+              Même règle pour les workers de l’équipe. Vide = valeur de l’instance (désactivé par
+              défaut). 0 = désactivé.
             </p>
           </Field>
 

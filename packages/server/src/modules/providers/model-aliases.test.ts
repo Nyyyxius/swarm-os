@@ -190,6 +190,7 @@ describe('SwarmDb.migrateModelAliases', () => {
       cost_budget_usd: null,
       budget_action: 'notify',
       auto_compact_pct: null,
+      worker_auto_compact_pct: null,
       created_at: now,
       updated_at: now,
     };

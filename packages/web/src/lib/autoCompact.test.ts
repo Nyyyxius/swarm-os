@@ -21,6 +21,7 @@ import {
   parseAutoCompactPct,
   AUTO_COMPACT_ERROR,
   DEFAULT_AUTO_COMPACT_PCT,
+  DEFAULT_WORKER_AUTO_COMPACT_PCT,
 } from './autoCompact';
 
 describe('parseAutoCompactPct', () => {
@@ -82,5 +83,18 @@ describe('autoCompactSummary', () => {
   it('distinguishes a disabled role from an inheriting one', () => {
     expect(autoCompactSummary(0, 35)).toBe('Désactivé');
     expect(autoCompactSummary(50, 35)).toBe('50 %');
+  });
+});
+
+describe('workers threshold (docs/auto-compact.md §8.2, v0.10.1)', () => {
+  it('falls back to OFF — the instance default the field ships with', () => {
+    expect(DEFAULT_WORKER_AUTO_COMPACT_PCT).toBe(0);
+  });
+
+  it('renders an inheriting worker field as "inherits: disabled"', () => {
+    // Same summary function as the lead's; the difference is the default fed
+    // into it, and 0 must read as "disabled", never as "0 %".
+    expect(autoCompactSummary(null, DEFAULT_WORKER_AUTO_COMPACT_PCT)).toBe('Hérite (désactivé)');
+    expect(autoCompactSummary(40, DEFAULT_WORKER_AUTO_COMPACT_PCT)).toBe('40 %');
   });
 });

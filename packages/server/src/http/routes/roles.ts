@@ -11,7 +11,7 @@ import type {
 import { isDiscordConnector, BUDGET_ACTIONS } from '../../modules/roles/index.js';
 import type { BudgetAction } from '../../modules/roles/index.js';
 import type { Config, EffortLevel, PermissionMode } from '../../config.js';
-import { DEFAULT_AUTO_COMPACT_PCT } from '../../config.js';
+import { DEFAULT_AUTO_COMPACT_PCT, DEFAULT_WORKER_AUTO_COMPACT_PCT } from '../../config.js';
 import {
   PASSWORD_SENTINEL,
   redactConfigForRead,
@@ -91,6 +91,7 @@ interface RoleBody {
   costBudgetUsd?: unknown;
   budgetAction?: unknown;
   autoCompactPct?: unknown;
+  workerAutoCompactPct?: unknown;
 }
 
 /**
@@ -289,8 +290,11 @@ function parseBudgetAction(
 }
 
 /**
- * Validate the OPTIONAL `autoCompactPct` (docs/auto-compact.md §3.3). `null` =
- * clear the override and go back to inheriting `config.autoCompactPct`.
+ * Validate the OPTIONAL `autoCompactPct` (docs/auto-compact.md §3.3) — and,
+ * since v0.10.1, its workers' twin `workerAutoCompactPct` (§8.2), which obeys
+ * the very same rules; `field` only names the offender in the 400. `null` =
+ * clear the override and go back to inheriting `config.autoCompactPct` (resp.
+ * `config.workerAutoCompactPct`).
  * Otherwise an INTEGER in 0..100, where `0` means "never auto-compact this
  * role".
  *
@@ -311,10 +315,11 @@ function parseBudgetAction(
  */
 function parseAutoCompactPct(
   x: unknown,
+  field: 'autoCompactPct' | 'workerAutoCompactPct' = 'autoCompactPct',
 ): { ok: true; value: number | null } | { ok: false; error: string } {
   if (x === null) return { ok: true, value: null };
   if (typeof x !== 'number' || !Number.isInteger(x) || x < 0 || x > 100) {
-    return { ok: false, error: 'autoCompactPct must be null or an integer between 0 and 100' };
+    return { ok: false, error: `${field} must be null or an integer between 0 and 100` };
   }
   return { ok: true, value: x };
 }
@@ -555,7 +560,14 @@ export function createRolesRouter(
       // `Config` cast, and serving `undefined` would drop the key from the JSON
       // — the browser would then render "Inherits (undefined %)" rather than a
       // number. The floor is the same constant `loadConfig` falls back to.
-      defaults: { autoCompactPct: config.autoCompactPct ?? DEFAULT_AUTO_COMPACT_PCT },
+      //
+      // `workerAutoCompactPct` (v0.10.1, docs/auto-compact.md §8.2) is the
+      // same kind of fallback for the role's workers field — `0` (off) by
+      // default, which the form renders "Hérite (désactivé)".
+      defaults: {
+        autoCompactPct: config.autoCompactPct ?? DEFAULT_AUTO_COMPACT_PCT,
+        workerAutoCompactPct: config.workerAutoCompactPct ?? DEFAULT_WORKER_AUTO_COMPACT_PCT,
+      },
     });
   });
 
@@ -666,6 +678,14 @@ export function createRolesRouter(
       if (!r.ok) return res.status(400).json({ error: r.error });
       autoCompactPct = r.value;
     }
+    // Workers' threshold (docs/auto-compact.md §8.2) — same contract, same
+    // parser; `null`/absent = inherit the instance worker default (0 = off).
+    let workerAutoCompactPct: number | null | undefined;
+    if (body.workerAutoCompactPct !== undefined) {
+      const r = parseAutoCompactPct(body.workerAutoCompactPct, 'workerAutoCompactPct');
+      if (!r.ok) return res.status(400).json({ error: r.error });
+      workerAutoCompactPct = r.value;
+    }
 
     const init: RoleInit = {
       label: body.label,
@@ -685,6 +705,7 @@ export function createRolesRouter(
       ...(costBudget !== undefined ? { costBudgetUsd: costBudget } : {}),
       ...(budgetAction !== undefined ? { budgetAction } : {}),
       ...(autoCompactPct !== undefined ? { autoCompactPct } : {}),
+      ...(workerAutoCompactPct !== undefined ? { workerAutoCompactPct } : {}),
     };
     const role = store.create(init);
     res.status(201).json({ role: maskRole(role, connectorRegistry) });
@@ -830,6 +851,12 @@ export function createRolesRouter(
       const r = parseAutoCompactPct(body.autoCompactPct);
       if (!r.ok) return res.status(400).json({ error: r.error });
       patch.autoCompactPct = r.value;
+    }
+    // Same for the workers' threshold (`null` = back to the instance default).
+    if (body.workerAutoCompactPct !== undefined) {
+      const r = parseAutoCompactPct(body.workerAutoCompactPct, 'workerAutoCompactPct');
+      if (!r.ok) return res.status(400).json({ error: r.error });
+      patch.workerAutoCompactPct = r.value;
     }
     const updated = store.update(req.params.id, patch);
     if (!updated) {

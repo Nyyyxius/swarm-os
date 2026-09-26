@@ -1,7 +1,8 @@
 # Auto-compact à seuil de contexte — par rôle, à la frontière d'inactivité
 
 Plan de la fonctionnalité. Statut : **Lots 1a, 1b, 2 et 3 livrés
-(2026-09-14)** — plan validé par revue adversariale (3 relecteurs : exactitude
+(2026-09-14)** ; **v0.10.1 : reprise après compaction + seuil distinct pour
+les workers (§8)** — plan validé par revue adversariale (3 relecteurs : exactitude
 vs code, mécanisme, design, deux passes), code relu (read-only) et corrigé ;
 §7 en garde la trace. Reste à faire : la vérification Docker du §5 sur une
 team réelle (non exécutée — redéploiement du conteneur 24/7 à la main de
@@ -679,3 +680,142 @@ intégrées ci-dessus :
   « compaction ») ; tests ajoutés (`starved`, `skipped` par changement de
   raison, branche sans reset, trois types bloquants, résolution de rôle via
   le Spawner).
+
+## 8. v0.10.1 — reprise après compaction, seuil distinct pour les workers
+
+Deux retours de production sur la v0.10.0.
+
+### 8.1 D9 — « Continue » après un `/compact`
+
+**Constat.** Après un `/compact` (quelle qu'en soit la source), l'agent — un
+CLI dans un PTY — reste au prompt : un `/compact` manuel ne relance pas de
+tour, et le travail en cours ne reprend jamais tant qu'un humain n'a pas tapé
+« continue ». La seule chose re-signalée jusqu'ici était une inbox non vide
+(`lastInboxSignalAt = null` dans `_fireContextReset`, garantie G).
+
+**Mécanisme.** Même frontière que G, même porte d'injection :
+
+- **Armement** — `Session._fireContextReset`, dans le callback du `\r` (la
+  commande a réellement atteint le PTY, au même endroit que `markStale` et
+  `lastInboxSignalAt = null`) : `_postCompactNudgeOwed = cmd === '/compact' &&
+  continueAfterCompact`. Couvre les trois sources serveur — auto-compact (D2),
+  `team.context_compact` / `team.clear_worker { compact: true }`, opérateur
+  (`POST /sessions/:id/context-reset`) — et les deux backstops, qui passent
+  tous par `requestContextReset`. Un `/clear` **remet le drapeau à `false`** :
+  un agent vidé est idle exprès (et un `/clear` tiré entre la fin d'un
+  `/compact` et sa frontière annule la relance due). Un `/compact` tapé à la
+  main dans la console, ou le compact interne de Claude Code (qui continue son
+  tour tout seul), ne passe pas par là : aucune relance, voulu.
+- **Détection de la fin de compaction** — la **première frontière libre**
+  (D1/D2) après la soumission. La compaction est un appel modèle pendant lequel
+  le TUI redessine son spinner ; le PTY ne redevient muet `idleThresholdMs`
+  qu'une fois qu'elle est finie. Les exclusions de l'étape 0 (dialogue, reset
+  armé ou en cours de frappe, notice armée, `paused`, arrêt) s'appliquent
+  telles quelles : une frontière déclinée n'est pas consommée, le drapeau reste
+  armé. Un `/compact` refusé par le CLI (« Not enough messages ») donne une
+  frontière tout de suite et donc une relance — inoffensive : le texte dit
+  « si tu n'avais rien en cours, reste en attente ».
+- **Injection** — `Orchestrator._onSessionIdle`, **nouvelle étape 0bis avant
+  le signal d'inbox** : `session.signalPostCompact({ inbox })` écrit **une**
+  ligne via `notifySignal` (mêmes règles que `signalInbox` : cadence Ink texte
+  puis `\r` seul à +150 ms, **aucun `\r` de tête** — correctif 2.1.277,
+  `docs/correctif-signal-cr-invisible.md` ; écriture unique `\r…\r` pour un
+  provider sans danse Ink, opencode) et consomme le drapeau. Refus sans écrire
+  ni consommer si `dialogPending`, `_contextResetFiring`, `_noticeFiring` ou
+  `_signalFiring` : réessai à la frontière suivante. Texte : constante exportée
+  `POST_COMPACT_NUDGE_TEXT` (`session.ts`, une ligne, jamais d'entrée
+  utilisateur) :
+  `[swarm-os] Contexte compacté. Reprends le travail que tu avais en cours là où tu t'étais arrêté (relis tes fichiers d'état si besoin). Si tu n'avais rien en cours, reste simplement en attente.`
+- **Inbox** — si le signal d'inbox est dû à cette frontière (courrier en file
+  et `lastInboxSignalAt` nul ou plus ancien que le message le plus récent — il
+  est nul juste après un reset), **une seule injection combinée** :
+  `POST_COMPACT_NUDGE_TEXT + ' ' + SIGNAL_TEXT`. `SIGNAL_TEXT` y figure
+  **octet pour octet** (contrat des préambules : « quand tu vois
+  `[swarm-os] new message in inbox`, lis l'inbox avant de continuer »), et le
+  stamp `lastInboxSignalAt` est posé comme par `signalInbox()` — pas de second
+  signal pour les mêmes messages. Deux injections sur la même frontière sont
+  exclues par construction : la seconde tomberait dans la fenêtre
+  `_signalFiring` de la première (texte1 texte2 CR CR = une ligne garbled).
+- **Après la relance** la frontière est dépensée : l'étape 2 (décision
+  auto-compact) et l'étape 3 (rafraîchissement de jauge) sont sautées — l'agent
+  vient de recevoir un tour, il n'est plus « idle sans rien à faire », et la
+  jauge est de toute façon `stale`/`not-grown` juste après un reset. Bonus : le
+  tour de reprise produit une vraie lecture post-compaction, qui rabaisse le
+  socle (D3) plus tôt.
+- **Visibilité** — ligne console `[swarm-os] compaction over — nudging the
+  agent to resume` (suffixe `(+ inbox signal)` en combiné), log `info`
+  `session.post_compact_nudge { sessionId, sessionType, inboxCount,
+  inboxSignalled }` (`debug` `session.post_compact_nudge_deferred` sur refus),
+  événement bus `session.post_compact_nudge` (payload `{ inboxCount,
+  inboxSignalled }`, sous-union `AutoCompactSwarmEventKind`, pas de toast).
+- **Interrupteur** — `SWARM_OS_CONTINUE_AFTER_COMPACT` (config
+  `continueAfterCompact`), **ON par défaut** ; `0`/`false`/`no`/`off` coupe.
+  Valeur illisible → ON + `warn` `config.continue_after_compact_invalid` (même
+  indulgence que `SWARM_OS_AUTO_COMPACT_PCT` : on ne fait pas tomber une flotte
+  24/7 pour une faute de frappe). Passé à chaque `Session` à sa construction
+  (`SessionInit.continueAfterCompact`, comme `autoCompactBytes`) ; drapeau
+  jamais armé quand c'est OFF → comportement v0.10.0 à l'octet près. Un
+  `Config` partiel (tests, embarqueurs) qui ne porte pas la clé = OFF, comme
+  `autoCompactPct` non entier = `disabled`.
+
+### 8.2 D10 — Seuil distinct pour les workers, désactivé par défaut
+
+**Constat.** Les workers font des tâches courtes et linéaires, et leur remise
+à zéro est la décision de la lead (`team.clear_worker`). Le seuil de rôle
+unique compactait leads et workers pareillement.
+
+**Contrat.**
+
+- Rôle : nouveau champ `workerAutoCompactPct` (`null` = hérite de l'instance,
+  `0` = jamais, `1..100` = seuil) — mêmes trois états, même assainissement
+  (`toAutoCompactPct`) et même validation stricte (`"35"` et `3.5` → 400,
+  message `workerAutoCompactPct must be null or an integer between 0 and 100`)
+  que `autoCompactPct`, qui ne concerne plus **que la lead**.
+- Instance : `SWARM_OS_WORKER_AUTO_COMPACT_PCT` (config
+  `workerAutoCompactPct`), **défaut `0` = désactivé** ; valeur illisible → `0`
+  + `warn` `config.worker_auto_compact_pct_invalid`.
+- Résolution, toujours à chaud à chaque frontière (D6) :
+  lead → `role.autoCompactPct ?? config.autoCompactPct` (inchangé) ;
+  worker → `role.workerAutoCompactPct ?? config.workerAutoCompactPct`.
+  `OrchestratorDeps.autoCompact.thresholdPctFor(roleId, sessionType)` — le
+  second argument est optionnel et vaut `'lead'` quand il manque, donc un
+  résolveur antérieur garde la sémantique lead.
+- Un worker à `0` répond `disabled` : aucune lecture de jauge à la frontière
+  (même marché que D2 étape 3). Le signal d'inbox (G) et la relance post-compact
+  (D9) restent actifs pour lui — un worker compacté par sa lead
+  (`team.clear_worker { compact: true }`) est relancé comme les autres.
+- DB : colonne additive `roles.worker_auto_compact_pct INTEGER`, nullable sans
+  DEFAULT (même raisonnement que `auto_compact_pct`), migration dans le même
+  bloc `db/index.ts`. `GET /roles` → `defaults: { autoCompactPct,
+  workerAutoCompactPct }`.
+- Web : section AUTO-COMPACT de `RolesPage` à deux champs (lead / workers,
+  enregistrés ensemble), champ `auto-compact workers (%)` dans `RoleDialog`,
+  `duplicateRole` recopie les deux.
+
+### 8.3 Changements de comportement (à connaître)
+
+1. **Les workers ne sont plus auto-compactés par défaut.** Un rôle qui veut
+   l'ancien comportement met `workerAutoCompactPct` à la même valeur que
+   `autoCompactPct` ; une flotte entière : `SWARM_OS_WORKER_AUTO_COMPACT_PCT=35`.
+2. **Après tout `/compact` tiré par le serveur, l'agent reçoit une ligne de
+   relance** à la fin de la compaction (une seule, combinée avec le signal
+   d'inbox si du courrier attend). Coupe-circuit :
+   `SWARM_OS_CONTINUE_AFTER_COMPACT=0`.
+3. Migration DB additive (une colonne nullable) : aucune donnée réécrite ; un
+   retour arrière en v0.10.0 ignore simplement la colonne.
+
+### 8.4 Tests
+
+- `idle-boundary.test.ts` — `signalPostCompact` : armé par `/compact` à la
+  soumission (pas à l'armement), jamais par `/clear`, un `/clear` désarme,
+  désactivé → jamais armé, refus sans consommer (dialogue, signal en cours),
+  une seule écriture et stamp d'inbox en mode combiné.
+- `auto-compact.orchestrator.test.ts` — relance une fois, **pas avant** la fin
+  du spinner, pas après `/clear`, pas quand l'interrupteur est coupé, inbox
+  signalée dans la même ligne et pas re-signalée ensuite, retenue par un
+  dialogue puis livrée ; worker au seuil worker (défaut off), lead inchangée,
+  surcharge de rôle.
+- `context-reset.test.ts` — la relance suit un `/compact` opérateur.
+- `spawner/auto-compact-threshold.test.ts`, `roles/auto-compact-pct.test.ts`,
+  `roles.autocompact.route.test.ts`, `config.auto-compact.test.ts`, web
+  (`RoleDialog.test.tsx`, `lib/autoCompact.test.ts`).

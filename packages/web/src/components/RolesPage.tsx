@@ -108,8 +108,16 @@ type SectionId =
   | 'budget';
 
 export function RolesPage({ open, onClose, onOpenCrons, approvalsVisible = true }: Props) {
-  const { roles, loading, error, create, update, destroy, autoCompactDefaultPct } =
-    useRoles();
+  const {
+    roles,
+    loading,
+    error,
+    create,
+    update,
+    destroy,
+    autoCompactDefaultPct,
+    workerAutoCompactDefaultPct,
+  } = useRoles();
   const { isMobile } = useShellMode();
   const [selectedRoleId, setSelectedRoleId] = useState<string | null>(null);
   const [editingSection, setEditingSection] = useState<SectionId | null>(null);
@@ -232,6 +240,7 @@ export function RolesPage({ open, onClose, onOpenCrons, approvalsVisible = true 
         // like its original did, and a role taken out of auto-compact (`0`)
         // stays out of it.
         autoCompactPct: role.autoCompactPct ?? null,
+        workerAutoCompactPct: role.workerAutoCompactPct ?? null,
       });
       setSelectedRoleId(r.id);
       setEditingSection(null);
@@ -452,6 +461,7 @@ export function RolesPage({ open, onClose, onOpenCrons, approvalsVisible = true 
             <AutoCompactSection
               role={role}
               defaultPct={autoCompactDefaultPct}
+              workerDefaultPct={workerAutoCompactDefaultPct}
               editing={editingSection === 'autocompact'}
               onEdit={() => setEditingSection('autocompact')}
               onCancel={() => setEditingSection(null)}
@@ -1255,28 +1265,38 @@ function AutoCleanupSection({
  * Three states in one field (§3.3): empty = inherit the instance value (shown
  * in the read-only line so "inherit" is never an opaque word), `0` = never
  * auto-compact this role, `1..100` = the threshold.
+ *
+ * Two such fields since v0.10.1 (§8.2): the LEAD's threshold and the WORKERS'
+ * one, each inheriting its own instance value — the workers' ships at `0`
+ * (off). Edited and saved together: they are one decision ("who in this team
+ * gets compacted, and when"), and a single SAVE keeps them from drifting.
  */
 function AutoCompactSection({
   role,
   defaultPct,
+  workerDefaultPct,
   editing,
   onEdit,
   onCancel,
   onSave,
 }: {
   role: RoleView;
-  /** Instance default (`GET /roles` → `defaults.autoCompactPct`). */
+  /** Instance default for the lead (`GET /roles` → `defaults.autoCompactPct`). */
   defaultPct: number;
+  /** Instance default for workers (`GET /roles` → `defaults.workerAutoCompactPct`). */
+  workerDefaultPct: number;
   editing: boolean;
   onEdit: () => void;
   onCancel: () => void;
   onSave: (body: Partial<RoleInput>) => Promise<void>;
 }) {
   const [pct, setPct] = useState('');
+  const [workerPct, setWorkerPct] = useState('');
   const [error, setError] = useState<string | null>(null);
 
   useEffect(() => {
     setPct(autoCompactFieldValue(role.autoCompactPct));
+    setWorkerPct(autoCompactFieldValue(role.workerAutoCompactPct));
     setError(null);
   }, [role.id, editing]);
 
@@ -1287,11 +1307,16 @@ function AutoCompactSection({
       setError(parsed.error);
       return;
     }
+    const parsedWorker = parseAutoCompactPct(workerPct);
+    if (!parsedWorker.ok) {
+      setError(parsedWorker.error);
+      return;
+    }
     try {
       // Sent even as `null`: emptying the field is the only way back to
       // inheriting, and a field that is only sent when filled can set a
       // threshold and never remove one.
-      await onSave({ autoCompactPct: parsed.value });
+      await onSave({ autoCompactPct: parsed.value, workerAutoCompactPct: parsedWorker.value });
     } catch (e) {
       setError(e instanceof Error ? e.message : String(e));
     }
@@ -1318,11 +1343,14 @@ function AutoCompactSection({
       </h3>
 
       {!editing ? (
-        <div className="cfg-pre">{autoCompactSummary(role.autoCompactPct, defaultPct)}</div>
+        <div className="cfg-pre">
+          {`Lead : ${autoCompactSummary(role.autoCompactPct, defaultPct)}\n` +
+            `Workers : ${autoCompactSummary(role.workerAutoCompactPct, workerDefaultPct)}`}
+        </div>
       ) : (
         <>
           <div className="field" style={{ maxWidth: 220 }}>
-            <label>SEUIL DE CONTEXTE (%)</label>
+            <label>LEAD — SEUIL DE CONTEXTE (%)</label>
             <input
               type="number"
               min={0}
@@ -1332,12 +1360,24 @@ function AutoCompactSection({
               placeholder={String(defaultPct)}
             />
           </div>
+          <div className="field" style={{ maxWidth: 220 }}>
+            <label>WORKERS — SEUIL DE CONTEXTE (%)</label>
+            <input
+              type="number"
+              min={0}
+              max={100}
+              value={workerPct}
+              onChange={(e) => setWorkerPct(e.target.value)}
+              placeholder={String(workerDefaultPct)}
+            />
+          </div>
           <div className="field-help" style={{ marginTop: 8 }}>
             Le serveur arme « /compact » quand le contexte de l’agent dépasse ce pourcentage de
             sa fenêtre, seulement quand l’agent est idle avec une inbox vide, jamais au milieu
             d’un tour. Vide = valeur de l’instance. 0 = désactivé pour ce rôle. En dessous du
             socle post-compaction (≈ 15-20 % sur claude), l’agent est re-compacté tous les
-            10 points de croissance.
+            10 points de croissance. Les workers (tâches courtes, remis à zéro par leur lead)
+            ont leur propre seuil, désactivé par défaut au niveau de l’instance.
           </div>
           {error && (
             <div

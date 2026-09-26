@@ -225,3 +225,104 @@ describe('auto_compact_pct — migration', () => {
     }
   });
 });
+
+// --- v0.10.1 — the WORKERS' threshold (docs/auto-compact.md §8.2) -----------
+//
+// `workerAutoCompactPct` is the exact twin of `autoCompactPct`, on its own
+// column. What must hold on top of the twin's own guarantees: the two fields
+// never bleed into each other (one statement list missing the new column would
+// write one field into the other's slot, or never write it at all), and a
+// database upgraded from v0.10.0 backfills the new column to NULL (inherit the
+// instance worker default, i.e. off) without touching the lead's value.
+
+/** Same bypass as `forceStoredPct`, on the workers' column. */
+function forceStoredWorkerPct(roleId: string, value: number | null): void {
+  const raw = new Database(path.join(dir, 'swarm-os.db'));
+  raw.prepare('UPDATE roles SET worker_auto_compact_pct = ? WHERE id = ?').run(value, roleId);
+  raw.close();
+}
+
+describe('RoleStore — workerAutoCompactPct round-trip (v0.10.1)', () => {
+  it('defaults to null (inherit the instance worker default) on a plain create', () => {
+    const role = roles.create({ label: 'plain' });
+    expect(role.workerAutoCompactPct).toBeNull();
+    expect(roles.get(role.id)!.workerAutoCompactPct).toBeNull();
+  });
+
+  it('stores the two thresholds independently, through get() and list()', () => {
+    const role = roles.create({ label: 'both', autoCompactPct: 40, workerAutoCompactPct: 0 });
+    expect(roles.get(role.id)).toMatchObject({ autoCompactPct: 40, workerAutoCompactPct: 0 });
+    const listed = roles.list().find((r) => r.id === role.id)!;
+    expect(listed.autoCompactPct).toBe(40);
+    expect(listed.workerAutoCompactPct).toBe(0);
+  });
+
+  it('is in the UPDATE SET list, and a patch of one field leaves the other alone', () => {
+    const role = roles.create({ label: 'own', autoCompactPct: 50, workerAutoCompactPct: 60 });
+    roles.update(role.id, { workerAutoCompactPct: 70 });
+    expect(roles.get(role.id)).toMatchObject({ autoCompactPct: 50, workerAutoCompactPct: 70 });
+    roles.update(role.id, { autoCompactPct: 20 });
+    expect(roles.get(role.id)).toMatchObject({ autoCompactPct: 20, workerAutoCompactPct: 70 });
+  });
+
+  it('treats an explicit null patch as "back to inherit" and an omission as "unchanged"', () => {
+    const role = roles.create({ label: 'own', workerAutoCompactPct: 45 });
+    roles.update(role.id, { label: 'renamed' });
+    expect(roles.get(role.id)!.workerAutoCompactPct).toBe(45);
+    roles.update(role.id, { workerAutoCompactPct: null });
+    expect(roles.get(role.id)!.workerAutoCompactPct).toBeNull();
+    roles.update(role.id, { workerAutoCompactPct: 0 });
+    expect(roles.get(role.id)!.workerAutoCompactPct).toBe(0);
+  });
+
+  it('reads an out-of-range / fractional column as null, like the lead field', () => {
+    const role = roles.create({ label: 'own', workerAutoCompactPct: 50 });
+    for (const bogus of [250, -5, 35.5, 101]) {
+      forceStoredWorkerPct(role.id, bogus);
+      expect(roles.get(role.id)!.workerAutoCompactPct, `stored ${bogus}`).toBeNull();
+    }
+  });
+});
+
+describe('worker_auto_compact_pct — migration (v0.10.1)', () => {
+  it('adds exactly one column and is idempotent across boots', () => {
+    const cols = (d: SwarmDb): string[] =>
+      d.db
+        .prepare<[], { name: string }>(`SELECT name FROM pragma_table_info('roles')`)
+        .all()
+        .map((r) => r.name);
+    expect(cols(db).filter((c) => c === 'worker_auto_compact_pct')).toHaveLength(1);
+    db.close();
+    const second = new SwarmDb(dir);
+    try {
+      expect(cols(second).filter((c) => c === 'worker_auto_compact_pct')).toHaveLength(1);
+    } finally {
+      second.close();
+    }
+    db = new SwarmDb(dir);
+  });
+
+  it('upgrades a v0.10.0 database: the lead value survives, workers backfill to NULL', () => {
+    // A roles table exactly as v0.10.0 left it — `auto_compact_pct` present,
+    // the workers' column absent — with a role that set its lead threshold.
+    const legacyDir = path.join(dir, 'v0100');
+    fs.mkdirSync(legacyDir, { recursive: true });
+    const first = new SwarmDb(legacyDir);
+    const firstStore = new RoleStore(first);
+    const role = firstStore.create({ label: 'Legacy', autoCompactPct: 30 });
+    first.close();
+    const raw = new Database(path.join(legacyDir, 'swarm-os.db'));
+    raw.exec('ALTER TABLE roles DROP COLUMN worker_auto_compact_pct');
+    raw.close();
+
+    const upgraded = new SwarmDb(legacyDir);
+    try {
+      const store = new RoleStore(upgraded);
+      expect(store.get(role.id)).toMatchObject({ autoCompactPct: 30, workerAutoCompactPct: null });
+      store.update(role.id, { workerAutoCompactPct: 25 });
+      expect(store.get(role.id)).toMatchObject({ autoCompactPct: 30, workerAutoCompactPct: 25 });
+    } finally {
+      upgraded.close();
+    }
+  });
+});

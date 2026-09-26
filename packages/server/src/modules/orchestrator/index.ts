@@ -4,6 +4,7 @@ import {
   type SessionInit,
   type SessionView,
   type SessionSshTransport,
+  type SessionType,
   type ContextResetCommand,
 } from './session.js';
 import { Mailbox } from './mailbox.js';
@@ -208,9 +209,16 @@ export interface OrchestratorDeps {
    *
    * `roleId` is the team's (`Orchestrator.roleId`), possibly `null`; the
    * implementation answers the instance default for a null, unknown or deleted
-   * role. Omitted (every unit test, every embedder) ⇒ `config.autoCompactPct`.
+   * role. Omitted (every unit test, every embedder) ⇒ `config.autoCompactPct`
+   * for the lead, `config.workerAutoCompactPct` for a worker.
+   *
+   * `sessionType` (docs/auto-compact.md §8.2, v0.10.1) — which of the role's
+   * two thresholds is asked for: the lead's (`autoCompactPct`) or the
+   * workers' (`workerAutoCompactPct`, OFF by default). Optional so a resolver
+   * written against v0.10.0 keeps compiling; one that ignores it answers the
+   * lead's threshold for everybody, which is what v0.10.0 did.
    */
-  autoCompact?: { thresholdPctFor(roleId: string | null): number };
+  autoCompact?: { thresholdPctFor(roleId: string | null, sessionType?: SessionType): number };
 }
 
 export interface StartOptions {
@@ -394,7 +402,9 @@ export class Orchestrator {
   /** Monitoring — model context limits (`null` ⇒ the pinned table answers). */
   private readonly _modelCatalogue: ModelCatalogue | null;
   /** docs/auto-compact.md D7 — live per-role threshold resolver, or `null`. */
-  private readonly _autoCompact: { thresholdPctFor(roleId: string | null): number } | null;
+  private readonly _autoCompact: {
+    thresholdPctFor(roleId: string | null, sessionType?: SessionType): number;
+  } | null;
   /** Monitoring — bounded transcript tail reader for this team's transport. */
   private readonly _tailReader: ContextUsageWiring['readTail'];
   /** Monitoring — ranged transcript reader (Lot 11, token accounting). */
@@ -672,6 +682,11 @@ export class Orchestrator {
       onIdle: (s) => this._onSessionIdle(s),
       idleThresholdMs: this.config.idleThresholdMs,
       autoCompactBytes: this.config.contextAutoCompactBytes,
+      // docs/auto-compact.md §8.1 (D9) — "resume" line after each `/compact`.
+      // `=== true`: a hand-built partial `Config` (tests, embedders) without
+      // the key keeps the v0.10.0 behaviour, like `autoCompactPct` undefined
+      // reads as `disabled`.
+      continueAfterCompact: this.config.continueAfterCompact === true,
       // Phase 4: lead session writes a per-session settings.json injecting
       // the Notification hook. The CLAUDE_CONFIG_DIR sub-tree lives under
       // <dataDir>/.claude-runtime/sessions/<id>/. We pass the resolved
@@ -827,6 +842,11 @@ export class Orchestrator {
       onIdle: (s) => this._onSessionIdle(s),
       idleThresholdMs: this.config.idleThresholdMs,
       autoCompactBytes: this.config.contextAutoCompactBytes,
+      // docs/auto-compact.md §8.1 (D9) — "resume" line after each `/compact`.
+      // `=== true`: a hand-built partial `Config` (tests, embedders) without
+      // the key keeps the v0.10.0 behaviour, like `autoCompactPct` undefined
+      // reads as `disabled`.
+      continueAfterCompact: this.config.continueAfterCompact === true,
       hookToken: this.config.hookToken,
       mainHttpPort: this.config.port,
       hookUrl: this.config.hookUrl,
@@ -1017,6 +1037,11 @@ export class Orchestrator {
       onIdle: (s) => this._onSessionIdle(s),
       idleThresholdMs: this.config.idleThresholdMs,
       autoCompactBytes: this.config.contextAutoCompactBytes,
+      // docs/auto-compact.md §8.1 (D9) — "resume" line after each `/compact`.
+      // `=== true`: a hand-built partial `Config` (tests, embedders) without
+      // the key keeps the v0.10.0 behaviour, like `autoCompactPct` undefined
+      // reads as `disabled`.
+      continueAfterCompact: this.config.continueAfterCompact === true,
       hookToken: this.config.hookToken,
       mainHttpPort: this.config.port,
       hookUrl: this.config.hookUrl,
@@ -1122,7 +1147,9 @@ export class Orchestrator {
    * The agent named by `session` has just gone idle, and the Session has
    * already vouched that the line is free (step 0 of D2 lives in
    * `Session._fireIdleBoundary`: right status, no dialog, no armed reset, no
-   * armed notice). Three steps, synchronous, in this order.
+   * armed notice). Three steps, synchronous, in this order — preceded since
+   * v0.10.1 by step 0bis, the post-compact nudge (docs/auto-compact.md §8.1),
+   * which, when it types, takes the whole boundary.
    *
    * Synchronous on purpose: everything it reads is a cached snapshot or an
    * O(1) queue length, and an `async` handler re-entered by a second boundary
@@ -1130,7 +1157,7 @@ export class Orchestrator {
    */
   private _onSessionIdle(session: Session): void {
     const queued = this.mailbox.size(session.id);
-    // --- 1. The inbox signal. This IS guarantee G. -----------------------
+    // Is the inbox signal owed at this boundary? This IS guarantee G.
     //
     // "Signal when something arrived after the last signal we sent" doubles as
     // "signal again after a context reset", because `_fireContextReset` drops
@@ -1142,30 +1169,48 @@ export class Orchestrator {
     // that arrives MID-TURN is never signalled (`messaging.sendMessage` only
     // injects when the recipient is already idle), so it waited for the agent
     // to poll. It is now delivered at the end of that turn.
-    if (queued > 0) {
-      const newest = this.mailbox.newestTs(session.id);
-      const stamp = session.lastInboxSignalAt;
-      if (stamp === null || (newest !== null && newest > stamp)) {
-        try {
-          if (!session.signalInbox()) {
-            // Refused because the line is busy (a half-typed injection). Not an
-            // error: the stamp was not moved either, so the next boundary
-            // retries this very message.
-            log.debug({
-              event: 'session.inbox_signal_deferred',
-              orchId: this.id,
-              sessionId: session.id,
-              inboxCount: queued,
-            });
-          }
-        } catch (err) {
-          log.warn({
-            event: 'session.inbox_signal_failed',
+    //
+    // Computed once, up front, because two steps below can deliver it: the
+    // post-compact nudge (0bis, combined into one line) or the plain signal (1).
+    const inboxDue = queued > 0 && this._inboxSignalDue(session);
+    // --- 0bis. The post-compact nudge (docs/auto-compact.md §8.1, D9) -----
+    //
+    // A server-fired `/compact` reached the PTY and THIS is the first free
+    // boundary since: the compaction is over (its spinner kept the PTY busy
+    // for the whole model call) and the agent is sitting at an empty prompt.
+    // Tell it to resume — with the inbox signal folded into the same line when
+    // it is owed too, so exactly one injection hits the Ink input line.
+    //
+    // Typed ⇒ the boundary is spent: the agent was just handed a turn, it is no
+    // longer "idle with nothing to do", so there is no auto-compact decision to
+    // take (the gauge is `stale`/`not-grown` right after a reset anyway) and no
+    // sample to freshen for it — the resumed turn's own boundary does both.
+    // Refused (line busy) ⇒ nothing consumed, fall through to the usual steps;
+    // the nudge goes out at a later boundary.
+    if (session.postCompactNudgeOwed && this._nudgeAfterCompact(session, queued, inboxDue)) {
+      return;
+    }
+    // --- 1. The inbox signal ----------------------------------------------
+    if (inboxDue) {
+      try {
+        if (!session.signalInbox()) {
+          // Refused because the line is busy (a half-typed injection). Not an
+          // error: the stamp was not moved either, so the next boundary
+          // retries this very message.
+          log.debug({
+            event: 'session.inbox_signal_deferred',
             orchId: this.id,
             sessionId: session.id,
-            error: err instanceof Error ? err.message : String(err),
+            inboxCount: queued,
           });
         }
+      } catch (err) {
+        log.warn({
+          event: 'session.inbox_signal_failed',
+          orchId: this.id,
+          sessionId: session.id,
+          error: err instanceof Error ? err.message : String(err),
+        });
       }
     }
     // --- 2. The auto-compact decision ------------------------------------
@@ -1189,11 +1234,79 @@ export class Orchestrator {
   }
 
   /**
+   * D2 step 1's rule, on its own: is there mail newer than the last inbox
+   * signal this agent got (or has the stamp been dropped by a context reset)?
+   * Only meaningful when the queue is non-empty — the caller checks that.
+   */
+  private _inboxSignalDue(session: Session): boolean {
+    const newest = this.mailbox.newestTs(session.id);
+    const stamp = session.lastInboxSignalAt;
+    return stamp === null || (newest !== null && newest > stamp);
+  }
+
+  /**
+   * Step 0bis of D2 (docs/auto-compact.md §8.1, D9) — type the post-compact
+   * nudge through `Session.signalPostCompact`, the same gate as the inbox
+   * signal, and make it visible. Returns `true` only when the line was
+   * actually typed; `false` leaves the nudge owed for a later boundary.
+   *
+   * `withInbox` folds the inbox signal into the same line (and stamps it), so
+   * a boundary never carries two injections — see
+   * `POST_COMPACT_NUDGE_WITH_INBOX_TEXT`.
+   */
+  private _nudgeAfterCompact(session: Session, inboxCount: number, withInbox: boolean): boolean {
+    let typed: boolean;
+    try {
+      typed = session.signalPostCompact({ inbox: withInbox });
+    } catch (err) {
+      log.warn({
+        event: 'session.post_compact_nudge_failed',
+        orchId: this.id,
+        sessionId: session.id,
+        error: err instanceof Error ? err.message : String(err),
+      });
+      return false;
+    }
+    if (!typed) {
+      // The line is taken (another injection half-typed, a dialog raised
+      // between the boundary and here). Not an error, nothing was consumed.
+      log.debug({
+        event: 'session.post_compact_nudge_deferred',
+        orchId: this.id,
+        sessionId: session.id,
+        inboxCount,
+      });
+      return false;
+    }
+    // The console line is written by the Session itself, BEFORE the text it
+    // types (see `signalPostCompact`), so the two never share a line.
+    log.info({
+      event: 'session.post_compact_nudge',
+      orchId: this.id,
+      sessionId: session.id,
+      sessionType: session.type,
+      inboxCount,
+      inboxSignalled: withInbox,
+    });
+    eventBus.emitEvent({
+      kind: 'session.post_compact_nudge',
+      orchestratorId: this.id,
+      sessionId: session.id,
+      payload: { inboxCount, inboxSignalled: withInbox },
+    });
+    return true;
+  }
+
+  /**
    * Step 2 of D2 — run the pure decision, log it the way an operator can act
    * on, and arm the `/compact` when it says so.
+   *
+   * The threshold depends on WHO the agent is (docs/auto-compact.md §8.2):
+   * the lead uses the role's `autoCompactPct`, a worker the role's
+   * `workerAutoCompactPct` — OFF unless the role or the instance turns it on.
    */
   private _decideSessionAutoCompact(session: Session, inboxCount: number): AutoCompactDecision {
-    const thresholdPct = this._autoCompactThresholdPct();
+    const thresholdPct = this._autoCompactThresholdPct(session.type);
     const usage = session.contextUsage;
     const input: AutoCompactInput = {
       thresholdPct,
@@ -1272,6 +1385,7 @@ export class Orchestrator {
       event: 'session.auto_compact_armed',
       orchId: this.id,
       sessionId: session.id,
+      sessionType: session.type,
       pct: decision.pct,
       thresholdPct,
       floorTokens: session.contextFloorTokens,
@@ -1286,27 +1400,32 @@ export class Orchestrator {
   }
 
   /**
-   * D6 — the threshold in force for this team RIGHT NOW, in percent.
+   * D6 — the threshold in force for this team RIGHT NOW, in percent, for one
+   * kind of agent (docs/auto-compact.md §8.2): `'lead'` (the default, and the
+   * only kind v0.10.0 knew) or `'worker'`.
    *
    * Re-read at every boundary and never cached: a role edited while the fleet
    * runs must apply at the next boundary of each of its agents. A resolver that
    * throws (a store mid-migration, a plugin-supplied one) costs the override,
-   * never the boundary — we fall back to the instance default rather than
-   * skipping the decision.
+   * never the boundary — we fall back to the instance default of the same
+   * kind rather than skipping the decision.
    */
-  private _autoCompactThresholdPct(): number {
+  private _autoCompactThresholdPct(sessionType: SessionType = 'lead'): number {
     if (this._autoCompact !== null) {
       try {
-        return this._autoCompact.thresholdPctFor(this.roleId);
+        return this._autoCompact.thresholdPctFor(this.roleId, sessionType);
       } catch (err) {
         log.warn({
           event: 'orch.auto_compact_threshold_unavailable',
           orchId: this.id,
+          sessionType,
           error: err instanceof Error ? err.message : String(err),
         });
       }
     }
-    return this.config.autoCompactPct;
+    // A partial `Config` without the worker key reads `undefined`, which the
+    // pure decision answers `disabled` — the same default the real config has.
+    return sessionType === 'worker' ? this.config.workerAutoCompactPct : this.config.autoCompactPct;
   }
 
   /**

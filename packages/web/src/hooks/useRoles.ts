@@ -1,6 +1,6 @@
 import { useCallback, useEffect, useState } from 'react';
 import { api, type RoleView, type RoleInput } from '../api/client';
-import { DEFAULT_AUTO_COMPACT_PCT } from '../lib/autoCompact';
+import { DEFAULT_AUTO_COMPACT_PCT, DEFAULT_WORKER_AUTO_COMPACT_PCT } from '../lib/autoCompact';
 
 interface State {
   roles: RoleView[];
@@ -14,6 +14,12 @@ interface State {
    * UI never shows an inherited value it made up out of nothing else.
    */
   autoCompactDefaultPct: number;
+  /**
+   * Same, for the WORKERS' threshold (`workerAutoCompactPct`, v0.10.1 —
+   * docs/auto-compact.md §8.2). `GET /roles` → `defaults.workerAutoCompactPct`;
+   * falls back to `0` (off), the instance default this field ships with.
+   */
+  workerAutoCompactDefaultPct: number;
 }
 
 export function useRoles(refreshMs = 5000): State & {
@@ -27,6 +33,7 @@ export function useRoles(refreshMs = 5000): State & {
     loading: true,
     error: null,
     autoCompactDefaultPct: DEFAULT_AUTO_COMPACT_PCT,
+    workerAutoCompactDefaultPct: DEFAULT_WORKER_AUTO_COMPACT_PCT,
   });
 
   const refresh = useCallback(async () => {
@@ -37,6 +44,8 @@ export function useRoles(refreshMs = 5000): State & {
         loading: false,
         error: null,
         autoCompactDefaultPct: r.defaults?.autoCompactPct ?? DEFAULT_AUTO_COMPACT_PCT,
+        workerAutoCompactDefaultPct:
+          r.defaults?.workerAutoCompactPct ?? DEFAULT_WORKER_AUTO_COMPACT_PCT,
       });
     } catch (err) {
       setState((s) => ({

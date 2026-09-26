@@ -401,8 +401,20 @@ export interface RoleView {
    *   - `0` = disabled for this role — deliberately distinct from `null`;
    *   - `1..100` = the threshold, in percent, as an INTEGER (the server
    *     answers 400 on `3.5` and on the string `"35"`).
+   *
+   * Applies to the team's LEAD only since v0.10.1 — workers have their own
+   * field below.
    */
   autoCompactPct?: number | null;
+  /**
+   * Auto-compact threshold for the team's WORKERS (docs/auto-compact.md §8.2,
+   * v0.10.1) — same three states as `autoCompactPct`, but the instance value a
+   * `null` inherits is `defaults.workerAutoCompactPct`, which is `0` (= OFF)
+   * unless the operator set `SWARM_OS_WORKER_AUTO_COMPACT_PCT`: workers run
+   * short, linear tasks and are reset by their lead, not by a threshold.
+   * Absent on a server predating v0.10.1 — read as "inherit".
+   */
+  workerAutoCompactPct?: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -1802,15 +1814,16 @@ export const api = {
   }) => request<{ text: string }>('POST', '/ai/improve-text', body),
   /**
    * `defaults` carries the INSTANCE value a role inherits when its own field
-   * is `null` (today: `autoCompactPct`, docs/auto-compact.md §3.3). Optional
-   * on purpose — a server predating the feature sends `{ roles }` alone, and
-   * so do the fixtures that mock this call.
+   * is `null` (`autoCompactPct`, docs/auto-compact.md §3.3, and since v0.10.1
+   * `workerAutoCompactPct`, §8.2). Optional on purpose — a server predating the
+   * feature sends `{ roles }` alone, and so do the fixtures that mock this
+   * call; `workerAutoCompactPct` is optional inside it for a v0.10.0 server.
    */
   listRoles: () =>
-    request<{ roles: RoleView[]; defaults?: { autoCompactPct: number } }>(
-      'GET',
-      '/roles',
-    ),
+    request<{
+      roles: RoleView[];
+      defaults?: { autoCompactPct: number; workerAutoCompactPct?: number };
+    }>('GET', '/roles'),
   getRole: (id: string) => request<{ role: RoleView }>('GET', `/roles/${id}`),
   createRole: (body: Partial<RoleInput> & { label: string }) =>
     request<{ role: RoleView }>('POST', '/roles', body),

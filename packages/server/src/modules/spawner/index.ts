@@ -11,7 +11,7 @@ import type { FeatureName } from '../features/registry.js';
 import { eventBus } from '../../events.js';
 import { withModule } from '../../logger.js';
 import type { Config, EffortLevel, PermissionMode } from '../../config.js';
-import type { Session } from '../orchestrator/session.js';
+import type { Session, SessionType } from '../orchestrator/session.js';
 import type { Notifier } from '../notify/index.js';
 import { DiscordWebhookNotifier } from '../notify/discord.js';
 import type { Persistence, ResumableState } from '../orchestrator/persistence.js';
@@ -539,15 +539,9 @@ export class Spawner {
       ...(this.features ? { features: this.features } : {}),
       ...(this.taskboard ? { taskboard: this.taskboard } : {}),
       // docs/auto-compact.md D6/D7 — the per-role auto-compact threshold,
-      // resolved LIVE at every idle boundary. No cache on purpose: an operator
-      // editing a role must see it apply at the next boundary of every agent
-      // of that role, with no restart — this fleet runs 24/7. A null roleId, a
-      // deleted role or a role that never set the field all fall back to the
-      // instance default.
+      // resolved LIVE at every idle boundary (see `autoCompactThresholdFor`).
       autoCompact: {
-        thresholdPctFor: (roleId) =>
-          (roleId ? this.roleStore?.get(roleId)?.autoCompactPct : null) ??
-          this.config.autoCompactPct,
+        thresholdPctFor: (roleId, sessionType) => this.autoCompactThresholdFor(roleId, sessionType),
       },
       skills: (orchestratorId, sessionId) =>
         this.resolveSkillsFor(spec.roleId ?? null, orchestratorId, sessionId),
@@ -609,6 +603,35 @@ export class Spawner {
     }
 
     return { orchestrator: orch, lead };
+  }
+
+  /**
+   * docs/auto-compact.md D6/D7 + §8.2 — the auto-compact threshold, in percent,
+   * for one kind of agent of a team of role `roleId`. The single body behind
+   * `OrchestratorDeps.autoCompact.thresholdPctFor` at both `new Orchestrator`
+   * sites (create and resume), so the two can never resolve differently.
+   *
+   *   - lead   → `role.autoCompactPct ?? config.autoCompactPct` (35 by default);
+   *   - worker → `role.workerAutoCompactPct ?? config.workerAutoCompactPct`
+   *              (0 = OFF by default, v0.10.1).
+   *
+   * Read LIVE at every idle boundary, no cache on purpose: an operator editing
+   * a role must see it apply at the next boundary of every agent of that role,
+   * with no restart — this fleet runs 24/7. A null roleId, a deleted role or a
+   * role that never set the field all fall back to the instance default of the
+   * same kind; a store that THROWS is the Orchestrator's to catch (it falls
+   * back the same way and keeps the boundary alive). `sessionType` defaults to
+   * `'lead'`, the only kind a v0.10.0 caller knew.
+   */
+  private autoCompactThresholdFor(
+    roleId: string | null,
+    sessionType: SessionType = 'lead',
+  ): number {
+    const role = roleId ? this.roleStore?.get(roleId) : null;
+    if (sessionType === 'worker') {
+      return role?.workerAutoCompactPct ?? this.config.workerAutoCompactPct;
+    }
+    return role?.autoCompactPct ?? this.config.autoCompactPct;
   }
 
   /** Resolve the skills active for a session — the per-spawn preamble thunk. */
@@ -1112,15 +1135,10 @@ export class Spawner {
         ...(this.features ? { features: this.features } : {}),
         ...(this.taskboard ? { taskboard: this.taskboard } : {}),
         // docs/auto-compact.md D6/D7 — the per-role auto-compact threshold,
-        // resolved LIVE at every idle boundary. No cache on purpose: an operator
-        // editing a role must see it apply at the next boundary of every agent
-        // of that role, with no restart — this fleet runs 24/7. A null roleId, a
-        // deleted role or a role that never set the field all fall back to the
-        // instance default.
-          autoCompact: {
-          thresholdPctFor: (roleId) =>
-            (roleId ? this.roleStore?.get(roleId)?.autoCompactPct : null) ??
-            this.config.autoCompactPct,
+        // resolved LIVE at every idle boundary (see `autoCompactThresholdFor`).
+        autoCompact: {
+          thresholdPctFor: (roleId, sessionType) =>
+            this.autoCompactThresholdFor(roleId, sessionType),
         },
         skills: (orchestratorId, sessionId) =>
           this.resolveSkillsFor(init.roleId ?? null, orchestratorId, sessionId),

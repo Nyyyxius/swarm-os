@@ -2,7 +2,12 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { Session, SIGNAL_TEXT } from './session.js';
+import {
+  Session,
+  SIGNAL_TEXT,
+  POST_COMPACT_NUDGE_TEXT,
+  POST_COMPACT_NUDGE_WITH_INBOX_TEXT,
+} from './session.js';
 import { Orchestrator } from './index.js';
 import { NoOpPersistence } from './persistence.js';
 import { FakeAgentProcess } from './agent-process.js';
@@ -83,6 +88,11 @@ function makeConfig(overrides: Partial<Config> = {}): Config {
     // otherwise spend 15 s of wall clock waiting for a file it just wrote.
     contextUsageTtlMs: 1,
     autoCompactPct: THRESHOLD,
+    // v0.10.1 (docs/auto-compact.md §8) — the two new knobs at their
+    // PRODUCTION defaults, so every scenario of this suite (not only the new
+    // ones) runs the way a real deployment does: workers off, nudge on.
+    workerAutoCompactPct: 0,
+    continueAfterCompact: true,
     token: 'tk',
     hookToken: 'hk',
     discordWebhookUrl: null,
@@ -99,16 +109,28 @@ interface Team {
   orch: Orchestrator;
   lead: Session;
   pty: FakeAgentProcess;
-  /** Mutable so a test can edit the "role" while the team runs (D6). */
-  threshold: { pct: number };
+  /**
+   * Mutable so a test can edit the "role" while the team runs (D6). `pct` is
+   * the lead's threshold; `workerPct` the role's workers field (§8.2), `null`
+   * = inherit `config.workerAutoCompactPct`.
+   */
+  threshold: { pct: number; workerPct: number | null };
   events: SwarmEvent[];
 }
 
-function makeTeam(opts: { thresholdPct?: number; configOverrides?: Partial<Config> } = {}): Team {
+function makeTeam(
+  opts: {
+    thresholdPct?: number;
+    workerPct?: number | null;
+    configOverrides?: Partial<Config>;
+    /** Build the team WITHOUT `deps.autoCompact` — the config-only fallback. */
+    noResolver?: boolean;
+  } = {},
+): Team {
   const config = makeConfig(opts.configOverrides);
   const registry = new ProviderRegistry();
   registry.register(new FakeProvider({ id: 'claude' }), { builtin: true });
-  const threshold = { pct: opts.thresholdPct ?? THRESHOLD };
+  const threshold = { pct: opts.thresholdPct ?? THRESHOLD, workerPct: opts.workerPct ?? null };
   const orch = new Orchestrator(
     {
       name: 'autocompact',
@@ -127,8 +149,18 @@ function makeTeam(opts: { thresholdPct?: number; configOverrides?: Partial<Confi
       persistence: new NoOpPersistence(),
       providerRegistry: registry,
       // D7 — exactly what the Spawner builds, minus the store: read LIVE at
-      // every boundary, so mutating `threshold.pct` IS a role edit.
-      autoCompact: { thresholdPctFor: () => threshold.pct },
+      // every boundary, so mutating `threshold.pct` IS a role edit. Since
+      // v0.10.1 it answers per kind of agent, like `Spawner.autoCompactThresholdFor`.
+      ...(opts.noResolver
+        ? {}
+        : {
+            autoCompact: {
+              thresholdPctFor: (_roleId: string | null, sessionType?: 'lead' | 'worker') =>
+                sessionType === 'worker'
+                  ? (threshold.workerPct ?? config.workerAutoCompactPct)
+                  : threshold.pct,
+            },
+          }),
     },
   );
   const pty = new FakeAgentProcess({ command: 'fake', args: [], cwd: tmpRoot });
@@ -600,5 +632,330 @@ describe('auto-compact — the refusals an operator has to be able to read', () 
     // Declined at step 0, so the reason is untouched — and nothing was typed.
     expect(team.lead.dialogPendingType).toBe('elicitation_dialog');
     expect(signalCount(team)).toBe(0);
+  });
+});
+
+// ===========================================================================
+// v0.10.1 — docs/auto-compact.md §8.1 (D9): "continue" after a /compact
+// ===========================================================================
+//
+// The production complaint: after a `/compact` lands, the agent sits at its
+// prompt and the work in progress never resumes until a human types
+// "continue". The fix types ONE resume line at the first free boundary after
+// the compaction — the boundary that already carries guarantee G.
+
+function nudgeCount(pty: FakeAgentProcess): number {
+  return pty.writes.join('').split(POST_COMPACT_NUDGE_TEXT).length - 1;
+}
+
+function nudgeLine(session: Session): string | undefined {
+  return session
+    .getRecentLines(200)
+    .find((l) => l.includes('compaction over — nudging the agent to resume'));
+}
+
+/**
+ * Stand in for the compaction itself: the TUI redraws its spinner for the
+ * whole model call. Emitting it is what makes "not before the compaction is
+ * over" a real assertion — a PTY that says nothing would prove nothing.
+ */
+async function compacting(pty: FakeAgentProcess, check?: () => void): Promise<void> {
+  for (let i = 0; i < 9; i++) {
+    pty._emitData('⠋ compacting…\r');
+    await sleep(Math.max(1, Math.floor(IDLE_MS / 3)));
+    check?.();
+  }
+}
+
+function addWorker(team: Team, name = 'w1'): { worker: Session; pty: FakeAgentProcess } {
+  const pty = new FakeAgentProcess({ command: 'fake', args: [], cwd: tmpRoot });
+  const worker = team.orch.addWorker({
+    name,
+    role: 'tester',
+    prompt: 'work',
+    cwd: tmpRoot,
+    agentProcessOverride: pty,
+  });
+  openSessions.push(worker);
+  return { worker, pty };
+}
+
+/** `measure`, for any session of the team, on that session's own transcript. */
+async function measureSession(team: Team, session: Session, usedTokens: number): Promise<void> {
+  const file = path.join(tmpRoot, `transcript-${session.id}.jsonl`);
+  turnSeq += 1;
+  fs.appendFileSync(file, transcript(usedTokens, `msg-${turnSeq}`));
+  session.setTranscriptPath(file);
+  const ok = await waitUntil(() => {
+    team.orch.toView();
+    const u = session.contextUsage;
+    return u !== null && u.usedTokens === usedTokens && !u.stale;
+  });
+  expect(ok).toBe(true);
+}
+
+async function turnOf(pty: FakeAgentProcess): Promise<void> {
+  pty._emitData('working…\r\n');
+  await sleep(IDLE_MS * 3);
+}
+
+describe('post-compact nudge — D9 (v0.10.1)', () => {
+  it('nudges ONCE after an operator /compact, when the compaction is over — not before', async () => {
+    const team = makeTeam();
+    await turn(team);
+    expect(team.orch.requestContextReset(team.lead.id, '/compact').id).toBe(team.lead.id);
+    await waitUntil(() => !team.lead.hasPendingContextReset);
+    expect(team.pty.writes.join('')).toContain('/compact');
+
+    // NOT BEFORE: the whole time the spinner runs, nothing is typed.
+    await compacting(team.pty, () => expect(nudgeCount(team.pty)).toBe(0));
+    // The spinner stops — the compaction is over — and the boundary types it.
+    await sleep(IDLE_MS * 3);
+    expect(nudgeCount(team.pty)).toBe(1);
+    // …after the /compact, never before it.
+    const all = team.pty.writes.join('');
+    expect(all.indexOf(POST_COMPACT_NUDGE_TEXT)).toBeGreaterThan(all.indexOf('/compact'));
+    // Visible: console line, bus event (inbox was empty, nothing folded in).
+    expect(nudgeLine(team.lead)).toBeDefined();
+    const ev = team.events.filter((e) => e.kind === 'session.post_compact_nudge');
+    expect(ev).toHaveLength(1);
+    expect(ev[0]?.sessionId).toBe(team.lead.id);
+    expect(ev[0]?.payload).toEqual({ inboxCount: 0, inboxSignalled: false });
+
+    // EXACTLY once per compaction: the agent's next turns get nothing more.
+    await turn(team);
+    await turn(team);
+    expect(nudgeCount(team.pty)).toBe(1);
+    expect(team.lead.postCompactNudgeOwed).toBe(false);
+  });
+
+  it('nudges after an AUTO-compact — the case reported in production', async () => {
+    const team = makeTeam();
+    await measure(team, 10_000);
+    await turn(team);
+    await measure(team, 0.4 * LIMIT);
+    await turn(team);
+    expect(armedLine(team)).toBeDefined();
+    await waitUntil(() => !team.lead.hasPendingContextReset);
+    expect(team.pty.writes.join('')).toContain('swarm-os auto-compact:');
+    expect(nudgeCount(team.pty)).toBe(0);
+    await compacting(team.pty);
+    await sleep(IDLE_MS * 3);
+    expect(nudgeCount(team.pty)).toBe(1);
+    // The nudge boundary is spent on the nudge: no second /compact is armed on
+    // the pre-compaction figure the gauge still serves.
+    expect(team.lead.hasPendingContextReset).toBe(false);
+    expect(team.events.filter((e) => e.kind === 'session.auto_compact')).toHaveLength(1);
+  });
+
+  it('nudges after an agent-requested compact (team.context_compact) and a lead→worker one', async () => {
+    const team = makeTeam();
+    // `team.context_compact` is exactly this call on the caller's own session.
+    expect(
+      team.lead.requestContextReset('/compact', { idleMs: IDLE_MS, instructions: 'waiting on w1' }),
+    ).toBe(true);
+    await waitUntil(() => !team.lead.hasPendingContextReset);
+    await compacting(team.pty);
+    await sleep(IDLE_MS * 3);
+    expect(nudgeCount(team.pty)).toBe(1);
+
+    // `team.clear_worker { compact: true }` — the lead compacts a worker.
+    const { worker, pty } = addWorker(team);
+    await turnOf(pty);
+    expect(team.orch.requestWorkerContextReset(worker.id, '/compact')).toBe(true);
+    await waitUntil(() => !worker.hasPendingContextReset);
+    await compacting(pty);
+    await sleep(IDLE_MS * 3);
+    expect(nudgeCount(pty)).toBe(1);
+  });
+
+  it('does NOT nudge after a /clear — a cleared agent is idle on purpose', async () => {
+    const team = makeTeam();
+    await turn(team);
+    team.orch.requestContextReset(team.lead.id, '/clear');
+    await waitUntil(() => !team.lead.hasPendingContextReset);
+    expect(team.pty.writes.join('')).toContain('/clear');
+    await compacting(team.pty);
+    await sleep(IDLE_MS * 3);
+    await turn(team);
+    expect(nudgeCount(team.pty)).toBe(0);
+    expect(team.events.filter((e) => e.kind === 'session.post_compact_nudge')).toHaveLength(0);
+  });
+
+  it('does NOT nudge when SWARM_OS_CONTINUE_AFTER_COMPACT is off — and G still holds', async () => {
+    const team = makeTeam({ configOverrides: { continueAfterCompact: false } });
+    await turn(team);
+    team.orch.mailbox.push(team.lead.id, { from: 'human', content: 'still here' });
+    await turn(team);
+    expect(signalCount(team)).toBe(1);
+    team.orch.requestContextReset(team.lead.id, '/compact');
+    await waitUntil(() => !team.lead.hasPendingContextReset);
+    await compacting(team.pty);
+    await sleep(IDLE_MS * 3);
+    expect(nudgeCount(team.pty)).toBe(0);
+    // The v0.10.0 behaviour, untouched: the plain inbox re-signal after the reset.
+    expect(signalCount(team)).toBe(2);
+  });
+
+  it('folds the inbox signal into ONE line when mail is waiting, and does not re-signal it', async () => {
+    const team = makeTeam();
+    await turn(team);
+    team.orch.mailbox.push(team.lead.id, { from: 'human', content: 'still here' });
+    await turn(team);
+    expect(signalCount(team)).toBe(1);
+
+    team.orch.requestContextReset(team.lead.id, '/compact');
+    await waitUntil(() => !team.lead.hasPendingContextReset);
+    const before = team.pty.writes.length;
+    await compacting(team.pty);
+    // Boundary at +IDLE_MS after the spinner, then the CR at +150 ms.
+    await sleep(IDLE_MS * 3 + 200);
+
+    // One injection on that boundary: the combined text, then its lone CR —
+    // never the nudge and the signal as two separate lines racing for the
+    // Ink input.
+    const injected = team.pty.writes.slice(before).filter((w) => !w.startsWith('⠋'));
+    expect(injected).toEqual([POST_COMPACT_NUDGE_WITH_INBOX_TEXT, '\r']);
+    expect(signalCount(team)).toBe(2);
+    expect(nudgeLine(team.lead)).toContain('(+ inbox signal)');
+    const ev = team.events.filter((e) => e.kind === 'session.post_compact_nudge');
+    expect(ev[0]?.payload).toEqual({ inboxCount: 1, inboxSignalled: true });
+
+    // The combined line stamped the inbox: the same message is not signalled
+    // again at the following boundaries (one reminder per message still holds).
+    await turn(team);
+    await turn(team);
+    expect(signalCount(team)).toBe(2);
+    expect(nudgeCount(team.pty)).toBe(1);
+  });
+
+  it('is held by a dialog and delivered at the first boundary after it closes', async () => {
+    const team = makeTeam();
+    await turn(team);
+    team.orch.requestContextReset(team.lead.id, '/compact');
+    await waitUntil(() => !team.lead.hasPendingContextReset);
+    await compacting(team.pty);
+    // A permission dialog pops up as the compaction ends — drawn (a byte) and
+    // hooked in the same tick, so the boundary cannot slip in between.
+    team.pty._emitData('Allow tool? (y/n)');
+    team.lead.markDialogPending('permission_prompt');
+    await sleep(IDLE_MS * 3);
+    await turn(team);
+    expect(nudgeCount(team.pty)).toBe(0);
+    expect(team.lead.postCompactNudgeOwed).toBe(true);
+    // A human answers it: the boundary comes back, and the nudge with it.
+    team.lead.clearDialogPending('input');
+    await sleep(IDLE_MS * 3);
+    expect(nudgeCount(team.pty)).toBe(1);
+  });
+
+  it('a busy line defers the nudge to the next boundary instead of dropping it', async () => {
+    const team = makeTeam();
+    await turn(team);
+    team.orch.requestContextReset(team.lead.id, '/compact');
+    await waitUntil(() => !team.lead.hasPendingContextReset);
+    await compacting(team.pty);
+    // Another injector takes the line just before the boundary lands (the
+    // worker-exit path, a plugin bridge…): its CR is pending for 150 ms, well
+    // past the boundary. A byte first, in the same tick, so the boundary is a
+    // full IDLE_MS away whatever the timer jitter.
+    team.pty._emitData('⠋ compacting…\r');
+    expect(team.lead.signalInbox()).toBe(true);
+    await sleep(IDLE_MS * 2);
+    expect(nudgeCount(team.pty)).toBe(0);
+    expect(team.lead.postCompactNudgeOwed).toBe(true);
+    // The agent answers that signal (a turn), and the next boundary nudges.
+    await turn(team);
+    expect(nudgeCount(team.pty)).toBe(1);
+  });
+});
+
+// ===========================================================================
+// v0.10.1 — docs/auto-compact.md §8.2 (D10): workers have their own threshold
+// ===========================================================================
+
+describe('auto-compact — workers use the WORKER threshold (v0.10.1)', () => {
+  it('does not auto-compact a worker by default, while the lead is compacted as before', async () => {
+    const team = makeTeam();
+    const { worker, pty } = addWorker(team);
+    await measureSession(team, worker, 10_000);
+    await turnOf(pty);
+    await measureSession(team, worker, 0.9 * LIMIT); // 90 %, far past the lead's 35
+    await turnOf(pty);
+    expect(worker.hasPendingContextReset).toBe(false);
+    expect(worker.lastAutoCompactSkipReason).toBe('disabled');
+
+    // The lead of the same team: unchanged, 40 % ≥ 35 % fires.
+    await measure(team, 10_000);
+    await turn(team);
+    await measure(team, 0.4 * LIMIT);
+    await turn(team);
+    expect(team.lead.hasPendingContextReset).toBe(true);
+    const ev = team.events.filter((e) => e.kind === 'session.auto_compact');
+    expect(ev.map((e) => e.sessionId)).toEqual([team.lead.id]);
+  });
+
+  it('a role worker threshold turns it on for the workers — with its own figure', async () => {
+    const team = makeTeam({ thresholdPct: 80, workerPct: 30 });
+    const { worker, pty } = addWorker(team);
+    await measureSession(team, worker, 10_000);
+    await turnOf(pty);
+    await measureSession(team, worker, 0.4 * LIMIT);
+    await turnOf(pty);
+    expect(worker.hasPendingContextReset).toBe(true);
+    expect(
+      worker.getRecentLines(200).find((l) => l.includes('auto-compact armed')),
+    ).toContain('context 40% ≥ 30%');
+  });
+
+  it('a role worker value of 0 keeps workers off even when the instance has them on', async () => {
+    const team = makeTeam({ workerPct: 0, configOverrides: { workerAutoCompactPct: 20 } });
+    const { worker, pty } = addWorker(team);
+    await measureSession(team, worker, 10_000);
+    await turnOf(pty);
+    await measureSession(team, worker, 0.5 * LIMIT);
+    await turnOf(pty);
+    expect(worker.hasPendingContextReset).toBe(false);
+  });
+
+  it('an inheriting role follows SWARM_OS_WORKER_AUTO_COMPACT_PCT', async () => {
+    const team = makeTeam({ workerPct: null, configOverrides: { workerAutoCompactPct: 25 } });
+    const { worker, pty } = addWorker(team);
+    await measureSession(team, worker, 10_000);
+    await turnOf(pty);
+    await measureSession(team, worker, 0.36 * LIMIT);
+    await turnOf(pty);
+    expect(worker.hasPendingContextReset).toBe(true);
+  });
+
+  it('with no resolver at all, each kind falls back to its own instance value', async () => {
+    // The config-only path (`deps.autoCompact` omitted): lead → autoCompactPct,
+    // worker → workerAutoCompactPct (0 here, the production default).
+    const team = makeTeam({ noResolver: true });
+    const { worker, pty } = addWorker(team);
+    await measureSession(team, worker, 10_000);
+    await turnOf(pty);
+    await measureSession(team, worker, 0.9 * LIMIT);
+    await turnOf(pty);
+    expect(worker.hasPendingContextReset).toBe(false);
+    expect(worker.lastAutoCompactSkipReason).toBe('disabled');
+    await measure(team, 10_000);
+    await turn(team);
+    await measure(team, 0.4 * LIMIT);
+    await turn(team);
+    expect(team.lead.hasPendingContextReset).toBe(true);
+  });
+
+  it('a worker at 0 does not pay a transcript read at its boundaries', async () => {
+    // D2 step 3's bargain, extended to workers: `disabled` ⇒ no gauge refresh
+    // from the boundary. Only boundaries here, no `toView()`.
+    const team = makeTeam();
+    const { worker, pty } = addWorker(team);
+    const file = path.join(tmpRoot, `transcript-${worker.id}.jsonl`);
+    fs.appendFileSync(file, transcript(50_000, 'msg-w'));
+    worker.setTranscriptPath(file);
+    await turnOf(pty);
+    await turnOf(pty);
+    expect(worker.contextUsage).toBeNull();
   });
 });

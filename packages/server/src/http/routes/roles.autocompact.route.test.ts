@@ -40,6 +40,8 @@ import type { Config } from '../../config.js';
  * pass on a hardcoded default if the instance value were the default value.
  */
 const INSTANCE_PCT = 42;
+/** Same reasoning for the workers' instance value (v0.10.1): NOT its default 0. */
+const INSTANCE_WORKER_PCT = 17;
 
 let listening: Server | null = null;
 let tmpRoot: string;
@@ -57,6 +59,7 @@ beforeEach(async () => {
     createRolesRouter(store, {
       maxWorkersPerOrch: 8,
       autoCompactPct: INSTANCE_PCT,
+      workerAutoCompactPct: INSTANCE_WORKER_PCT,
     } as unknown as Config),
   );
   const server = createServer(app);
@@ -280,7 +283,10 @@ describe('auto_compact_pct column — round-trip', () => {
 describe('GET /roles — defaults.autoCompactPct', () => {
   it('carries the instance default so the UI can render "inherits (N %)"', async () => {
     const body = await (await fetch(`${base}/roles`)).json();
-    expect(body.defaults).toEqual({ autoCompactPct: INSTANCE_PCT });
+    expect(body.defaults).toEqual({
+      autoCompactPct: INSTANCE_PCT,
+      workerAutoCompactPct: INSTANCE_WORKER_PCT,
+    });
   });
 
   it('is served even with no role at all, and leaves the roles array untouched', async () => {
@@ -295,5 +301,83 @@ describe('GET /roles — defaults.autoCompactPct', () => {
     expect(after.roles).toHaveLength(1);
     expect(after.roles[0]).toMatchObject({ id, autoCompactPct: null, cronCount: 0 });
     expect(after.defaults.autoCompactPct).toBe(INSTANCE_PCT);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// v0.10.1 — the WORKERS' threshold (docs/auto-compact.md §8.2)
+// ---------------------------------------------------------------------------
+//
+// Same contract as `autoCompactPct`, on its own field: the three states, the
+// strict parser (with its own name in the 400, so the operator knows WHICH of
+// the two numbers was refused), the null/omission distinction on PATCH — and
+// the two fields never overwrite each other.
+
+describe('POST / PATCH /roles — workerAutoCompactPct (v0.10.1)', () => {
+  it('stores null, 0 and a threshold as three distinct states', async () => {
+    for (const pct of [null, 0, 1, 60, 100]) {
+      const res = await post({ label: 'CALM', workerAutoCompactPct: pct });
+      expect(res.status, `workerAutoCompactPct=${String(pct)}`).toBe(201);
+      const id = (await res.json()).role.id as string;
+      expect(store.get(id)?.workerAutoCompactPct).toBe(pct);
+    }
+  });
+
+  it('defaults to null (inherit the instance worker value) when omitted', async () => {
+    const id = await createRole({ autoCompactPct: 30 });
+    expect(store.get(id)).toMatchObject({ autoCompactPct: 30, workerAutoCompactPct: null });
+  });
+
+  it('rejects what the lead field rejects, naming the workers field', async () => {
+    for (const bad of [101, -1, 3.5, '35', '', true, [], {}]) {
+      const res = await post({ label: 'CALM', workerAutoCompactPct: bad });
+      expect(res.status, `workerAutoCompactPct=${JSON.stringify(bad)}`).toBe(400);
+      expect((await res.json()).error).toBe(
+        'workerAutoCompactPct must be null or an integer between 0 and 100',
+      );
+    }
+    const id = await createRole({ workerAutoCompactPct: 40 });
+    const res = await patch(id, { workerAutoCompactPct: 3.5 });
+    expect(res.status).toBe(400);
+    expect(store.get(id)?.workerAutoCompactPct).toBe(40);
+  });
+
+  it('patches one threshold without touching the other, and null clears it', async () => {
+    const id = await createRole({ autoCompactPct: 50, workerAutoCompactPct: 20 });
+    expect((await patch(id, { workerAutoCompactPct: 25 })).status).toBe(200);
+    expect(store.get(id)).toMatchObject({ autoCompactPct: 50, workerAutoCompactPct: 25 });
+    expect((await patch(id, { autoCompactPct: 10 })).status).toBe(200);
+    expect(store.get(id)).toMatchObject({ autoCompactPct: 10, workerAutoCompactPct: 25 });
+    expect((await patch(id, { workerAutoCompactPct: null })).status).toBe(200);
+    expect(store.get(id)).toMatchObject({ autoCompactPct: 10, workerAutoCompactPct: null });
+  });
+
+  it('exposes the field on the role views', async () => {
+    const id = await createRole({ workerAutoCompactPct: 0 });
+    const one = await (await fetch(`${base}/roles/${id}`)).json();
+    expect(one.role.workerAutoCompactPct).toBe(0);
+    const list = await (await fetch(`${base}/roles`)).json();
+    expect(list.roles[0].workerAutoCompactPct).toBe(0);
+  });
+});
+
+describe('GET /roles — defaults.workerAutoCompactPct (v0.10.1)', () => {
+  it('falls back to 0 (off) when the Config carries no worker value', async () => {
+    // A hand-built partial `Config` — the case the `??` in the route exists
+    // for: serving `undefined` would drop the key and the form would render
+    // "Hérite (undefined %)".
+    const app = express();
+    app.use(express.json());
+    app.use(createRolesRouter(store, { maxWorkersPerOrch: 8 } as unknown as Config));
+    const server = createServer(app);
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+    try {
+      const addr = server.address();
+      const port = addr && typeof addr === 'object' ? addr.port : 0;
+      const body = await (await fetch(`http://127.0.0.1:${port}/roles`)).json();
+      expect(body.defaults).toEqual({ autoCompactPct: 35, workerAutoCompactPct: 0 });
+    } finally {
+      await new Promise<void>((resolve) => server.close(() => resolve()));
+    }
   });
 });

@@ -44,6 +44,8 @@ const budgetInput = () =>
   screen.getByLabelText(/^cost budget \(usd\)/) as HTMLInputElement;
 const autoCompactInput = () =>
   screen.getByLabelText(/^auto-compact \(%\)/) as HTMLInputElement;
+const workerAutoCompactInput = () =>
+  screen.getByLabelText(/^auto-compact workers \(%\)/) as HTMLInputElement;
 const actionButton = (label: string) =>
   screen.getByRole('radio', { name: label });
 
@@ -273,5 +275,74 @@ describe('RoleDialog · AUTO-COMPACT field', () => {
       costBudgetUsd: 50,
       autoCompactPct: 25,
     });
+  });
+});
+
+// ── AUTO-COMPACT WORKERS (docs/auto-compact.md §8.2, v0.10.1) ──────────────
+//
+// The workers' threshold is a SECOND field with the same three states, whose
+// instance default is OFF. What has to hold is exactly what holds for the
+// lead's field — `null` / `0` / integer reach `onSubmit` distinctly — plus
+// that the two fields never bleed into each other.
+describe('RoleDialog · AUTO-COMPACT WORKERS field', () => {
+  it('opens empty (inherit = off by default) and says so', () => {
+    renderDialog();
+    expect(workerAutoCompactInput().value).toBe('');
+    expect(screen.getByText(/Vide = valeur de l’instance \(désactivé par/)).toBeTruthy();
+  });
+
+  it('submits null when left empty, alongside the lead threshold', async () => {
+    const onSubmit = renderDialog();
+    fillLabel();
+    fireEvent.change(autoCompactInput(), { target: { value: '40' } });
+    save();
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    expect(onSubmit.mock.calls[0]?.[0]).toMatchObject({ autoCompactPct: 40 });
+    expect(onSubmit.mock.calls[0]?.[0].workerAutoCompactPct).toBeNull();
+  });
+
+  it('submits a worker threshold without touching the lead one', async () => {
+    const onSubmit = renderDialog();
+    fillLabel();
+    fireEvent.change(workerAutoCompactInput(), { target: { value: '60' } });
+    save();
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    expect(onSubmit.mock.calls[0]?.[0]).toMatchObject({ workerAutoCompactPct: 60 });
+    expect(onSubmit.mock.calls[0]?.[0].autoCompactPct).toBeNull();
+  });
+
+  it('keeps an explicit 0 as 0 across an edit', async () => {
+    const onSubmit = renderDialog(role({ autoCompactPct: 30, workerAutoCompactPct: 0 }));
+    expect(workerAutoCompactInput().value).toBe('0');
+    expect(autoCompactInput().value).toBe('30');
+    save();
+
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    expect(onSubmit.mock.calls[0]?.[0]).toMatchObject({
+      autoCompactPct: 30,
+      workerAutoCompactPct: 0,
+    });
+  });
+
+  it('refuses an out-of-range worker threshold instead of submitting it', async () => {
+    const onSubmit = renderDialog();
+    fillLabel();
+    fireEvent.change(workerAutoCompactInput(), { target: { value: '3.5' } });
+    save();
+
+    expect(
+      await screen.findByText(/Le seuil doit être un entier entre 0 et 100/),
+    ).toBeTruthy();
+    expect(onSubmit).not.toHaveBeenCalled();
+  });
+
+  it('opens on inherit for a role from a server predating v0.10.1', async () => {
+    const onSubmit = renderDialog(role({ autoCompactPct: 25 }));
+    expect(workerAutoCompactInput().value).toBe('');
+    save();
+    await waitFor(() => expect(onSubmit).toHaveBeenCalled());
+    expect(onSubmit.mock.calls[0]?.[0].workerAutoCompactPct).toBeNull();
   });
 });

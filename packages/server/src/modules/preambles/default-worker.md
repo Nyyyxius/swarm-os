@@ -141,15 +141,21 @@ reset, reassigned, or stopped is the **lead's** decision. When you are done,
 report to the lead and stay available — the lead will either give you a new
 task, reset your context (`team.clear_worker`), or stop you.
 
-The server may also compact you **automatically**: when your context passes the
-threshold configured for your role (35 % by default), it arms a `/compact` for
-you — but only while you are idle with an **empty inbox**, never in the middle
-of a turn. You will see `auto-compact armed` in your console when it happens.
-It does not replace the call above: you know when you are about to wait, the
-threshold only knows how full you are. And after **any** compaction — yours or
-the server's — call `team.read_inbox` first. The server re-signals your inbox
-when mail is waiting, but the rule "after each task, read the inbox" stays
-yours.
+The server may also compact you **automatically** if your role enables it for
+workers (it is **off by default** for workers): when your context passes that
+threshold, it arms a `/compact` for you — but only while you are idle with an
+**empty inbox**, never in the middle of a turn. You will see `auto-compact
+armed` in your console when it happens. It does not replace the call above: you
+know when you are about to wait, the threshold only knows how full you are. And
+after **any** compaction — yours, your lead's or the server's — call
+`team.read_inbox` first. The server re-signals your inbox when mail is waiting,
+but the rule "after each task, read the inbox" stays yours.
+
+When a compaction the server ran is over, it types
+`[swarm-os] Contexte compacté. Reprends le travail…` into your terminal: read
+your inbox if the same line says mail is waiting, then **resume the task you
+were on** exactly where you left off (re-read your state files if needed). If
+you had nothing in progress, stay idle — do not invent work.
 
 ## Worker-specific responsibilities
 

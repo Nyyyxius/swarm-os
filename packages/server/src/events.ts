@@ -92,7 +92,7 @@ export type BudgetSwarmEventKind = 'session.budget_exceeded';
  * The frame exists so a dashboard or a plugin can COUNT compactions; the badge
  * already covers the UI.
  */
-export type AutoCompactSwarmEventKind = 'session.auto_compact';
+export type AutoCompactSwarmEventKind = 'session.auto_compact' | 'session.post_compact_nudge';
 
 /**
  * Code-graph (Graphify integration) event kinds. Emitted by `GraphStore` via the
@@ -196,6 +196,21 @@ export interface BudgetExceededPayload {
 export interface AutoCompactEventPayload {
   pct: number;
   thresholdPct: number;
+}
+
+/**
+ * Payload of `session.post_compact_nudge` (docs/auto-compact.md §8.1, D9) —
+ * emitted when the "resume" line was actually typed into an agent's PTY at the
+ * end of a server-fired `/compact`. Same no-toast policy as
+ * `session.auto_compact`: it exists so a dashboard or a plugin can count them.
+ *
+ * `inboxCount` is the queue length at that boundary; `inboxSignalled` says
+ * whether the inbox signal was folded into the same line (it is owed right
+ * after a reset whenever the queue is non-empty).
+ */
+export interface PostCompactNudgeEventPayload {
+  inboxCount: number;
+  inboxSignalled: boolean;
 }
 
 export interface SwarmEvent {

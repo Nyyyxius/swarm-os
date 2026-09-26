@@ -181,10 +181,14 @@ agent nobody is waiting on.
 This is an accepted degradation, not a bug: those CLIs have no "I am blocked on
 a human" signal to give. Compaction does not depend on it: the primary
 automatic path is the **context-threshold auto-compact** (`docs/auto-compact.md`,
-`SWARM_OS_AUTO_COMPACT_PCT` / per-role `autoCompactPct`, default 35 %), which
+`SWARM_OS_AUTO_COMPACT_PCT` / per-role `autoCompactPct`, default 35 %, for the
+lead; workers have their own threshold, off by default since v0.10.1), which
 reads each provider's context-usage source and arms `/compact` at the idle
 boundary — it works for claude, codex and opencode, and never fires for gemini
-(no context-usage source). `SWARM_OS_AUTO_COMPACT_BYTES` (volume-driven) remains
+(no context-usage source). The post-compact "resume" line
+(`SWARM_OS_CONTINUE_AFTER_COMPACT`, `docs/auto-compact.md` §8.1) is typed
+through the same `notifySignal` path as the inbox signal, so it follows each
+provider's submit rule (`inkSubmitDance`) and works for all four. `SWARM_OS_AUTO_COMPACT_BYTES` (volume-driven) remains
 as a secondary backstop.
 
 The UI carries the same statement per provider, so it is visible in the

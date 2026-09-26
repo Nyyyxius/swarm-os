@@ -136,6 +136,44 @@ const SIGNAL_WRITE_WINDOW_MS = 150;
 export const SIGNAL_TEXT = '[swarm-os] new message in inbox — call team.read_inbox to fetch';
 
 /**
+ * docs/auto-compact.md §8.1 (D9, v0.10.1) — the line typed into an agent's PTY
+ * once a `/compact` the SERVER fired is over.
+ *
+ * Why it exists: a `/compact` does not start a turn. Every CLI summarises the
+ * conversation and hands back an EMPTY prompt, so an agent compacted with work
+ * in progress — by the threshold auto-compact (D2), by its own
+ * `team.context_compact`, by its lead's `team.clear_worker { compact: true }`
+ * or by the operator's COMPACT button — sat at that prompt until a human typed
+ * "continue". Seen in production on v0.10.0.
+ *
+ * French because the fleet works in French. ONE LINE, no `\r` / `\n`: it is
+ * typed into a live prompt buffer, and an embedded CR would submit it half-way
+ * (`notifySignal`'s JSDoc). The last sentence is load-bearing: the nudge
+ * follows EVERY server-fired compaction, including one that caught an agent
+ * with nothing in progress (a lead waiting on its workers, a `/compact` the CLI
+ * refused), and such an agent must stay idle rather than invent work.
+ *
+ * A server constant, never user or agent input.
+ */
+export const POST_COMPACT_NUDGE_TEXT =
+  "[swarm-os] Contexte compacté. Reprends le travail que tu avais en cours là où tu t'étais arrêté " +
+  "(relis tes fichiers d'état si besoin). Si tu n'avais rien en cours, reste simplement en attente.";
+
+/**
+ * The post-compact nudge when the inbox signal is ALSO owed at that boundary
+ * (docs/auto-compact.md §8.1): ONE line, one submission.
+ *
+ * Two injections on the same boundary are not an option — the second would
+ * land inside the first one's `_signalFiring` window and either be refused or,
+ * without that guard, interleave as `text1 text2 CR CR` and submit one garbled
+ * line. `SIGNAL_TEXT` is appended BYTE FOR BYTE: the preambles tell every agent
+ * "when you see `[swarm-os] new message in inbox`, read the inbox before
+ * continuing", so the combined line keeps that contract instead of inventing a
+ * second wording of it.
+ */
+export const POST_COMPACT_NUDGE_WITH_INBOX_TEXT = `${POST_COMPACT_NUDGE_TEXT} ${SIGNAL_TEXT}`;
+
+/**
  * How old a `dialogPending` flag must get before we say so (D5).
  *
  * A dialog closed WITHOUT a keystroke — an MCP elicitation the client cancelled
@@ -358,6 +396,19 @@ export interface SessionInit {
    * `0` (default) disables the backstop — the agent-driven path is primary.
    */
   autoCompactBytes?: number;
+  /**
+   * docs/auto-compact.md §8.1 (D9) — owe the agent a `POST_COMPACT_NUDGE_TEXT`
+   * at the first free idle boundary after each `/compact` this Session submits.
+   * The Orchestrator passes `config.continueAfterCompact`
+   * (`SWARM_OS_CONTINUE_AFTER_COMPACT`, ON by default). Absent = `false`, so a
+   * Session built without it behaves exactly as it did in v0.10.0.
+   *
+   * The Session only ARMS and GATES the nudge (`postCompactNudgeOwed`,
+   * `signalPostCompact`); choosing to type it is the idle-boundary handler's
+   * job (`Orchestrator._onSessionIdle`), because the combined line with the
+   * inbox signal needs the mailbox, which the Session does not see.
+   */
+  continueAfterCompact?: boolean;
   /**
    * Phase 4: hook token + main HTTP port. When both are set, the provider
    * writes a per-session config dir under `<runtimeRoot>/sessions/<id>/`
@@ -785,6 +836,20 @@ export class Session extends EventEmitter {
    */
   private _lastInboxSignalAt: number | null = null;
   /**
+   * docs/auto-compact.md §8.1 (D9) — a `/compact` reached the PTY and the agent
+   * has not been told to resume yet.
+   *
+   * Armed in `_fireContextReset` at the moment the command is SUBMITTED (its
+   * `\r` landed), never when it is merely armed: an armed reset can wait
+   * minutes for its boundary, and one the provider does not support never
+   * writes anything. Cleared by a `/clear` fired in between (a wiped agent is
+   * idle on purpose) and consumed by `signalPostCompact` — which is what makes
+   * it "exactly once per compaction". A boundary DECLINED by the step-0 guards
+   * of `_fireIdleBoundary` never reaches the handler, so it cannot consume it
+   * either; neither can a refused injection.
+   */
+  private _postCompactNudgeOwed = false;
+  /**
    * docs/auto-compact.md D8 — the last refusal reason
    * `Orchestrator._onSessionIdle` logged for this session, so it can log at
    * `info` on a CHANGE and at `debug` otherwise. Lives here because the state
@@ -807,6 +872,8 @@ export class Session extends EventEmitter {
   private _bytesSinceReset = 0;
   private readonly _idleThresholdMs: number;
   private readonly _autoCompactBytes: number;
+  /** docs/auto-compact.md §8.1 — `SessionInit.continueAfterCompact`, frozen at construction. */
+  private readonly _continueAfterCompact: boolean;
 
   /** Phase 4 — set during construction, fired on every state mutation. */
   private readonly _onStateChange: ((session: Session, force: boolean) => void) | null;
@@ -871,6 +938,7 @@ export class Session extends EventEmitter {
     this._onIdle = init.onIdle ?? null;
     this._idleThresholdMs = init.idleThresholdMs ?? 2000;
     this._autoCompactBytes = init.autoCompactBytes ?? 0;
+    this._continueAfterCompact = init.continueAfterCompact === true;
 
     const orchLogDir = path.join(init.logsDir, this.orchestratorId);
     fs.mkdirSync(orchLogDir, { recursive: true });
@@ -1508,10 +1576,71 @@ export class Session extends EventEmitter {
    * stamp this method sets.
    */
   signalInbox(): boolean {
-    if (this.dialogPending) return false;
-    if (this._contextResetFiring || this._noticeFiring || this._signalFiring) return false;
+    if (this._injectionRefused()) return false;
     this.notifySignal(SIGNAL_TEXT);
     this._lastInboxSignalAt = Date.now();
+    return true;
+  }
+
+  /**
+   * The line is not free for a server-side injection right now — the four
+   * refusals documented on `signalInbox`, shared with `signalPostCompact` so
+   * the two gates can never drift apart.
+   */
+  private _injectionRefused(): boolean {
+    if (this.dialogPending) return true;
+    return this._contextResetFiring || this._noticeFiring || this._signalFiring;
+  }
+
+  /**
+   * docs/auto-compact.md §8.1 (D9) — is a "resume" line owed to this agent?
+   *
+   * True from the moment a server-fired `/compact` reached the PTY until
+   * `signalPostCompact` types the line (or a `/clear` fires in between). Always
+   * `false` when the Session was built without `continueAfterCompact`.
+   */
+  get postCompactNudgeOwed(): boolean {
+    return this._postCompactNudgeOwed;
+  }
+
+  /**
+   * docs/auto-compact.md §8.1 (D9) — type the post-compact nudge, once.
+   *
+   * Called by the idle-boundary handler at the first free boundary after the
+   * `/compact` was submitted, i.e. when the compaction is over: the TUI redraws
+   * its spinner for the whole model call, and the PTY only stays quiet for
+   * `idleThresholdMs` once it has finished.
+   *
+   * `inbox: true` types `POST_COMPACT_NUDGE_WITH_INBOX_TEXT` instead — the
+   * nudge and the unchanged inbox signal in ONE line — and stamps
+   * `lastInboxSignalAt` exactly as `signalInbox` would, so the same messages
+   * are not signalled a second time at the next boundary (at most one nudge
+   * per message, D2 step 1).
+   *
+   * Same gate and same path as `signalInbox`, deliberately: `notifySignal` is
+   * what makes an injection provider-agnostic (Ink two-step write with NO
+   * leading `\r` for claude/codex/gemini — Claude Code ≥ 2.1.277 cancels a
+   * submit whose buffer holds a bare CR, docs/correctif-signal-cr-invisible.md
+   * — and a single `\r…\r` write for opencode), and its `_signalFiring`
+   * window keeps a reset or a notice from typing into the half-written line.
+   *
+   * Returns `false` WITHOUT writing and WITHOUT consuming the owed nudge when
+   * nothing is owed or the line is taken (a dialog on screen, another
+   * injection half-typed): the boundary handler falls through to its usual
+   * steps and the nudge goes out at a later boundary.
+   */
+  signalPostCompact(opts: { inbox: boolean }): boolean {
+    if (!this._postCompactNudgeOwed) return false;
+    if (this._injectionRefused()) return false;
+    this._postCompactNudgeOwed = false;
+    // Console line FIRST: `notifySignal` logs the typed text without a newline
+    // (its CR follows 150 ms later), so a server line appended after it would
+    // be glued onto the injected text in the operator's console.
+    this._appendLog(
+      `[swarm-os] compaction over — nudging the agent to resume${opts.inbox ? ' (+ inbox signal)' : ''}\n`,
+    );
+    this.notifySignal(opts.inbox ? POST_COMPACT_NUDGE_WITH_INBOX_TEXT : POST_COMPACT_NUDGE_TEXT);
+    if (opts.inbox) this._lastInboxSignalAt = Date.now();
     return true;
   }
 
@@ -1893,6 +2022,13 @@ export class Session extends EventEmitter {
       // arm here: the re-signal now happens when the compaction is genuinely
       // over (the PTY goes quiet again), not when a fixed timer says so.
       this._lastInboxSignalAt = null;
+      // docs/auto-compact.md §8.1 (D9) — and owe the agent a "resume" line at
+      // the boundary that ends this compaction: a `/compact` hands back an
+      // empty prompt, and without the nudge the work in progress never
+      // resumes. ASSIGNED, not just raised: a `/clear` landing here must drop a
+      // nudge still owed from an earlier `/compact` (a wiped agent is idle on
+      // purpose), and two compactions in a row owe one nudge, not two.
+      this._postCompactNudgeOwed = pending.cmd === '/compact' && this._continueAfterCompact;
       // Hand off to the orchestrator so it can re-wake the agent if a `/clear`
       // left undelivered mail behind (the mailbox is server-side and survives).
       try {

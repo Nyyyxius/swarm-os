@@ -6,6 +6,10 @@
 // `lib/budget.ts`, because a threshold that parses one way in the overlay and
 // another way in the dialog is how a role ends up silently un-compacted.
 //
+// Since v0.10.1 a role carries TWO such fields, parsed by the same functions:
+// `autoCompactPct` (the lead) and `workerAutoCompactPct` (the workers, whose
+// instance default is 0 = off — docs/auto-compact.md §8.2).
+//
 // One nullable integer, three states (§3.3 of the plan):
 //
 //   - `null` / absent — inherit the instance default. The default itself is
@@ -22,6 +26,17 @@
 
 /** Fallback default when `GET /roles` carries no `defaults` (older server). */
 export const DEFAULT_AUTO_COMPACT_PCT = 35;
+
+/**
+ * Same fallback for the WORKERS' threshold (docs/auto-compact.md §8.2,
+ * v0.10.1): `0`, i.e. workers are not auto-compacted unless the instance
+ * (`SWARM_OS_WORKER_AUTO_COMPACT_PCT`) or the role says so. A server predating
+ * v0.10.1 carries no `defaults.workerAutoCompactPct` — and on such a server
+ * workers DID follow the lead's threshold; the form cannot know that, and it
+ * only matters until the server is upgraded, so the fallback states the new
+ * contract rather than the old one.
+ */
+export const DEFAULT_WORKER_AUTO_COMPACT_PCT = 0;
 
 /** The one error sentence, so the dialog and the overlay say the same thing. */
 export const AUTO_COMPACT_ERROR =

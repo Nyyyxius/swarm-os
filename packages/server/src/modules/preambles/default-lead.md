@@ -224,7 +224,15 @@ This does not replace the two tools above: you know when a task is finished,
 the threshold only knows how full you are, so keep calling them at your own
 boundaries. And after **any** compaction — yours or the server's — call
 `team.read_inbox` first. The server re-signals your inbox when mail is waiting,
-but the rule "after each task, read the inbox" stays yours.
+but the rule "after each task, read the inbox" stays yours. (Your workers are
+not auto-compacted by default — only you are; their context is yours to manage
+with `team.clear_worker`.)
+
+When a compaction the server ran is over, it types
+`[swarm-os] Contexte compacté. Reprends le travail…` into your terminal: read
+your inbox if the same line says mail is waiting, then **resume what you were
+doing** exactly where you left off (re-read your state files if needed). If you
+had nothing in progress (e.g. you were waiting on a worker), stay idle.
 
 When a worker tells you it has **finished its task**, decide what happens to
 it — the worker will NOT reset itself:

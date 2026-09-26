@@ -327,8 +327,20 @@ export interface Role {
    * Resolved live at every boundary (`role.autoCompactPct ?? config.autoCompactPct`),
    * never cached: editing a role takes effect on its running agents without a
    * restart, which is the only acceptable behaviour on a fleet that never stops.
+   *
+   * Since v0.10.1 (docs/auto-compact.md §8.2) this is the team's LEAD
+   * threshold only — workers read `workerAutoCompactPct`.
    */
   autoCompactPct: number | null;
+  /**
+   * Auto-compact threshold for this role's WORKERS (docs/auto-compact.md §8.2,
+   * v0.10.1). Same three states as `autoCompactPct`, but a `null` inherits
+   * `config.workerAutoCompactPct` (`SWARM_OS_WORKER_AUTO_COMPACT_PCT`), which
+   * is `0` = OFF by default: workers run short, linear tasks and their reset
+   * is their lead's call. Resolved live, like the lead's
+   * (`role.workerAutoCompactPct ?? config.workerAutoCompactPct`).
+   */
+  workerAutoCompactPct: number | null;
   createdAt: string;
   updatedAt: string;
 }
@@ -363,6 +375,8 @@ export interface RoleInit {
    * `RoleStore.update`, where `undefined` and `null` are NOT interchangeable.
    */
   autoCompactPct?: number | null;
+  /** Same contract as `autoCompactPct`, for the workers (docs/auto-compact.md §8.2). */
+  workerAutoCompactPct?: number | null;
 }
 
 export type RolePatch = Partial<RoleInit>;
@@ -417,6 +431,10 @@ function rowToRole(row: RoleRow): Role {
         : null,
     budgetAction: toBudgetAction(row.budget_action),
     autoCompactPct: toAutoCompactPct(row.auto_compact_pct),
+    // Same read-side sanitising: a corrupt or hand-edited value inherits, it
+    // never becomes an arbitrary threshold (and `undefined` — a row read
+    // through a fixture predating the column — inherits too).
+    workerAutoCompactPct: toAutoCompactPct(row.worker_auto_compact_pct),
     createdAt: row.created_at,
     updatedAt: row.updated_at,
   };
@@ -444,6 +462,7 @@ function roleToRow(r: Role): RoleRow {
     cost_budget_usd: r.costBudgetUsd,
     budget_action: r.budgetAction,
     auto_compact_pct: r.autoCompactPct,
+    worker_auto_compact_pct: r.workerAutoCompactPct,
     created_at: r.createdAt,
     updated_at: r.updatedAt,
   };
@@ -484,6 +503,7 @@ export class RoleStore {
       // `??` is correct HERE (unlike in `update`): on a create there is no
       // previous value, so "omitted" and "explicitly null" both mean inherit.
       autoCompactPct: init.autoCompactPct ?? null,
+      workerAutoCompactPct: init.workerAutoCompactPct ?? null,
       createdAt: now,
       updatedAt: now,
     };
@@ -544,6 +564,12 @@ export class RoleStore {
       // role pinned to a number the operator just erased.
       autoCompactPct:
         patch.autoCompactPct !== undefined ? patch.autoCompactPct : existing.autoCompactPct,
+      // Same load-bearing `!== undefined`: `null` sends the workers back to
+      // the instance default (off unless the operator moved it).
+      workerAutoCompactPct:
+        patch.workerAutoCompactPct !== undefined
+          ? patch.workerAutoCompactPct
+          : existing.workerAutoCompactPct,
       updatedAt: new Date().toISOString(),
     };
     this.db.updateRole(roleToRow(updated));

@@ -201,8 +201,42 @@ export interface Config {
    * Default 35. A value that is not an integer in 0..100 falls back to 35 with
    * a `warn` at boot rather than failing the boot — see `autoCompactPctEnv`.
    * Env: `SWARM_OS_AUTO_COMPACT_PCT`.
+   *
+   * Since v0.10.1 this is the LEAD's threshold only; workers have their own
+   * (`workerAutoCompactPct` below, docs/auto-compact.md §8.2).
    */
   autoCompactPct: number;
+  /**
+   * Auto-compact (docs/auto-compact.md §8.2, v0.10.1) — the INSTANCE default
+   * threshold for WORKERS, in percent of the context window (0..100).
+   *
+   * Same resolution as the lead's, on the role's second field:
+   * `role.workerAutoCompactPct ?? config.workerAutoCompactPct`, read live at
+   * every boundary. Default **0 = disabled**: workers run short, linear tasks
+   * and their reset is their lead's decision (`team.clear_worker`), so a
+   * threshold compacting them in the middle of a delegation was noise at best.
+   * A role can still opt its workers in with its own non-zero value.
+   *
+   * A value that is not an integer in 0..100 falls back to 0 with a `warn` at
+   * boot, same leniency as `autoCompactPct`. Env:
+   * `SWARM_OS_WORKER_AUTO_COMPACT_PCT`.
+   */
+  workerAutoCompactPct: number;
+  /**
+   * docs/auto-compact.md §8.1 (D9, v0.10.1) — after each `/compact` the server
+   * fired (auto-compact, `team.context_compact`, `team.clear_worker
+   * { compact: true }`, the operator's COMPACT, the byte / waiting backstops),
+   * type ONE "resume what you were doing" line into the agent's PTY at the
+   * first idle boundary after the compaction, folded together with the inbox
+   * signal when mail is waiting. A `/compact` hands back an empty prompt, and
+   * without it the work in progress never resumes until a human types
+   * "continue". Never after `/clear` — a wiped agent is idle on purpose.
+   *
+   * Default `true`. `0` / `false` / `no` / `off` disable it; an unreadable
+   * value keeps it ON with a `warn` at boot (see `continueAfterCompactEnv`).
+   * Env: `SWARM_OS_CONTINUE_AFTER_COMPACT`.
+   */
+  continueAfterCompact: boolean;
   /**
    * Hot-backup interval in ms. The server takes an online SQLite snapshot of
    * `swarm-os.db` into `<dataDir>/backups/` every `backupIntervalMs`. Since
@@ -532,6 +566,14 @@ function intEnv(name: string, def: number): number {
 export const DEFAULT_AUTO_COMPACT_PCT = 35;
 
 /**
+ * Instance default for the WORKERS' auto-compact threshold (docs/auto-compact.md
+ * §8.2): `0`, i.e. workers are not auto-compacted unless a role or
+ * `SWARM_OS_WORKER_AUTO_COMPACT_PCT` says otherwise. Exported for the same
+ * reason as `DEFAULT_AUTO_COMPACT_PCT`: the roles route serves it to the web.
+ */
+export const DEFAULT_WORKER_AUTO_COMPACT_PCT = 0;
+
+/**
  * Read `SWARM_OS_AUTO_COMPACT_PCT` as an integer percentage 0..100.
  *
  * Deliberately NOT `intEnv`: that one THROWS on a bad value, which is right for
@@ -546,19 +588,64 @@ export const DEFAULT_AUTO_COMPACT_PCT = 35;
  * empty var falls through silently to the default.
  */
 function autoCompactPctEnv(): number {
-  const raw = process.env.SWARM_OS_AUTO_COMPACT_PCT;
-  if (raw == null || raw === '') return DEFAULT_AUTO_COMPACT_PCT;
+  return pctEnv(
+    'SWARM_OS_AUTO_COMPACT_PCT',
+    DEFAULT_AUTO_COMPACT_PCT,
+    'config.auto_compact_pct_invalid',
+  );
+}
+
+/**
+ * `SWARM_OS_WORKER_AUTO_COMPACT_PCT` (docs/auto-compact.md §8.2) — the same
+ * lenient reading as `autoCompactPctEnv`, falling back to `0` (off), with its
+ * own warn event so the two knobs can be told apart in the boot log.
+ */
+function workerAutoCompactPctEnv(): number {
+  return pctEnv(
+    'SWARM_OS_WORKER_AUTO_COMPACT_PCT',
+    DEFAULT_WORKER_AUTO_COMPACT_PCT,
+    'config.worker_auto_compact_pct_invalid',
+  );
+}
+
+/** The shared body of the two readers above. */
+function pctEnv(name: string, fallback: number, invalidEvent: string): number {
+  const raw = process.env[name];
+  if (raw == null || raw === '') return fallback;
   const n = Number(raw);
   if (!Number.isInteger(n) || n < 0 || n > 100) {
     withModule('config').warn({
-      event: 'config.auto_compact_pct_invalid',
+      event: invalidEvent,
       value: raw,
-      fallback: DEFAULT_AUTO_COMPACT_PCT,
-      reason: 'SWARM_OS_AUTO_COMPACT_PCT must be an integer between 0 and 100',
+      fallback,
+      reason: `${name} must be an integer between 0 and 100`,
     });
-    return DEFAULT_AUTO_COMPACT_PCT;
+    return fallback;
   }
   return n;
+}
+
+/**
+ * Read `SWARM_OS_CONTINUE_AFTER_COMPACT` (docs/auto-compact.md §8.1). Default ON.
+ *
+ * Deliberately NOT `boolEnv`, for the reason `autoCompactPctEnv` gives: this is
+ * a behaviour switch on a 24/7 fleet, and a typo (`"flase"`) must not keep the
+ * server from booting. The usual spellings are honoured both ways; anything
+ * else keeps the documented default and says so once, loudly.
+ */
+function continueAfterCompactEnv(): boolean {
+  const raw = process.env.SWARM_OS_CONTINUE_AFTER_COMPACT;
+  if (raw == null || raw.trim() === '') return true;
+  const v = raw.trim().toLowerCase();
+  if (v === '1' || v === 'true' || v === 'yes' || v === 'on') return true;
+  if (v === '0' || v === 'false' || v === 'no' || v === 'off') return false;
+  withModule('config').warn({
+    event: 'config.continue_after_compact_invalid',
+    value: raw,
+    fallback: true,
+    reason: 'SWARM_OS_CONTINUE_AFTER_COMPACT must be a boolean (true/false/1/0)',
+  });
+  return true;
 }
 
 function boolEnv(name: string, def: boolean): boolean {
@@ -785,6 +872,11 @@ export function loadConfig(): Config {
   // the whole point of the feature is that nobody has to remember. `0` is the
   // kill switch.
   const autoCompactPct = autoCompactPctEnv();
+  // docs/auto-compact.md §8.2 (v0.10.1) — workers get their own threshold, OFF
+  // by default: short linear tasks, reset by their lead, not by a percentage.
+  const workerAutoCompactPct = workerAutoCompactPctEnv();
+  // docs/auto-compact.md §8.1 (v0.10.1) — "resume" line after each `/compact`.
+  const continueAfterCompact = continueAfterCompactEnv();
 
   // Hot SQLite backup scheduler (in-process; writes to <dataDir>/backups).
   const backupIntervalMs = intEnv('SWARM_OS_BACKUP_INTERVAL_MS', 6 * 60 * 60 * 1000);
@@ -1055,6 +1147,8 @@ export function loadConfig(): Config {
     contextAutoCompactBytes,
     contextUsageTtlMs,
     autoCompactPct,
+    workerAutoCompactPct,
+    continueAfterCompact,
     backupIntervalMs,
     backupKeep,
     taskboardOrphanTtlMs,

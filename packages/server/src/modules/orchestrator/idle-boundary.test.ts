@@ -2,7 +2,13 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { Session, SIGNAL_TEXT, isTerminalAutoResponse } from './session.js';
+import {
+  Session,
+  SIGNAL_TEXT,
+  POST_COMPACT_NUDGE_TEXT,
+  POST_COMPACT_NUDGE_WITH_INBOX_TEXT,
+  isTerminalAutoResponse,
+} from './session.js';
 import { FakeAgentProcess } from './agent-process.js';
 import { FakeProvider } from '../providers/fake.js';
 
@@ -65,6 +71,7 @@ function makeSession(
     provider?: FakeProvider;
     onIdle?: (s: Session) => void;
     permissionMode?: string;
+    continueAfterCompact?: boolean;
   } = {},
 ): Rig {
   const pty = new FakeAgentProcess({ command: 'fake', args: [], cwd: tmpRoot });
@@ -87,6 +94,9 @@ function makeSession(
     provider: opts.provider ?? new FakeProvider({ id: 'claude' }),
     agentProcessOverride: pty,
     idleThresholdMs: IDLE_MS,
+    ...(opts.continueAfterCompact !== undefined
+      ? { continueAfterCompact: opts.continueAfterCompact }
+      : {}),
     onIdle:
       opts.onIdle ??
       ((s) => {
@@ -564,5 +574,159 @@ describe('Session.writeInput — only a human lowers the guard', () => {
     session.markDialogPending('permission_prompt');
     session.writeInput(`${ESC}[Iy`);
     expect(session.dialogPending).toBe(false);
+  });
+});
+
+// ---------------------------------------------------------------------------
+// docs/auto-compact.md §8.1 (D9, v0.10.1) — the post-compact nudge, Session side
+// ---------------------------------------------------------------------------
+//
+// The Session ARMS the nudge when a `/compact` is actually submitted and GATES
+// its injection exactly like `signalInbox`. Whether a given boundary types it is
+// the Orchestrator's call (`auto-compact.orchestrator.test.ts`); what this block
+// proves is the part that must hold whoever calls it: owed once per submitted
+// `/compact`, never after `/clear`, never when switched off, typed once, never
+// into a busy line, and in one single line when the inbox is folded in.
+
+/** Arm a reset and wait until its CR has landed (the `_contextResetFiring` window is over). */
+async function fireReset(session: Session, cmd: '/compact' | '/clear'): Promise<void> {
+  expect(session.requestContextReset(cmd, { idleMs: IDLE_MS })).toBe(true);
+  await waitUntil(() => !session.hasPendingContextReset, 3_000);
+  expect(session.hasPendingContextReset).toBe(false);
+}
+
+describe('Session.signalPostCompact — D9', () => {
+  it('is owed once a /compact is SUBMITTED — not when it is armed, not mid-write', async () => {
+    const { session, pty } = makeSession({ continueAfterCompact: true });
+    expect(session.postCompactNudgeOwed).toBe(false);
+    session.requestContextReset('/compact', { idleMs: IDLE_MS });
+    // Armed, waiting for its boundary: nothing owed — it may wait minutes.
+    expect(session.postCompactNudgeOwed).toBe(false);
+    await waitUntil(() => pty.writes.join('').includes('/compact'));
+    // Typed but its CR has not landed yet (+250 ms): still nothing owed.
+    expect(session.hasPendingContextReset).toBe(true);
+    expect(session.postCompactNudgeOwed).toBe(false);
+    await waitUntil(() => !session.hasPendingContextReset, 3_000);
+    expect(session.postCompactNudgeOwed).toBe(true);
+  });
+
+  it('is NEVER owed after a /clear — a wiped agent is idle on purpose', async () => {
+    const { session } = makeSession({ continueAfterCompact: true });
+    await fireReset(session, '/clear');
+    expect(session.postCompactNudgeOwed).toBe(false);
+    expect(session.signalPostCompact({ inbox: false })).toBe(false);
+  });
+
+  it('a /clear fired after the /compact drops the nudge still owed', async () => {
+    const { session } = makeSession({ continueAfterCompact: true });
+    await fireReset(session, '/compact');
+    expect(session.postCompactNudgeOwed).toBe(true);
+    await fireReset(session, '/clear');
+    expect(session.postCompactNudgeOwed).toBe(false);
+  });
+
+  it('is never owed when the Session was built without continueAfterCompact', async () => {
+    // The v0.10.0 behaviour, byte for byte: the switch OFF, or a Session built
+    // by a caller that predates it.
+    for (const opt of [false, undefined]) {
+      const { session } = makeSession({ continueAfterCompact: opt });
+      await fireReset(session, '/compact');
+      expect(session.postCompactNudgeOwed, `continueAfterCompact=${String(opt)}`).toBe(false);
+    }
+  });
+
+  it('types the nudge ONCE, as its own write with no leading CR, then a lone CR', async () => {
+    const { session, pty } = makeSession({ continueAfterCompact: true });
+    await fireReset(session, '/compact');
+    const before = pty.writes.length;
+    expect(session.signalPostCompact({ inbox: false })).toBe(true);
+    expect(session.postCompactNudgeOwed).toBe(false);
+    // Claude Code ≥ 2.1.277 cancels a submit whose buffer holds a bare CR
+    // (docs/correctif-signal-cr-invisible.md): the text goes alone, first.
+    expect(pty.writes[before]).toBe(POST_COMPACT_NUDGE_TEXT);
+    await sleep(200);
+    expect(pty.writes[before + 1]).toBe('\r');
+    // Consumed: a second call types nothing.
+    expect(session.signalPostCompact({ inbox: false })).toBe(false);
+    expect(countOf(pty.writes.join(''), POST_COMPACT_NUDGE_TEXT)).toBe(1);
+    // …and the inbox stamp was NOT touched by a nudge that carried no signal.
+    expect(session.lastInboxSignalAt).toBeNull();
+  });
+
+  it('folds the inbox signal into the SAME line and stamps it', async () => {
+    const { session, pty } = makeSession({ continueAfterCompact: true });
+    await fireReset(session, '/compact');
+    expect(session.lastInboxSignalAt).toBeNull();
+    const before = pty.writes.length;
+    expect(session.signalPostCompact({ inbox: true })).toBe(true);
+    expect(pty.writes[before]).toBe(POST_COMPACT_NUDGE_WITH_INBOX_TEXT);
+    // The preamble contract survives: the standard signal is in there verbatim.
+    expect(POST_COMPACT_NUDGE_WITH_INBOX_TEXT.endsWith(SIGNAL_TEXT)).toBe(true);
+    expect(session.lastInboxSignalAt).not.toBeNull();
+    await sleep(200);
+    // One submission: one text, one CR.
+    expect(pty.writes.slice(before)).toEqual([POST_COMPACT_NUDGE_WITH_INBOX_TEXT, '\r']);
+  });
+
+  it('refuses WITHOUT consuming while a dialog is on screen', async () => {
+    const { session, pty } = makeSession({ continueAfterCompact: true });
+    await fireReset(session, '/compact');
+    session.markDialogPending('permission_prompt');
+    expect(session.signalPostCompact({ inbox: false })).toBe(false);
+    expect(pty.writes.join('')).not.toContain(POST_COMPACT_NUDGE_TEXT);
+    expect(session.postCompactNudgeOwed).toBe(true);
+    session.clearDialogPending('input');
+    expect(session.signalPostCompact({ inbox: false })).toBe(true);
+  });
+
+  it('refuses WITHOUT consuming while another injection is mid two-step write', async () => {
+    const { session, pty } = makeSession({ continueAfterCompact: true });
+    await fireReset(session, '/compact');
+    expect(session.signalInbox()).toBe(true);
+    // The signal's CR lands at +150 ms; typing now would garble both lines.
+    expect(session.signalPostCompact({ inbox: false })).toBe(false);
+    expect(session.postCompactNudgeOwed).toBe(true);
+    await sleep(200);
+    expect(session.signalPostCompact({ inbox: false })).toBe(true);
+    expect(countOf(pty.writes.join(''), POST_COMPACT_NUDGE_TEXT)).toBe(1);
+  });
+
+  it('makes an armed reset back off while its CR is pending, like the inbox signal', async () => {
+    const { session, pty } = makeSession({ continueAfterCompact: true });
+    await fireReset(session, '/compact');
+    expect(session.signalPostCompact({ inbox: false })).toBe(true);
+    const before = pty.writes.length;
+    session.requestContextReset('/clear', { idleMs: 0 });
+    await sleep(60);
+    // Nothing typed into the half-written nudge…
+    expect(pty.writes.slice(before).join('')).not.toContain('/clear');
+    // …the reset takes the line once the nudge's CR has landed.
+    await waitUntil(() => pty.writes.join('').includes('/clear'), 3_000);
+    expect(pty.writes.join('')).toContain('/clear');
+  });
+
+  it('goes through the provider submit rule — one `\\r…\\r` write without the Ink dance', async () => {
+    const { session, pty } = makeSession({
+      continueAfterCompact: true,
+      provider: new FakeProvider({ id: 'claude', capabilities: { inkSubmitDance: false } }),
+    });
+    await fireReset(session, '/compact');
+    const before = pty.writes.length;
+    expect(session.signalPostCompact({ inbox: false })).toBe(true);
+    await sleep(200);
+    expect(pty.writes.slice(before)).toEqual([`\r${POST_COMPACT_NUDGE_TEXT}\r`]);
+  });
+
+  it('writes its console line BEFORE the typed text, never glued to it', async () => {
+    const { session } = makeSession({ continueAfterCompact: true });
+    await fireReset(session, '/compact');
+    session.signalPostCompact({ inbox: true });
+    await sleep(200);
+    session.appendServerLogLine('[swarm-os] marker');
+    const lines = session.getRecentLines(200);
+    const i = lines.findIndex((l) => l.includes('compaction over — nudging the agent to resume'));
+    expect(i).toBeGreaterThanOrEqual(0);
+    expect(lines[i]).toContain('(+ inbox signal)');
+    expect(lines[i]).not.toContain('Contexte compacté');
   });
 });

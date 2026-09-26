@@ -75,8 +75,12 @@ function makeConfig(over: Partial<Config> = {}): Config {
 }
 
 /** The slice of a `Role` the Spawner touches on the create path. */
-function fakeRole(id: string, autoCompactPct: number | null): Role {
-  return { id, autoCompactPct, connectors: [], skills: [] } as unknown as Role;
+function fakeRole(
+  id: string,
+  autoCompactPct: number | null,
+  workerAutoCompactPct: number | null = null,
+): Role {
+  return { id, autoCompactPct, workerAutoCompactPct, connectors: [], skills: [] } as unknown as Role;
 }
 
 interface StoreRig {
@@ -112,6 +116,13 @@ function fakeRoleStore(roles: Record<string, Role>): StoreRig {
  */
 function thresholdOf(orch: Orchestrator): number {
   return (orch as unknown as { _autoCompactThresholdPct(): number })._autoCompactThresholdPct();
+}
+
+/** Same chain, asked for a WORKER's threshold (docs/auto-compact.md §8.2). */
+function workerThresholdOf(orch: Orchestrator): number {
+  return (
+    orch as unknown as { _autoCompactThresholdPct(t: 'lead' | 'worker'): number }
+  )._autoCompactThresholdPct('worker');
 }
 
 function createTeam(s: SpawnerT, name: string, roleId: string | null) {
@@ -223,6 +234,73 @@ describe('Spawner — autoCompact.thresholdPctFor (D6/D7)', () => {
   it('falls back to the instance default when no role store is wired at all', () => {
     spawner = new Spawner(makeConfig());
     const { orchestrator } = createTeam(spawner, 'THETA', 'role-1');
+    expect(thresholdOf(orchestrator)).toBe(INSTANCE_DEFAULT);
+  });
+});
+
+// v0.10.1 (docs/auto-compact.md §8.2) — the WORKERS' threshold. Same chain,
+// second field: `role.workerAutoCompactPct ?? config.workerAutoCompactPct`,
+// whose instance default is 0 (off). The lead's resolution must not move.
+describe('Spawner — thresholdPctFor(roleId, "worker") (v0.10.1)', () => {
+  const WORKER_DEFAULT = 0;
+
+  it('workers inherit the instance worker default (off), the lead keeps its own', () => {
+    const { store } = fakeRoleStore({ 'role-1': fakeRole('role-1', null, null) });
+    spawner = new Spawner(makeConfig({ workerAutoCompactPct: WORKER_DEFAULT }), {
+      roleStore: store,
+    });
+    const { orchestrator } = createTeam(spawner, 'IOTA', 'role-1');
+    expect(thresholdOf(orchestrator)).toBe(INSTANCE_DEFAULT);
+    expect(workerThresholdOf(orchestrator)).toBe(0);
+  });
+
+  it('a role\'s worker value wins, without touching the lead one', () => {
+    const { store } = fakeRoleStore({ 'role-1': fakeRole('role-1', 20, 60) });
+    spawner = new Spawner(makeConfig({ workerAutoCompactPct: WORKER_DEFAULT }), {
+      roleStore: store,
+    });
+    const { orchestrator } = createTeam(spawner, 'KAPPA', 'role-1');
+    expect(thresholdOf(orchestrator)).toBe(20);
+    expect(workerThresholdOf(orchestrator)).toBe(60);
+  });
+
+  it('the lead\'s role value does NOT leak into the workers', () => {
+    // The v0.10.0 behaviour this release removes: one per-role number for
+    // everybody. A role at 20 for its lead leaves its workers at the instance
+    // worker default.
+    const { store } = fakeRoleStore({ 'role-1': fakeRole('role-1', 20, null) });
+    spawner = new Spawner(makeConfig({ workerAutoCompactPct: WORKER_DEFAULT }), {
+      roleStore: store,
+    });
+    const { orchestrator } = createTeam(spawner, 'LAMBDA', 'role-1');
+    expect(workerThresholdOf(orchestrator)).toBe(0);
+  });
+
+  it('honours an instance worker default the operator turned on', () => {
+    const { store } = fakeRoleStore({ 'role-1': fakeRole('role-1', null, null) });
+    spawner = new Spawner(makeConfig({ workerAutoCompactPct: 50 }), { roleStore: store });
+    const { orchestrator } = createTeam(spawner, 'MU', 'role-1');
+    expect(workerThresholdOf(orchestrator)).toBe(50);
+    expect(thresholdOf(orchestrator)).toBe(INSTANCE_DEFAULT);
+  });
+
+  it('an explicit 0 on the role switches workers off even when the instance has them on', () => {
+    const { store } = fakeRoleStore({ 'role-1': fakeRole('role-1', null, 0) });
+    spawner = new Spawner(makeConfig({ workerAutoCompactPct: 50 }), { roleStore: store });
+    const { orchestrator } = createTeam(spawner, 'NU', 'role-1');
+    expect(workerThresholdOf(orchestrator)).toBe(0);
+  });
+
+  it('re-reads live and survives a throwing store with the WORKER default', () => {
+    const role = fakeRole('role-1', 30, 40);
+    const rig = fakeRoleStore({ 'role-1': role });
+    spawner = new Spawner(makeConfig({ workerAutoCompactPct: 5 }), { roleStore: rig.store });
+    const { orchestrator } = createTeam(spawner, 'XI', 'role-1');
+    expect(workerThresholdOf(orchestrator)).toBe(40);
+    (role as { workerAutoCompactPct: number | null }).workerAutoCompactPct = 45;
+    expect(workerThresholdOf(orchestrator)).toBe(45);
+    rig.breakIt();
+    expect(workerThresholdOf(orchestrator)).toBe(5);
     expect(thresholdOf(orchestrator)).toBe(INSTANCE_DEFAULT);
   });
 });

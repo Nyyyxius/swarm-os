@@ -2,7 +2,7 @@ import { describe, it, expect, beforeEach, afterEach } from 'vitest';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
-import { Session } from './session.js';
+import { Session, POST_COMPACT_NUDGE_TEXT } from './session.js';
 import { Orchestrator, SessionActionError } from './index.js';
 import { NoOpPersistence } from './persistence.js';
 import { FakeAgentProcess } from './agent-process.js';
@@ -28,7 +28,7 @@ let dataDir: string;
 let mcpRuntimeDir: string;
 let openSessions: Session[] = [];
 
-function makeConfig(): Config {
+function makeConfig(overrides: Partial<Config> = {}): Config {
   return {
     port: 8787,
     host: '127.0.0.1',
@@ -60,6 +60,7 @@ function makeConfig(): Config {
     logPretty: false,
     startedAt: new Date().toISOString(),
     version: 'test',
+    ...overrides,
   } as unknown as Config;
 }
 
@@ -73,8 +74,11 @@ interface Team {
  * A live team whose sole registered adapter is a fake one — registered under
  * `claude` because that is the team default every session resolves against.
  */
-function makeTeam(provider: FakeProvider = new FakeProvider({ id: 'claude' })): Team {
-  const config = makeConfig();
+function makeTeam(
+  provider: FakeProvider = new FakeProvider({ id: 'claude' }),
+  configOverrides: Partial<Config> = {},
+): Team {
+  const config = makeConfig(configOverrides);
   const registry = new ProviderRegistry();
   registry.register(provider, { builtin: true });
   const orch = new Orchestrator(
@@ -346,5 +350,58 @@ describe('command mapping stays the adapter’s business', () => {
     const typed = leadPty.writes.join('');
     expect(typed).toContain('/new');
     expect(typed).not.toContain('/clear');
+  });
+});
+
+// docs/auto-compact.md §8.1 (D9, v0.10.1) — the operator's COMPACT button is one
+// of the three sources the production complaint named: the agent compacted
+// and then sat at its prompt. The resume line must follow it, once, at the
+// boundary that ends the compaction — and never follow a CLEAR.
+describe('Orchestrator.requestContextReset — the agent is told to resume (D9)', () => {
+  const nudges = (pty: FakeAgentProcess): number =>
+    pty.writes.join('').split(POST_COMPACT_NUDGE_TEXT).length - 1;
+
+  /** The compaction's own output, then the silence that ends it. */
+  async function compactionRuns(pty: FakeAgentProcess): Promise<void> {
+    for (let i = 0; i < 5; i++) {
+      pty._emitData('⠋ compacting…\r');
+      await new Promise((r) => setTimeout(r, 15));
+    }
+    await new Promise((r) => setTimeout(r, 200));
+  }
+
+  it('types the resume line once the operator /compact is over', async () => {
+    const { orch, lead, leadPty } = makeTeam(undefined, { continueAfterCompact: true });
+    orch.requestContextReset(lead.id, '/compact');
+    await new Promise((r) => setTimeout(r, 400));
+    expect(leadPty.writes.join('')).toContain('/compact');
+    expect(nudges(leadPty)).toBe(0); // no PTY byte since: no boundary yet
+    await compactionRuns(leadPty);
+    expect(nudges(leadPty)).toBe(1);
+  });
+
+  it('does the same for a WORKER compacted from the console', async () => {
+    const { orch } = makeTeam(undefined, { continueAfterCompact: true });
+    const { worker, pty } = addWorker(orch);
+    orch.requestContextReset(worker.id, '/compact');
+    await new Promise((r) => setTimeout(r, 400));
+    await compactionRuns(pty);
+    expect(nudges(pty)).toBe(1);
+  });
+
+  it('never follows a /clear', async () => {
+    const { orch, lead, leadPty } = makeTeam(undefined, { continueAfterCompact: true });
+    orch.requestContextReset(lead.id, '/clear');
+    await new Promise((r) => setTimeout(r, 400));
+    await compactionRuns(leadPty);
+    expect(nudges(leadPty)).toBe(0);
+  });
+
+  it('is off when the Config does not turn it on (the instance switch)', async () => {
+    const { orch, lead, leadPty } = makeTeam(undefined, { continueAfterCompact: false });
+    orch.requestContextReset(lead.id, '/compact');
+    await new Promise((r) => setTimeout(r, 400));
+    await compactionRuns(leadPty);
+    expect(nudges(leadPty)).toBe(0);
   });
 });
