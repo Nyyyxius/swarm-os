@@ -3,11 +3,10 @@
  * swarm-os?".
  *
  * Credentials: `SWARM_OS_GITHUB_TOKEN`, and nothing else. No write route, no
- * settings field, no reading the host's `~/.docker/config.json` (its
- * `read:packages` scope isn't `contents:read` anyway, and siphoning another
- * tool's credential file is a surprise, not a feature). The operator already
- * creates a PAT to `docker pull` from GHCR — this reuses that habit, not that
- * secret.
+ * settings field, no reading the host's `~/.docker/config.json` (siphoning
+ * another tool's credential file is a surprise, not a feature). The repo is
+ * public, so the operator MAY put that same `read:packages` PAT here — but it
+ * is their choice, made in the .env, never inferred.
  *
  * A PRIVATE repo answers an unauthenticated call with 404, not 401 (verified
  * while `Nyyyxius/swarm-os` was private). So "no PAT configured" is a

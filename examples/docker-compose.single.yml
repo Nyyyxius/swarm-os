@@ -52,8 +52,8 @@ services:
     environment:
       SWARM_OS_PROJECT_NAME: fyrel-cc-app
       SWARM_OS_DISCORD_WEBHOOK_URL: ${FYREL_DISCORD_WEBHOOK:-}
-      # Update detection: read-only GitHub PAT (scope `contents:read`) used to
-      # read the releases of the private swarm-os repo. `environment:` is an
+      # Update detection: read-only GitHub PAT (any scope — the read:packages one
+      # works) used to read the releases of the swarm-os repo. `environment:` is an
       # allow-list — a variable not named here never reaches the process, and
       # the check stays on `no_token` forever. Empty = detection off.
       SWARM_OS_GITHUB_TOKEN: ${SWARM_OS_GITHUB_TOKEN:-}

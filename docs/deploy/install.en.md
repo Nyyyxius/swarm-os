@@ -10,8 +10,7 @@ one project.** This guide takes a fresh host to a running, accessible instance.
 On a fresh host, this whole document fits on one line:
 
 ```sh
-T=<YOUR_GITHUB_PAT>; curl -fsSL -H "Authorization: Bearer $T" \
-  https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/bootstrap.sh | SWARM_OS_PAT=$T bash
+curl -fsSL https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/bootstrap.sh | bash
 ```
 
 `bootstrap.sh` downloads the kit (installer, compose files, docs) into
@@ -20,19 +19,11 @@ T=<YOUR_GITHUB_PAT>; curl -fsSL -H "Authorization: Bearer $T" \
 the Claude login, paths, image, transport, providers, remote access,
 notifications.
 
-Why the token appears twice: the repository is **private**, so the first `curl`
-has to authenticate to read `bootstrap.sh`, and the script reuses the same value
-(`SWARM_OS_PAT`) to fetch the rest of the kit — then offers it as the update
-detection token. A **read-only** PAT is enough (classic: scope `repo`;
-fine-grained: `Contents: Read` on swarm-os).
-
-With no token in the environment the script asks for one (hidden input). That is
-the form to use if you publish `bootstrap.sh` at a public URL (a gist, your own
-host), where the first `curl` needs no header at all:
-
-```sh
-curl -fsSL https://<public-url>/bootstrap.sh | bash
-```
+The repository is **public**: fetching the kit needs no token. The one token
+you will be asked for is the image's — the GHCR package is private, see
+[§2](#2-get-the-image-ghcr). A token passed as `SWARM_OS_PAT` (or `--token`) is
+only needed to fetch from a private fork or mirror (`SWARM_OS_REPO`); when given,
+the script also offers it as the update detection token.
 
 Options, after `bash -s --`: `--dir <path>` (default `~/swarm-os`),
 `--ref <branch|tag>`, `--token <pat>`, `--fetch-only` (download, start nothing).
@@ -41,8 +32,7 @@ Re-running the command **updates the kit**, and never touches your `.env`.
 Piping a remote script into `bash` is an act of trust; to read it first:
 
 ```sh
-curl -fsSL -H "Authorization: Bearer $T" \
-  https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/bootstrap.sh -o bootstrap.sh
+curl -fsSL https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/bootstrap.sh -o bootstrap.sh
 less bootstrap.sh && bash bootstrap.sh
 ```
 
@@ -460,17 +450,16 @@ run waits out a **warning window** (300 s by default).
 ### 7.4 Update detection — `SWARM_OS_GITHUB_TOKEN`
 
 swarm-os reads the **GitHub Releases** of `Nyyyxius/swarm-os` to know a newer
-version exists. That repository is private, so an unauthenticated call answers
-404: with no token, the check status stays `no_token`, the badge never lights,
+version exists. The repository is public, but the checker only calls GitHub with
+a token: with none, the check status stays `no_token`, the badge never lights,
 and no update is ever offered. Nothing else breaks — it is a healthy state, and
 it means "never tell me about releases".
 
 To turn detection on:
 
-1. Create a **read-only** GitHub PAT with access to the swarm-os repository —
-   classic PAT: scope `repo`; fine-grained PAT: permission **`Contents: Read`**.
-   This is *not* the `read:packages` token used by `docker login`: that one can
-   pull images but cannot read releases.
+1. Use any **read-only** GitHub PAT — no particular scope is needed to read the
+   releases of a public repository, so the `read:packages` token you already
+   use for `docker login` ([§2](#2-get-the-image-ghcr)) does the job.
 2. Put it in the deployment `.env`:
    ```sh
    SWARM_OS_GITHUB_TOKEN=github_pat_xxxxxxxx

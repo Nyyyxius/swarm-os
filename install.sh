@@ -728,15 +728,15 @@ wiz_step_notifications() {
 
   ask SWARM_OS_DISCORD_WEBHOOK_URL "Discord webhook URL for idle / team-ended notifications (empty = off)" "${SWARM_OS_DISCORD_WEBHOOK_URL:-}"
 
-  printf '     %sUpdate detection reads the GitHub Releases of the (private) swarm-os repo.%s\n' "$C_DIM" "$C_RESET"
-  printf '     %sIt needs a READ-ONLY PAT — classic: scope \`repo\`; fine-grained: Contents: Read.%s\n' "$C_DIM" "$C_RESET"
-  printf '     %sThis is NOT the read:packages token used by docker login. Empty is healthy:%s\n' "$C_DIM" "$C_RESET"
+  printf '     %sUpdate detection reads the GitHub Releases of the public swarm-os repo.%s\n' "$C_DIM" "$C_RESET"
+  printf '     %sAny read-only GitHub PAT does — the read:packages one used by docker login too.%s\n' "$C_DIM" "$C_RESET"
+  printf '     %sEmpty is healthy:%s\n' "$C_DIM" "$C_RESET"
   printf '     %sit simply means "never tell me about releases".%s\n' "$C_DIM" "$C_RESET"
   local pat=""
   if [ -n "${SWARM_OS_GITHUB_TOKEN:-}" ]; then
-    # bootstrap.sh exports the token it used to fetch the kit: the same read-only
-    # PAT that reads the repository reads its releases. Do not make the operator
-    # find it twice.
+    # bootstrap.sh exports the token it was given (private fork/mirror): the
+    # same read-only PAT that reads the repository reads its releases. Do not
+    # make the operator find it twice.
     if ask_yn "A GitHub token is already in the environment — use it for update detection?" y; then
       pat="$SWARM_OS_GITHUB_TOKEN"
     fi
@@ -886,7 +886,7 @@ write_env() {
   env_kv  SWARM_OS_DISCORD_WEBHOOK_URL "${SWARM_OS_DISCORD_WEBHOOK_URL:-}"
   env_txt ""
   env_txt "# ── Update detection ─────────────────────────────────────────────────────────"
-  env_txt "# Read-only GitHub PAT (contents:read). Empty = never announce releases."
+  env_txt "# Read-only GitHub PAT, any scope (the read:packages one works). Empty = never announce releases."
   env_kv  SWARM_OS_GITHUB_TOKEN "${SWARM_OS_GITHUB_TOKEN:-}"
   env_txt ""
   env_txt "# ── Envelopes ────────────────────────────────────────────────────────────────"

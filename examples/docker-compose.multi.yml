@@ -40,7 +40,7 @@ services:
       SWARM_OS_PROJECT_NAME: fyrel-cc-app
       SWARM_OS_DISCORD_WEBHOOK_URL: ${FYREL_DISCORD_WEBHOOK:-}
       SWARM_OS_PUBLIC_URL: ${FYREL_PUBLIC_URL:-https://swarm.tail-xyz.ts.net:8787}
-      # Update detection: read-only GitHub PAT (scope `contents:read`). Both
+      # Update detection: read-only GitHub PAT (any scope — read:packages works). Both
       # services read the SAME variable — one token, one repository. Not naming
       # it here would leave the check on `no_token` whatever the .env holds.
       SWARM_OS_GITHUB_TOKEN: ${SWARM_OS_GITHUB_TOKEN:-}

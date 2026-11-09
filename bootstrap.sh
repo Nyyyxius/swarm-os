@@ -7,16 +7,14 @@
 # and hands over to the guided installer, which asks its way through Docker, the
 # Claude Code login, paths, image, transport, providers and remote access.
 #
-# THE REPOSITORY IS PRIVATE, so fetching the kit needs a read-only GitHub token
-# (classic PAT: scope `repo`; fine-grained: `Contents: Read` on swarm-os). Give
-# it in the environment, on the command line, or let the script ask for it:
+# The repository is public, so fetching the kit needs no token:
 #
-#   export SWARM_OS_PAT=github_pat_xxx
-#   curl -fsSL -H "Authorization: Bearer $SWARM_OS_PAT" \
-#        https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/bootstrap.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/bootstrap.sh | bash
 #
-#   # or, when this script is published somewhere public (gist, your own host):
-#   curl -fsSL https://<public-url>/bootstrap.sh | bash          # it will ask for the token
+# A token is only needed to fetch from a PRIVATE fork or mirror (SWARM_OS_REPO):
+# give it in the environment (SWARM_OS_PAT) or with --token. When one is given it
+# is also handed to the installer as the update detection token. The image itself
+# is a separate matter: the installer asks for its `docker login`.
 #
 # Re-running it is the update path for the kit itself: files are refreshed, your
 # `.env` is never touched, and the installer picks up where it left off.
@@ -24,7 +22,7 @@
 # Options (after `bash -s --` when piping):
 #   --dir <path>     where to put the kit          (default ~/swarm-os)
 #   --ref <ref>      branch or tag to fetch        (default master)
-#   --token <pat>    GitHub token, read-only
+#   --token <pat>    GitHub token, read-only — private fork/mirror only
 #   --fetch-only     download the kit, do not start the installer
 #   --help
 set -euo pipefail
@@ -65,7 +63,7 @@ warn() { printf '%s [!]%s %s\n' "$C_YELLOW" "$C_RESET" "$*" >&2; }
 die()  { printf '%s [x]%s %s\n' "$C_RED" "$C_RESET" "$*" >&2; exit 1; }
 note() { printf '%s     %s%s\n' "$C_DIM" "$*" "$C_RESET"; }
 
-usage() { sed -n '2,29p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
+usage() { sed -n '2,27p' "${BASH_SOURCE[0]}" | sed 's/^# \{0,1\}//'; }
 
 while [ "$#" -gt 0 ]; do
   case "$1" in
@@ -101,14 +99,6 @@ printf '%s%s\n\n' "  └──────────────────�
 
 command -v curl >/dev/null 2>&1 || die "curl is required."
 [ "$(id -u)" != 0 ] || warn "Running as root. swarm-os runs as uid 1000 — install it as the normal user that owns ~/.claude, or /data ends up unwritable for the container."
-
-# ── Token ─────────────────────────────────────────────────────────────────────
-if [ -z "$TOKEN" ] && [ "$INTERACTIVE" = 1 ]; then
-  printf '  %sThe swarm-os repository is private, so the kit needs a read-only GitHub token.%s\n' "$C_DIM" "$C_RESET"
-  printf '  %sClassic PAT: scope `repo`. Fine-grained: `Contents: Read` on swarm-os.%s\n' "$C_DIM" "$C_RESET"
-  read -r -s -u "$TTY_FD" -p "$(printf '  %s?%s GitHub token %s(hidden, empty to try without)%s: ' "$C_CYAN" "$C_RESET" "$C_DIM" "$C_RESET")" TOKEN || true
-  printf '\n'
-fi
 
 # ── Fetch ─────────────────────────────────────────────────────────────────────
 # With a token: the API's raw media type, which is the documented way to read a
@@ -154,12 +144,12 @@ if [ -n "$failed" ]; then
   # come down: diagnosing a partial fetch as an auth failure sends the operator
   # to regenerate a token that works fine.
   if [ "$fetched" -gt 0 ]; then
-    note "the token itself works — ${fetched} other files came down from ${REPO}@${REF}"
+    note "GitHub answers fine — ${fetched} other files came down from ${REPO}@${REF}"
     die "those paths do not exist at ${REF}. Pick a ref that has them (--ref master), or ask the maintainer for a newer tag."
   fi
   case "$failed" in
-    *"(401)"*|*"(403)"*) die "GitHub refused the token. It needs read access to ${REPO} (classic: scope \`repo\`; fine-grained: Contents: Read)." ;;
-    *"(404)"*) die "GitHub answered 404. Either the token cannot see ${REPO} (a private repo answers 404, not 403, to a token without access), or --ref ${REF} does not exist." ;;
+    *"(401)"*|*"(403)"*) die "GitHub refused the token. It needs read access to ${REPO} (classic: scope \`repo\`; fine-grained: Contents: Read) — or drop it: the public repo needs none." ;;
+    *"(404)"*) die "GitHub answered 404. Either --ref ${REF} does not exist, or ${REPO} is a private fork/mirror the token cannot see (a private repo answers 404, not 403) — pass --token." ;;
     *"(000)"*) die "could not reach api.github.com — check outbound network/DNS." ;;
   esac
   die "kit incomplete — nothing was started."

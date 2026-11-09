@@ -21,13 +21,12 @@ Status: **MVP implementation-complete.** Phases 0–7 implemented (see
 One command on a fresh host — no build toolchain required, nothing cloned first:
 
 ```sh
-T=<YOUR_GITHUB_PAT>; curl -fsSL -H "Authorization: Bearer $T" \
-  https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/bootstrap.sh | SWARM_OS_PAT=$T bash
+curl -fsSL https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/bootstrap.sh | bash
 ```
 
-`bootstrap.sh` fetches the deploy kit into `~/swarm-os` (the repo is private, so
-the read-only PAT is needed twice: once by curl, once by the script) and hands
-over to the same wizard `./install.sh` runs from a checkout:
+`bootstrap.sh` fetches the deploy kit into `~/swarm-os` (the repo is public: no
+token needed) and hands over to the same wizard `./install.sh` runs from a
+checkout:
 
 ```sh
 ./install.sh             # guided setup, then deploy
@@ -42,6 +41,11 @@ against the host as you give it. It then writes `.env`, deploys, waits for
 `boot_complete` and prints the URL, the token and each provider's verdict.
 `--reconfigure` re-runs it with your current values as defaults; `--yes` deploys
 an existing `.env` with no questions (CI). Full bilingual guide in `docs/deploy/`.
+
+The only token involved is for the **image**, which is a private GHCR package:
+a classic GitHub PAT with the `read:packages` scope, on an account the
+maintainer has granted access to the package. The wizard asks for it at the
+image step (`docker login ghcr.io`).
 
 Prerequisite: an **authenticated Claude Code CLI on the host**
 (`~/.claude/.credentials.json` must exist) — agents launch the CLI and inherit
@@ -58,10 +62,10 @@ by `.github/workflows/release-image.yml` (push a `vX.Y.Z` tag) or
 Full guide: `docs/deploy/install.en.md` §7 (FR: `install.fr.md` §7). The short
 version:
 
-**Detection needs a token.** `SWARM_OS_GITHUB_TOKEN` is a read-only GitHub PAT
-with `contents:read` on the (private) swarm-os repository — classic PAT: scope
-`repo`; fine-grained: `Contents: Read`. It is *not* the `read:packages` token
-used by `docker login`. Put it in the deployment `.env` **and** make sure the
+**Detection needs a token.** `SWARM_OS_GITHUB_TOKEN` is any read-only GitHub
+PAT: the repository is public, so no particular scope is required — the
+`read:packages` token used by `docker login` works. Put it in the deployment
+`.env` **and** make sure the
 compose service names it in `environment:` (that block is an explicit
 allow-list; all shipped compose files carry
 `SWARM_OS_GITHUB_TOKEN: ${SWARM_OS_GITHUB_TOKEN:-}`). Without it the check

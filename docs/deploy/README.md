@@ -15,8 +15,7 @@ The one hard prerequisite is an **authenticated Claude Code CLI on the host**
 TL;DR — on a bare host, one command:
 
 ```sh
-T=<YOUR_GITHUB_PAT>; curl -fsSL -H "Authorization: Bearer $T" \
-  https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/bootstrap.sh | SWARM_OS_PAT=$T bash
+curl -fsSL https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/bootstrap.sh | bash
 ```
 
 From a checkout, the same wizard without the fetch:
@@ -40,9 +39,9 @@ cp .env.example .env     # edit WORKSPACE_PATH, DATA_PATH, SWARM_OS_IMAGE, proje
 
 Two variables decide what the update surface can do — both documented in
 [install.en.md §7](install.en.md): `SWARM_OS_IMAGE` (set it explicitly; it is
-the line an update rewrites, `.bak` beside it) and `SWARM_OS_GITHUB_TOKEN` (a
-read-only PAT with `contents:read` on the private repo; without it no release
-is ever detected).
+the line an update rewrites, `.bak` beside it) and `SWARM_OS_GITHUB_TOKEN` (any
+read-only PAT — the `read:packages` one used by `docker login` works; without it
+no release is ever detected).
 
 ---
 
@@ -59,18 +58,13 @@ GitHub account/team read access to the GHCR package.
 > `workflow_dispatch` run publishes `:<short-sha>` only: it does not move
 > `:latest` and cuts no release.
 
-**Hand over**: ideally just the one-command line above plus two credentials —
-a read-only PAT that can read this repository (classic: scope `repo`;
-fine-grained: `Contents: Read`) and `read:packages` access to the GHCR package.
+**Hand over**: just the one-command line above plus one credential — the
+recipient's GitHub account granted `read:packages` access to the GHCR package
+(they log in with a classic PAT carrying that scope; the same PAT reads the
+releases for update detection).
 `bootstrap.sh` pulls the kit itself (`install.sh`, `bootstrap.sh`,
 `.env.example`, `examples/docker-compose.{dist,ssh,multi}.yml`, `docs/deploy/`,
 `LICENSE`) — that list lives in the script, in `KIT`.
-
-> To hand out a line with **no token in it**, publish `bootstrap.sh` at a public
-> URL you control — a public gist (`https://gist.githubusercontent.com/<you>/<id>/raw/bootstrap.sh`
-> always serves the latest revision) or your own host. The recipient then runs
-> `curl -fsSL <url> | bash` and the script asks for the PAT itself, hidden. Keep
-> the copy in sync with this repo: it is the one file that cannot fix itself.
 
 **Do NOT hand over** your personal state: your `.env`, `~/.claude`, `~/.ssh`,
 `docker-compose.stiix.yml` / `docker-compose.test.yml` (they hold your paths,
