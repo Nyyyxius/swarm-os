@@ -89,7 +89,7 @@ services:
       SWARM_OS_HOST_WORKSPACE_ROOT: ${HOME}/projets/fyrel
       # Update detection. `environment:` is an explicit allow-list: a variable
       # not named here never reaches the process, and the check stays stuck on
-      # `no_token`. Read-only PAT, scope `contents:read` (the repo is private).
+      # `no_token`. Any read-only PAT (the repo is public; read:packages works).
       SWARM_OS_GITHUB_TOKEN: ${SWARM_OS_GITHUB_TOKEN:-}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/health"]

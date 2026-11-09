@@ -170,9 +170,9 @@ const CHECK_COPY: Partial<Record<SystemCheckStatus, string>> = {
   never_checked: 'no check has completed yet — the first one runs in the background.',
   no_releases: 'the repository has no published release to compare against.',
   no_token:
-    'no SWARM_OS_GITHUB_TOKEN in the deployment .env — set one (scope contents:read) to read releases.',
+    'no SWARM_OS_GITHUB_TOKEN in the deployment .env — set one (any read-only PAT, e.g. the read:packages one) to read releases.',
   unauthorized:
-    'GitHub rejected the token (401) — SWARM_OS_GITHUB_TOKEN is expired or lacks contents:read.',
+    'GitHub rejected the token (401) — SWARM_OS_GITHUB_TOKEN is expired or revoked.',
   not_found:
     'the releases endpoint answered 404 — the repository is invisible to this token, or was renamed.',
 };

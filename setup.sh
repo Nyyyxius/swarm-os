@@ -1,20 +1,19 @@
 #!/usr/bin/env bash
 # swarm-os — fullscreen guided installer, self-contained.
 #
-#   export SWARM_OS_PAT=github_pat_xxx
-#   curl -fsSL -H "Authorization: Bearer $SWARM_OS_PAT" \
-#        https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/setup.sh | bash
+#   curl -fsSL https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/setup.sh | bash
 #
-# The repository is private, so raw.githubusercontent answers 404 without that
-# header — and the script needs the same read access afterwards, to fetch the
-# compose files and pull the image. Exporting the token means you give it once:
-# SWARM_OS_PAT, SWARM_OS_GITHUB_TOKEN, GITHUB_TOKEN and GH_TOKEN are all read
-# from the environment. `| bash -s -- --token <pat>` works too, but leaves the
-# token in your shell history and in `ps` output.
+# The repository is public: the script and its compose files need no token. The
+# IMAGE is private, so pulling it needs a classic GitHub PAT with
+# `read:packages` — the script asks for it (and reuses it to read releases).
+# Exporting it means you give it once: SWARM_OS_PAT, SWARM_OS_GITHUB_TOKEN,
+# GITHUB_TOKEN and GH_TOKEN are all read from the environment.
+# `| bash -s -- --token <pat>` works too, but leaves the token in your shell
+# history and in `ps` output.
 #
 # One file, no kit, no clone. It takes a bare host to a running swarm-os:
-# checks the prerequisites, asks for a GitHub token when the private repository
-# or the private image needs one, lets you pick the install directory / project
+# checks the prerequisites, asks for a GitHub token when the private image (or
+# a private fork of the repository) needs one, lets you pick the install directory / project
 # workspace / state directory (suggesting the ones that actually exist on this
 # host), verifies the port is free, writes `.env`, pulls the image, starts the
 # container, waits for the boot gate and hands you the access token.
@@ -56,7 +55,7 @@ KIT_SSH="examples/docker-compose.ssh.yml"
 # ── Answers (globals the screens fill in) ─────────────────────────────────────
 DIR="${SWARM_OS_DIR:-$HOME/swarm-os}"
 TOKEN="${SWARM_OS_PAT:-${SWARM_OS_GITHUB_TOKEN:-${GITHUB_TOKEN:-${GH_TOKEN:-}}}}"
-GHCR_TOKEN=""            # may differ from TOKEN: read:packages vs contents:read
+GHCR_TOKEN=""            # may differ from TOKEN: read:packages vs repo (private fork)
 GHCR_USER=""
 SWARM_OS_PROJECT_NAME=""
 SWARM_OS_CONTAINER_NAME=""
@@ -1223,8 +1222,9 @@ fix_prereqs() {
 }
 
 # ── GitHub access ─────────────────────────────────────────────────────────────
-# What the token is FOR, in order: reading two compose files out of a private
-# repository, and pulling a private image out of GHCR. Those are two different
+# What the token is FOR, in order: reading two compose files out of the
+# repository (public — only a private fork needs it), and pulling a private
+# image out of GHCR. Those are two different
 # permissions and a token can carry one without the other, so both are probed
 # and reported separately instead of failing later with `pull access denied`.
 KIT_ACCESS=""      # ok | 401 | 403 | 404 | 000
@@ -1268,8 +1268,8 @@ screen_token() {
   STEP_NO=2
   local probed=0
   while :; do
-    ui_head "GitHub access" "the repository and the image are private — one read-only token unlocks both"
-    ui_wrapdim "Classic PAT: scopes \`repo\` and \`read:packages\`. Fine-grained PAT: Contents: Read on ${REPO}, plus read access to the package."
+    ui_head "GitHub access" "the image is private — one read-only token pulls it and reads releases"
+    ui_wrapdim "Classic PAT with the \`read:packages\` scope (add \`repo\` only for a private fork of ${REPO})."
     ui_wrapdim "Leave it empty to try without one — the probe below says whether that is enough on this host."
     ui_gap
     ui_input TOKEN "token" "$TOKEN" v_token 1
@@ -1289,7 +1289,7 @@ screen_token() {
       401|403) ui_no "GitHub refused the token (HTTP $KIT_ACCESS)"
                ui_wrapdim "it needs read access to ${REPO}" ;;
       404) ui_no "GitHub answered 404"
-           ui_wrapdim "a private repo answers 404, not 403, to a token that cannot see it — and so does a ref that does not exist" ;;
+           ui_wrapdim "the ref does not exist — or, for a private fork, the token cannot see it (a private repo answers 404, not 403)" ;;
       000) ui_no "could not reach api.github.com — network, DNS or proxy" ;;
       *)   ui_no "unexpected HTTP $KIT_ACCESS from GitHub" ;;
     esac
@@ -2135,8 +2135,8 @@ screen_access() {
 screen_extras() {
   STEP_NO=11
   ui_head "Notifications, updates, limits" "all optional — enter walks past every one of them"
-  ui_dim "Update detection reads the GitHub releases of a private repository, so it"
-  ui_dim "needs a read-only PAT. Empty is a healthy state: it means \"never tell me\"."
+  ui_dim "Update detection reads the GitHub releases of swarm-os: any read-only PAT"
+  ui_dim "does (the image one too). Empty is a healthy state: it means \"never tell me\"."
   ui_gap
   SWARM_OS_GITHUB_TOKEN="${SWARM_OS_GITHUB_TOKEN:-$TOKEN}"
   ui_input SWARM_OS_GITHUB_TOKEN "release-check token" "$SWARM_OS_GITHUB_TOKEN" v_token 1
@@ -2315,7 +2315,7 @@ write_env() {
   ekv SWARM_OS_DISCORD_WEBHOOK_URL "$SWARM_OS_DISCORD_WEBHOOK_URL"
   etx ""
   etx "# ── Update detection ─────────────────────────────────────────────────────────"
-  etx "# Read-only GitHub PAT (contents:read). Empty = never announce releases."
+  etx "# Read-only GitHub PAT, any scope (the read:packages one works). Empty = never announce releases."
   ekv SWARM_OS_GITHUB_TOKEN "$SWARM_OS_GITHUB_TOKEN"
   etx ""
   etx "# ── Envelopes ────────────────────────────────────────────────────────────────"
@@ -2365,7 +2365,7 @@ fetch_kit() {
     else
       case "$code" in
         401|403) die "GitHub refused the token while fetching $path (HTTP $code). It needs read access to ${REPO}." ;;
-        404) die "HTTP 404 on $path. Either the token cannot see ${REPO} (a private repo answers 404, not 403), or ref '${REF}' has no such file." ;;
+        404) die "HTTP 404 on $path. Either ref '${REF}' has no such file, or ${REPO} is a private fork the token cannot see (a private repo answers 404, not 403)." ;;
         000) die "could not reach GitHub while fetching $path — network, DNS or proxy." ;;
         *) die "could not fetch $path (HTTP $code)." ;;
       esac

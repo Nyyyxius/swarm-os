@@ -67,7 +67,7 @@ services:
       # Update detection. `environment:` here is an explicit allow-list, so a
       # variable that is not named on this line NEVER reaches the process —
       # without it `checkStatus` is stuck on `no_token` and no release is ever
-      # seen. Read-only PAT, scope `contents:read` (the repo is private).
+      # seen. Any read-only PAT (the repo is public; read:packages works).
       SWARM_OS_GITHUB_TOKEN: ${SWARM_OS_GITHUB_TOKEN:-}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/health"]
