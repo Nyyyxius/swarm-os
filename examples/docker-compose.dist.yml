@@ -20,7 +20,7 @@
 
 services:
   swarm-os:
-    image: ${SWARM_OS_IMAGE:-ghcr.io/luminis1986/swarm-os:latest}
+    image: ${SWARM_OS_IMAGE:-ghcr.io/nyyyxius/swarm-os:latest}
     container_name: ${SWARM_OS_CONTAINER_NAME:-swarm-os}
     # WHOSE processes these are on the host. The image's own `USER node` is
     # uid 1000 — the default here, so an .env that never heard of this key

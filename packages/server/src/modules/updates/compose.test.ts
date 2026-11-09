@@ -139,7 +139,7 @@ describe('rewriteEnvStream', () => {
 
 describe('image / env value validation', () => {
   it('accepts real references and refuses anything that could be injected', () => {
-    expect(isValidImageRef('ghcr.io/luminis1986/swarm-os:0.6.0')).toBe(true);
+    expect(isValidImageRef('ghcr.io/nyyyxius/swarm-os:0.6.0')).toBe(true);
     expect(isValidImageRef('registry:5000/x/y:1')).toBe(true);
     expect(isValidImageRef('a b')).toBe(false);
     expect(isValidImageRef('a$(id)')).toBe(false);

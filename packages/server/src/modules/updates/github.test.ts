@@ -23,7 +23,7 @@ function rel(over: Record<string, unknown> = {}) {
   return {
     tag_name: 'v1.0.0',
     draft: false,
-    html_url: 'https://github.com/luminis1986/swarm-os/releases/tag/v1.0.0',
+    html_url: 'https://github.com/Nyyyxius/swarm-os/releases/tag/v1.0.0',
     body: 'notes',
     published_at: '2026-01-01T00:00:00Z',
     ...over,

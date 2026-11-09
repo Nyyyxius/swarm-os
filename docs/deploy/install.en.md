@@ -11,7 +11,7 @@ On a fresh host, this whole document fits on one line:
 
 ```sh
 T=<YOUR_GITHUB_PAT>; curl -fsSL -H "Authorization: Bearer $T" \
-  https://raw.githubusercontent.com/luminis1986/swarm-os/master/bootstrap.sh | SWARM_OS_PAT=$T bash
+  https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/bootstrap.sh | SWARM_OS_PAT=$T bash
 ```
 
 `bootstrap.sh` downloads the kit (installer, compose files, docs) into
@@ -42,7 +42,7 @@ Piping a remote script into `bash` is an act of trust; to read it first:
 
 ```sh
 curl -fsSL -H "Authorization: Bearer $T" \
-  https://raw.githubusercontent.com/luminis1986/swarm-os/master/bootstrap.sh -o bootstrap.sh
+  https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/bootstrap.sh -o bootstrap.sh
 less bootstrap.sh && bash bootstrap.sh
 ```
 
@@ -124,7 +124,7 @@ maintainer must have granted your account access to the package.
 
 ```sh
 echo <YOUR_PAT> | docker login ghcr.io -u <your-github-user> --password-stdin
-docker pull ghcr.io/luminis1986/swarm-os:latest      # or a pinned :X.Y.Z tag
+docker pull ghcr.io/nyyyxius/swarm-os:latest      # or a pinned :X.Y.Z tag
 ```
 
 ---
@@ -402,7 +402,7 @@ the host would refuse — instead it names the single reason:
 | `ELIGIBLE` / `HOST CHECKS PENDING` | transport and image qualify; the rest is decided on the host, at preflight | nothing |
 | `TRANSPORT IS NOT SSH` | `SWARM_OS_AGENT_TRANSPORT=local` — agents run in-container, so swarm-os cannot run `docker` on the host at all | switch the transport to `ssh` and mount a key |
 | `IMAGE TAG IS HARDCODED` | `SWARM_OS_IMAGE` is unset, so the compose file pins its own tag — there is no variable to rewrite | put `image: ${SWARM_OS_IMAGE}` in the compose and define the variable in `.env` |
-| `IMAGE IS LOCALLY BUILT` | `SWARM_OS_IMAGE` has no registry path (`swarm-os:latest`) — nothing to pull | point at `ghcr.io/luminis1986/swarm-os:<tag>` |
+| `IMAGE IS LOCALLY BUILT` | `SWARM_OS_IMAGE` has no registry path (`swarm-os:latest`) — nothing to pull | point at `ghcr.io/nyyyxius/swarm-os:<tag>` |
 | `NO .env FOUND` / `.env IS NOT WRITABLE` | the updater found no writable env file beside the compose file | create it / fix its ownership (the container user is uid 1000) |
 | `REGISTRY LOGIN MISSING` | the host is not authenticated against GHCR | `docker login ghcr.io` with a `read:packages` PAT |
 
@@ -459,7 +459,7 @@ run waits out a **warning window** (300 s by default).
 
 ### 7.4 Update detection — `SWARM_OS_GITHUB_TOKEN`
 
-swarm-os reads the **GitHub Releases** of `luminis1986/swarm-os` to know a newer
+swarm-os reads the **GitHub Releases** of `Nyyyxius/swarm-os` to know a newer
 version exists. That repository is private, so an unauthenticated call answers
 404: with no token, the check status stays `no_token`, the badge never lights,
 and no update is ever offered. Nothing else breaks — it is a healthy state, and

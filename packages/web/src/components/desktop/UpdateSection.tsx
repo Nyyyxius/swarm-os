@@ -142,7 +142,7 @@ const SELF_UPDATE_COPY: Record<SelfUpdateStatus, { label: string; fallback: stri
   image_not_registry: {
     label: 'IMAGE IS LOCALLY BUILT',
     fallback:
-      'SWARM_OS_IMAGE points at a locally-built image, with nothing behind it to pull. Point the deployment at a registry image (ghcr.io/luminis1986/swarm-os:<tag>).',
+      'SWARM_OS_IMAGE points at a locally-built image, with nothing behind it to pull. Point the deployment at a registry image (ghcr.io/nyyyxius/swarm-os:<tag>).',
   },
   env_file_not_found: {
     label: 'NO .env FOUND',

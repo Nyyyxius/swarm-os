@@ -180,14 +180,14 @@ describe('GET /info', () => {
   it('exposes version, commit and image', async () => {
     process.env.SWARM_OS_VERSION = '1.2.3';
     process.env.SWARM_OS_COMMIT = 'abc1234';
-    process.env.SWARM_OS_IMAGE = 'ghcr.io/luminis1986/swarm-os:1.2.3';
+    process.env.SWARM_OS_IMAGE = 'ghcr.io/nyyyxius/swarm-os:1.2.3';
     _resetConfigCacheForTesting();
     const base = await serve(loadConfig());
     const body = (await (await fetch(`${base}/info`)).json()) as Record<string, unknown>;
     expect(body.project_name).toBe('http-test');
     expect(body.version).toBe('1.2.3');
     expect(body.commit).toBe('abc1234');
-    expect(body.image).toBe('ghcr.io/luminis1986/swarm-os:1.2.3');
+    expect(body.image).toBe('ghcr.io/nyyyxius/swarm-os:1.2.3');
     expect(typeof body.started_at).toBe('string');
   });
 

@@ -45,7 +45,7 @@ services:
       - ${HOME}/.ssh:/host-ssh:ro
     environment:
       SWARM_OS_PROJECT_NAME: storyforge
-      SWARM_OS_PUBLIC_URL: https://vps-00b690bc.tail240b2d.ts.net:8093
+      SWARM_OS_PUBLIC_URL: https://${SWARM_OS_TAILNET_HOST:?SWARM_OS_TAILNET_HOST manquant - le définir dans .env à la racine du dépôt (non versionné)}:8093
       # MCP port — moved off the 8788 default ON PURPOSE. Under the ssh
       # transport each agent session opens `ssh -R <mcpPort>:127.0.0.1:<mcpPort>`
       # (agent-process.ts), which binds that port on the HOST loopback. Two

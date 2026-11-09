@@ -10,13 +10,13 @@
 #
 # Usage:
 #   scripts/push-image.sh v0.1.0                 # builds + pushes :0.1.0 and :latest
-#   IMAGE=ghcr.io/luminis1986/swarm-os scripts/push-image.sh v0.1.0
+#   IMAGE=ghcr.io/nyyyxius/swarm-os scripts/push-image.sh v0.1.0
 set -euo pipefail
 
 REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 cd "$REPO_ROOT"
 
-IMAGE="${IMAGE:-ghcr.io/luminis1986/swarm-os}"
+IMAGE="${IMAGE:-ghcr.io/nyyyxius/swarm-os}"
 VERSION="${1:?usage: scripts/push-image.sh <version>   e.g. v0.1.0}"
 TAG="${VERSION#v}"   # strip a leading "v" → 0.1.0
 

@@ -42,7 +42,7 @@ services:
       - ${HOME}/.ssh:/host-ssh:ro
     environment:
       SWARM_OS_PROJECT_NAME: test
-      SWARM_OS_PUBLIC_URL: https://vps-00b690bc.tail240b2d.ts.net:8787
+      SWARM_OS_PUBLIC_URL: https://${SWARM_OS_TAILNET_HOST:?SWARM_OS_TAILNET_HOST manquant - le définir dans .env à la racine du dépôt (non versionné)}:8787
       # SSH transport: claude runs on the host, container only orchestrates.
       SWARM_OS_AGENT_TRANSPORT: ssh
       SWARM_OS_SSH_TARGET: ubuntu@host.docker.internal

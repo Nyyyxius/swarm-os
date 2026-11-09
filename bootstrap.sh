@@ -13,7 +13,7 @@
 #
 #   export SWARM_OS_PAT=github_pat_xxx
 #   curl -fsSL -H "Authorization: Bearer $SWARM_OS_PAT" \
-#        https://raw.githubusercontent.com/luminis1986/swarm-os/master/bootstrap.sh | bash
+#        https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/bootstrap.sh | bash
 #
 #   # or, when this script is published somewhere public (gist, your own host):
 #   curl -fsSL https://<public-url>/bootstrap.sh | bash          # it will ask for the token
@@ -29,7 +29,7 @@
 #   --help
 set -euo pipefail
 
-REPO="${SWARM_OS_REPO:-luminis1986/swarm-os}"
+REPO="${SWARM_OS_REPO:-Nyyyxius/swarm-os}"
 REF="${SWARM_OS_REF:-master}"
 DIR="${SWARM_OS_DIR:-$HOME/swarm-os}"
 TOKEN="${SWARM_OS_PAT:-${SWARM_OS_GITHUB_TOKEN:-${GITHUB_TOKEN:-${GH_TOKEN:-}}}}"

@@ -105,7 +105,7 @@ et état de run restent derrière l'auth dans `GET /updates`.
 
 | Composant | Source |
 |---|---|
-| Système | `GET /repos/luminis1986/swarm-os/releases` + PAT. **Filtrer `draft === false`** et prendre le max via le comparateur maison — la liste est ordonnée par date de création et inclut les brouillons |
+| Système | `GET /repos/Nyyyxius/swarm-os/releases` + PAT. **Filtrer `draft === false`** et prendre le max via le comparateur maison — la liste est ordonnée par date de création et inclut les brouillons |
 | Système (pré-vol) | `docker manifest inspect` sur l'hôte : l'image doit exister ET `docker login ghcr.io` doit être valide → sinon `registry_auth_missing` |
 | Plugin `git` | `git ls-remote <url> <ref>` vs le **commit installé** (voir Lot F) |
 | Plugin `npm` | `registry.npmjs.org` `dist-tags.latest` vs `plugins.version` |
