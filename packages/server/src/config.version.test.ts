@@ -117,9 +117,9 @@ describe('config.commit / config.image', () => {
   });
 
   it('surfaces SWARM_OS_IMAGE verbatim', () => {
-    process.env.SWARM_OS_IMAGE = 'ghcr.io/luminis1986/swarm-os:0.6.0';
+    process.env.SWARM_OS_IMAGE = 'ghcr.io/nyyyxius/swarm-os:0.6.0';
     _resetConfigCacheForTesting();
-    expect(loadConfig().image).toBe('ghcr.io/luminis1986/swarm-os:0.6.0');
+    expect(loadConfig().image).toBe('ghcr.io/nyyyxius/swarm-os:0.6.0');
   });
 
   it('treats empty SWARM_OS_COMMIT / SWARM_OS_IMAGE as null', () => {

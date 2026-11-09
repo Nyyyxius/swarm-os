@@ -3,7 +3,7 @@
 #
 #   export SWARM_OS_PAT=github_pat_xxx
 #   curl -fsSL -H "Authorization: Bearer $SWARM_OS_PAT" \
-#        https://raw.githubusercontent.com/luminis1986/swarm-os/master/setup.sh | bash
+#        https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/setup.sh | bash
 #
 # The repository is private, so raw.githubusercontent answers 404 without that
 # header — and the script needs the same read access afterwards, to fetch the
@@ -25,7 +25,7 @@
 #   --port <n>         host port for the UI             (default 8787)
 #   --token <pat>      GitHub token, read-only
 #   --ref <ref>        branch or tag to fetch the compose files from
-#   --repo <o/r>       source repository                (default luminis1986/swarm-os)
+#   --repo <o/r>       source repository                (default Nyyyxius/swarm-os)
 #   --image <ref>      image reference to deploy
 #   --no-fullscreen    keep the normal scrollback instead of the alternate screen
 #   --help
@@ -43,9 +43,9 @@ set -uo pipefail
 SETUP_VERSION="1.0.0"
 
 # ── Where things come from ────────────────────────────────────────────────────
-REPO="${SWARM_OS_REPO:-luminis1986/swarm-os}"
+REPO="${SWARM_OS_REPO:-Nyyyxius/swarm-os}"
 REF="${SWARM_OS_REF:-master}"
-IMAGE_DEFAULT="ghcr.io/luminis1986/swarm-os:latest"
+IMAGE_DEFAULT="ghcr.io/nyyyxius/swarm-os:latest"
 RELEASES_API="https://api.github.com/repos/${REPO}/releases/latest"
 
 # The only files this installer needs from the repository. Everything else it

@@ -15,7 +15,7 @@ let clock = 1_000_000;
 
 const CONFIG: UpdateServiceConfig = {
   version: '0.5.0',
-  image: 'ghcr.io/luminis1986/swarm-os:0.5.0',
+  image: 'ghcr.io/nyyyxius/swarm-os:0.5.0',
   agentTransport: 'ssh',
 };
 
@@ -329,7 +329,7 @@ describe('evaluateSelfUpdate', () => {
 
   it('isRegistryRef distinguishes a local tag from a registry ref', () => {
     expect(isRegistryRef('swarm-os:latest')).toBe(false);
-    expect(isRegistryRef('ghcr.io/luminis1986/swarm-os:0.6.0')).toBe(true);
+    expect(isRegistryRef('ghcr.io/nyyyxius/swarm-os:0.6.0')).toBe(true);
     expect(isRegistryRef('owner/name:1')).toBe(true);
   });
 });

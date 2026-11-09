@@ -153,8 +153,8 @@ describe('resolveGraceSeconds', () => {
 
 describe('retagImage', () => {
   it('replaces the tag and leaves registry host + path alone', () => {
-    expect(retagImage('ghcr.io/luminis1986/swarm-os:0.5.0', '0.6.0')).toBe(
-      'ghcr.io/luminis1986/swarm-os:0.6.0',
+    expect(retagImage('ghcr.io/nyyyxius/swarm-os:0.5.0', '0.6.0')).toBe(
+      'ghcr.io/nyyyxius/swarm-os:0.6.0',
     );
     expect(retagImage('ghcr.io/o/r', '0.6.0')).toBe('ghcr.io/o/r:0.6.0');
   });

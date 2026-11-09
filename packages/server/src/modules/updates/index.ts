@@ -203,7 +203,7 @@ export function evaluateSelfUpdate(config: UpdateServiceConfig): SelfUpdateEligi
   if (!isRegistryRef(config.image)) {
     return {
       status: 'image_not_registry',
-      detail: `SWARM_OS_IMAGE is "${config.image}", a locally-built image with nothing to pull from. Point the deployment at a registry image (e.g. ghcr.io/luminis1986/swarm-os:<tag>) to enable one-click updates.`,
+      detail: `SWARM_OS_IMAGE is "${config.image}", a locally-built image with nothing to pull from. Point the deployment at a registry image (e.g. ghcr.io/nyyyxius/swarm-os:<tag>) to enable one-click updates.`,
     };
   }
   return {

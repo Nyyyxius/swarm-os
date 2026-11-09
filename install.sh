@@ -41,9 +41,9 @@ cd "$REPO_ROOT"
 
 COMPOSE_DIST="examples/docker-compose.dist.yml"
 COMPOSE_SSH="examples/docker-compose.ssh.yml"
-DEFAULT_IMAGE="ghcr.io/luminis1986/swarm-os:latest"
+DEFAULT_IMAGE="ghcr.io/nyyyxius/swarm-os:latest"
 LOCAL_IMAGE="swarm-os:local"
-RELEASES_API="https://api.github.com/repos/luminis1986/swarm-os/releases/latest"
+RELEASES_API="https://api.github.com/repos/Nyyyxius/swarm-os/releases/latest"
 
 ENV_FILE="$REPO_ROOT/.env"
 MODE=""            # "" (auto) | wizard | deploy

@@ -74,7 +74,7 @@ const AVAILABLE = mkSystem({
   available: true,
   latest: '0.6.0',
   tag: 'v0.6.0',
-  notesUrl: 'https://github.com/luminis1986/swarm-os/releases/tag/v0.6.0',
+  notesUrl: 'https://github.com/Nyyyxius/swarm-os/releases/tag/v0.6.0',
   notesBody: '## What changed\n* one-click updates',
   publishedAt: '2026-07-14T09:12:00.000Z',
 });

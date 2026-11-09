@@ -9,9 +9,10 @@
  * creates a PAT to `docker pull` from GHCR — this reuses that habit, not that
  * secret.
  *
- * `luminis1986/swarm-os` is PRIVATE: verified, an unauthenticated call answers
- * 404, not 401. So "no PAT configured" is a first-class, expected state of a
- * healthy deployment — never an error, never a log storm. Every outcome is a
+ * A PRIVATE repo answers an unauthenticated call with 404, not 401 (verified
+ * while `Nyyyxius/swarm-os` was private). So "no PAT configured" is a
+ * first-class, expected state of a healthy deployment — never an error, never
+ * a log storm. Every outcome is a
  * value; this client does not throw.
  *
  * ⚠️ `GET /releases` is ordered by CREATION date and INCLUDES drafts. Taking
@@ -25,7 +26,7 @@ import { compareVersions, parseVersion, tagToVersion } from './semver.js';
 const log = withModule('updates.github');
 
 /** The repository this build's updates come from. */
-export const DEFAULT_OWNER = 'luminis1986';
+export const DEFAULT_OWNER = 'Nyyyxius';
 export const DEFAULT_REPO = 'swarm-os';
 
 /** Wall-clock cap on the whole call. `/info` fans out to this in the

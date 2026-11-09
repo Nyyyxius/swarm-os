@@ -22,7 +22,7 @@ One command on a fresh host — no build toolchain required, nothing cloned firs
 
 ```sh
 T=<YOUR_GITHUB_PAT>; curl -fsSL -H "Authorization: Bearer $T" \
-  https://raw.githubusercontent.com/luminis1986/swarm-os/master/bootstrap.sh | SWARM_OS_PAT=$T bash
+  https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/bootstrap.sh | SWARM_OS_PAT=$T bash
 ```
 
 `bootstrap.sh` fetches the deploy kit into `~/swarm-os` (the repo is private, so

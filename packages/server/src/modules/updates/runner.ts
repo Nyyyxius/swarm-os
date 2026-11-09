@@ -1252,7 +1252,7 @@ export class UpdateRunner {
     // discover it as a failed `docker pull`.
     if (!this.config.image.includes('/')) {
       throw new UpdateInvalidInputError(
-        `SWARM_OS_IMAGE is "${this.config.image}", a locally-built image with nothing to pull from. Point the deployment at a registry image (e.g. ghcr.io/luminis1986/swarm-os:<tag>) to enable one-click updates.`,
+        `SWARM_OS_IMAGE is "${this.config.image}", a locally-built image with nothing to pull from. Point the deployment at a registry image (e.g. ghcr.io/nyyyxius/swarm-os:<tag>) to enable one-click updates.`,
       );
     }
     const target = retagImage(this.config.image, version);
