@@ -66,7 +66,7 @@ $script:ReleasesApi  = "https://api.github.com/repos/$($script:Repo)/releases/la
 # The kit -- the same list bootstrap.sh fetches.
 $script:Kit = @(
   'install.sh', 'install.ps1', 'bootstrap.sh', 'README.md',
-  'docs/plugins.md', 'docs/builtin-features.md', 'docs/providers.md', 'docs/comparatif-hermes-agent.md',
+  'docs/plugins.md', 'docs/builtin-features.md', 'docs/providers.md',
   '.env.example', 'LICENSE',
   'examples/.env.example', 'examples/docker-compose.dist.yml', 'examples/docker-compose.ssh.yml',
   'examples/docker-compose.multi.yml',
