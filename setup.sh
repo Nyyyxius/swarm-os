@@ -540,6 +540,49 @@ ui_pause() {
 # ══════════════════════════════════════════════════════════════════════════════
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# The NATIVE Claude Code installer, picked for this environment — not the npm
+# package, which Anthropic now ships only as a thin wrapper around the same
+# native binary (and which needs Node.js on the host for nothing). The native
+# build lands in ~/.local/bin/claude and keeps itself up to date.
+#   Linux / macOS / WSL      → claude.ai/install.sh (detects arch + glibc/musl)
+#   Windows (Git Bash, MSYS) → claude.ai/install.ps1 through PowerShell
+#   no curl/wget at all      → npm as a last resort
+claude_install_cmd() {
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      printf '%s' 'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://claude.ai/install.ps1 | iex"'
+      return 0 ;;
+  esac
+  if have curl; then
+    printf '%s' 'curl -fsSL https://claude.ai/install.sh | bash'
+  elif have wget; then
+    printf '%s' 'wget -qO- https://claude.ai/install.sh | bash'
+  elif have npm; then
+    printf '%s' 'npm i -g @anthropic-ai/claude-code'
+  else
+    return 1
+  fi
+}
+
+# musl (Alpine) is supported by the native build, but it links against the
+# system libgcc/libstdc++ and wants the system ripgrep.
+claude_install_musl_hint() {
+  [ "$(uname -s 2>/dev/null)" = Linux ] || return 1
+  if [ -f /etc/alpine-release ] || ldd --version 2>&1 | grep -qi musl; then
+    printf '%s' 'musl libc detected: apk add libgcc libstdc++ ripgrep, and set USE_BUILTIN_RIPGREP=0'
+    return 0
+  fi
+  return 1
+}
+
+# The installer drops the binary in ~/.local/bin, which this already-running
+# shell may not have on PATH yet.
+claude_path_refresh() {
+  have claude && return 0
+  case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH"; export PATH ;; esac
+  have claude
+}
+
 expand_path() {
   local p="$1" ex
   case "$p" in
@@ -1511,7 +1554,7 @@ run_account_checks() {
   else
     # `bash -lc` is what an ssh-transport agent gets: a CLI reachable only from
     # the interactive branch of ~/.bashrc is invisible to it.
-    ui_warn "claude is not on ${SWARM_OS_RUN_USER}'s login-shell PATH  ${C_DIM}npm i -g @anthropic-ai/claude-code${C_RESET}"
+    ui_warn "claude is not on ${SWARM_OS_RUN_USER}'s login-shell PATH  ${C_DIM}$(claude_install_cmd || printf 'https://docs.claude.com/en/docs/claude-code/setup')${C_RESET}"
     ACCOUNT_UNSURE=1
   fi
 
@@ -1532,9 +1575,12 @@ fix_account() {
   run_test -f "$CLAUDE_DIR/.credentials.json"; cred=$?
   run_test -f "$CLAUDE_JSON"; cj=$?
 
-  if ! run_user_has claude && is_self && have npm; then
-    if ui_confirm "Install the Claude Code CLI (npm i -g @anthropic-ai/claude-code)?" y; then
-      ui_suspend npm i -g @anthropic-ai/claude-code || true
+  local install_cmd musl_hint
+  if ! run_user_has claude && is_self && install_cmd="$(claude_install_cmd)"; then
+    musl_hint="$(claude_install_musl_hint)" && ui_warn "$musl_hint"
+    if ui_confirm "Install the native Claude Code CLI ($install_cmd)?" y; then
+      ui_suspend bash -c "$install_cmd" || true
+      claude_path_refresh || true
       return 0
     fi
   fi
