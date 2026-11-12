@@ -21,7 +21,7 @@
 |---|---|---|
 | **Nature** | Console d'orchestration d'**équipes de CLI de code** (Claude Code & co) en PTY réels | **Agent personnel auto-améliorant** + framework, orienté assistant généraliste |
 | **Unité de base** | Une instance = un projet ; Spawner → N orchestrateurs (1 lead + N workers) | Un agent avec mémoire persistante, qui spawne des subagents à la demande |
-| **Licence** | Propriétaire (tous droits réservés) | MIT, open source |
+| **Licence** | MIT, open source | MIT, open source |
 | **Cible** | Single-user, un opérateur, supervision mobile | Individu → cloud managé (Hermes Cloud) |
 
 ---

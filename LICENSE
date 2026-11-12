@@ -1,44 +1,21 @@
-swarm-os — Proprietary Software License
+MIT License
 
-Copyright (c) 2026 Nicolas Alepins. All rights reserved.
+Copyright (c) 2026 Nicolas Alepins
 
-This software and its source code (the "Software") are confidential and
-proprietary. They are provided to the designated recipient (the "Licensee")
-under the terms below and for the Licensee's internal use only.
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
 
-1. Grant. Subject to these terms, the copyright holder grants the Licensee a
-   non-exclusive, non-transferable, revocable license to install and run the
-   Software for the Licensee's own internal purposes.
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
 
-2. Restrictions. Without the prior written permission of the copyright holder,
-   the Licensee shall not: (a) copy, distribute, sublicense, sell, rent, lease
-   or otherwise make the Software available to any third party; (b) publish or
-   disclose the source code; or (c) remove or alter any proprietary notices.
-   Modification for the Licensee's own internal use is permitted; the resulting
-   work remains subject to this license.
-
-3. Confidentiality. The Software is a trade secret of the copyright holder. The
-   Licensee shall protect it with at least the same degree of care it uses for
-   its own confidential information and shall not disclose it.
-
-4. No warranty. THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND,
-   EXPRESS OR IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF
-   MERCHANTABILITY, FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT.
-
-5. Limitation of liability. IN NO EVENT SHALL THE COPYRIGHT HOLDER BE LIABLE FOR
-   ANY CLAIM, DAMAGES OR OTHER LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT
-   OR OTHERWISE, ARISING FROM, OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE
-   USE OR OTHER DEALINGS IN THE SOFTWARE.
-
-6. Third-party components. The Software depends on third-party packages and
-   tools (including, without limitation, the Anthropic Claude Code CLI, the
-   Microsoft VS Code CLI, and npm dependencies), each governed by its own
-   license. This license does not alter those terms, and the Licensee is
-   responsible for complying with them.
-
-7. Termination. This license terminates automatically if the Licensee breaches
-   any term. On termination, the Licensee shall cease all use and destroy all
-   copies of the Software in its possession or control.
-
-For permissions beyond the scope of this license, contact:
-nicolasalepins86@gmail.com
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
