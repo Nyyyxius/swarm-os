@@ -39,6 +39,37 @@ curl -fsSL https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/bootstrap.
 less bootstrap.sh && bash bootstrap.sh
 ```
 
+### Windows (PowerShell)
+
+Sous Windows, la même chose en PowerShell — ni bash ni WSL nécessaires :
+
+```powershell
+irm https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/install.ps1 | iex
+```
+
+`install.ps1` télécharge le kit dans `~\swarm-os` (`$env:SWARM_OS_DIR` pour
+changer) et lance la version Windows de l'assistant : **Docker Desktop** (proposé
+via `winget`, démarré pour toi s'il est installé mais arrêté, mode conteneurs
+Linux vérifié), le CLI Claude natif (`irm https://claude.ai/install.ps1 | iex`)
+et son login, chemins, image + `docker login`, accès distant (Tailscale via
+`winget`), notifications, détection des mises à jour — puis déploie et affiche le
+token. Depuis un répertoire de kit :
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1               # assistant, puis déploiement
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Reconfigure  # rejouer l'assistant
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Yes          # déployer le .env sans question
+```
+
+Ce qui change par rapport à `install.sh` : le transport des agents est toujours
+**`local`** (agents dans le conteneur, claude seul, mises à jour via
+`.\install.ps1`). Le transport `ssh` lance chaque agent en `bash -lc …` sur
+l'hôte, ce qui exige un hôte POSIX — pour lui (et pour codex / gemini / opencode
+et la mise à jour en un clic), lance `./install.sh` depuis une distribution
+WSL 2 avec l'intégration WSL de Docker Desktop activée. Les chemins sont écrits
+dans `.env` sous la forme `C:/Users/…` ; aucun uid à corriger (les bind mounts de
+Docker Desktop sont inscriptibles par le conteneur tels quels).
+
 Les sections 1 à 3 restent la référence de ce que fait l'assistant, et la voie
 manuelle. La suite du guide vaut dans les deux cas.
 
