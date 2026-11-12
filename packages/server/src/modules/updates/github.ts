@@ -2,17 +2,19 @@
  * GitHub Releases client — the ONE source of truth for "is there a newer
  * swarm-os?".
  *
- * Credentials: `SWARM_OS_GITHUB_TOKEN`, and nothing else. No write route, no
- * settings field, no reading the host's `~/.docker/config.json` (siphoning
- * another tool's credential file is a surprise, not a feature). The repo is
- * public, so the operator MAY put that same `read:packages` PAT here — but it
- * is their choice, made in the .env, never inferred.
+ * The repository is public, so the releases API answers WITHOUT a token: no
+ * token configured is the normal case, and the call goes out unauthenticated.
+ * A token (`SWARM_OS_GITHUB_TOKEN`, and nothing else — no write route, no
+ * settings field, no reading the host's `~/.docker/config.json`) is optional:
+ * it raises GitHub's rate limit (60 unauthenticated requests per hour per IP,
+ * shared by everything behind that IP) and lets a private fork be read. It is
+ * sent only when set.
  *
- * A PRIVATE repo answers an unauthenticated call with 404, not 401 (verified
- * while `Nyyyxius/swarm-os` was private). So "no PAT configured" is a
- * first-class, expected state of a healthy deployment — never an error, never
- * a log storm. Every outcome is a
- * value; this client does not throw.
+ * Running out of that budget is its own state (`rate_limited`), not a failure
+ * and not a token problem: it clears at the reset time, and a token is only
+ * the way to stop hitting it. A PRIVATE repo answers an unauthenticated call
+ * with 404, not 401, which lands in `not_found`. Every outcome is a value;
+ * this client does not throw.
  *
  * ⚠️ `GET /releases` is ordered by CREATION date and INCLUDES drafts. Taking
  * `[0]` would (a) offer an operator a draft that has no image behind it, and
@@ -51,19 +53,32 @@ export interface GithubRelease {
 }
 
 /**
- * Every way this call can end, as data. `no_token` and `not_found` are
- * ordinary states of a correct deployment (no PAT / PAT without access to a
- * private repo) and each has its own operator-facing sentence upstream —
+ * Every way this call can end, as data. `rate_limited`, `unauthorized` and
+ * `not_found` each have their own operator-facing sentence upstream —
  * collapsing them into one "error" would tell the operator to fix the wrong
- * thing.
+ * thing (a rate limit needs waiting or a token; a refused token needs a new
+ * token; a 404 needs the right repository).
+ *
+ * There is no `no_token` outcome any more: without a token the call is made
+ * unauthenticated.
  */
 export type GithubLatestResult =
   | { status: 'ok'; release: GithubRelease }
   | { status: 'no_releases' }
-  | { status: 'no_token' }
+  | GithubRateLimited
   | { status: 'unauthorized' }
   | { status: 'not_found' }
   | { status: 'error'; message: string };
+
+export interface GithubRateLimited {
+  status: 'rate_limited';
+  /** Whether the exhausted budget was the token's or the anonymous one. */
+  authenticated: boolean;
+  /** ISO time the budget comes back, when GitHub said; else `null`. */
+  resetAt: string | null;
+  /** One operator-facing sentence. */
+  message: string;
+}
 
 /** Shape we consume out of the API payload — everything else is ignored. */
 interface RawRelease {
@@ -75,7 +90,7 @@ interface RawRelease {
 }
 
 export interface GithubReleasesClientOptions {
-  /** PAT, or `null` when unset — `null` short-circuits WITHOUT a network call. */
+  /** Optional token, or `null` when unset — `null` means an unauthenticated call. */
   token: string | null;
   owner?: string;
   repo?: string;
@@ -111,21 +126,21 @@ export class GithubReleasesClient {
 
   /** Highest non-draft release, or a typed non-answer. Never throws. */
   async latestRelease(): Promise<GithubLatestResult> {
-    if (this.token === null) return { status: 'no_token' };
-
     const url = `https://api.github.com/repos/${this.owner}/${this.repo}/releases?per_page=${PER_PAGE}`;
+    const headers: Record<string, string> = {
+      Accept: 'application/vnd.github+json',
+      'X-GitHub-Api-Version': '2022-11-28',
+      'User-Agent': 'swarm-os',
+    };
+    // Sent only when configured: the public repo answers without it.
+    if (this.token !== null) headers.Authorization = `Bearer ${this.token}`;
     const controller = new AbortController();
     const timer = setTimeout(() => controller.abort(), this.timeoutMs);
     let res: Response;
     try {
       res = await this.fetchImpl(url, {
         method: 'GET',
-        headers: {
-          Authorization: `Bearer ${this.token}`,
-          Accept: 'application/vnd.github+json',
-          'X-GitHub-Api-Version': '2022-11-28',
-          'User-Agent': 'swarm-os',
-        },
+        headers,
         signal: controller.signal,
       });
     } catch (err) {
@@ -138,11 +153,29 @@ export class GithubReleasesClient {
       clearTimeout(timer);
     }
 
-    // 401 = the PAT is wrong/expired. 403 = valid PAT, refused (missing scope
-    // or rate-limited) — same operator action (fix the token), same bucket.
-    if (res.status === 401 || res.status === 403) return { status: 'unauthorized' };
-    // 404 on a private repo means "this PAT cannot see it" — GitHub hides
-    // existence rather than admitting it, so this is NOT a missing-repo bug.
+    // A rate limit comes back as 429, or as 403 with an exhausted budget /
+    // `retry-after` / a "rate limit" message. Checked BEFORE the token buckets:
+    // a 403 from a spent anonymous budget is not a token problem.
+    if (res.status === 429 || (res.status === 403 && (await isRateLimited(res)))) {
+      const limited = this.rateLimited(res);
+      log.warn({
+        event: 'updates.github_rate_limited',
+        authenticated: limited.authenticated,
+        resetAt: limited.resetAt,
+      });
+      return limited;
+    }
+    // 401 = the token is wrong/expired. 403 = token valid but refused (missing
+    // scope / no access) — same operator action (fix the token), same bucket.
+    // Without a token neither should happen on a public repo: report it raw.
+    if (res.status === 401 || res.status === 403) {
+      return this.token !== null
+        ? { status: 'unauthorized' }
+        : { status: 'error', message: `HTTP ${res.status}` };
+    }
+    // 404: the repository is private (GitHub hides existence rather than
+    // admitting it, to an anonymous call or to a token that cannot see it) or
+    // was renamed.
     if (res.status === 404) return { status: 'not_found' };
     if (!res.ok) return { status: 'error', message: `HTTP ${res.status}` };
 
@@ -157,6 +190,57 @@ export class GithubReleasesClient {
     const best = pickHighestRelease(payload as RawRelease[]);
     return best ? { status: 'ok', release: best } : { status: 'no_releases' };
   }
+
+  private rateLimited(res: Response): GithubRateLimited {
+    const authenticated = this.token !== null;
+    const resetAt = rateLimitResetAt(res);
+    const until = resetAt ? ` until ${resetAt}` : '';
+    const message = authenticated
+      ? `GitHub API rate limit reached for SWARM_OS_GITHUB_TOKEN${until}; a later check retries on its own.`
+      : `GitHub API rate limit reached for unauthenticated requests from this IP (60 per hour)${until}; ` +
+        'a later check retries on its own. Setting SWARM_OS_GITHUB_TOKEN (any read-only token) raises the limit.';
+    return { status: 'rate_limited', authenticated, resetAt, message };
+  }
+}
+
+/** Header lookup that tolerates a response without `headers` (test doubles). */
+function header(res: Response, name: string): string | null {
+  const h = (res as Partial<Response>).headers;
+  return h && typeof h.get === 'function' ? h.get(name) : null;
+}
+
+/**
+ * Does a 403 mean "rate limited"? GitHub's primary limit sets
+ * `x-ratelimit-remaining: 0`; its secondary limits send `retry-after`; both
+ * say "rate limit" in the body's `message`.
+ */
+async function isRateLimited(res: Response): Promise<boolean> {
+  if (header(res, 'x-ratelimit-remaining') === '0') return true;
+  if (header(res, 'retry-after') !== null) return true;
+  try {
+    const body: unknown = await res.json();
+    const message =
+      typeof body === 'object' && body !== null ? (body as { message?: unknown }).message : undefined;
+    return typeof message === 'string' && /rate limit/i.test(message);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * When the budget comes back: `retry-after` (seconds from now) wins, then
+ * `x-ratelimit-reset` (epoch seconds). `null` when GitHub said neither.
+ */
+export function rateLimitResetAt(res: Response, nowMs: number = Date.now()): string | null {
+  const retryAfter = header(res, 'retry-after');
+  if (retryAfter !== null && /^\d+$/.test(retryAfter.trim())) {
+    return new Date(nowMs + Number(retryAfter.trim()) * 1000).toISOString();
+  }
+  const reset = header(res, 'x-ratelimit-reset');
+  if (reset !== null && /^\d+$/.test(reset.trim()) && Number(reset.trim()) > 0) {
+    return new Date(Number(reset.trim()) * 1000).toISOString();
+  }
+  return null;
 }
 
 /**

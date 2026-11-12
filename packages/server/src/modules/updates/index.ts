@@ -13,9 +13,9 @@
  * produce exactly the same freshness at exactly the moments it matters.
  *
  * Two consequences worth stating:
- *  - `getVerdict()` NEVER blocks and NEVER throws. A dead network, an expired
- *    PAT, a private repo — each is a value carried in the verdict, and the
- *    previous verdict stays visible in the meantime.
+ *  - `getVerdict()` NEVER blocks and NEVER throws. A dead network, a spent
+ *    rate limit, an expired token, a private repo — each is a value carried
+ *    in the verdict, and the previous verdict stays visible in the meantime.
  *  - The clock is only advanced on a COMPLETED refresh (success or failure
  *    alike), so a permanently failing check backs off to one attempt per TTL
  *    instead of one per `/info` poll.
@@ -53,7 +53,14 @@ export type SystemCheckStatus =
   | 'never_checked'
   | 'ok'
   | 'no_releases'
+  /**
+   * @deprecated No longer produced: without a token the check now runs
+   * unauthenticated against the public repo. Kept in the union so clients
+   * built against the older contract still type-check.
+   */
   | 'no_token'
+  /** GitHub's API rate limit is spent (`error` says until when). */
+  | 'rate_limited'
   | 'unauthorized'
   | 'not_found'
   | 'error';
@@ -75,7 +82,10 @@ export interface SystemUpdateState {
   checkStatus: SystemCheckStatus;
   /** ISO of the last COMPLETED check, success or failure. */
   checkedAt: string | null;
-  /** Message for `checkStatus === 'error'`. */
+  /**
+   * Message for `checkStatus === 'error'`, and the operator sentence (with the
+   * reset time when known) for `checkStatus === 'rate_limited'`.
+   */
   error: string | null;
 }
 
@@ -371,6 +381,11 @@ export class UpdateService {
         // Keep the previous release: a flaky network must not make a known
         // update disappear from the UI.
         this.checkStatus = 'error';
+        this.checkError = r.message;
+        break;
+      case 'rate_limited':
+        // Same reasoning: a spent rate limit says nothing about the releases.
+        this.checkStatus = 'rate_limited';
         this.checkError = r.message;
         break;
       default:

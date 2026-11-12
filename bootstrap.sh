@@ -13,8 +13,8 @@
 #
 # A token is only needed to fetch from a PRIVATE fork or mirror (SWARM_OS_REPO):
 # give it in the environment (SWARM_OS_PAT) or with --token. When one is given it
-# is also handed to the installer as the update detection token. The image itself
-# is a separate matter: the installer asks for its `docker login`.
+# is also handed to the installer as the (optional) update detection token. The
+# image is public too: the installer pulls it anonymously, no `docker login`.
 #
 # Re-running it is the update path for the kit itself: files are refreshed, your
 # `.env` is never touched, and the installer picks up where it left off.
@@ -146,7 +146,7 @@ if [ -n "$failed" ]; then
   # to regenerate a token that works fine.
   if [ "$fetched" -gt 0 ]; then
     note "GitHub answers fine — ${fetched} other files came down from ${REPO}@${REF}"
-    die "those paths do not exist at ${REF}. Pick a ref that has them (--ref master), or ask the maintainer for a newer tag."
+    die "those paths do not exist at ${REF}. Pick a ref that has them (--ref master), or use a newer tag."
   fi
   case "$failed" in
     *"(401)"*|*"(403)"*) die "GitHub refused the token. It needs read access to ${REPO} (classic: scope \`repo\`; fine-grained: Contents: Read) — or drop it: the public repo needs none." ;;
