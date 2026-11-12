@@ -15,8 +15,16 @@ Comment opérer une instance en marche. Pour l'install / l'accès distant, voir
   modèle et effort par défaut, connecteur Discord optionnel.
 - **Crons** — réveils programmés, visant un **rôle**. Un rôle peut en porter
   autant qu'il veut ; voir [Crons](#crons) plus bas.
-- Toutes les sessions tournent en `bypassPermissions`. **L'isolation vient du
-  conteneur, pas du runtime — ne jamais lancer swarm-os hors Docker.**
+- **Permissions** — par défaut, les agents tournent avec leurs demandes de
+  permission coupées (`bypassPermissions` pour claude ; codex, gemini et
+  opencode tournent toujours sans demande). Ce qu'ils atteignent dépend du
+  transport : en `local`, le conteneur et ses montages ; en `ssh`, ils tournent
+  **sur l'hôte** sous le compte SSH, et le conteneur n'isole plus rien. Lis
+  [SECURITY.md](../../SECURITY.md) (en anglais) avant de choisir.
+- **Approbations humaines** — une équipe claude dans un mode qui questionne
+  (`default`, `plan`, `acceptEdits`, réglé par rôle ou par équipe) transforme
+  chaque demande de permission en approbation que tu accordes ou refuses depuis
+  l'UI ou Discord.
 
 ---
 
@@ -86,9 +94,11 @@ sous `/workspace` ou `/data` — des chemins **conteneur**.
 > session.
 
 Autrement dit, quiconque possède le `X-Auth-Token` peut exécuter du code
-arbitraire **dans le conteneur**. C'est le pouvoir que ce token donne déjà par
-ailleurs (une équipe `bypassPermissions` sur `/workspace` exécute aussi du code
-arbitraire), mais ça mérite d'être dit.
+arbitraire **dans le conteneur** — et sous le transport `ssh`, le conteneur
+détient une clé qui ouvre une session sur l'hôte. C'est le pouvoir que ce token
+donne déjà par ailleurs (une équipe `bypassPermissions` exécute aussi du code
+arbitraire, un plugin aussi), mais ça mérite d'être dit. Voir
+[SECURITY.md](../../SECURITY.md#the-auth-token).
 
 Exemple complet, contrat de sortie détaillé et variante `uv run --with
 requests` : [examples/crons/](../../examples/crons/).
@@ -151,9 +161,10 @@ modèle toutes seules ; seules les nouvelles prennent le défaut le plus récent
 
 ## Mettre à jour
 
-**RÉGLAGES ▸ SYSTEM UPDATE** affiche la version en cours et, si un
-`SWARM_OS_GITHUB_TOKEN` est configuré, la dernière release publiée. Sans ce
-token, rien n'est jamais annoncé — voir install.fr.md §7.4.
+**RÉGLAGES ▸ SYSTEM UPDATE** affiche la version en cours et la dernière
+release publiée, lue dans les releases GitHub publiques sans aucun token.
+`SWARM_OS_GITHUB_TOKEN` est optionnel et ne fait que relever la limite de débit
+de GitHub — voir install.fr.md §7.4.
 
 Si le déploiement est éligible (transport SSH + un `SWARM_OS_IMAGE` de
 registry), le même panneau applique la mise à jour lui-même : il réécrit la

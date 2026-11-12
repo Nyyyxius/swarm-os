@@ -1,4 +1,4 @@
-# swarm-os — Deployment & handoff docs
+# swarm-os — Deployment docs
 
 Everything needed to install and operate swarm-os on your own host — bilingual.
 
@@ -6,68 +6,105 @@ Everything needed to install and operate swarm-os on your own host — bilingual
 |---|---|---|
 | Install, remote access, troubleshooting | [install.en.md](install.en.md) | [install.fr.md](install.fr.md) |
 | Usage guide (concepts, UI, backups) | [usage.en.md](usage.en.md) | [usage.fr.md](usage.fr.md) |
+| Trust model: what the agents can reach, what the token grants | [../../SECURITY.md](../../SECURITY.md) | (English only) |
 
-**Read order:** install → first login → remote access → usage.
+**Read order:** security → install → first login → remote access → usage.
 
 The one hard prerequisite is an **authenticated Claude Code CLI on the host**
 (`~/.claude/.credentials.json` must exist). Without it, no agent can start.
 
-TL;DR — on a bare host, one command:
+Before you install, know this: agents run commands **without asking for
+permission**. Under the default `local` transport they are confined to the
+container and its mounts; under the `ssh` transport they run on the host as your
+account. [SECURITY.md](../../SECURITY.md) explains the difference and how to set
+up a dedicated account.
+
+TL;DR — on a bare host, one command (no token, no GitHub
+account: the repository and the image are public):
 
 ```sh
 curl -fsSL https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/bootstrap.sh | bash
 ```
 
-From a checkout, the same wizard without the fetch:
+On Windows, in PowerShell:
+
+```powershell
+irm https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/install.ps1 | iex
+```
+
+From a checkout or a kit directory, the same wizard without the fetch:
 
 ```sh
 ./install.sh             # guided setup: asks, checks, writes .env, deploys
 ```
 
 On a host with no `.env`, `install.sh` runs a nine-step wizard — host
-prerequisites (it can install Docker and run the Claude login for you), project
-paths, image + registry login, agent transport (it generates and authorises the
-SSH key), the other provider CLIs, remote access (incl. Tailscale),
-notifications, update detection — then deploys and prints the token, the URL and
-each provider's verdict. `--reconfigure` re-runs it, `--yes` deploys an existing
-`.env` without asking anything. The manual path still works:
+prerequisites (it can install Docker and the native Claude CLI and run the
+Claude login for you), project paths, image, agent transport (it can generate
+and authorise the SSH key), the other provider CLIs, remote access (incl.
+Tailscale), notifications and update detection, advanced settings, review — then
+deploys and prints the token, the URL and each provider's verdict.
+`--reconfigure` re-runs it, `--yes` deploys an existing `.env` without asking
+anything. The manual path still works:
 
 ```sh
 cp .env.example .env     # edit WORKSPACE_PATH, DATA_PATH, SWARM_OS_IMAGE, project name
 ./install.sh
 ```
 
-Two variables decide what the update surface can do — both documented in
+A third installer, `setup.sh`, is a self-contained full-screen wizard (12 steps,
+including installing for another host account). It is not in the kit; run it
+from the repository with
+`curl -fsSL https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/setup.sh | bash`.
+See [install.en.md §1 and §3](install.en.md).
+
+Two variables shape the update surface — both documented in
 [install.en.md §7](install.en.md): `SWARM_OS_IMAGE` (set it explicitly; it is
-the line an update rewrites, `.bak` beside it) and `SWARM_OS_GITHUB_TOKEN` (any
-read-only PAT — the `read:packages` one used by `docker login` works; without it
-no release is ever detected).
+the line a one-click update rewrites, `.bak` beside it) and
+`SWARM_OS_GITHUB_TOKEN` (optional: release detection works without it; a
+read-only token only raises GitHub's API rate limit).
 
 ---
 
-## Handoff checklist (for the maintainer shipping this)
+## What `bootstrap.sh` downloads
 
-**Publish the image** — push a `vX.Y.Z` git tag (the `release-image` workflow
-builds + pushes to GHCR **and cuts the GitHub Release the update checker
-reads**), or run `scripts/push-image.sh vX.Y.Z`. Then grant the recipient's
-GitHub account/team read access to the GHCR package.
+`bootstrap.sh` fetches the deploy kit into `~/swarm-os` (`--dir` to change it).
+The list lives in the script, in `KIT`:
+
+- `install.sh`, `install.ps1`, `bootstrap.sh`
+- `.env.example`, `examples/.env.example`
+- `examples/docker-compose.dist.yml`, `examples/docker-compose.ssh.yml`,
+  `examples/docker-compose.multi.yml`
+- `docs/deploy/README.md`, `docs/deploy/install.{en,fr}.md`,
+  `docs/deploy/usage.{en,fr}.md`
+- `LICENSE`
+
+Nothing else (server sources, `Dockerfile`, `setup.sh`) is part of the kit. To
+build the image yourself, clone the repository instead. Re-running the command
+refreshes the kit and never touches your `.env`.
+
+## Keep your own state out of the repository
+
+Your deployment state is yours: never commit it, paste it, or copy it to
+another machine. That means your `.env` (it holds your tokens), `~/.claude`,
+the SSH key directory (`~/.swarm-os/ssh`, or `~/.ssh`), and the `DATA_PATH`
+directory (`token`, `hook-token`, `ide-token`, the database). A local compose
+file with your own paths belongs next to your `.env`, outside version control.
+On another machine, run the installer again and log in to Claude Code there.
+
+---
+
+## Publishing a release (maintainer)
+
+Push a `vX.Y.Z` git tag: the `release-image` workflow builds and pushes the
+image to GHCR **and cuts the GitHub Release the update checker reads**.
+`scripts/push-image.sh vX.Y.Z` can push an image from your own machine, but it
+cuts no GitHub Release, so no instance will be told about it.
 
 > A release is only effective once the tag reaches GitHub:
 > `git push origin master --follow-tags`. A tag that stays local publishes
 > nothing — the workflow never fires and no instance sees the version. A manual
 > `workflow_dispatch` run publishes `:<short-sha>` only: it does not move
 > `:latest` and cuts no release.
-
-**Hand over**: just the one-command line above plus one credential — the
-recipient's GitHub account granted `read:packages` access to the GHCR package
-(they log in with a classic PAT carrying that scope; the same PAT reads the
-releases for update detection).
-`bootstrap.sh` pulls the kit itself (`install.sh`, `bootstrap.sh`,
-`.env.example`, `examples/docker-compose.{dist,ssh,multi}.yml`, `docs/deploy/`,
-`LICENSE`) — that list lives in the script, in `KIT`.
-
-**Do NOT hand over** your personal state: your `.env`, `~/.claude`, `~/.ssh`,
-`docker-compose.stiix.yml` / `docker-compose.test.yml` (they hold your paths,
-tailnet name and SSH keys). The recipient sets up their **own** Claude Code login.
 
 The Software is licensed under the MIT license (see `LICENSE`).
