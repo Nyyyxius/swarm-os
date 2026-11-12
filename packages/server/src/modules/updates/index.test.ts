@@ -6,7 +6,14 @@ import { SwarmDb } from '../db/index.js';
 import { SettingsStore } from '../settings/index.js';
 import { GithubReleasesClient } from './github.js';
 import { PluginUpdateChecker } from './plugins-check.js';
-import { UpdateService, UpdateStore, evaluateSelfUpdate, isRegistryRef, type UpdateServiceConfig } from './index.js';
+import {
+  UpdateService,
+  UpdateStore,
+  evaluateSelfUpdate,
+  isRegistryRef,
+  TOKEN_REJECTED_NOTE,
+  type UpdateServiceConfig,
+} from './index.js';
 
 let dir: string;
 let db: SwarmDb;
@@ -245,9 +252,52 @@ describe('UpdateService — cache & background refresh (no timer)', () => {
     const v = await s.refreshNow();
     expect(v.checkStatus).toBe('rate_limited');
     expect(v.error).toContain('rate limit');
-    expect(v.error).toContain('2026-01-01T00:00:00.000Z');
+    expect(v.error).toContain('2026-01-01 00:00 UTC');
     expect(v.latest).toBe('0.6.0');
     expect(v.available).toBe(true);
+  });
+
+  it('after a rate limit, retries at the reset time (+ jitter), not after the full TTL', async () => {
+    const reset = Date.parse('2026-01-01T00:00:00Z');
+    clock = reset - 10 * 60_000;
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce({
+        ok: false,
+        status: 403,
+        headers: new Headers({ 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(reset / 1000) }),
+        json: async () => ({}),
+      })
+      .mockResolvedValue({ ok: true, status: 200, json: async () => [release('v0.6.0')] });
+    const s = service({
+      github: githubWith(fetchImpl),
+      ttlMs: 6 * 60 * 60 * 1000,
+      retryJitterMs: () => 45_000,
+    });
+    expect((await s.refreshNow()).checkStatus).toBe('rate_limited');
+
+    clock = reset + 44_000; // before reset + jitter: no new call
+    s.getVerdict();
+    await settle();
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+
+    clock = reset + 45_000; // due — hours before the TTL would have allowed
+    s.getVerdict();
+    await settle();
+    await settle();
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect(s.getVerdict().checkStatus).toBe('ok');
+  });
+
+  it('a rejected token with a successful anonymous retry: verdict ok, the note in `error`', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce({ ok: false, status: 401, json: async () => ({}) })
+      .mockResolvedValueOnce({ ok: true, status: 200, json: async () => [release('v0.6.0')] });
+    const v = await service({ github: githubWith(fetchImpl) }).refreshNow();
+    expect(v.checkStatus).toBe('ok');
+    expect(v.latest).toBe('0.6.0');
+    expect(v.error).toBe(TOKEN_REJECTED_NOTE);
   });
 });
 

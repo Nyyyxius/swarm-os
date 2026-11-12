@@ -4,6 +4,7 @@ import {
   githubTokenFromEnv,
   pickHighestRelease,
   rateLimitResetAt,
+  describeReset,
 } from './github.js';
 
 /**
@@ -28,7 +29,13 @@ function sentHeaders(fetchImpl: ReturnType<typeof vi.fn>): Record<string, string
 }
 
 function client(fetchImpl: typeof fetch, token: string | null = 'pat_x') {
-  return new GithubReleasesClient({ token, fetchImpl, timeoutMs: 50 });
+  return new GithubReleasesClient({
+    token,
+    fetchImpl,
+    timeoutMs: 50,
+    // Pinned so the rate-limit sentence's relative delay is deterministic.
+    now: () => Date.parse('2025-12-31T23:37:00Z'),
+  });
 }
 
 function rel(over: Record<string, unknown> = {}) {
@@ -80,11 +87,61 @@ describe('GithubReleasesClient.latestRelease', () => {
     expect((init.headers as Record<string, string>).Authorization).toBe('Bearer pat_x');
   });
 
-  it('401 → unauthorized (bad or expired PAT)', async () => {
-    const fetchImpl = vi.fn(async () => jsonRes(401, {}));
+  it('401 with a token, anonymous retry fails too → unauthorized', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(jsonRes(401, {}))
+      .mockResolvedValueOnce(jsonRes(404, {}));
     expect(await client(fetchImpl as unknown as typeof fetch).latestRelease()).toEqual({
       status: 'unauthorized',
     });
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+  });
+
+  it('401 with a token, anonymous retry succeeds → the verdict, flagged tokenRejected', async () => {
+    const fetchImpl = vi
+      .fn()
+      .mockResolvedValueOnce(jsonRes(401, { message: 'Bad credentials' }))
+      .mockResolvedValueOnce(jsonRes(200, [rel({ tag_name: 'v0.7.0' })]));
+    const r = await client(fetchImpl as unknown as typeof fetch).latestRelease();
+    expect(r.status).toBe('ok');
+    if (r.status !== 'ok') return;
+    expect(r.release.tag).toBe('v0.7.0');
+    expect(r.tokenRejected).toBe(true);
+    expect(fetchImpl).toHaveBeenCalledTimes(2);
+    expect((fetchImpl.mock.calls[0][1] as RequestInit).headers).toHaveProperty('Authorization', 'Bearer pat_x');
+    expect((fetchImpl.mock.calls[1][1] as RequestInit).headers).not.toHaveProperty('Authorization');
+  });
+
+  it('a working token is not flagged and makes a single call', async () => {
+    const fetchImpl = vi.fn(async () => jsonRes(200, [rel()]));
+    const r = await client(fetchImpl as unknown as typeof fetch).latestRelease();
+    expect(r).not.toHaveProperty('tokenRejected');
+    expect(fetchImpl).toHaveBeenCalledTimes(1);
+  });
+
+  it('a body that never ends → error at the deadline, not a hang', async () => {
+    const fetchImpl = vi.fn(
+      async () =>
+        ({
+          ok: true,
+          status: 200,
+          headers: new Headers(),
+          json: () => new Promise<never>(() => undefined),
+        }) as unknown as Response,
+    );
+    const started = Date.now();
+    const r = await client(fetchImpl as unknown as typeof fetch, null).latestRelease();
+    expect(r.status).toBe('error');
+    if (r.status !== 'error') return;
+    expect(r.message).toContain('timed out after 50 ms');
+    expect(Date.now() - started).toBeLessThan(2000);
+  });
+
+  it('headers that never arrive → error at the deadline too', async () => {
+    const fetchImpl = vi.fn(() => new Promise<never>(() => undefined));
+    const r = await client(fetchImpl as unknown as typeof fetch, null).latestRelease();
+    expect(r).toEqual({ status: 'error', message: 'timed out after 50 ms' });
   });
 
   it('403 that is not a rate limit → unauthorized too: same operator action', async () => {
@@ -120,7 +177,7 @@ describe('GithubReleasesClient.latestRelease', () => {
     expect(r.authenticated).toBe(false);
     expect(r.resetAt).toBe('2026-01-01T00:00:00.000Z');
     expect(r.message).toContain('unauthenticated');
-    expect(r.message).toContain('2026-01-01T00:00:00.000Z');
+    expect(r.message).toContain('until 2026-01-01 00:00 UTC (in about 23 min)');
     expect(r.message).toContain('SWARM_OS_GITHUB_TOKEN');
   });
 
@@ -183,6 +240,17 @@ describe('GithubReleasesClient.latestRelease', () => {
     });
     const r = await client((vi.fn(async () => jsonRes(200, { message: 'nope' })) as unknown) as typeof fetch).latestRelease();
     expect(r.status).toBe('error');
+  });
+});
+
+describe('describeReset', () => {
+  const now = Date.parse('2026-01-01T00:00:00Z');
+  it('states UTC and a relative delay', () => {
+    expect(describeReset('2026-01-01T00:23:10.000Z', now)).toBe('2026-01-01 00:23 UTC (in about 24 min)');
+    expect(describeReset('2026-01-01T03:00:00.000Z', now)).toBe('2026-01-01 03:00 UTC (in about 3 h)');
+  });
+  it('never says "in 0 min" for a reset already passed', () => {
+    expect(describeReset('2025-12-31T23:59:00.000Z', now)).toBe('2025-12-31 23:59 UTC (in about 1 min)');
   });
 });
 

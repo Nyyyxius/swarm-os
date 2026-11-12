@@ -6,10 +6,10 @@
 # The repository and the image are public: the script, its compose files and
 # `docker pull` need no token. A read-only GitHub token is optional and only
 # useful for a private fork (`repo`) or a private image mirror (`read:packages`);
-# it is never asked for — press `e` on the GitHub access screen, or export it:
-# SWARM_OS_PAT, SWARM_OS_GITHUB_TOKEN, GITHUB_TOKEN and GH_TOKEN are all read
-# from the environment. `| bash -s -- --token <pat>` works too, but leaves the
-# token in your shell history and in `ps` output.
+# it is never asked for — press `e` on the GitHub access screen, or export
+# SWARM_OS_PAT or SWARM_OS_GITHUB_TOKEN (an ambient GITHUB_TOKEN / GH_TOKEN is
+# NOT read: it is some other tool's credential). `| bash -s -- --token <pat>`
+# works too, but leaves the token in your shell history and in `ps` output.
 #
 # One file, no kit, no clone. It takes a bare host to a running swarm-os:
 # checks the prerequisites, checks the repository and the image are in reach
@@ -54,7 +54,12 @@ KIT_SSH="examples/docker-compose.ssh.yml"
 
 # ── Answers (globals the screens fill in) ─────────────────────────────────────
 DIR="${SWARM_OS_DIR:-$HOME/swarm-os}"
-TOKEN="${SWARM_OS_PAT:-${SWARM_OS_GITHUB_TOKEN:-${GITHUB_TOKEN:-${GH_TOKEN:-}}}}"
+# Explicit variables only — never an ambient GITHUB_TOKEN / GH_TOKEN (CI, the gh
+# CLI): those would be used silently and could end up in this deployment's .env.
+TOKEN="${SWARM_OS_PAT:-${SWARM_OS_GITHUB_TOKEN:-}}"
+TOKEN_SOURCE=""          # where TOKEN came from, said on the access screen
+if [ -n "${SWARM_OS_PAT:-}" ]; then TOKEN_SOURCE="SWARM_OS_PAT"
+elif [ -n "${SWARM_OS_GITHUB_TOKEN:-}" ]; then TOKEN_SOURCE="SWARM_OS_GITHUB_TOKEN"; fi
 GHCR_TOKEN=""            # may differ from TOKEN: read:packages vs repo (private fork)
 GHCR_USER=""
 SWARM_OS_PROJECT_NAME=""
@@ -1271,6 +1276,7 @@ fix_prereqs() {
 # can carry one permission without the other. Both are probed and reported
 # separately instead of failing later with `pull access denied`.
 KIT_ACCESS=""      # ok | 401 | 403 | 404 | 000
+KIT_TOKEN_REFUSED=0  # 1 = the token got 401/403 and the anonymous retry decided
 GHCR_ACCESS=""     # ok | denied | skipped
 GHCR_ERR=""        # what docker said when GHCR_ACCESS=denied
 
@@ -1299,12 +1305,20 @@ pull_diagnosis() { # pull_diagnosis <image> <docker output>
 
 probe_kit() {
   local code
+  KIT_TOKEN_REFUSED=0
   if [ -n "$TOKEN" ]; then
     code="$(curl -sS -o /dev/null -w '%{http_code}' -m 20 \
       -H "Authorization: Bearer ${TOKEN}" \
       -H "Accept: application/vnd.github.raw" \
       -H "X-GitHub-Api-Version: 2022-11-28" \
       "https://api.github.com/repos/${REPO}/contents/${KIT_DIST}?ref=${REF}" 2>/dev/null)" || code="000"
+    # A stale or wrong token must not block a public repository.
+    case "$code" in
+      401|403)
+        KIT_TOKEN_REFUSED=1
+        code="$(curl -sS -o /dev/null -w '%{http_code}' -m 20 \
+          "https://raw.githubusercontent.com/${REPO}/${REF}/${KIT_DIST}" 2>/dev/null)" || code="000" ;;
+    esac
   else
     code="$(curl -sS -o /dev/null -w '%{http_code}' -m 20 \
       "https://raw.githubusercontent.com/${REPO}/${REF}/${KIT_DIST}" 2>/dev/null)" || code="000"
@@ -1343,6 +1357,10 @@ screen_token() {
       ui_gap
       ui_input TOKEN "token (empty = none)" "$TOKEN" v_token 1
       [ "$UI_BACK" = 1 ] && return 0
+      TOKEN_SOURCE=""
+    elif [ -n "$TOKEN" ] && [ -n "$TOKEN_SOURCE" ]; then
+      # Never use a token the operator cannot see: say where it came from.
+      ui_warn "using the token from \$${TOKEN_SOURCE} (set, hidden) — press e to change or clear it"
     fi
 
     ui_gap
@@ -1354,6 +1372,7 @@ screen_token() {
     printf '\033[%d;1H\033[K' "$((UI_ROW-1))"
     UI_ROW=$((UI_ROW-1))
 
+    [ "$KIT_TOKEN_REFUSED" = 1 ] && ui_warn "GitHub refused the token; the public repository was read without it"
     case "$KIT_ACCESS" in
       ok)  ui_ok "compose files readable from ${REPO}@${REF}" ;;
       401|403) ui_no "GitHub refused the token (HTTP $KIT_ACCESS)"
@@ -2423,6 +2442,12 @@ fetch_one() {
       -H "Accept: application/vnd.github.raw" \
       -H "X-GitHub-Api-Version: 2022-11-28" \
       "https://api.github.com/repos/${REPO}/contents/${path}?ref=${REF}" 2>/dev/null)" || code="000"
+    # A stale or wrong token must not block a public repository.
+    case "$code" in
+      401|403)
+        code="$(curl -sS -w '%{http_code}' -o "$dest.part" -m 40 --retry 2 --retry-delay 1 \
+          "https://raw.githubusercontent.com/${REPO}/${REF}/${path}" 2>/dev/null)" || code="000" ;;
+    esac
   else
     code="$(curl -sS -w '%{http_code}' -o "$dest.part" -m 40 --retry 2 --retry-delay 1 \
       "https://raw.githubusercontent.com/${REPO}/${REF}/${path}" 2>/dev/null)" || code="000"
@@ -2598,10 +2623,13 @@ pull_image() {
        die "$SWARM_OS_IMAGE has no registry path and is not in the local image store." ;;
   esac
   say "Pulling $SWARM_OS_IMAGE"
-  # Progress goes to the terminal as before; the tail is kept to diagnose.
-  local log; log="$(mktemp)"
-  if docker pull "$SWARM_OS_IMAGE" 2>&1 | tee "$log"; then rm -f "$log"; good "image ready"; return 0; fi
-  local out; out="$(tail -n 20 "$log")"; rm -f "$log"
+  # Attached to the terminal so docker's progress bars show (a pipe would hide
+  # them and make a multi-GB pull look hung). Only on failure is the pull run
+  # again, captured, to get docker's error text: the failures worth
+  # diagnosing fail again at once, and a rerun that succeeds is a success.
+  local out
+  if docker pull "$SWARM_OS_IMAGE"; then good "image ready"; return 0; fi
+  if out="$(docker pull "$SWARM_OS_IMAGE" 2>&1)"; then good "image ready"; return 0; fi
 
   # The access probe on the token screen ran against whatever image was selected
   # THEN; the answer can have changed since. A token given for a private mirror
@@ -2616,6 +2644,8 @@ pull_image() {
       if printf '%s' "$tok" | docker login "$registry" -u "$GHCR_USER" --password-stdin >/dev/null 2>&1; then
         good "logged in"
         if docker pull "$SWARM_OS_IMAGE"; then good "image ready"; return 0; fi
+        # Diagnose THIS failure, not the anonymous one before the login.
+        if out="$(docker pull "$SWARM_OS_IMAGE" 2>&1)"; then good "image ready"; return 0; fi
       else
         bad "docker login was refused by $registry"
       fi
@@ -2623,6 +2653,7 @@ pull_image() {
   fi
   bad "the pull failed."
   local line
+  [ -n "$out" ] && printf '%s\n' "$out" | tail -n 4 | while IFS= read -r line; do dimly "docker: $line"; done
   while IFS= read -r line; do dimly "$line"; done <<< "$(pull_diagnosis "$SWARM_OS_IMAGE" "$out")"
   die "could not pull the image — nothing was started."
 }
@@ -2801,7 +2832,7 @@ main() {
       --dir)            DIR="$(expand_path "$2")"; shift 2 ;;
       --user)           RUN_USER_ARG="$2"; shift 2 ;;
       --port)           SWARM_OS_PORT="$2"; shift 2 ;;
-      --token)          TOKEN="$2"; shift 2 ;;
+      --token)          TOKEN="$2"; TOKEN_SOURCE=""; shift 2 ;;
       --ref)            REF="$2"; shift 2 ;;
       --repo)           REPO="$2"; shift 2 ;;
       --image)          SWARM_OS_IMAGE="$2"; shift 2 ;;

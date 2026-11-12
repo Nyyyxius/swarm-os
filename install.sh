@@ -226,6 +226,22 @@ build_from_source_hint() {
   note "  git clone $SOURCE_REPO_URL && cd swarm-os && ./install.sh   (then pick \"Build it here\")"
 }
 
+# `docker pull` attached to the terminal (so its progress bars show — piping it
+# would hide them and make a multi-GB pull look hung). Only when it fails is it
+# run again with its output captured into PULL_ERR, for explain_pull_failure:
+# the failures worth diagnosing (refused, unknown tag, platform, network)
+# fail again in a second, and a rerun that succeeds is simply a success.
+PULL_ERR=""
+pull_attached() { # pull_attached <image>
+  PULL_ERR=""
+  docker pull "$1" && return 0
+  PULL_ERR="$(docker pull "$1" 2>&1)" && return 0
+  return 1
+}
+
+# Set by explain_pull_failure: daemon | platform | network | refused | tag | other
+PULL_FAILURE_KIND=""
+
 # Explain a failed `docker pull` from what docker actually said, rather than
 # guessing. Matching order matters: a missing platform also says "not found",
 # and GHCR answers "denied" both for a refused login and for a package that
@@ -237,20 +253,26 @@ explain_pull_failure() { # explain_pull_failure <image> <docker output>
   fi
   case "$out" in
     *"Cannot connect to the Docker daemon"*|*"Docker daemon socket"*|*"docker daemon"*"running"*)
+      PULL_FAILURE_KIND=daemon
       note "the Docker daemon is not running, or this user may not use it (docker group)." ;;
     *"no matching manifest"*|*"no match for platform"*|*"does not provide the specified platform"*)
+      PULL_FAILURE_KIND=platform
       note "$img has no build for this machine's architecture ($(uname -m))."
       build_from_source_hint ;;
     *"no such host"*|*"i/o timeout"*|*"dial tcp"*|*"connection refused"*|*"network is unreachable"*|*"TLS handshake"*|*"Client.Timeout"*)
+      PULL_FAILURE_KIND=network
       note "$registry could not be reached — check outbound network, DNS and any proxy." ;;
     *denied*|*unauthorized*|*"authentication required"*|*forbidden*)
+      PULL_FAILURE_KIND=refused
       note "$registry refused the pull. The published image is public and needs no login, so either:"
       note "  - the reference is wrong, or the package does not exist (GHCR answers \"denied\" for both);"
       note "  - a stale \`docker login\` for $registry is being sent — try: docker logout $registry"
       note "  - it is a private mirror: log in first (docker login $registry), then re-run." ;;
     *"manifest unknown"*|*"not found"*)
+      PULL_FAILURE_KIND=tag
       note "$registry does not know this tag — check the reference (e.g. $DEFAULT_IMAGE)." ;;
     *)
+      PULL_FAILURE_KIND=other
       note "see docker's message above." ;;
   esac
 }
@@ -520,14 +542,35 @@ wiz_step_image() {
 
   # Probe the pull now rather than at deploy, so a bad reference or a missing
   # architecture is caught while the operator can still change the answer.
-  say "Checking access to $SWARM_OS_IMAGE ..."
-  local out
-  if out="$(docker pull "$SWARM_OS_IMAGE" 2>&1)"; then
+  say "Pulling $SWARM_OS_IMAGE ..."
+  if pull_attached "$SWARM_OS_IMAGE"; then
     ok "image pulled"
     return 0
   fi
   warn "Could not pull $SWARM_OS_IMAGE."
-  explain_pull_failure "$SWARM_OS_IMAGE" "$out"
+  explain_pull_failure "$SWARM_OS_IMAGE" "$PULL_ERR"
+
+  # A private mirror is the one case a login fixes. Offered only for an image
+  # that is NOT the public default, so the default flow never asks for one.
+  local registry="${SWARM_OS_IMAGE%%/*}"
+  if [ "$PULL_FAILURE_KIND" = refused ] && [ "$SWARM_OS_IMAGE" != "$DEFAULT_IMAGE" ] \
+     && [ "$INTERACTIVE" = 1 ] && ask_yn "Is $registry a private registry you can log in to? Log in now?" n; then
+    local reg_user reg_pw
+    ask reg_user "Username for $registry" "${USER:-}"
+    ask_secret reg_pw "Password or token for $registry"
+    if [ -n "$reg_pw" ]; then
+      if printf '%s' "$reg_pw" | docker login "$registry" -u "$reg_user" --password-stdin; then
+        ok "logged in to $registry"
+        unset reg_pw
+        if pull_attached "$SWARM_OS_IMAGE"; then ok "image pulled"; return 0; fi
+        warn "Still cannot pull $SWARM_OS_IMAGE."
+        explain_pull_failure "$SWARM_OS_IMAGE" "$PULL_ERR"
+      else
+        warn "docker login to $registry failed."
+      fi
+      unset reg_pw
+    fi
+  fi
   note "the deploy step will try the pull again."
 }
 
@@ -810,10 +853,10 @@ wiz_step_notifications() {
   printf '     %sGitHub API rate limit. Leave it empty unless you hit that limit.%s\n' "$C_DIM" "$C_RESET"
   local pat=""
   if [ -n "${SWARM_OS_GITHUB_TOKEN:-}" ]; then
-    # bootstrap.sh exports the token it was given (private fork/mirror): the
-    # same read-only PAT that reads the repository reads its releases. Do not
-    # make the operator find it twice.
-    if ask_yn "A GitHub token is already in the environment — use it for update detection?" y; then
+    # Set explicitly: by the existing .env, or exported by bootstrap.sh from
+    # SWARM_OS_PAT / SWARM_OS_GITHUB_TOKEN / --token (never from an ambient
+    # GITHUB_TOKEN or GH_TOKEN). "no" means no token is written.
+    if ask_yn "A GitHub token is already configured — keep it for update detection?" y; then
       pat="$SWARM_OS_GITHUB_TOKEN"
     fi
   fi
@@ -829,7 +872,7 @@ wiz_step_notifications() {
     esac
     SWARM_OS_GITHUB_TOKEN="$pat"
   else
-    SWARM_OS_GITHUB_TOKEN="${SWARM_OS_GITHUB_TOKEN:-}"
+    SWARM_OS_GITHUB_TOKEN=""
   fi
 }
 
@@ -1016,15 +1059,11 @@ load_env() {
 build_or_pull() {
   if image_is_registry "$SWARM_OS_IMAGE"; then
     say "Pulling $SWARM_OS_IMAGE"
-    # Progress goes to the terminal as before; the tail is kept to diagnose.
-    local log; log="$(mktemp)"
-    if ! docker pull "$SWARM_OS_IMAGE" 2>&1 | tee "$log"; then
+    if ! pull_attached "$SWARM_OS_IMAGE"; then
       warn "Pull failed."
-      explain_pull_failure "$SWARM_OS_IMAGE" "$(tail -n 20 "$log")"
-      rm -f "$log"
+      explain_pull_failure "$SWARM_OS_IMAGE" "$PULL_ERR"
       die "could not pull the image."
     fi
-    rm -f "$log"
     return 0
   fi
   # No registry path → a locally built tag. Build it if it is not there yet.
