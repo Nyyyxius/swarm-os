@@ -53,12 +53,6 @@ export type SystemCheckStatus =
   | 'never_checked'
   | 'ok'
   | 'no_releases'
-  /**
-   * @deprecated No longer produced: without a token the check now runs
-   * unauthenticated against the public repo. Kept in the union so clients
-   * built against the older contract still type-check.
-   */
-  | 'no_token'
   /** GitHub's API rate limit is spent (`error` says until when). */
   | 'rate_limited'
   | 'unauthorized'
