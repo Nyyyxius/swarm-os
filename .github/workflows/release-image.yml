@@ -10,8 +10,9 @@ name: release-image
 #     `enable=${{ github.ref_type == 'tag' }}`, so a dispatch can never promote
 #     an untagged build. (This comment used to claim otherwise — it was wrong.)
 #
-# Image is published to ghcr.io/<owner>/<repo> (owner lowercased automatically).
-# Consumers pull with a PAT that has read:packages — see docs/deploy/install.en.md.
+# Image is published to ghcr.io/<owner>/<repo> (owner lowercased automatically),
+# as a multi-arch image (linux/amd64 + linux/arm64). The package is public:
+# consumers `docker pull` it anonymously, no login.
 
 on:
   push:
@@ -31,6 +32,12 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      # QEMU lets the amd64 runner build the arm64 leg under emulation.
+      - name: Set up QEMU
+        uses: docker/setup-qemu-action@v3
+        with:
+          platforms: arm64
 
       - name: Set up Docker Buildx
         uses: docker/setup-buildx-action@v3
@@ -56,11 +63,12 @@ jobs:
         uses: docker/build-push-action@v6
         with:
           context: .
-          # amd64 only by default. To also publish arm64, set:
-          #   platforms: linux/amd64,linux/arm64
-          # NOTE: the arm64 leg cross-compiles the native modules
-          # (better-sqlite3, node-pty) under QEMU emulation and is much slower.
-          platforms: linux/amd64
+          # One manifest list, both architectures, same tags. The Dockerfile
+          # picks every arch-specific download from TARGETARCH (Claude Code
+          # native build + its manifest checksum, VS Code CLI, uv). The arm64
+          # leg runs under QEMU emulation — pnpm install, node-pty's node-gyp
+          # compile and the tsc/vite build — so it is the slow half of this step.
+          platforms: linux/amd64,linux/arm64
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
