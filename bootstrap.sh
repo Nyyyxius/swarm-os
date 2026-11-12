@@ -37,6 +37,7 @@ FETCH_ONLY=0
 # on this list (the server sources, the plan, the prototypes) stays behind.
 KIT="
 install.sh
+install.ps1
 bootstrap.sh
 .env.example
 LICENSE

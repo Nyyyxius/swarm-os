@@ -32,6 +32,14 @@ checkout:
 ./install.sh             # guided setup, then deploy
 ```
 
+On Windows, the PowerShell twin (`install.ps1`) fetches the kit and runs the same
+wizard against Docker Desktop — agents on the `local` transport (see
+[docs/deploy/install.en.md](docs/deploy/install.en.md#windows-powershell)):
+
+```powershell
+irm https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/install.ps1 | iex
+```
+
 With no `.env` present it runs a **nine-step wizard**: host prerequisites (it can
 install Docker, and it runs the Claude Code OAuth login for you), project name
 and paths, image + `docker login ghcr.io`, the agent transport (generating and
@@ -153,6 +161,7 @@ no-ops. See `docs/phase-1-spawner-lead.md` for the full local-dev wiring.
 - `examples/` — `docker-compose.{single,multi,dist}.yml` reference deployments (`dist` = third-party, `.env`-driven) + `docker-compose.ssh.yml` (overlay for the `ssh` agent transport); `plugins/` — example plugins (`echo`, `slack-bridge`, `discord-agent`, `novelai`)
 - `bootstrap.sh` — remote entry point: fetches the kit onto a bare host and starts the installer (`curl … | bash`)
 - `install.sh` + `.env.example` — guided installer (wizard + deploy) and the config template it writes
+- `install.ps1` — Windows (PowerShell) twin of `install.sh`: Docker Desktop, `local` transport; fetches the kit itself under `irm … | iex`
 - `docs/deploy/` — bilingual install + usage guides for shipping to a third party
 - `docs/` — phase-by-phase implementation reports (mandatory pre-reading)
 - `archives/` — superseded plan revisions (historical, do not edit)

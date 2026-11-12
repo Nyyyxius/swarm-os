@@ -36,6 +36,36 @@ curl -fsSL https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/bootstrap.
 less bootstrap.sh && bash bootstrap.sh
 ```
 
+### Windows (PowerShell)
+
+On Windows, the same thing in PowerShell — no bash, no WSL needed:
+
+```powershell
+irm https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/install.ps1 | iex
+```
+
+`install.ps1` fetches the kit into `~\swarm-os` (`$env:SWARM_OS_DIR` to change
+it) and runs the Windows twin of the wizard: **Docker Desktop** (offered through
+`winget`, started for you if it is installed but stopped, Linux-containers mode
+checked), the native Claude CLI (`irm https://claude.ai/install.ps1 | iex`) and
+its login, paths, image + `docker login`, remote access (Tailscale via `winget`),
+notifications, update detection — then deploys and prints the token. From a kit
+directory:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\install.ps1               # wizard, then deploy
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Reconfigure  # redo the wizard
+powershell -ExecutionPolicy Bypass -File .\install.ps1 -Yes          # deploy .env, no questions
+```
+
+What differs from `install.sh`: the agent transport is always **`local`**
+(agents in the container, claude only, updates via `.\install.ps1`). The `ssh`
+transport runs every agent as `bash -lc …` on the host, which needs a POSIX
+host — for it (and for codex / gemini / opencode and one-click updates), run
+`./install.sh` from a WSL 2 distribution with Docker Desktop's WSL integration
+enabled. Paths are written to `.env` as `C:/Users/…`; there is no uid to fix
+(Docker Desktop bind mounts are writable by the container as they are).
+
 Sections 1–3 remain the reference for what the wizard does, and the manual path.
 The rest of the guide applies either way.
 
