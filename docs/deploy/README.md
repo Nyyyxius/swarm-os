@@ -77,6 +77,7 @@ The list lives in the script, in `KIT`:
   `examples/docker-compose.multi.yml`
 - `docs/deploy/README.md`, `docs/deploy/install.{en,fr}.md`,
   `docs/deploy/usage.{en,fr}.md`
+- `docs/providers.md`, `SECURITY.md`
 - `LICENSE`
 
 Nothing else (server sources, `Dockerfile`, `setup.sh`) is part of the kit. To

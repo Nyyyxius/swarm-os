@@ -898,6 +898,14 @@ export function UpdateSection({ focus = false }: UpdateSectionProps) {
                   'GitHub API rate limit reached — the next check retries on its own.'}
               </div>
             )}
+            {(system.checkStatus === 'ok' || system.checkStatus === 'no_releases') &&
+              system.error && (
+                // The verdict is valid; the note says the configured token was
+                // rejected and the check ran without it.
+                <div className="field-help" style={{ color: 'var(--warn)' }}>
+                  {system.error}
+                </div>
+              )}
             {system.dismissedVersion && (
               <div className="field-help">
                 v{system.dismissedVersion} is hidden.{' '}

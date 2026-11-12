@@ -270,6 +270,23 @@ describe('UpdateSection — verdict', () => {
     expect(container.querySelector('.dot')?.className).not.toMatch(/\bok\b/);
   });
 
+  it('shows the rejected-token note next to a valid verdict', async () => {
+    vi.spyOn(api, 'getUpdates').mockResolvedValue(
+      mkState({
+        system: mkSystem({
+          checkStatus: 'ok',
+          error: 'SWARM_OS_GITHUB_TOKEN was rejected by GitHub (401); releases were read without it.',
+        }),
+      }),
+    );
+
+    const { container } = render(<UpdateSection />);
+
+    expect(await screen.findByText(/was rejected by GitHub/)).toBeInTheDocument();
+    // The check itself succeeded, so the dot stays green.
+    expect(container.querySelector('.dot')?.className).toMatch(/\bok\b/);
+  });
+
   it('keeps the green dot for a check that actually succeeded', async () => {
     vi.spyOn(api, 'getUpdates').mockResolvedValue(mkState());
 
