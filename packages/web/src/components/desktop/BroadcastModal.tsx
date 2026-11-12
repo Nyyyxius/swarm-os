@@ -149,7 +149,7 @@ export default function BroadcastModal({ open, onClose, orchestrators }: Broadca
         <div className="modal-head">
           <div className="modal-title" id="broadcast-title">
             <span style={{ color: 'var(--amber)' }}>◇ BROADCAST</span>{' '}
-            <span className="sub">// to all leads via swarm bus</span>
+            <span className="sub">{'// to all leads via swarm bus'}</span>
           </div>
           <button
             className="pr-close"
@@ -165,7 +165,7 @@ export default function BroadcastModal({ open, onClose, orchestrators }: Broadca
           {/* Pre-send: list of targeted teams */}
           {!result && activeOrchestrators.length > 0 && (
             <div className="field-help">
-              This message is sent as <code>from='human'</code> to{' '}
+              This message is sent as <code>{"from='human'"}</code> to{' '}
               <b style={{ color: 'var(--text)' }}>{activeOrchestrators.length}</b>{' '}
               active lead{activeOrchestrators.length === 1 ? '' : 's'}:&nbsp;
               {activeOrchestrators.map((o) => o.name).join(' · ')}

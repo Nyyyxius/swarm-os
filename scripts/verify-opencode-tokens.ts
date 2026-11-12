@@ -1102,16 +1102,13 @@ function emitReport(): void {
   }
   lines.push(...recommendation());
   writeFileSync(REPORT_PATH, lines.join('\n'));
-  // eslint-disable-next-line no-console
   console.log(`report written to ${REPORT_PATH}`);
-  // eslint-disable-next-line no-console
   console.log(`CONFIRMED=${counts.CONFIRMED} PARTIAL=${counts.PARTIAL} INFIRMED=${counts.INFIRMED} UNVERIFIED=${counts.UNVERIFIED}`);
 }
 
 main().then(
   () => process.exit(0),
   (err) => {
-    // eslint-disable-next-line no-console
     console.error(err);
     process.exit(1);
   },

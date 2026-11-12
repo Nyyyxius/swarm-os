@@ -17,6 +17,8 @@ import type { ToolContext } from './tools.js';
 import { registerGraphTools } from './codegraph-tools.js';
 
 const execFileMock = execFile as unknown as Mock;
+/** Node's `execFile` completion callback, as the mocks below invoke it. */
+type ExecFileCallback = (err: Error | null, stdout: string, stderr: string) => void;
 
 type Handler = (args: unknown) => unknown | Promise<unknown>;
 
@@ -147,7 +149,7 @@ describe('codegraph.explain', () => {
   it('wraps graphify explain and returns its text', async () => {
     seedScope('project__app', NODES);
     let capturedArgs: string[] | undefined;
-    execFileMock.mockImplementation((_bin: string, args: string[], _opts: unknown, cb: Function) => {
+    execFileMock.mockImplementation((_bin: string, args: string[], _opts: unknown, cb: ExecFileCallback) => {
       capturedArgs = args;
       cb(null, 'Node: greet()\n  Source: a.py L3', '');
     });
@@ -162,7 +164,7 @@ describe('codegraph.explain', () => {
 
   it('returns ok:false (never throws) when the CLI errors', async () => {
     seedScope('project__app', NODES);
-    execFileMock.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: Function) => {
+    execFileMock.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: ExecFileCallback) => {
       cb(Object.assign(new Error('boom'), {}), '', 'node not found');
     });
     const out = sc(await handlers.get('codegraph.explain')!({ node: 'ghost', scope: 'project__app' }));
@@ -175,7 +177,7 @@ describe('codegraph.path', () => {
   it('wraps graphify path with from/to and the scope graph', async () => {
     seedScope('project__app', NODES);
     let capturedArgs: string[] | undefined;
-    execFileMock.mockImplementation((_bin: string, args: string[], _opts: unknown, cb: Function) => {
+    execFileMock.mockImplementation((_bin: string, args: string[], _opts: unknown, cb: ExecFileCallback) => {
       capturedArgs = args;
       cb(null, 'hello() -> greet()', '');
     });

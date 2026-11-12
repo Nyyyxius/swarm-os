@@ -455,7 +455,7 @@ function parseGitHubPath(pathStr: string): MarketGitTarget | null {
 
   const owner = parts[0]!;
   let repoSeg = parts[1]!;
-  let rest = parts.slice(2);
+  const rest = parts.slice(2);
 
   let ref: string | undefined;
   const at = repoSeg.indexOf('@');

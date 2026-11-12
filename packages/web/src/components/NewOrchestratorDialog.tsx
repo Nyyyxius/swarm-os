@@ -284,7 +284,7 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
       <div className="modal wide" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <div className="modal-title">
-            + NEW ORCHESTRATOR <span className="sub">// spin up a new team</span>
+            + NEW ORCHESTRATOR <span className="sub">{'// spin up a new team'}</span>
           </div>
           <button className="pr-close" onClick={onClose} aria-label="Close">×</button>
         </div>
@@ -356,7 +356,7 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
 
           <div className="field">
             <label htmlFor="orch-preamble">
-              LEAD PREAMBLE <span style={{ color: 'var(--text-mute)' }}>// optional</span>
+              LEAD PREAMBLE <span style={{ color: 'var(--text-mute)' }}>{'// optional'}</span>
             </label>
             <textarea
               id="orch-preamble"

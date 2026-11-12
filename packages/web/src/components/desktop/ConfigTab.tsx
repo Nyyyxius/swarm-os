@@ -87,7 +87,7 @@ export default function ConfigTab({
             {team.permissionMode}
             {team.permissionMode === 'bypassPermissions' && (
               <span style={{ marginLeft: 8, color: 'var(--text-mute)' }}>
-                // danger: agent runs unattended
+                {'// danger: agent runs unattended'}
               </span>
             )}
           </span>

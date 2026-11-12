@@ -93,7 +93,6 @@ function ownCardOrThrow(
   ctx: ToolContext,
   store: TaskboardStore,
   id: string,
-  tool: string,
 ): NonNullable<ReturnType<TaskboardStore['getCard']>> {
   const card = store.getCard(id);
   if (!card || card.orchestratorId !== ctx.orchestrator.id) {
@@ -268,7 +267,7 @@ export function registerTaskboardTools(server: McpServer, ctxResolver: () => Too
         labels?: string[];
       };
       try {
-        const existing = ownCardOrThrow(ctx, store, a.id, 'board.update');
+        const existing = ownCardOrThrow(ctx, store, a.id);
         requireLeadOrAssignee(ctx, existing, 'board.update');
         const card = store.updateCard({
           id: a.id,
@@ -306,7 +305,7 @@ export function registerTaskboardTools(server: McpServer, ctxResolver: () => Too
       const store = taskboardOf(ctx, 'board.move');
       const a = args as { id: string; status: string; expectedVersion?: number };
       try {
-        const existing = ownCardOrThrow(ctx, store, a.id, 'board.move');
+        const existing = ownCardOrThrow(ctx, store, a.id);
         requireLeadOrAssignee(ctx, existing, 'board.move');
         const card = store.moveCard({
           id: a.id,
@@ -340,7 +339,7 @@ export function registerTaskboardTools(server: McpServer, ctxResolver: () => Too
       const store = taskboardOf(ctx, 'board.assign');
       const a = args as { id: string; assignee: string | null };
       try {
-        const existing = ownCardOrThrow(ctx, store, a.id, 'board.assign');
+        const existing = ownCardOrThrow(ctx, store, a.id);
         if (existing.orchestratorId !== ctx.orchestrator.id) {
           throw new McpError(ErrorCode.InvalidRequest, 'NOT_FOUND: card is not on your board');
         }
@@ -376,7 +375,7 @@ export function registerTaskboardTools(server: McpServer, ctxResolver: () => Too
       const store = taskboardOf(ctx, 'board.comment');
       const a = args as { id: string; text: string };
       try {
-        ownCardOrThrow(ctx, store, a.id, 'board.comment');
+        ownCardOrThrow(ctx, store, a.id);
         const event = store.comment({ id: a.id, text: a.text, actorSessionId: ctx.session.id });
         logCall('board.comment', ctx, true);
         return ok({ event });
@@ -401,8 +400,8 @@ export function registerTaskboardTools(server: McpServer, ctxResolver: () => Too
       const store = taskboardOf(ctx, 'board.link');
       const a = args as { from: string; to: string };
       try {
-        ownCardOrThrow(ctx, store, a.from, 'board.link');
-        ownCardOrThrow(ctx, store, a.to, 'board.link');
+        ownCardOrThrow(ctx, store, a.from);
+        ownCardOrThrow(ctx, store, a.to);
         store.addDep({ cardId: a.from, dependsOnId: a.to, actorSessionId: ctx.session.id });
         logCall('board.link', ctx, true);
         return ok({ ok: true });
@@ -426,7 +425,7 @@ export function registerTaskboardTools(server: McpServer, ctxResolver: () => Too
       const store = taskboardOf(ctx, 'board.unlink');
       const a = args as { from: string; to: string };
       try {
-        ownCardOrThrow(ctx, store, a.from, 'board.unlink');
+        ownCardOrThrow(ctx, store, a.from);
         store.removeDep({ cardId: a.from, dependsOnId: a.to, actorSessionId: ctx.session.id });
         logCall('board.unlink', ctx, true);
         return ok({ ok: true });
@@ -451,7 +450,7 @@ export function registerTaskboardTools(server: McpServer, ctxResolver: () => Too
       const store = taskboardOf(ctx, 'board.close');
       const a = args as { id: string; expectedVersion?: number };
       try {
-        const existing = ownCardOrThrow(ctx, store, a.id, 'board.close');
+        const existing = ownCardOrThrow(ctx, store, a.id);
         requireLeadOrAssignee(ctx, existing, 'board.close');
         const card = store.closeCard({
           id: a.id,
@@ -480,7 +479,7 @@ export function registerTaskboardTools(server: McpServer, ctxResolver: () => Too
       const store = taskboardOf(ctx, 'board.reopen');
       const a = args as { id: string; expectedVersion?: number };
       try {
-        const existing = ownCardOrThrow(ctx, store, a.id, 'board.reopen');
+        const existing = ownCardOrThrow(ctx, store, a.id);
         requireLeadOrAssignee(ctx, existing, 'board.reopen');
         const card = store.reopenCard({
           id: a.id,
@@ -511,7 +510,7 @@ export function registerTaskboardTools(server: McpServer, ctxResolver: () => Too
       requireLead(ctx, 'board.delete');
       const a = args as { id: string };
       try {
-        ownCardOrThrow(ctx, store, a.id, 'board.delete');
+        ownCardOrThrow(ctx, store, a.id);
         const deleted = store.deleteCard({ id: a.id, actorSessionId: ctx.session.id });
         logCall('board.delete', ctx, true);
         return ok({ deleted });
