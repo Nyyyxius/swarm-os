@@ -12,7 +12,8 @@
  *
  * Running out of that budget is its own state (`rate_limited`), not a failure
  * and not a token problem: it clears at the reset time, and a token is only
- * the way to stop hitting it. A PRIVATE repo answers an unauthenticated call
+ * the way to stop hitting it. A configured token that GitHub rejects (401) is
+ * retried once anonymously, so a stale token cannot block detection. A PRIVATE repo answers an unauthenticated call
  * with 404, not 401, which lands in `not_found`. Every outcome is a value;
  * this client does not throw.
  *
@@ -63,8 +64,14 @@ export interface GithubRelease {
  * unauthenticated.
  */
 export type GithubLatestResult =
-  | { status: 'ok'; release: GithubRelease }
-  | { status: 'no_releases' }
+  | {
+      status: 'ok';
+      release: GithubRelease;
+      /** Set when the configured token got a 401 and the answer came from an
+       *  anonymous retry instead (see `latestRelease`). */
+      tokenRejected?: true;
+    }
+  | { status: 'no_releases'; tokenRejected?: true }
   | GithubRateLimited
   | { status: 'unauthorized' }
   | { status: 'not_found' }
@@ -96,7 +103,10 @@ export interface GithubReleasesClientOptions {
   repo?: string;
   /** Test seam — defaults to global `fetch`. */
   fetchImpl?: typeof fetch;
+  /** Cap on the WHOLE call, headers and body alike. */
   timeoutMs?: number;
+  /** Test seam for the rate-limit sentence's relative delay. */
+  now?: () => number;
 }
 
 /** Read the PAT from the environment. The only supported source, on purpose. */
@@ -111,6 +121,7 @@ export class GithubReleasesClient {
   private readonly repo: string;
   private readonly fetchImpl: typeof fetch;
   private readonly timeoutMs: number;
+  private readonly now: () => number;
 
   constructor(opts: GithubReleasesClientOptions) {
     this.token = opts.token;
@@ -118,14 +129,41 @@ export class GithubReleasesClient {
     this.repo = opts.repo ?? DEFAULT_REPO;
     this.fetchImpl = opts.fetchImpl ?? fetch;
     this.timeoutMs = opts.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    this.now = opts.now ?? (() => Date.now());
   }
 
   get hasToken(): boolean {
     return this.token !== null;
   }
 
-  /** Highest non-draft release, or a typed non-answer. Never throws. */
+  /**
+   * Highest non-draft release, or a typed non-answer. Never throws.
+   *
+   * A configured token that GitHub rejects (401: expired, revoked, mistyped)
+   * must not block detection of a PUBLIC repo: the call is retried once
+   * without it, and a usable answer comes back flagged `tokenRejected` so the
+   * operator still learns the token needs fixing.
+   */
   async latestRelease(): Promise<GithubLatestResult> {
+    const first = await this.request(this.token);
+    if (first !== 'token_rejected') return first;
+    log.warn({ event: 'updates.github_token_rejected', note: 'retrying without SWARM_OS_GITHUB_TOKEN' });
+    const anon = await this.request(null);
+    if (anon !== 'token_rejected' && (anon.status === 'ok' || anon.status === 'no_releases')) {
+      return { ...anon, tokenRejected: true };
+    }
+    // The anonymous call did not help (private fork, rate limit, network):
+    // the token is still the thing to fix.
+    return { status: 'unauthorized' };
+  }
+
+  /**
+   * One call, bounded END TO END by `timeoutMs`: the deadline stays armed
+   * until the body is fully read, so a response whose body stalls cannot pin
+   * the caller's single-flight refresh for ever. `'token_rejected'` = a 401
+   * while a token was sent (the caller decides whether to retry anonymously).
+   */
+  private async request(token: string | null): Promise<GithubLatestResult | 'token_rejected'> {
     const url = `https://api.github.com/repos/${this.owner}/${this.repo}/releases?per_page=${PER_PAGE}`;
     const headers: Record<string, string> = {
       Accept: 'application/vnd.github+json',
@@ -133,74 +171,99 @@ export class GithubReleasesClient {
       'User-Agent': 'swarm-os',
     };
     // Sent only when configured: the public repo answers without it.
-    if (this.token !== null) headers.Authorization = `Bearer ${this.token}`;
+    if (token !== null) headers.Authorization = `Bearer ${token}`;
+
     const controller = new AbortController();
-    const timer = setTimeout(() => controller.abort(), this.timeoutMs);
-    let res: Response;
+    let expire: (err: Error) => void = () => undefined;
+    const expired = new Promise<never>((_resolve, reject) => {
+      expire = reject;
+    });
+    expired.catch(() => undefined); // observed via race(); never unhandled
+    const timer = setTimeout(() => {
+      const err = new Error(`timed out after ${this.timeoutMs} ms`);
+      controller.abort(err);
+      expire(err);
+    }, this.timeoutMs);
+    /** Any await on the network goes through this: it loses to the deadline. */
+    const bounded = <T>(p: Promise<T>): Promise<T> => Promise.race([p, expired]);
+
     try {
-      res = await this.fetchImpl(url, {
-        method: 'GET',
-        headers,
-        signal: controller.signal,
-      });
-    } catch (err) {
-      // Network down, DNS gone, abort on timeout — all the same to the caller:
-      // we simply don't know, and the previous verdict stays in place.
-      const message = err instanceof Error ? err.message : String(err);
-      log.warn({ event: 'updates.github_unreachable', error: message });
-      return { status: 'error', message };
+      let res: Response;
+      try {
+        res = await bounded(this.fetchImpl(url, { method: 'GET', headers, signal: controller.signal }));
+      } catch (err) {
+        // Network down, DNS gone, deadline — all the same to the caller: we
+        // simply don't know, and the previous verdict stays in place.
+        const message = err instanceof Error ? err.message : String(err);
+        log.warn({ event: 'updates.github_unreachable', error: message });
+        return { status: 'error', message };
+      }
+
+      // A rate limit comes back as 429, or as 403 with an exhausted budget /
+      // `retry-after` / a "rate limit" message. Checked BEFORE the token
+      // buckets: a 403 from a spent anonymous budget is not a token problem.
+      if (res.status === 429 || (res.status === 403 && (await isRateLimited(res, bounded)))) {
+        const limited = this.rateLimited(res, token !== null);
+        log.warn({
+          event: 'updates.github_rate_limited',
+          authenticated: limited.authenticated,
+          resetAt: limited.resetAt,
+        });
+        return limited;
+      }
+      // 401 with a token = the token is wrong/expired: let the caller retry
+      // anonymously. 403 with a token = valid but refused (missing scope / no
+      // access) — fix the token. Without a token neither should happen on a
+      // public repo: report it raw.
+      if (res.status === 401 && token !== null) return 'token_rejected';
+      if (res.status === 401 || res.status === 403) {
+        return token !== null ? { status: 'unauthorized' } : { status: 'error', message: `HTTP ${res.status}` };
+      }
+      // 404: the repository is private (GitHub hides existence rather than
+      // admitting it, to an anonymous call or to a token that cannot see it)
+      // or was renamed.
+      if (res.status === 404) return { status: 'not_found' };
+      if (!res.ok) return { status: 'error', message: `HTTP ${res.status}` };
+
+      let payload: unknown;
+      try {
+        payload = await bounded(res.json() as Promise<unknown>);
+      } catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        log.warn({ event: 'updates.github_body_failed', error: message });
+        return { status: 'error', message: `reading the response failed: ${message}` };
+      }
+      if (!Array.isArray(payload)) return { status: 'error', message: 'expected a JSON array of releases' };
+
+      const best = pickHighestRelease(payload as RawRelease[]);
+      return best ? { status: 'ok', release: best } : { status: 'no_releases' };
     } finally {
       clearTimeout(timer);
     }
-
-    // A rate limit comes back as 429, or as 403 with an exhausted budget /
-    // `retry-after` / a "rate limit" message. Checked BEFORE the token buckets:
-    // a 403 from a spent anonymous budget is not a token problem.
-    if (res.status === 429 || (res.status === 403 && (await isRateLimited(res)))) {
-      const limited = this.rateLimited(res);
-      log.warn({
-        event: 'updates.github_rate_limited',
-        authenticated: limited.authenticated,
-        resetAt: limited.resetAt,
-      });
-      return limited;
-    }
-    // 401 = the token is wrong/expired. 403 = token valid but refused (missing
-    // scope / no access) — same operator action (fix the token), same bucket.
-    // Without a token neither should happen on a public repo: report it raw.
-    if (res.status === 401 || res.status === 403) {
-      return this.token !== null
-        ? { status: 'unauthorized' }
-        : { status: 'error', message: `HTTP ${res.status}` };
-    }
-    // 404: the repository is private (GitHub hides existence rather than
-    // admitting it, to an anonymous call or to a token that cannot see it) or
-    // was renamed.
-    if (res.status === 404) return { status: 'not_found' };
-    if (!res.ok) return { status: 'error', message: `HTTP ${res.status}` };
-
-    let payload: unknown;
-    try {
-      payload = await res.json();
-    } catch (err) {
-      return { status: 'error', message: `invalid JSON: ${err instanceof Error ? err.message : String(err)}` };
-    }
-    if (!Array.isArray(payload)) return { status: 'error', message: 'expected a JSON array of releases' };
-
-    const best = pickHighestRelease(payload as RawRelease[]);
-    return best ? { status: 'ok', release: best } : { status: 'no_releases' };
   }
 
-  private rateLimited(res: Response): GithubRateLimited {
-    const authenticated = this.token !== null;
-    const resetAt = rateLimitResetAt(res);
-    const until = resetAt ? ` until ${resetAt}` : '';
+  private rateLimited(res: Response, authenticated: boolean): GithubRateLimited {
+    const nowMs = this.now();
+    const resetAt = rateLimitResetAt(res, nowMs);
+    const until = resetAt ? ` until ${describeReset(resetAt, nowMs)}` : '';
     const message = authenticated
-      ? `GitHub API rate limit reached for SWARM_OS_GITHUB_TOKEN${until}; a later check retries on its own.`
+      ? `GitHub API rate limit reached for SWARM_OS_GITHUB_TOKEN${until}; the check retries on its own after that.`
       : `GitHub API rate limit reached for unauthenticated requests from this IP (60 per hour)${until}; ` +
-        'a later check retries on its own. Setting SWARM_OS_GITHUB_TOKEN (any read-only token) raises the limit.';
+        'the check retries on its own after that. Setting SWARM_OS_GITHUB_TOKEN (any read-only token) raises the limit.';
     return { status: 'rate_limited', authenticated, resetAt, message };
   }
+}
+
+/**
+ * `2026-01-01 00:00 UTC (in about 23 min)` — explicit about the zone, and with
+ * the delay that an operator actually wants to know.
+ */
+export function describeReset(resetAtIso: string, nowMs: number): string {
+  const at = new Date(resetAtIso);
+  const stamp = `${at.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+  const mins = Math.max(1, Math.ceil((at.getTime() - nowMs) / 60_000));
+  const rel = mins < 90 ? `${mins} min` : `${Math.round(mins / 60)} h`;
+  return `${stamp} (in about ${rel})`;
 }
 
 /** Header lookup that tolerates a response without `headers` (test doubles). */
@@ -214,11 +277,14 @@ function header(res: Response, name: string): string | null {
  * `x-ratelimit-remaining: 0`; its secondary limits send `retry-after`; both
  * say "rate limit" in the body's `message`.
  */
-async function isRateLimited(res: Response): Promise<boolean> {
+async function isRateLimited(
+  res: Response,
+  bounded: <T>(p: Promise<T>) => Promise<T>,
+): Promise<boolean> {
   if (header(res, 'x-ratelimit-remaining') === '0') return true;
   if (header(res, 'retry-after') !== null) return true;
   try {
-    const body: unknown = await res.json();
+    const body: unknown = await bounded(res.json() as Promise<unknown>);
     const message =
       typeof body === 'object' && body !== null ? (body as { message?: unknown }).message : undefined;
     return typeof message === 'string' && /rate limit/i.test(message);

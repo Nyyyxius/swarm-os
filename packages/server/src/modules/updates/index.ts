@@ -77,8 +77,13 @@ export interface SystemUpdateState {
   /** ISO of the last COMPLETED check, success or failure. */
   checkedAt: string | null;
   /**
-   * Message for `checkStatus === 'error'`, and the operator sentence (with the
-   * reset time when known) for `checkStatus === 'rate_limited'`.
+   * Operator sentence, `null` when there is nothing to say:
+   *  - `checkStatus === 'error'` → the failure message;
+   *  - `checkStatus === 'rate_limited'` → the limit and when it resets (UTC +
+   *    relative delay);
+   *  - `checkStatus === 'ok' | 'no_releases'` → non-null ONLY when the
+   *    configured token was rejected and the answer came from an anonymous
+   *    retry (`TOKEN_REJECTED_NOTE`): the verdict is valid, the token is not.
    */
   error: string | null;
 }
@@ -154,7 +159,19 @@ export interface UpdateServiceOptions {
   runner?: UpdateRunner;
   ttlMs?: number;
   now?: () => number;
+  /** Delay added after a rate-limit reset before retrying (test seam). */
+  retryJitterMs?: () => number;
 }
+
+/** After a rate-limit reset, wait 30–90 s more: lands after GitHub's clock,
+ *  and spreads the instances that share one IP. */
+function defaultRetryJitterMs(): number {
+  return 30_000 + Math.floor(Math.random() * 60_000);
+}
+
+/** Sentence carried in `error` when the answer came from the anonymous retry. */
+export const TOKEN_REJECTED_NOTE =
+  'SWARM_OS_GITHUB_TOKEN was rejected by GitHub (401: expired, revoked or mistyped); releases were read without it. Replace or remove the token.';
 
 /**
  * Is this image reference pullable from a registry?
@@ -226,6 +243,7 @@ export class UpdateService {
   private readonly listPluginOrigins: () => PluginOrigin[];
   private readonly ttlMs: number;
   private readonly now: () => number;
+  private readonly retryJitterMs: () => number;
   private runnerRef: UpdateRunner | null;
 
   /** Last successful release lookup; survives a later failed refresh. */
@@ -233,6 +251,8 @@ export class UpdateService {
   private checkStatus: SystemCheckStatus = 'never_checked';
   private checkError: string | null = null;
   private checkedAtMs: number | null = null;
+  /** Earlier than `checkedAtMs + ttlMs` when GitHub said when to come back. */
+  private retryAtMs: number | null = null;
   private plugins: PluginUpdateCheck[] = [];
   private pluginsCheckedAt: string | null = null;
   /** Single-flight: `/info` can be polled by many tabs at once, and
@@ -248,6 +268,7 @@ export class UpdateService {
     this.listPluginOrigins = opts.listPluginOrigins ?? (() => []);
     this.ttlMs = opts.ttlMs ?? ttlFromEnv();
     this.now = opts.now ?? (() => Date.now());
+    this.retryJitterMs = opts.retryJitterMs ?? defaultRetryJitterMs;
     this.runnerRef = opts.runner ?? null;
   }
 
@@ -337,7 +358,10 @@ export class UpdateService {
 
   private maybeRefresh(): void {
     if (this.inflight !== null) return;
-    if (this.checkedAtMs !== null && this.now() - this.checkedAtMs < this.ttlMs) return;
+    if (this.checkedAtMs !== null) {
+      const due = Math.min(this.checkedAtMs + this.ttlMs, this.retryAtMs ?? Number.POSITIVE_INFINITY);
+      if (this.now() < due) return;
+    }
     void this.refresh();
   }
 
@@ -365,11 +389,17 @@ export class UpdateService {
 
   private async refreshSystem(): Promise<void> {
     const r = await this.github.latestRelease();
+    this.retryAtMs = null;
     switch (r.status) {
       case 'ok':
         this.release = r.release;
         this.checkStatus = 'ok';
-        this.checkError = null;
+        // A verdict was reached, but the configured token is broken: say so.
+        this.checkError = r.tokenRejected ? TOKEN_REJECTED_NOTE : null;
+        break;
+      case 'no_releases':
+        this.checkStatus = 'no_releases';
+        this.checkError = r.tokenRejected ? TOKEN_REJECTED_NOTE : null;
         break;
       case 'error':
         // Keep the previous release: a flaky network must not make a known
@@ -377,11 +407,18 @@ export class UpdateService {
         this.checkStatus = 'error';
         this.checkError = r.message;
         break;
-      case 'rate_limited':
+      case 'rate_limited': {
         // Same reasoning: a spent rate limit says nothing about the releases.
         this.checkStatus = 'rate_limited';
         this.checkError = r.message;
+        // GitHub said when the budget comes back: retry then (plus jitter)
+        // rather than waiting out the whole TTL. The TTL still caps it.
+        const resetMs = r.resetAt === null ? NaN : Date.parse(r.resetAt);
+        if (Number.isFinite(resetMs)) {
+          this.retryAtMs = Math.max(resetMs, this.now()) + this.retryJitterMs();
+        }
         break;
+      }
       default:
         this.checkStatus = r.status;
         this.checkError = null;

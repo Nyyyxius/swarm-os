@@ -63,9 +63,11 @@ $script:DefaultImage = 'ghcr.io/nyyyxius/swarm-os:latest'
 $script:LocalImage   = 'swarm-os:local'
 $script:ReleasesApi  = "https://api.github.com/repos/$($script:Repo)/releases/latest"
 
-# The kit -- the same list bootstrap.sh fetches.
+# The kit -- bootstrap.sh's KIT list plus README.md, docs/plugins.md and
+# docs/builtin-features.md (this script is often the only thing a Windows user
+# downloads, so the kit it fetches carries the main docs too).
 $script:Kit = @(
-  'install.sh', 'install.ps1', 'bootstrap.sh', 'README.md',
+  'install.sh', 'install.ps1', 'bootstrap.sh', 'README.md', 'SECURITY.md',
   'docs/plugins.md', 'docs/builtin-features.md', 'docs/providers.md',
   '.env.example', 'LICENSE',
   'examples/.env.example', 'examples/docker-compose.dist.yml', 'examples/docker-compose.ssh.yml',
@@ -207,6 +209,25 @@ function Write-BuildFromSourceHint {
   Note "  git clone https://github.com/$($script:Repo).git; cd swarm-os; .\install.ps1   (then pick 'Build it here')"
 }
 
+# `docker pull` attached to the console (so its progress shows -- piping it
+# would hide the bars and make a multi-GB pull look hung). Only when it fails
+# is it run again with its output captured into $script:PullErr for
+# Explain-PullFailure: refused / unknown tag / platform / network fail again
+# at once, and a rerun that succeeds is simply a success.
+$script:PullErr = @()
+function Invoke-PullAttached([string]$Img) {
+  $script:PullErr = @()
+  # Start-Process, not `& docker`: inside a function `&` would feed docker's
+  # stdout into this function's return value (and redirect it, hiding the bars).
+  $p = Start-Process -FilePath 'docker' -ArgumentList @('pull', $Img) -NoNewWindow -Wait -PassThru
+  if ($p.ExitCode -eq 0) { return $true }
+  $script:PullErr = @(& docker pull $Img 2>&1 | ForEach-Object { "$_" })
+  return ($LASTEXITCODE -eq 0)
+}
+
+# Set by Explain-PullFailure: daemon | platform | network | refused | tag | other
+$script:PullFailureKind = ''
+
 # Explain a failed `docker pull` from what docker actually said, rather than
 # guessing. Matching order matters: a missing platform also says "not found",
 # and GHCR answers "denied" both for a refused login and for a package that
@@ -217,20 +238,26 @@ function Explain-PullFailure([string]$Img, [string[]]$Out) {
   foreach ($l in $tail) { Note "docker: $l" }
   $all = ($Out -join "`n")
   if ($all -match 'docker daemon|docker_engine|dockerDesktopLinuxEngine|pipe/docker') {
+    $script:PullFailureKind = 'daemon'
     Note 'the Docker engine is not reachable -- is Docker Desktop running?'
   } elseif ($all -match 'no matching manifest|no match for platform|does not provide the specified platform') {
+    $script:PullFailureKind = 'platform'
     Note "$Img has no build for this machine's architecture ($env:PROCESSOR_ARCHITECTURE)."
     Write-BuildFromSourceHint
   } elseif ($all -match 'no such host|i/o timeout|dial tcp|connection refused|network is unreachable|TLS handshake|Client\.Timeout') {
+    $script:PullFailureKind = 'network'
     Note "$registry could not be reached -- check outbound network, DNS and any proxy."
   } elseif ($all -match 'denied|unauthorized|authentication required|forbidden') {
+    $script:PullFailureKind = 'refused'
     Note "$registry refused the pull. The published image is public and needs no login, so either:"
     Note '  - the reference is wrong, or the package does not exist (GHCR answers "denied" for both);'
     Note "  - a stale ``docker login`` for $registry is being sent -- try: docker logout $registry"
     Note "  - it is a private mirror: log in first (docker login $registry), then re-run."
   } elseif ($all -match 'manifest unknown|not found') {
+    $script:PullFailureKind = 'tag'
     Note "$registry does not know this tag -- check the reference (e.g. $($script:DefaultImage))."
   } else {
+    $script:PullFailureKind = 'other'
     Note "see docker's message above."
   }
 }
@@ -338,6 +365,17 @@ function Get-Kit([string]$Target, [string]$GitRef, [string]$Pat) {
       $code = [int]$r.StatusCode
     } catch {
       if ($_.Exception.Response) { try { $code = [int]$_.Exception.Response.StatusCode } catch { } }
+    }
+    # A stale or wrong token must not block a public repository: retry the
+    # file anonymously before giving up.
+    if ($Pat -and ($code -eq 401 -or $code -eq 403)) {
+      $code = 0
+      try {
+        $r = Invoke-WebRequest -Uri "https://raw.githubusercontent.com/$($script:Repo)/$GitRef/$path" -UseBasicParsing -OutFile "$dest.part" -PassThru -TimeoutSec 30 -ErrorAction Stop
+        $code = [int]$r.StatusCode
+      } catch {
+        if ($_.Exception.Response) { try { $code = [int]$_.Exception.Response.StatusCode } catch { } }
+      }
     }
     if ($code -eq 200 -and (Test-Path -LiteralPath "$dest.part") -and (New-Object System.IO.FileInfo("$dest.part")).Length -gt 0) {
       Move-Item -Force "$dest.part" $dest
@@ -594,11 +632,30 @@ function Wiz-Image {
 
   # Probe the pull now rather than at deploy, so a bad reference or a missing
   # architecture is caught while the operator can still change the answer.
-  Say "Checking access to $img ..."
-  $out = @(& docker pull $img 2>&1 | ForEach-Object { "$_" })
-  if ($LASTEXITCODE -eq 0) { Ok 'image pulled'; return }
+  Say "Pulling $img ..."
+  if (Invoke-PullAttached $img) { Ok 'image pulled'; return }
   Warn "Could not pull $img."
-  Explain-PullFailure $img $out
+  Explain-PullFailure $img $script:PullErr
+
+  # A private mirror is the one case a login fixes. Offered only for an image
+  # that is NOT the public default, so the default flow never asks for one.
+  $registry = $img.Split('/')[0]
+  if ($script:PullFailureKind -eq 'refused' -and $img -ne $script:DefaultImage -and $script:Interactive -and
+      (Ask-YN "Is $registry a private registry you can log in to? Log in now?" 'n')) {
+    $regUser = Ask "Username for $registry" $env:USERNAME
+    $regPw = Ask-Secret "Password or token for $registry"
+    if ($regPw) {
+      $regPw | & docker login $registry -u $regUser --password-stdin
+      $loggedIn = ($LASTEXITCODE -eq 0)
+      $regPw = $null
+      if ($loggedIn) {
+        Ok "logged in to $registry"
+        if (Invoke-PullAttached $img) { Ok 'image pulled'; return }
+        Warn "Still cannot pull $img."
+        Explain-PullFailure $img $script:PullErr
+      } else { Warn "docker login to $registry failed." }
+    }
+  }
   Note 'the deploy step will try the pull again.'
 }
 
@@ -879,11 +936,9 @@ function Build-OrPull {
   $img = Cfg 'SWARM_OS_IMAGE'
   if (Test-RegistryImage $img) {
     Say "Pulling $img"
-    # Progress is still shown as it comes; the lines are kept to diagnose.
-    $out = @(& docker pull $img 2>&1 | ForEach-Object { $s = "$_"; Write-Host $s; $s })
-    if ($LASTEXITCODE -ne 0) {
+    if (-not (Invoke-PullAttached $img)) {
       Warn 'Pull failed.'
-      Explain-PullFailure $img $out
+      Explain-PullFailure $img $script:PullErr
       Die 'could not pull the image.'
     }
     return
