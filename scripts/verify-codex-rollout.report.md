@@ -103,7 +103,7 @@ FIRST usage-bearing event, verbatim from the live rollout:
         "unlimited": false,
         "balance": "0"
       },
-      "plan_type": "plus",
+      "plan_type": "<redacted>",
       "rate_limit_reached_type": null
     }
   }
@@ -234,7 +234,7 @@ TUI "% context" readouts captured from the composer footer: (none printed — th
 │ Directory: /tmp/claude-1000/swarm-os-spike-codex-rollout/work │
 │ Permissions: Full Access │
 │ Agents.md: <none> │
-│ Account: nicolasalepins86@gmail.com (Plus) │
+│ Account: <redacted> │
 │ Collaboration mode: Default │
 │ Session: 01a052e8-bad9-7f13-a9e0-e89f692a9bd8 │
 │ │

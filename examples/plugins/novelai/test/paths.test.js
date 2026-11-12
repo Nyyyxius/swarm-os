@@ -63,7 +63,7 @@ describe('workspaceRoot', () => {
 describe('toAgentPath', () => {
   it('is the identity under the local transport, even with a host root set', () => {
     process.env.SWARM_OS_WORKSPACE_ROOT = '/workspace';
-    process.env.SWARM_OS_HOST_WORKSPACE_ROOT = '/home/ubuntu/projets/fyrel';
+    process.env.SWARM_OS_HOST_WORKSPACE_ROOT = '/home/user/projects/my-project';
     // No SWARM_OS_AGENT_TRANSPORT === local: the agent runs in the container.
     expect(toAgentPath('/workspace/novelai/2026-07-27/a.ogg')).toBe(
       '/workspace/novelai/2026-07-27/a.ogg',
@@ -78,23 +78,23 @@ describe('toAgentPath', () => {
   it('substitutes the workspace prefix under ssh', () => {
     process.env.SWARM_OS_AGENT_TRANSPORT = 'ssh';
     process.env.SWARM_OS_WORKSPACE_ROOT = '/workspace';
-    process.env.SWARM_OS_HOST_WORKSPACE_ROOT = '/home/ubuntu/projets/fyrel';
+    process.env.SWARM_OS_HOST_WORKSPACE_ROOT = '/home/user/projects/my-project';
     expect(toAgentPath('/workspace/novelai/2026-07-27/a.ogg')).toBe(
-      '/home/ubuntu/projets/fyrel/novelai/2026-07-27/a.ogg',
+      '/home/user/projects/my-project/novelai/2026-07-27/a.ogg',
     );
   });
 
   it('maps the workspace root itself, with no trailing separator', () => {
     process.env.SWARM_OS_AGENT_TRANSPORT = 'ssh';
     process.env.SWARM_OS_WORKSPACE_ROOT = '/workspace';
-    process.env.SWARM_OS_HOST_WORKSPACE_ROOT = '/home/ubuntu/projets/fyrel';
-    expect(toAgentPath('/workspace')).toBe('/home/ubuntu/projets/fyrel');
+    process.env.SWARM_OS_HOST_WORKSPACE_ROOT = '/home/user/projects/my-project';
+    expect(toAgentPath('/workspace')).toBe('/home/user/projects/my-project');
   });
 
   it('leaves a path outside the workspace untouched', () => {
     process.env.SWARM_OS_AGENT_TRANSPORT = 'ssh';
     process.env.SWARM_OS_WORKSPACE_ROOT = '/workspace';
-    process.env.SWARM_OS_HOST_WORKSPACE_ROOT = '/home/ubuntu/projets/fyrel';
+    process.env.SWARM_OS_HOST_WORKSPACE_ROOT = '/home/user/projects/my-project';
     // The host does not see /data at all — rewriting it would invent a path.
     expect(toAgentPath('/data/plugins/novelai/index.js')).toBe('/data/plugins/novelai/index.js');
   });
@@ -102,7 +102,7 @@ describe('toAgentPath', () => {
   it('does not treat a sibling directory as being inside the workspace', () => {
     process.env.SWARM_OS_AGENT_TRANSPORT = 'ssh';
     process.env.SWARM_OS_WORKSPACE_ROOT = '/workspace';
-    process.env.SWARM_OS_HOST_WORKSPACE_ROOT = '/home/ubuntu/projets/fyrel';
+    process.env.SWARM_OS_HOST_WORKSPACE_ROOT = '/home/user/projects/my-project';
     // `/workspace-backup` merely shares a string prefix — the separator check
     // is what keeps it out.
     expect(toAgentPath('/workspace-backup/a.ogg')).toBe('/workspace-backup/a.ogg');
@@ -111,9 +111,9 @@ describe('toAgentPath', () => {
   it('normalises BOTH roots through path.resolve before comparing', () => {
     process.env.SWARM_OS_AGENT_TRANSPORT = 'ssh';
     process.env.SWARM_OS_WORKSPACE_ROOT = '/workspace/./';
-    process.env.SWARM_OS_HOST_WORKSPACE_ROOT = '/home/ubuntu/./projets/fyrel/';
+    process.env.SWARM_OS_HOST_WORKSPACE_ROOT = '/home/user/./projects/my-project/';
     // A non-normalised env value must not silently defeat the prefix test.
-    expect(toAgentPath('/workspace/novelai/a.ogg')).toBe('/home/ubuntu/projets/fyrel/novelai/a.ogg');
+    expect(toAgentPath('/workspace/novelai/a.ogg')).toBe('/home/user/projects/my-project/novelai/a.ogg');
   });
 });
 

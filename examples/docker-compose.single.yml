@@ -5,16 +5,16 @@
 #
 # Usage:
 #   1. Adjust the host paths below to point at YOUR project + state dirs.
-#   2. (Optional) export FYREL_DISCORD_WEBHOOK in your shell or a .env file.
+#   2. (Optional) export MY_PROJECT_DISCORD_WEBHOOK in your shell or a .env file.
 #   3. docker compose -f examples/docker-compose.single.yml up -d
 #
 # The web UI is reachable at http://127.0.0.1:8787 from the host (and via
 # Tailscale on this loopback when MagicDNS exposes the host on its tailnet).
 
 services:
-  swarm-fyrel-cc-app:
+  swarm-my-project:
     image: swarm-os:latest
-    container_name: swarm-fyrel-cc-app
+    container_name: swarm-my-project
     # init: true → Docker injects tini as PID 1 to reap zombies. The image
     # also has its own tini ENTRYPOINT — both layered is harmless and keeps
     # the contract explicit at the orchestration layer (plan §13).
@@ -35,7 +35,7 @@ services:
       # the first boot — see docs/builtin-features.md.
     volumes:
       # The project the agents will work in. RW.
-      - ${HOME}/dev/fyrel-cc-app:/workspace
+      - ${HOME}/dev/my-project:/workspace
       # Host ~/.claude credentials + state, RO. Boot-time copy lands at
       # /data/.claude-runtime — this RO mount is never written to.
       - ${HOME}/.claude:/claude-source:ro
@@ -48,14 +48,14 @@ services:
       - ${HOME}/.claude.json:/claude-source.json:ro
       # Per-project state dir. Holds: SQLite db, token, hook-token, logs/,
       # .claude-runtime/ (writable copy of /claude-source).
-      - ${HOME}/.swarm-os/fyrel-cc-app:/data
+      - ${HOME}/.swarm-os/my-project:/data
     environment:
-      SWARM_OS_PROJECT_NAME: fyrel-cc-app
-      SWARM_OS_DISCORD_WEBHOOK_URL: ${FYREL_DISCORD_WEBHOOK:-}
-      # Update detection: read-only GitHub PAT (any scope — the read:packages one
-      # works) used to read the releases of the swarm-os repo. `environment:` is an
-      # allow-list — a variable not named here never reaches the process, and
-      # the check stays on `no_token` forever. Empty = detection off.
+      SWARM_OS_PROJECT_NAME: my-project
+      SWARM_OS_DISCORD_WEBHOOK_URL: ${MY_PROJECT_DISCORD_WEBHOOK:-}
+      # Update detection: OPTIONAL GitHub token. Releases of the public swarm-os
+      # repo are read anonymously; a token (any scope) only raises the API rate
+      # limit. `environment:` is an allow-list — a variable not named here never
+      # reaches the process. Empty is the normal state.
       SWARM_OS_GITHUB_TOKEN: ${SWARM_OS_GITHUB_TOKEN:-}
       # Public URL is used for Discord embed deep-links (no token included).
       # Set to your Tailscale name or whatever URL the user reaches the UI at.

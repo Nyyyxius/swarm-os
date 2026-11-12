@@ -45,7 +45,7 @@ afterEach(() => {
 /** Put the process in the production shape: container + host, ssh transport. */
 function useSsh() {
   process.env.SWARM_OS_WORKSPACE_ROOT = '/workspace';
-  process.env.SWARM_OS_HOST_WORKSPACE_ROOT = '/home/ubuntu/swarm';
+  process.env.SWARM_OS_HOST_WORKSPACE_ROOT = '/home/user/swarm';
   process.env.SWARM_OS_AGENT_TRANSPORT = 'ssh';
 }
 
@@ -72,18 +72,18 @@ describe('toAgentPath', () => {
   });
 
   it('is the identity when only the host root is set (transport not ssh)', () => {
-    process.env.SWARM_OS_HOST_WORKSPACE_ROOT = '/home/ubuntu/swarm';
+    process.env.SWARM_OS_HOST_WORKSPACE_ROOT = '/home/user/swarm';
     expect(toAgentPath('/workspace/a.png')).toBe('/workspace/a.png');
   });
 
   it('rewrites the workspace prefix under ssh', () => {
     useSsh();
-    expect(toAgentPath('/workspace/gemini/a.png')).toBe('/home/ubuntu/swarm/gemini/a.png');
+    expect(toAgentPath('/workspace/gemini/a.png')).toBe('/home/user/swarm/gemini/a.png');
   });
 
   it('maps the root itself, without leaving a trailing separator', () => {
     useSsh();
-    expect(toAgentPath('/workspace')).toBe('/home/ubuntu/swarm');
+    expect(toAgentPath('/workspace')).toBe('/home/user/swarm');
   });
 
   it('leaves a path outside the bind mount alone (the host would not see it either)', () => {
@@ -110,7 +110,7 @@ describe('toContainerPath — the inverse, and the containment gate', () => {
 
   it('rewrites a HOST path back onto the container mount under ssh', () => {
     useSsh();
-    expect(toContainerPath('/home/ubuntu/swarm/shots/a.png')).toBe('/workspace/shots/a.png');
+    expect(toContainerPath('/home/user/swarm/shots/a.png')).toBe('/workspace/shots/a.png');
   });
 
   it('round-trips with toAgentPath under ssh', () => {
@@ -121,7 +121,7 @@ describe('toContainerPath — the inverse, and the containment gate', () => {
 
   it('maps the host root itself', () => {
     useSsh();
-    expect(toContainerPath('/home/ubuntu/swarm')).toBe('/workspace');
+    expect(toContainerPath('/home/user/swarm')).toBe('/workspace');
   });
 
   it('refuses a traversal out of the workspace', () => {

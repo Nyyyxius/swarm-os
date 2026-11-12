@@ -301,7 +301,7 @@ Le fichier audio est **écrit dans le workspace** ; l'outil retourne son chemin.
 // réponse
 { "ok": true,
   "files": [{
-    "path": "/home/ubuntu/projets/fyrel/novelai/2026-07-27/143205-bonjour-ceci-a7f3-0.ogg",
+    "path": "/home/user/projects/my-project/novelai/2026-07-27/143205-bonjour-ceci-a7f3-0.ogg",
     "workspace_relative": "novelai/2026-07-27/143205-bonjour-ceci-a7f3-0.ogg",
     "container_path": "/workspace/novelai/2026-07-27/143205-bonjour-ceci-a7f3-0.ogg",
     "bytes": 18422, "chars": 26 }],

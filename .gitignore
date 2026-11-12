@@ -15,3 +15,36 @@ prototypes/
 
 # generated distribution artifact
 swarm-os-dist.zip
+
+# Personal, machine-specific compose files at the repo root (e.g. a local
+# docker-compose.<name>.yml for a live instance). The shipped templates live in
+# examples/ and are not affected; a plain /docker-compose.yml is not matched.
+/docker-compose.*.yml
+
+# Local runtime state (dev data dir, server tokens written at the root by a
+# local run, agent CLI configs)
+/.dev-data/
+/token
+/hook-token
+/ide-token
+.claude.json
+.codex/
+.gemini/
+
+# Databases, transcripts and backups produced at runtime
+*.db
+*.db-wal
+*.db-shm
+*.db-journal
+*.sqlite
+*.sqlite3
+*.sqlite-*
+*.jsonl
+*.bak
+
+# Keys and certificates
+*.pem
+*.key
+id_rsa*
+id_ed25519*
+id_ecdsa*
