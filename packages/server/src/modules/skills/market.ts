@@ -1,7 +1,7 @@
 /**
  * Market source — import an Agent Skill from the agentskills.io ECOSYSTEM.
  *
- * REALITY CHECK (investigated Lot 4a, 2026-08-03 — docs/skills-lot4-contract.md):
+ * REALITY CHECK (investigated Lot 4a, 2026-08-03 — docs/internal/skills/skills-lot4-contract.md):
  * agentskills.io is the open Agent-Skills SPEC + client showcase. It exposes NO
  * package-registry download or search HTTP API — the plan's "index HTTP →
  * tarball" assumption (plan §5.1) does not match reality. The canonical

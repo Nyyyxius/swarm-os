@@ -88,9 +88,7 @@ tests and build on every pull request; a red CI blocks the merge.
 
 ```sh
 pnpm lint                                   # eslint . (flat config in eslint.config.js)
-pnpm --filter server exec tsc --noEmit      # server typecheck
-pnpm --filter web typecheck                 # web typecheck, test files included
-pnpm --filter @swarm-os/plugin-sdk exec tsc --noEmit
+pnpm typecheck                              # tsc --noEmit in server, web and plugin-sdk
 pnpm test                                   # every Vitest project, single run
 pnpm build
 ```
@@ -121,17 +119,12 @@ pnpm test:watch                                     # watch mode
 pnpm test:coverage                                  # coverage/ + thresholds (50 % lines and functions)
 ```
 
-Two known pitfalls when running locally:
-
-1. **One server run at a time.** Some server integration tests bind fixed
-   ports, so two `server` project runs on the same machine (two terminals, two
-   worktrees, an agent running tests next to you) collide and fail with
-   address-in-use errors. Run a single Vitest invocation of the `server` project
-   at a time. The `web` and `examples` projects have no such constraint.
-2. **Exit code 1 with no failing test.** The server suite can currently exit
-   with code 1 because of a teardown error (`ENOENT` on a temporary directory)
-   even though every test passed. Read the `Tests N passed` summary line, not
-   only the exit code. This is a known issue being fixed.
+One pitfall when running locally: **one server run at a time.** Some server
+integration tests bind fixed ports, so two `server` project runs on the same
+machine (two terminals, two worktrees, an agent running tests next to you)
+collide and fail with address-in-use errors. Run a single Vitest invocation of
+the `server` project at a time. The `web` and `examples` projects have no such
+constraint.
 
 There are also spike-style harnesses that exercise the real HTTP/MCP stack
 (`pnpm --filter server verify:phase2` … `verify:phase5`) and probes of the real

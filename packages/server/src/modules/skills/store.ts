@@ -1,5 +1,5 @@
 /**
- * SkillStore — persistence for the skill registry (docs/plan-skills-importables.md §3.1).
+ * SkillStore — persistence for the skill registry (docs/internal/skills/plan-skills-importables.md §3.1).
  *
  * ⚠️ Owns the `skills` table via `CREATE TABLE IF NOT EXISTS` on the RAW
  * `Database` handle (`SwarmDb.db`) — the SAME self-contained model `PluginStore`
@@ -19,7 +19,7 @@ import type { SwarmDb } from '../db/index.js';
 
 const log = withModule('skills.store');
 
-/** Trust levels (docs/plan-skills-importables.md §9). `community` is the default. */
+/** Trust levels (docs/internal/skills/plan-skills-importables.md §9). `community` is the default. */
 export const SKILL_TRUST_LEVELS = ['first-party', 'verified', 'community', 'local'] as const;
 export type SkillTrust = (typeof SKILL_TRUST_LEVELS)[number];
 

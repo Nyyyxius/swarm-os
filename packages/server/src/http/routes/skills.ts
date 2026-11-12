@@ -1,5 +1,5 @@
 /**
- * Skills control-plane REST (docs/plan-skills-importables.md §8.4).
+ * Skills control-plane REST (docs/internal/skills/plan-skills-importables.md §8.4).
  *
  * FROZEN CONTRACT (Lot 1b/2b/3b web client builds `web/api/client.ts` on this):
  *   GET    /skills                 → { skills: SkillView[] }

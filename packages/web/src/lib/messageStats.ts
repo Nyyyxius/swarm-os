@@ -2,7 +2,7 @@
 //
 // Aggregates the per-orchestrator `msgCount` field (introduced by S1) into
 // the three numbers required by the desktop LeftPanel `MESSAGE FLOW`
-// section (cf. `docs/update_system/04_compteur_global_messages.md`):
+// section (cf. `docs/internal/ui-redesign/update_system/04_compteur_global_messages.md`):
 //
 //   - `total`     : sum of `msgCount` across all live orchestrators.
 //   - `perMinute` : delta of `total` between two consecutive 60 s ticks.

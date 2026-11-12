@@ -67,7 +67,7 @@ export type InstallSource =
   | { kind: 'upload'; tgz: Buffer; name?: string };
 
 // `isSafeSubdir` + the git-ref codec live in the shared install-core module now
-// (docs/plan-skills-importables.md §11.4). Re-exported so existing importers
+// (docs/internal/skills/plan-skills-importables.md §11.4). Re-exported so existing importers
 // (installer.test.ts) keep resolving them from here.
 export { isSafeSubdir, encodeGitRef, decodeGitRef } from '../install-core/fetch.js';
 

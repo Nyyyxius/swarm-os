@@ -2,12 +2,12 @@
 //
 // Step 14 (Phase C) — Modal générique de confirmation pour actions
 // destructives. Déclenchée principalement par les boutons STOP / KILL de la
-// RightPanel (cf. docs/redesign-desktop/07_rightpanel-data-binding.md §5),
+// RightPanel (cf. docs/internal/ui-redesign/redesign-desktop/07_rightpanel-data-binding.md §5),
 // mais réutilisable pour toute future action irréversible.
 //
 // Pure UI : aucun appel réseau, état porté par le parent.
 // Source v2 : prototypes/v2/panels.jsx:537-557.
-// Squelette Step 2 : docs/redesign-desktop/02_desktop-skeleton.md §3.14.
+// Squelette Step 2 : docs/internal/ui-redesign/redesign-desktop/02_desktop-skeleton.md §3.14.
 
 import { useEffect, useRef } from 'react';
 import type { KeyboardEvent, MouseEvent } from 'react';

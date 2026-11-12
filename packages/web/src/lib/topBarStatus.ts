@@ -1,7 +1,7 @@
 // packages/web/src/lib/topBarStatus.ts
 //
 // Mapping orchestrator → pill visuel pour la TopBar v2 (cf.
-// docs/ui-redesign-desktop.md §3.1 et docs/redesign-desktop/04_topbar-data-binding.md).
+// docs/internal/ui-redesign/ui-redesign-desktop.md §3.1 et docs/internal/ui-redesign/redesign-desktop/04_topbar-data-binding.md).
 //
 // Le bucket retourné pilote :
 //  - la classe CSS du dot (`stopped|bad|waiting|starting|warn|ok`)

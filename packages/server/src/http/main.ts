@@ -377,7 +377,7 @@ export function createApp(
   // subsystem untouched and simply has no `/crons`.
   if (crons) app.use(createCronsRouter(crons.store, crons.scheduler, roleStore, crons.runner));
 
-  // Skills control-plane REST (docs/plan-skills-importables.md §8.4). Same
+  // Skills control-plane REST (docs/internal/skills/plan-skills-importables.md §8.4). Same
   // X-Auth-Token gate. Mounted off `spawner.skills` so no extra dep is threaded;
   // absent ⇒ the routes simply aren't registered and `/skills` 404s.
   if (spawner.skills) {

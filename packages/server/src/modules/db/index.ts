@@ -131,7 +131,7 @@ export interface RoleRow {
    */
   approval_json: string | null;
   /**
-   * Skills activated on this role (docs/plan-skills-importables.md §3.2),
+   * Skills activated on this role (docs/internal/skills/plan-skills-importables.md §3.2),
    * JSON-serialized. NULL = no active skill. Same convention as connectors_json;
    * added via applyMigrations only (like approval_json), not in the base schema.
    */
@@ -1113,7 +1113,7 @@ export class SwarmDb {
       // the role behaves EXACTLY as before (default `isPromptingMode` arming,
       // Discord notification ON). Every pre-existing role reads NULL.
       { table: 'roles',         column: 'approval_json',    ddl: 'ALTER TABLE roles ADD COLUMN approval_json TEXT' },
-      // Skills library (docs/plan-skills-importables.md §3.2) — OPTIONAL
+      // Skills library (docs/internal/skills/plan-skills-importables.md §3.2) — OPTIONAL
       // JSON-serialized list of skills activated on a role. NULL = none. Same
       // migrations-only convention as approval_json (not in the base schema).
       { table: 'roles',         column: 'skills_json',      ddl: 'ALTER TABLE roles ADD COLUMN skills_json TEXT' },
@@ -1165,7 +1165,7 @@ export class SwarmDb {
       // tokens billed per agent, one column per bucket. Four columns rather
       // than one JSON blob: they are four integers that only ever get added to,
       // SQL can sum them across a team without parsing anything, and the schema
-      // is the same one `docs/auto-amelioration.md` reserves in
+      // is the same one `docs/internal/designs/auto-amelioration.md` reserves in
       // `learning_episodes`. Nullable with no default, exactly like
       // `messages_processed`: NULL = "predates the columns", 0 = "measured".
       { table: 'sessions',      column: 'tokens_in',                         ddl: 'ALTER TABLE sessions ADD COLUMN tokens_in INTEGER' },

@@ -75,7 +75,7 @@ function shortFromSessionId(sessionId: string): string {
  * field the server guarantees is absent for intra-team messages — cf.
  * `mailbox.ts:33-37`). `currentSessionId` is kept for future use
  * (e.g. flagging self-loops defensively) and to align with the spec
- * signature in `docs/update_system/12_mapping_from.md`.
+ * signature in `docs/internal/ui-redesign/update_system/12_mapping_from.md`.
  */
 export function classifyBubble(
   msg: MailMessageView,

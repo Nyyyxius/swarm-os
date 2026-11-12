@@ -436,7 +436,7 @@ describe('Session — requestContextReset (deferred /clear & /compact)', () => {
 
   it('writes the command with NO leading CR — the lone submit CR is the only one', async () => {
     // Claude Code >= 2.1.277 cancels a submit whose prompt holds a CR not
-    // followed by LF (docs/correctif-signal-cr-invisible.md).
+    // followed by LF (docs/internal/post-mortems/correctif-signal-cr-invisible.md).
     const { s, fake } = makeRunning();
     expect(s.requestContextReset('/compact', { idleMs: 10 })).toBe(true);
     await new Promise((r) => setTimeout(r, 350));
@@ -568,7 +568,7 @@ describe('Session — armNotice (operator warning with a deadline)', () => {
 
   it('notifySignal never writes a leading CR — the lone submit CR is the only one', async () => {
     // Claude Code >= 2.1.277 cancels a submit whose prompt holds a CR not
-    // followed by LF (docs/correctif-signal-cr-invisible.md).
+    // followed by LF (docs/internal/post-mortems/correctif-signal-cr-invisible.md).
     const { s, fake } = makeRunning();
     s.notifySignal('[swarm-os] new message in inbox — call team.read_inbox to fetch');
     await new Promise((r) => setTimeout(r, 250));

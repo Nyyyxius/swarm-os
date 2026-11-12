@@ -1,5 +1,4 @@
 import { defineConfig } from 'vitest/config';
-import { ignoreOrphanSessionLogOpen } from './packages/server/test/known-unhandled-errors.js';
 
 /**
  * Workspace-level Vitest config (Phase 7).
@@ -22,10 +21,6 @@ export default defineConfig({
       // Without this third project nothing under `examples/` would ever run.
       './examples/vitest.config.ts',
     ],
-    // Vitest reads this from the config it was started with, not from the
-    // project configs; it filters one known server teardown race by exact
-    // shape (see the module for the root cause and the real fix).
-    onUnhandledError: ignoreOrphanSessionLogOpen,
     coverage: {
       provider: 'v8',
       reporter: ['text', 'html', 'json-summary'],

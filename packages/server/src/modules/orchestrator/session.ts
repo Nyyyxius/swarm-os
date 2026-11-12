@@ -1551,7 +1551,7 @@ export class Session extends EventEmitter {
    * followed by LF inside the prompt counts as an "invisible character" —
    * the TUI strips it and CANCELS the submit ("review and press Enter to
    * send"), leaving the signal typed but never sent
-   * (docs/correctif-signal-cr-invisible.md).
+   * (docs/internal/post-mortems/correctif-signal-cr-invisible.md).
    *
    * Best-effort: if the agent has exited or the write throws, we swallow
    * and log; the mailbox push is the source of truth, the signal is just
@@ -1676,7 +1676,7 @@ export class Session extends EventEmitter {
    * Same gate and same path as `signalInbox`, deliberately: `notifySignal` is
    * what makes an injection provider-agnostic (Ink two-step write with NO
    * leading `\r` for claude/codex/gemini — Claude Code ≥ 2.1.277 cancels a
-   * submit whose buffer holds a bare CR, docs/correctif-signal-cr-invisible.md
+   * submit whose buffer holds a bare CR, docs/internal/post-mortems/correctif-signal-cr-invisible.md
    * — and a single `\r…\r` write for opencode), and its `_signalFiring`
    * window keeps a reset or a notice from typing into the half-written line.
    *
@@ -1787,7 +1787,7 @@ export class Session extends EventEmitter {
     // character, `writeInput` lands here, and a millisecond later the idle
     // boundary types `[swarm-os] new message…` INTO that half-typed answer,
     // then submits the mix with its trailing CR. (The signal no longer carries
-    // a leading `\r` — docs/correctif-signal-cr-invisible.md — so it does not
+    // a leading `\r` — docs/internal/post-mortems/correctif-signal-cr-invisible.md — so it does not
     // submit the answer first any more, but it still lands inside it.) A held
     // `/compact` fires the same way.
     // Re-basing makes all three wait a full `idleThresholdMs` of REAL silence
@@ -3120,7 +3120,16 @@ export class Session extends EventEmitter {
     } catch {
       // file doesn't exist — that's fine
     }
-    this.logStream = fs.createWriteStream(this.logPath, { flags: 'a', mode: 0o600 });
+    const stream = fs.createWriteStream(this.logPath, { flags: 'a', mode: 0o600 });
+    // The file is opened asynchronously. Without a listener, a failed open or
+    // write (log directory removed, disk full) is an uncaught exception, which
+    // shuts the whole server down. A session log is not worth that: drop the
+    // stream and keep the session running.
+    stream.on('error', (err) => {
+      log.warn({ event: 'session.log_stream_error', sessionId: this.id, error: String(err) });
+      if (this.logStream === stream) this.logStream = null;
+    });
+    this.logStream = stream;
   }
 
   private _appendLog(chunk: string): void {

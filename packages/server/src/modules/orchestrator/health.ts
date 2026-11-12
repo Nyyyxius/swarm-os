@@ -27,7 +27,7 @@ export type HealthInput = Pick<
 >;
 
 /**
- * Aggregation rules (cf. `docs/update_system/07_health_agrege.md` §5):
+ * Aggregation rules (cf. `docs/internal/ui-redesign/update_system/07_health_agrege.md` §5):
  *
  *   1. Orch `stopped` or `stopping`         → `'stopped'`
  *   2. Orch `failed`                         → `'bad'`

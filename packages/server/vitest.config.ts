@@ -1,6 +1,5 @@
 import { defineConfig } from 'vitest/config';
 import * as path from 'node:path';
-import { ignoreOrphanSessionLogOpen } from './test/known-unhandled-errors.js';
 
 /**
  * Server package — Phase 7 test config.
@@ -33,8 +32,6 @@ export default defineConfig({
     // options.
     pool: 'forks',
     fileParallelism: false,
-    // One known teardown race, filtered by exact shape: see the module.
-    onUnhandledError: ignoreOrphanSessionLogOpen,
   },
 });
 

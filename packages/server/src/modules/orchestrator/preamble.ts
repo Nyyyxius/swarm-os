@@ -123,7 +123,7 @@ export const TEAM_TOOL_LOGICAL_NAMES: readonly string[] = [
   'codegraph.search',
   'codegraph.explain',
   'codegraph.path',
-  // Skills library tools (docs/plan-skills-importables.md §7) — mounted on the
+  // Skills library tools (docs/internal/skills/plan-skills-importables.md §7) — mounted on the
   // same team-comms server, so they are part of the renamed vocabulary.
   'skills.list',
   'skills.show',
@@ -327,7 +327,7 @@ export interface SkillFragment {
 }
 
 /**
- * Announce the skills ACTIVE for this session (docs/plan-skills-importables.md).
+ * Announce the skills ACTIVE for this session (docs/internal/skills/plan-skills-importables.md).
  *
  * Mirrors `buildPluginToolsSection`: appended UNCONDITIONALLY to the default and
  * BEFORE the operator override, so a role preamble can never hide an activated
@@ -489,7 +489,7 @@ export interface BuildPreambleInput {
   pluginTools?: readonly PluginToolSummary[] | null;
   /**
    * Skills ACTIVE for this session, resolved at spawn from the role/team/session
-   * scopes (docs/plan-skills-importables.md §2.1, durable channel). Appended
+   * scopes (docs/internal/skills/plan-skills-importables.md §2.1, durable channel). Appended
    * UNCONDITIONALLY like `pluginTools`, so an operator override can never hide an
    * activated skill. Omitted / empty ⇒ no section at all.
    */

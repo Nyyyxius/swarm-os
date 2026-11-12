@@ -6,7 +6,7 @@
 // outside the component so they're trivially testable in isolation
 // (no React, no I/O, no hooks).
 //
-// See `docs/redesign-desktop/07_rightpanel-data-binding.md` §3.
+// See `docs/internal/ui-redesign/redesign-desktop/07_rightpanel-data-binding.md` §3.
 
 import {
   isDiscordConnectorView,

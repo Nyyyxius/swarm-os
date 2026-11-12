@@ -1,6 +1,6 @@
 // packages/web/src/lib/roleShape.ts
 // Mapping figé role → forme SVG du node sur la MapView. Cf.
-// docs/ui-redesign-desktop.md §1.3.
+// docs/internal/ui-redesign/ui-redesign-desktop.md §1.3.
 
 export type Shape =
   | 'diamond'

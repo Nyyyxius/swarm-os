@@ -1,7 +1,7 @@
 // Phase C — Step 10 (Étape C.10) — `RolesPage` v2 fullscreen overlay.
 //
 // Replaces the previous Tailwind list+modal page with the v2 prototype layout
-// (cf. `prototypes/v2/modals.jsx:119-218` and `docs/redesign-desktop/10_roles-page-overlay.md`):
+// (cf. `prototypes/v2/modals.jsx:119-218` and `docs/internal/ui-redesign/redesign-desktop/10_roles-page-overlay.md`):
 //
 //   ┌──────────────────────────────────────────────────────────────────┐
 //   │  TopBar (kept visible above the overlay — `.roles-overlay` is    │

@@ -1,5 +1,5 @@
 /**
- * Skill trust model + review gate (docs/plan-skills-importables.md §9, Lot 3).
+ * Skill trust model + review gate (docs/internal/skills/plan-skills-importables.md §9, Lot 3).
  *
  * A skill is DATA (§0) — nothing here runs skill code. Trust classifies the
  * SOURCE a skill came from; the review gate governs whether a skill that can

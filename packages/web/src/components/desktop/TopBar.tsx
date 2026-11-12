@@ -25,7 +25,7 @@ export interface TopBarTeam {
  *
  * `startedAt` (ISO string ou null) est passé brut depuis `DesktopShell` ;
  * la TopBar le formate à chaque tick local (cf. §6 de
- * `docs/redesign-desktop/04_topbar-data-binding.md`). Cela évite de
+ * `docs/internal/ui-redesign/redesign-desktop/04_topbar-data-binding.md`). Cela évite de
  * re-render le `DesktopShell` à chaque seconde.
  */
 export interface TopBarInfo {

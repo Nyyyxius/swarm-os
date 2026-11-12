@@ -8,7 +8,7 @@ import type { OrchestratorStatus } from './index.js';
  * function. Each case is an explicit `HealthInput` literal and the
  * expected verdict.
  *
- * Covers the 14 cases listed in `docs/update_system/07_health_agrege.md`
+ * Covers the 14 cases listed in `docs/internal/ui-redesign/update_system/07_health_agrege.md`
  * §5 plus a couple of priority / edge cases (lead-failed wins over
  * lastError; orch-failed wins over lead-running; lead-disappeared while
  * running).

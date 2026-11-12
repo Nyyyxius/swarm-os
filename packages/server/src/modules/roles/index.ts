@@ -163,7 +163,7 @@ export function connectorConfig(c: Connector): Record<string, unknown> {
 }
 
 /**
- * A skill activated on a role (docs/plan-skills-importables.md §3.2). Persisted
+ * A skill activated on a role (docs/internal/skills/plan-skills-importables.md §3.2). Persisted
  * JSON-serialized in `roles.skills_json`, same convention as `connectors_json`.
  */
 export type SkillActivationMode = 'inject';
@@ -279,7 +279,7 @@ export interface Role {
    * default arming (`isPromptingMode`) and Discord notification ON.
    */
   approval: RoleApprovalSettings | null;
-  /** Skills activated on this role (docs/plan-skills-importables.md §3.2). */
+  /** Skills activated on this role (docs/internal/skills/plan-skills-importables.md §3.2). */
   skills: RoleSkillRef[];
   /**
    * Dead-worker reaper toggle. When `true`, the in-process session reaper

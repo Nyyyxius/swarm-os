@@ -293,7 +293,7 @@ export class McpServer {
       registerGraphTools(sdkServer, () => ctx);
     }
     // Skills library tools (skills.*), registered next so every agent can list
-    // and (lead) activate skills (docs/plan-skills-importables.md §7).
+    // and (lead) activate skills (docs/internal/skills/plan-skills-importables.md §7).
     registerSkillsTools(sdkServer, () => ctx);
     this.pluginTools?.registerAll(sdkServer, () => ctx);
 

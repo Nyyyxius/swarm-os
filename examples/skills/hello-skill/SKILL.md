@@ -12,6 +12,6 @@ sentence — nothing more. If the user specifies a language, greet in that
 language; otherwise mirror the language they wrote in.
 
 This is the spike example for the swarm-os importable-skills library
-(`docs/plan-skills-importables.md`, Lot 0). It is pure data: it ships no assets
+(`docs/internal/skills/plan-skills-importables.md`, Lot 0). It is pure data: it ships no assets
 and requires no plugin. Activating it injects exactly these instructions into an
 agent's preamble.

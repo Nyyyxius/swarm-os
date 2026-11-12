@@ -1,6 +1,6 @@
 /**
  * install-core — shared fetch/stage primitives for the plugin installer AND the
- * skills installer (docs/plan-skills-importables.md §4/§11.4).
+ * skills installer (docs/internal/skills/plan-skills-importables.md §4/§11.4).
  *
  * PURE mechanics: clone / pack / extract a source into a staging dir, plus the
  * git-ref codec + subdir guard. NOTHING here validates a manifest, runs

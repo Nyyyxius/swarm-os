@@ -1,7 +1,7 @@
 /**
  * Skill manifest — `SKILL.md` (YAML frontmatter subset + body) parser.
  *
- * A "skill" (docs/plan-skills-importables.md) is DATA: a folder holding a
+ * A "skill" (docs/internal/skills/plan-skills-importables.md) is DATA: a folder holding a
  * `SKILL.md` whose YAML frontmatter carries the metadata and whose body is the
  * instruction text injected into an agent's preamble. `skill.json` is an
  * OPTIONAL swarm-os superset for fields the frontmatter does not carry.
@@ -19,7 +19,7 @@
  * a later lot IF a dependency is approved.
  *
  * Nothing here executes skill code — a skill is data-first
- * (docs/plan-skills-importables.md §0).
+ * (docs/internal/skills/plan-skills-importables.md §0).
  */
 
 import * as fs from 'node:fs';

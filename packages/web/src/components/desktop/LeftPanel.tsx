@@ -4,7 +4,7 @@
 // HEALTH + per-orchestrator sparklines) and adapts the canonical
 // `OrchestratorView[]` (passed down from `DesktopShell`'s single
 // `useOrchestrators` poll) into the row models. Cf.
-// `docs/redesign-desktop/05_leftpanel-data-binding.md`.
+// `docs/internal/ui-redesign/redesign-desktop/05_leftpanel-data-binding.md`.
 
 import { useMemo } from 'react';
 import Sparkline from './Sparkline';

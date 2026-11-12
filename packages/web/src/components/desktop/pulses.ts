@@ -24,7 +24,7 @@ export const PULSE_DEDUPE_MS = 200;
 /**
  * Classify a mailbox.message into one of the 4 visual kinds the MapView
  * knows how to animate. Order is significant — early-returns implement
- * the precedence specified in `docs/ui-redesign-desktop.md §3.3`.
+ * the precedence specified in `docs/internal/ui-redesign/ui-redesign-desktop.md §3.3`.
  */
 export function deriveKind(ev: MailboxMessageEvent): MapPulse['kind'] {
   // 1) Broadcast (operator → all leads OR lead → all workers via

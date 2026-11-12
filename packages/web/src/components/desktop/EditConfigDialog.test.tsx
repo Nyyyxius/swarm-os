@@ -2,7 +2,7 @@
 //
 // Phase C — Step 13 : smoke tests for `EditConfigDialog`.
 //
-// Contract enforced by docs/redesign-desktop/13_spawn-worker-edit-config.md
+// Contract enforced by docs/internal/ui-redesign/redesign-desktop/13_spawn-worker-edit-config.md
 // §6 + §10 step 8 :
 //  - `open={false}` (or `team=null`) renders nothing.
 //  - MODEL / EFFORT / PERMISSION MODE are pre-filled from team defaults.

@@ -1,5 +1,5 @@
 /**
- * Skill review surface (docs/plan-skills-importables.md §9, Lot 3) — read-only
+ * Skill review surface (docs/internal/skills/plan-skills-importables.md §9, Lot 3) — read-only
  * inspection of a skill's `assets/` tree so an operator (via the Lot 3b
  * `SkillReviewDialog`) can SEE the executable content before approving it.
  *
