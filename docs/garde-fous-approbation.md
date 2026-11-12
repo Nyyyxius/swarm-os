@@ -282,7 +282,7 @@ Journal `approval_events` append-only (audit : requested/notified/resolved/expir
 
 ---
 
-## 9. Décisions produit (arrêtées 2026-08-01 par @eleodas01)
+## 9. Décisions produit (arrêtées le 2026-08-01)
 
 **Approche** : **(A) d'abord** (surface du prompt natif, tous providers), **puis
 (B)** hook `PreToolUse` **pour les modèles Claude** (le provider est sélectionné à

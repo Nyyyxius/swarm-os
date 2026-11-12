@@ -319,7 +319,7 @@ patron overlay de la mémoire) :
   de scheduling ; mise en évidence de l'âge/SLA des cartes ; templates de cartes par
   rôle ; tableau mobile.
 
-## 11. Décisions (confirmées par @eleodas01 le 2026-08-01)
+## 11. Décisions (confirmées le 2026-08-01)
 
 - ✅ **Portée** : **par équipe** (primaire) + **lecture cross-équipe réservée aux
   leads**. **Pas** de tableau global unique.

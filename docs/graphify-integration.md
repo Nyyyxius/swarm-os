@@ -1,6 +1,6 @@
 # Intégration de Graphify à swarm-os — plan & proposition de fonctionnement
 
-> Statut : **proposition** (2026-08-02). Aucune ligne de code écrite. Demandé par @eleodas01 :
+> Statut : **proposition** (2026-08-02). Aucune ligne de code écrite. Demande du mainteneur :
 > « intègre graphify à swarm-os, fais un plan et une proposition de fonctionnement ».
 > Grounding code vérifié fichier:ligne par un agent d'exploration + inspection runtime du déploiement `test`.
 > Docs sœurs à suivre comme modèle d'exécution : `docs/memoire-partagee.md`, `docs/tableau-de-taches.md`, `docs/garde-fous-approbation.md`.
@@ -9,7 +9,7 @@
 
 ## 0. Décisions figées & résultats du spike P0 (2026-08-02)
 
-**Décisions @eleodas01 (6/6 tranchées)** :
+**Décisions du mainteneur (6/6 tranchées)** :
 1. **« packages » = dépendances exclues** (`node_modules`, `.venv`, libs vendorisées) ; on n'indexe que le code de 1re partie.
 2. **Intégration mémoire = Option A** (séparé mais relié) : graphe = source de vérité hors SQLite + note mémoire auto par scope + outil MCP `codegraph.*` + page web. **Pas** d'ingestion complète dans le graphe mémoire (option B écartée).
 3. **Moteur = AST-only gratuit par défaut** ; `extract` LLM en opt-in.
@@ -79,7 +79,7 @@ Bénéfice principal côté agents : au lieu de charger des fichiers bruts pour 
 
 ---
 
-## 3. Les contraintes posées par @eleodas01 (et leur traduction)
+## 3. Les contraintes posées par le mainteneur (et leur traduction)
 
 > « Cet outil doit être exécuté uniquement sur du code du workspace appartenant au projet (pas de packages) ou du code contenu dans les plugins installés (sans les packages). Il doit être maintenu à jour sur modification du code dans le workspace ou d'un plugin et ne doit pas être activé si aucun code n'est détecté. J'aimerais qu'il s'intègre au système de mémoire actuel d'une manière ou d'une autre. »
 
@@ -208,7 +208,7 @@ Une **surface « CODE GRAPH »** : soit un **2e onglet** sur la page `#/memory`,
 
 ## 8. Plan phasé
 
-Exécution séquentielle, 1 worker par phase, branche dédiée `feat/codegraph`, verts exigés (build tsc server + web, tests ciblés + suite, seul flake toléré = `persistence.test.ts` ENOENT préexistant), rapport au lead à chaque phase, je vérifie chaque phase (recette §RECETTE des docs sœurs). **Pas de déploiement sans l'aval explicite de @eleodas01.**
+Exécution séquentielle, 1 worker par phase, branche dédiée `feat/codegraph`, verts exigés (build tsc server + web, tests ciblés + suite, seul flake toléré = `persistence.test.ts` ENOENT préexistant), rapport au lead à chaque phase, je vérifie chaque phase (recette §RECETTE des docs sœurs). **Pas de déploiement sans l'aval explicite du mainteneur.**
 
 - **P0 — Spike de faisabilité** (pas de code produit final) : installer Graphify dans l'image, lancer `graphify update` **à la main** sur 1 projet workspace (ex. `my-project`) + 1 plugin (ex. `novelai`), vérifier `graph.json` + `GRAPH_REPORT.md`, valider l'exclusion `node_modules`, **mesurer le temps** et la taille de sortie. Valider AVANT de bâtir l'infra. Livrable = note de faisabilité + décision go/no-go sur le packaging.
 - **P1 — Indexeur cœur + store** : `modules/codegraph/` (découverte scopes + porte C3 « code détecté » + `.graphifyignore` géré + runner `execFile` + probe + `GraphStore` + stockage `/data/codegraph`) ; **janitor + watcher débouncé** ; instanciation `index.ts` (try/catch, optionnel) ; config knobs. Tests. **À ce stade le graphe existe et se maintient, invisible pour les agents.**
