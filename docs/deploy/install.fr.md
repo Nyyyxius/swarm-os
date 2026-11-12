@@ -19,12 +19,16 @@ curl -fsSL https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/bootstrap.
 qui pose les questions une par une : Docker, login Claude, chemins, image,
 transport, providers, accès distant, notifications.
 
-Le dépôt est **public** : récupérer le kit ne demande aucun token. Le seul token
-qu'on te demandera est celui de l'image — le package GHCR est privé, voir
-[§2](#2-récupérer-limage-ghcr). Un token passé en `SWARM_OS_PAT` (ou `--token`)
-ne sert qu'à récupérer le kit depuis un fork ou miroir privé (`SWARM_OS_REPO`) ;
-s'il est fourni, le script le propose aussi comme token de détection des mises à
-jour.
+Le dépôt et l'image sont **publics** : récupérer le kit et puller l'image ne
+demandent ni token ni compte GitHub ([§2](#2-récupérer-limage-ghcr)). Un token
+passé en `SWARM_OS_PAT` (ou `--token`) ne sert qu'à récupérer le kit depuis un
+fork ou miroir privé (`SWARM_OS_REPO`) ; s'il est fourni, le script le propose
+aussi à l'installeur comme token (optionnel) de détection des mises à jour.
+
+Avant d'installer, lis [SECURITY.md](../../SECURITY.md) (en anglais) : les
+agents exécutent des commandes sans rien demander, et le transport choisi à
+l'étape 4 décide s'ils le font dans le conteneur ou sur l'hôte, sous ton
+compte.
 
 Options, après `bash -s --` : `--dir <chemin>` (défaut `~/swarm-os`),
 `--ref <branche|tag>`, `--token <pat>`, `--fetch-only` (télécharge sans rien
@@ -51,9 +55,12 @@ irm https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/install.ps1 | iex
 changer) et lance la version Windows de l'assistant : **Docker Desktop** (proposé
 via `winget`, démarré pour toi s'il est installé mais arrêté, mode conteneurs
 Linux vérifié), le CLI Claude natif (`irm https://claude.ai/install.ps1 | iex`)
-et son login, chemins, image + `docker login`, accès distant (Tailscale via
-`winget`), notifications, détection des mises à jour — puis déploie et affiche le
-token. Depuis un répertoire de kit :
+et son login, chemins, image (il teste le pull, et ne propose un `docker login`
+que s'il échoue), accès distant (Tailscale via `winget`), notifications,
+détection des mises à jour, réglages avancés et revue (huit étapes ; l'étape
+transport se contente d'expliquer qu'il est `local`) — puis déploie et affiche
+le token. Il n'y a pas d'étape providers : sous Windows seul `claude` tourne.
+Depuis un répertoire de kit :
 
 ```powershell
 powershell -ExecutionPolicy Bypass -File .\install.ps1               # assistant, puis déploiement
@@ -109,8 +116,15 @@ le place dans `~/.local/bin/claude` et le tient à jour — pas besoin de Node.j
 Vérifie que `~/.local/bin` est dans le PATH du **shell de login** du compte. Sur
 Alpine (musl), d'abord `apk add libgcc libstdc++ ripgrep` et
 `USE_BUILTIN_RIPGREP=0`. Sous Windows natif : `irm https://claude.ai/install.ps1 | iex`
-dans PowerShell. `./install.sh` et `./setup.sh` proposent de lancer la bonne
-commande pour toi.
+dans PowerShell. `./install.sh`, `install.ps1` et `setup.sh` proposent de
+lancer la bonne commande pour toi.
+
+> `setup.sh` est un troisième installeur, autonome (assistant plein écran en
+> 12 étapes). Il ne fait pas partie du kit que télécharge `bootstrap.sh` ; lance-le
+> directement depuis le dépôt avec
+> `curl -fsSL https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/setup.sh | bash`
+> (options après `bash -s --`, voir `--help`). Il récupère lui-même les deux
+> fichiers compose dont il a besoin.
 
 Sans `~/.claude/.credentials.json`, aucun agent ne démarre — une session lancée se
 fige sur le sélecteur de thème du premier lancement.
@@ -151,14 +165,16 @@ chaque CLI sait et ne sait pas exprimer : [../providers.md](../providers.md).
 
 ## 2. Récupérer l'image (GHCR)
 
-L'image est dans un package **privé** du GitHub Container Registry. Il te faut un
-**Personal Access Token (classic)** GitHub avec le scope `read:packages`, et le
-mainteneur doit avoir autorisé ton compte sur le package.
+L'image est un package **public** du GitHub Container Registry : ni login ni
+token.
 
 ```sh
-echo <TON_PAT> | docker login ghcr.io -u <ton-user-github> --password-stdin
 docker pull ghcr.io/nyyyxius/swarm-os:latest      # ou un tag figé :X.Y.Z
 ```
+
+L'image n'est construite que pour `linux/amd64`. Si tu pulles depuis un miroir
+ou un fork privé à toi, fais d'abord un `docker login` sur ce registry ; rien
+dans swarm-os n'en a besoin sinon.
 
 ---
 
@@ -181,8 +197,9 @@ cp .env.example .env
 - `DATA_PATH` — où l'état persistant est stocké.
 - `CLAUDE_DIR` — ton `~/.claude` (défaut correct sur une install standard).
 - `SWARM_OS_PROJECT_NAME` — un libellé pour l'UI / les logs / Discord.
-- `SWARM_OS_GITHUB_TOKEN` — optionnel ; sans lui, swarm-os ne t'annoncera jamais
-  une nouvelle version (§7.4).
+- `SWARM_OS_GITHUB_TOKEN` — optionnel. La détection des mises à jour marche
+  sans lui ; un token ne fait que relever la limite de débit de l'API GitHub
+  (§7.4).
 
 Le même fichier, à côté de `examples/docker-compose.dist.yml`, est
 [`examples/.env.example`](../../examples/.env.example).
@@ -255,14 +272,20 @@ DATA_PATH=/home/alice/.swarm-os/mon-projet
 WORKSPACE_PATH=/home/alice/dev/mon-projet
 ```
 
-`setup.sh` en fait une étape à part entière (« Run-as account », 4/12) : il liste
+`setup.sh` (l'installeur autonome, récupéré par `curl` — voir §1) en fait une
+étape à part entière (« Run-as account », 4/12) : il liste
 les comptes de l'hôte, vérifie *depuis le compte visé* que le login Claude est
 là, propose de le faire s'il manque, génère la clé SSH sous son identité et
 l'autorise dans son `authorized_keys`, crée `/data` et son `home` avec le bon
 propriétaire, et écrit les variables ci-dessus. `setup.sh --user alice` fait la
-même chose sans poser la question.
+même chose sans poser la question. (`install.sh` n'a pas d'étape « run-as » : il
+configure toujours l'uid 1000.)
 
-**Jamais uid 0.** Le conteneur ne doit pas tourner en root : l'installeur refuse
+Un compte dédié est aussi la principale mesure de sécurité disponible
+aujourd'hui — voir
+[SECURITY.md](../../SECURITY.md#recommendations-for-operators).
+
+**Jamais uid 0.** Le conteneur ne doit pas tourner en root : `setup.sh` refuse
 la valeur, et un `.env` écrit à la main qui la porte donne des fichiers root
 partout dans ton workspace.
 
@@ -279,7 +302,16 @@ une vraie question (étape 4) :
 | Mise à jour en un clic | non (`TRANSPORT IS NOT SSH`) | oui |
 | `host-exec` des plugins | non | oui |
 | Course sur le refresh OAuth | possible (hôte + conteneur écrivent le même fichier) | impossible |
-| Ce que ça coûte | rien | une clé SSH lisible par le conteneur, et des agents qui tournent avec les droits de l'utilisateur hôte |
+| Ce que les agents atteignent | le conteneur et ses montages (`/workspace`, `/data`, `~/.claude` en lecture seule) | tout ce que le compte SSH peut lire ou modifier sur l'hôte |
+| Isolation | le conteneur fait frontière | aucune venant du conteneur : c'est le compte hôte qui fait frontière |
+| Ce que ça coûte | rien | une clé SSH sans passphrase ni restriction, lisible par le conteneur, et des agents qui tournent avec les droits de l'utilisateur hôte |
+
+Les agents tournent avec leurs demandes de permission coupées
+(`bypassPermissions`, `--yolo`, `--dangerously-bypass-approvals-and-sandbox`) :
+en `ssh`, ils peuvent faire tout ce que ce compte hôte peut faire. Choisis
+`local` sauf besoin de ce qu'apporte `ssh`, et donne un compte dédié à un
+déploiement `ssh`. Comparaison complète, et ce que donnent le token et les
+plugins : [SECURITY.md](../../SECURITY.md).
 
 Le transport `ssh` a besoin d'un **overlay compose** en plus du fichier de base :
 
@@ -289,9 +321,12 @@ docker compose -f examples/docker-compose.dist.yml \
 ```
 
 `./install.sh` ajoute ce `-f` tout seul dès que le fichier d'env dit `ssh` — tu
-n'as pas à t'en souvenir. L'overlay monte le répertoire de la clé sur
-`/host-ssh`, ajoute l'alias `host.docker.internal` et transmet les variables
-`SWARM_OS_SSH_*` / `SWARM_OS_HOST_*` (son en-tête documente chacune).
+n'as pas à t'en souvenir. L'overlay monte le répertoire de la clé
+(`HOST_SSH_DIR`) en lecture seule sur `/host-ssh`, ajoute l'alias
+`host.docker.internal` et transmet les variables `SWARM_OS_SSH_*` /
+`SWARM_OS_HOST_*` (son en-tête documente chacune). Garde `HOST_SSH_DIR` pointé
+sur un répertoire qui ne contient que la clé swarm-os : s'il n'est pas défini,
+l'overlay retombe sur ton `~/.ssh` entier.
 
 ---
 
@@ -310,13 +345,13 @@ voie manuelle décrite dans les sections précédentes.
 
 | # | Étape | Ce qu'elle fait |
 |---|---|---|
-| 1 | Prérequis | Docker + Compose (propose l'install officielle, le `usermod -aG docker`, le démarrage du daemon) ; CLI claude (`npm i -g`) ; **le login OAuth** — l'assistant lance `claude` pour toi et attend ; crée `~/.claude.json` s'il manque, parce qu'un bind mount vers un fichier absent fait créer un *répertoire* à sa place, et la première session gèle sur le sélecteur de thème |
+| 1 | Prérequis | Docker + Compose (propose l'install officielle `get.docker.com`, qui t'ajoute aussi au groupe `docker`, ou le démarrage du daemon ; si tu n'as pas accès au daemon il affiche le correctif `usermod -aG docker`) ; CLI claude via l'**installeur natif** (`curl -fsSL https://claude.ai/install.sh \| bash`, `npm i -g @anthropic-ai/claude-code` seulement s'il n'y a ni curl ni wget) ; **le login OAuth** — l'assistant lance `claude` pour toi et attend ; crée `~/.claude.json` s'il manque, parce qu'un bind mount vers un fichier absent fait créer un *répertoire* à sa place, et la première session gèle sur le sélecteur de thème |
 | 2 | Projet | nom, workspace (le crée, et propose un `git clone` s'il est vide), répertoire d'état, nom du conteneur, port — un port déjà pris est détecté et un port libre proposé ; si `/data` n'appartient pas à l'uid 1000, il propose le `chown` (le conteneur tourne en `node`, uid 1000, et sinon n'écrit pas sa base) |
-| 3 | Image | GHCR ou build local. Il **teste le `docker pull` tout de suite** et, s'il échoue, propose le `docker login ghcr.io` en demandant le PAT en saisie masquée |
-| 4 | Transport | `local` ou `ssh` (§3). En `ssh` : génère une clé ed25519 dédiée dans son propre répertoire, l'ajoute à `authorized_keys`, teste la connexion **et** vérifie que `claude` est résolu par le *login shell* — l'agent tourne sous `bash -lc`, donc un CLI qui n'existe que dans la branche interactive de `~/.bashrc` lui est invisible |
+| 3 | Image | GHCR ou build local. Il **teste le `docker pull` tout de suite** ; l'image publique ne demande aucun login, et ce n'est que si le pull échoue qu'il propose un `docker login` (utile pour un miroir privé). Un build local exige un `git clone` complet du dépôt : le kit que télécharge `bootstrap.sh` n'a pas de `Dockerfile` |
+| 4 | Transport | `local` ou `ssh` (§3, et [SECURITY.md](../../SECURITY.md)). `ssh` est proposé en premier et marqué recommandé quand un serveur SSH répond sur le port 22 ; `local` est le choix le plus isolé. En `ssh` : génère une clé ed25519 dédiée dans son propre répertoire, l'ajoute à `authorized_keys`, teste la connexion **et** vérifie que `claude` est résolu par le *login shell* — l'agent tourne sous `bash -lc`, donc un CLI qui n'existe que dans la branche interactive de `~/.bashrc` lui est invisible |
 | 5 | Providers | détecte codex / gemini / opencode, propose l'install et le login de chacun, choisit le provider par défaut parmi ceux réellement présents, et épingle `oauth-personal` si le login Google de gemini est détecté |
 | 6 | Accès distant | loopback/tunnel SSH, **Tailscale** (install, `tailscale up`, `tailscale serve`, URL publique déduite du tailnet) ou reverse proxy |
-| 7 | Notifs & MAJ | webhook Discord ; PAT GitHub de détection des releases — **testé en direct** contre l'API, donc tu sais immédiatement si c'est 200, 401 ou 404 (le cas « token valide mais aucun accès au dépôt ») |
+| 7 | Notifs & MAJ | webhook Discord ; un token GitHub **optionnel** pour la détection des releases (vide, c'est très bien — la détection marche sans, §7.4). Un token fourni est **testé en direct** contre l'API, donc tu sais immédiatement si c'est 200, 401 ou 404 |
 | 8 | Avancé | modèle et effort par défaut, plafonds d'équipes et de workers, niveau de log, éditeur VS Code. Sautable d'une touche |
 | 9 | Revue | récapitulatif complet, secrets masqués, confirmation. L'ancien `.env` est sauvegardé en `.env.backup-<horodatage>`, le nouveau est écrit en 0600 (il contient tes tokens) |
 
@@ -356,6 +391,10 @@ Relance-le après toute modif de `.env`, ou pour passer à un nouveau tag d'imag
 3. Colle le token affiché par `install.sh` (ou `docker exec <conteneur> cat
    /data/token`).
 4. Enregistre — il est conservé dans le `localStorage` du navigateur. C'est fait.
+
+Traite ce token comme un mot de passe root de l'instance : il donne tout, y
+compris l'exécution de code sur la machine. Voir
+[SECURITY.md](../../SECURITY.md#the-auth-token).
 
 ---
 
@@ -401,8 +440,11 @@ swarm.example.com {
 }
 ```
 
-Ce que tu exposes reste protégé par le X-Auth-Token, mais c'est toi qui assumes le
-patching et les abus. Préfère Tailscale sauf besoin réel d'une URL publique.
+Ce que tu exposes reste protégé par le X-Auth-Token, mais ce token équivaut à
+l'exécution de code sur la machine ([SECURITY.md](../../SECURITY.md#the-auth-token)),
+et c'est toi qui assumes le patching et les abus. Mets ton propre contrôle
+d'accès devant (VPN, SSO, liste d'IP autorisées), et préfère Tailscale sauf
+besoin réel d'une URL publique.
 
 ### C. Localhost / tunnel SSH (le plus simple et le plus sûr)
 
@@ -439,8 +481,8 @@ jamais un bouton que l'hôte refuserait — il nomme la raison, une seule :
 | `TRANSPORT IS NOT SSH` | `SWARM_OS_AGENT_TRANSPORT=local` — les agents tournent dans le conteneur, donc swarm-os n'a aucun moyen de lancer `docker` sur l'hôte | passer le transport en `ssh` et monter une clé |
 | `IMAGE TAG IS HARDCODED` | `SWARM_OS_IMAGE` n'est pas défini : le compose fige son propre tag, il n'y a aucune variable à réécrire | mettre `image: ${SWARM_OS_IMAGE}` dans le compose et définir la variable dans `.env` |
 | `IMAGE IS LOCALLY BUILT` | `SWARM_OS_IMAGE` n'a pas de chemin de registry (`swarm-os:latest`) — rien à puller | pointer `ghcr.io/nyyyxius/swarm-os:<tag>` |
-| `NO .env FOUND` / `.env IS NOT WRITABLE` | l'updater n'a pas trouvé de fichier d'env inscriptible à côté du compose | le créer / corriger ses droits (l'utilisateur du conteneur est uid 1000) |
-| `REGISTRY LOGIN MISSING` | l'hôte n'est pas authentifié sur GHCR | `docker login ghcr.io` avec un PAT `read:packages` |
+| `NO .env FOUND` / `.env IS NOT WRITABLE` | l'updater n'a pas trouvé de fichier d'env à côté du compose, ou le compte SSH ne peut pas l'écrire | le créer / donner l'écriture au compte SSH (l'utilisateur de `SWARM_OS_SSH_TARGET`, qui exécute l'updater sur l'hôte) |
+| `REGISTRY LOGIN MISSING` | l'hôte n'a pas pu puller l'image cible (le run finit refusé, `pull_failed`) | vérifier que le tag existe et que l'hôte joint `ghcr.io` ; l'image publique ne demande aucun login, un miroir privé demande un `docker login` sur l'hôte |
 
 Les trois derniers sont des **faits d'hôte** : ils sont tranchés par le préflight
 de l'updater, sur l'hôte, avant la moindre écriture. Un run qui tombe dessus se
@@ -477,7 +519,7 @@ session et le run attend une **fenêtre d'avertissement** (300 s par défaut).
   conclure : ce n'est plus un avertissement, c'est une annonce.
 - Le panneau affiche le compte à rebours, une ligne par équipe (`read` ·
   `displayed, unread` · `never available` · `no lead` · `no answer yet`) et une
-  phrase volontairement brutale : *"3 teams warned — 1 lead (stiix-infra) has
+  phrase volontairement brutale : *"3 teams warned — 1 lead (my-project) has
   not read it yet (busy for 4m31). **Applying anyway** in 01:12."* L'échéance ne
   se négocie pas.
 - `APPLY NOW` écourte la fenêtre — mais seulement une fois les 120 s écoulées ;
@@ -494,20 +536,20 @@ session et le run attend une **fenêtre d'avertissement** (300 s par défaut).
   contre la liste des équipes vivantes, donc une équipe déjà repartie est
   ignorée plutôt que tuée.
 
-### 7.4 Détection des mises à jour — `SWARM_OS_GITHUB_TOKEN`
+### 7.4 Détection des mises à jour — `SWARM_OS_GITHUB_TOKEN` (optionnel)
 
 swarm-os lit les **GitHub Releases** de `Nyyyxius/swarm-os` pour savoir qu'une
-version plus récente existe. Le dépôt est public, mais le check n'appelle GitHub
-qu'avec un token : sans token, le statut du check reste `no_token`, le badge ne
-s'allume jamais et aucune mise à jour n'est proposée. Rien d'autre ne casse —
-c'est un état sain, qui veut dire « ne me parle jamais des releases ».
+version plus récente existe. Le dépôt est public, donc le check marche **sans
+token** : rien à configurer.
 
-Pour activer la détection :
+Le check tourne en arrière-plan au plus une fois toutes les 6 heures par
+instance, quand un onglet est ouvert. Sans authentification, GitHub accepte 60
+requêtes API par heure et par adresse IP, largement assez pour une instance. Un
+token ne fait que relever cette limite — utile quand plusieurs instances, ou
+d'autres outils, partagent une même IP publique :
 
-1. Prends n'importe quel PAT GitHub **en lecture seule** — lire les releases
-   d'un dépôt public ne demande aucun scope particulier, donc le token
-   `read:packages` que tu utilises déjà pour `docker login`
-   ([§2](#2-récupérer-limage-ghcr)) fait l'affaire.
+1. Crée n'importe quel token GitHub **en lecture seule**. Lire les releases
+   d'un dépôt public ne demande aucun scope.
 2. Mets-le dans le `.env` du déploiement :
    ```sh
    SWARM_OS_GITHUB_TOKEN=github_pat_xxxxxxxx
@@ -522,7 +564,10 @@ Pour activer la détection :
 4. `./install.sh` (ou `docker compose up -d`) pour recréer le conteneur.
 
 Le token n'est envoyé qu'à `api.github.com`, en lecture. Aucune route ne
-l'écrit, ne le renvoie ni ne le stocke en base.
+l'écrit, ne le renvoie ni ne le stocke en base. Sous le transport `local`, les
+agents héritent de l'environnement du serveur et peuvent le lire
+([SECURITY.md](../../SECURITY.md#known-limitations)) : prends un token sans
+aucun scope.
 
 ### 7.5 Publier une release (mainteneur)
 
@@ -559,8 +604,13 @@ crée aucune release.
 - **Un plugin échoue à s'installer avec une erreur d'écriture** — `HOME` dans le
   conteneur pointe sur un répertoire non inscriptible : uid ≠ 1000 sans
   `SWARM_OS_CONTAINER_HOME` (§3).
-- **`pull access denied` / `unauthorized`** — connecte-toi à GHCR avec un PAT
-  `read:packages` et vérifie que le mainteneur a autorisé ton compte sur le package.
+- **`pull access denied` / `unauthorized`** sur `ghcr.io/nyyyxius/swarm-os` —
+  l'image est publique, donc c'est en général une référence ou un tag mal
+  tapé, ou un ancien `docker login` sur `ghcr.io` avec un token expiré :
+  `docker logout ghcr.io` puis pull à nouveau. Un miroir privé demande son
+  propre `docker login`.
+- **`no matching manifest for linux/arm64`** — l'image n'est publiée que pour
+  `linux/amd64`.
 - **Un provider est grisé à la création d'une équipe** — survole-le : la raison
   vient d'une sonde en direct. `not on PATH` signifie que le CLI manque *sur
   l'hôte qui exécute les agents* (§1) ; installe-le et il s'allume en moins de
@@ -578,11 +628,12 @@ crée aucune release.
   (aucun port à publier). Vérifie que l'IDE est activé (écran Plugins, section
   BUILT-IN — `SWARM_OS_IDE_ENABLED` ne sert que de valeur de seed au premier
   boot), et que ton reverse proxy relaie bien les WebSockets sous ce chemin.
-- **SYSTEM UPDATE dit « no SWARM_OS_GITHUB_TOKEN » alors que tu en as mis un** —
-  la variable est dans `.env` mais pas dans la liste blanche `environment:` du
-  service : elle n'atteint jamais le processus. Ajoute
-  `SWARM_OS_GITHUB_TOKEN: ${SWARM_OS_GITHUB_TOKEN:-}` et recrée le conteneur
-  (§7.4).
+- **SYSTEM UPDATE n'arrive pas à lire les releases** — un 401 veut dire que le
+  `SWARM_OS_GITHUB_TOKEN` que tu as mis est expiré ou révoqué : remplace-le, ou
+  vide-le (la détection marche sans). Un 403/429 veut dire que la limite de
+  débit non authentifiée de GitHub est épuisée pour ton IP : attends, ou mets un
+  token. Un token mis dans `.env` ne compte que si la liste blanche
+  `environment:` du service le nomme (§7.4).
 - **Tout répond 503 juste après une mise à jour** — c'est le boot gate :
   l'auto-resume rejoue les équipes et les routes métier l'attendent. `/health` et
   `/info` restent verts ; le panneau propose CHECK AGAIN.
