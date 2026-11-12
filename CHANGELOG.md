@@ -11,12 +11,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 > reference the old image path `ghcr.io/luminis1986/swarm-os`, which no longer
 > exists: their installers and compose files are not installable as-is. Install
 > v0.10.4 or later, whose image lives at `ghcr.io/nyyyxius/swarm-os`.
+>
+> The tags v0.4.0, v0.5.0, v0.10.0 and v0.10.1 were never published on GitHub
+> (v0.10.2 was never tagged); the compare links for those versions point at
+> their release commits instead.
 
 ## [Unreleased]
 
 ### Added
 
-- MIT license.
 - Public container image: `ghcr.io/nyyyxius/swarm-os` can be pulled
   anonymously; installers and docs no longer ask for a GitHub token.
 - `linux/arm64` image alongside `linux/amd64`.
@@ -34,6 +37,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Changed
 
+- Relicensed from a proprietary license to MIT. Releases up to and including
+  v0.10.4 were published under the previous license.
 - Installers and the image install Claude Code with its native installer
   instead of `npm`.
 - The deploy kit is fetched from the public repository without a token.
@@ -49,7 +54,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - The Tailscale host name is read from the local `.env`
   (`SWARM_OS_TAILNET_HOST`) instead of being written in the repository.
 
-## [0.10.3] - 2026-09-26
+## [0.10.3] - 2026-10-26
 
 ### Added
 
@@ -228,18 +233,18 @@ First versioned release: the MVP plus everything built on it until then.
 
 [Unreleased]: https://github.com/Nyyyxius/swarm-os/compare/v0.10.4...HEAD
 [0.10.4]: https://github.com/Nyyyxius/swarm-os/compare/v0.10.3...v0.10.4
-[0.10.3]: https://github.com/Nyyyxius/swarm-os/compare/v0.10.1...v0.10.3
-[0.10.1]: https://github.com/Nyyyxius/swarm-os/compare/v0.10.0...v0.10.1
-[0.10.0]: https://github.com/Nyyyxius/swarm-os/compare/v0.9.2...v0.10.0
+[0.10.3]: https://github.com/Nyyyxius/swarm-os/compare/7a3440e...v0.10.3
+[0.10.1]: https://github.com/Nyyyxius/swarm-os/compare/87b63cc...7a3440e
+[0.10.0]: https://github.com/Nyyyxius/swarm-os/compare/v0.9.2...87b63cc
 [0.9.2]: https://github.com/Nyyyxius/swarm-os/compare/v0.9.1...v0.9.2
 [0.9.1]: https://github.com/Nyyyxius/swarm-os/compare/v0.9.0...v0.9.1
 [0.9.0]: https://github.com/Nyyyxius/swarm-os/compare/v0.8.1...v0.9.0
 [0.8.1]: https://github.com/Nyyyxius/swarm-os/compare/v0.8.0...v0.8.1
 [0.8.0]: https://github.com/Nyyyxius/swarm-os/compare/v0.7.0...v0.8.0
 [0.7.0]: https://github.com/Nyyyxius/swarm-os/compare/v0.6.0...v0.7.0
-[0.6.0]: https://github.com/Nyyyxius/swarm-os/compare/v0.5.0...v0.6.0
-[0.5.0]: https://github.com/Nyyyxius/swarm-os/compare/v0.4.0...v0.5.0
-[0.4.0]: https://github.com/Nyyyxius/swarm-os/compare/v0.3.0...v0.4.0
+[0.6.0]: https://github.com/Nyyyxius/swarm-os/compare/4336b61...v0.6.0
+[0.5.0]: https://github.com/Nyyyxius/swarm-os/compare/aab69f0...4336b61
+[0.4.0]: https://github.com/Nyyyxius/swarm-os/compare/v0.3.0...aab69f0
 [0.3.0]: https://github.com/Nyyyxius/swarm-os/compare/v0.2.0...v0.3.0
 [0.2.0]: https://github.com/Nyyyxius/swarm-os/compare/v0.1.0...v0.2.0
 [0.1.0]: https://github.com/Nyyyxius/swarm-os/releases/tag/v0.1.0

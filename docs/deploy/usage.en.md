@@ -99,7 +99,7 @@ Worked example, the full output contract and the `uv run --with requests`
 variant: [examples/crons/](../../examples/crons/).
 
 `SWARM_OS_SCHEDULE_ENABLED` (default on) and `SWARM_OS_SCHEDULE_TZ` (default
-UTC) are unchanged — they are now the master switch and timezone for all crons.
+UTC) are the master switch and timezone for all crons.
 With scheduling off, crons stop ticking (the screen says so) but RUN NOW still
 works.
 
@@ -123,7 +123,10 @@ All state lives in the `/data` volume (`DATA_PATH` on the host):
 - `logs/` — per-session logs. `backups/` — SQLite snapshots.
 - `.claude-runtime/` — the writable copy of your `~/.claude`.
 
-Behaviour:
+Behaviour (the variables in parentheses are read by the server but not passed
+by the shipped compose file: to change one, add it to the service's
+`environment:`; the same goes for the two `SWARM_OS_SCHEDULE_*` variables
+above):
 
 - **Backups** — hot SQLite snapshots every 6 h, keeping 14
   (`SWARM_OS_BACKUP_INTERVAL_MS`, `SWARM_OS_BACKUP_KEEP`).

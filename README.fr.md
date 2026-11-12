@@ -22,7 +22,7 @@ et de le piloter depuis un navigateur ou un téléphone.
   SQLite et reviennent après un redémarrage. Les crons envoient du travail planifié aux équipes en cours ;
   Discord vous prévient quand un agent a besoin de vous.
 - **Fournisseurs mélangés.** Choisissez le CLI par équipe et par agent : un lead Claude avec des workers
-  Gemini, c'est possible.
+  Codex, c'est possible.
 - **Supervision de partout.** Un terminal en direct pour chaque agent, des jauges de coût et de contexte,
   des approbations, le tout dans une application web adaptée au mobile, accessible via Tailscale ou votre
   propre proxy.
@@ -72,7 +72,7 @@ de supervision par-dessus.
 
 Il vous faut :
 
-- un hôte Linux x86_64 avec Docker et Compose v2 (l'installeur peut installer Docker) ;
+- un hôte Linux x86_64 (arm64 à partir de la release qui suit la 0.10.4) avec Docker et Compose v2 (l'installeur peut installer Docker) ;
 - un compte Claude Code avec le CLI `claude` connecté sur cet hôte (l'installeur vous guide) ;
 - environ 2 à 4 vCPU et 4 à 8 Go de RAM par équipe active.
 
@@ -96,11 +96,13 @@ conteneur et affichent l'URL et le token d'accès. Pour lire le script avant de 
 [guide d'installation](docs/deploy/install.fr.md).
 
 Ouvrez ensuite `http://127.0.0.1:8787`, collez le token dans le panneau qui s'ouvre, et créez une équipe
-avec **New Orchestrator**.
+avec **New Orchestrator**. Sur un serveur distant, le port est lié au loopback : ouvrez d'abord un tunnel
+avec `ssh -L 8787:127.0.0.1:8787 user@host`, ou voyez [Accès distant](#accès-distant).
 
 Plateformes : Linux est le chemin testé. Windows fonctionne via Docker Desktop, avec Claude seulement
-(utilisez WSL 2 et `install.sh` pour les autres fournisseurs). macOS n'est pas testé. L'image publiée est
-amd64 uniquement pour l'instant ; sur arm64, construisez l'image depuis un clone de ce dépôt.
+(utilisez WSL 2 et `install.sh` pour les autres fournisseurs). macOS n'est pas testé. Les images jusqu'à la 0.10.4
+sont `linux/amd64` uniquement ; les releases suivantes fournissent aussi `linux/arm64`. D'ici là, sur
+arm64, construisez l'image depuis un clone de ce dépôt.
 
 ## Fonctionnement
 
@@ -130,7 +132,7 @@ inactif.
 | Instance | Un conteneur, un projet (le montage `/workspace`), un opérateur. |
 | Équipe | Aussi appelée orchestrateur : un lead qui planifie et décide, plus des workers qui exécutent. |
 | Rôle | Un modèle d'équipe réutilisable : prompts, fournisseur, modèle, effort, budget ; les crons ciblent un rôle. |
-| Mailbox | La file de messages persistante entre les agents d'une équipe. |
+| Mailbox | La file de messages entre les agents d'une équipe (en mémoire, répliquée dans SQLite). |
 | Transport | L'endroit où tournent les CLI : `local` (dans le conteneur) ou `ssh` (sur l'hôte). |
 
 ## Fournisseurs d'agents
@@ -138,11 +140,12 @@ inactif.
 | CLI | Authentification | Limites |
 |---|---|---|
 | `claude` (Anthropic) | connexion OAuth `claude` sur l'hôte | Seul CLI présent dans l'image ; fonctionne avec les deux transports. |
-| `codex` (OpenAI) | `codex login` sur l'hôte | Transport `ssh` uniquement ; ne signale jamais d'état « waiting ». |
+| `codex` (OpenAI) | `codex login` sur l'hôte | Transport `ssh` uniquement. |
 | `gemini` (Google) | compte Google ou clé d'API sur l'hôte | `ssh` uniquement ; pas de réglage d'effort, pas de jauge de contexte ; jamais testé contre un vrai modèle. |
 | `opencode` (OpenRouter) | clé OpenRouter dans SETTINGS ▸ OPENROUTER | `ssh` uniquement ; pas de réglage d'effort ; le passage par OpenRouter n'est pas prouvé de bout en bout. |
 
-Les listes de modèles se mettent à jour depuis [models.dev](https://models.dev) toutes les 6 h.
+`codex`, `gemini` et `opencode` ne signalent jamais d'état « waiting ». Les listes de modèles se mettent
+à jour depuis [models.dev](https://models.dev) toutes les 6 h.
 Détails : [docs/providers.md](docs/providers.md) (en anglais).
 
 ## Configuration
@@ -157,7 +160,7 @@ L'installeur écrit `.env` ; on l'édite rarement à la main. Les variables esse
 | `DATA_PATH` | Répertoire hôte de l'état : base de données, tokens, logs, sauvegardes. |
 | `CLAUDE_DIR` | Votre `~/.claude` connecté, monté en lecture seule. |
 | `SWARM_OS_PORT` | Port hôte de l'interface (défaut `8787`, lié à `127.0.0.1`). |
-| `SWARM_OS_AGENT_TRANSPORT` | `local` (défaut) ou `ssh`. |
+| `SWARM_OS_AGENT_TRANSPORT` | `local` (défaut du compose) ou `ssh` (présélectionné par `install.sh` quand un serveur SSH tourne). |
 | `SWARM_OS_DISCORD_WEBHOOK_URL` | Notifications Discord, optionnelles. |
 
 Tout le reste est documenté dans [.env.example](.env.example).
@@ -184,7 +187,8 @@ l'exposer. En bref :
   d'environnement du serveur. Le conteneur limite ce qu'ils atteignent sur l'hôte.
 - **Transport `ssh` :** les agents tournent **sur l'hôte, sous votre compte utilisateur**, avec tout ce
   que ce compte peut faire. Dans ce mode, le conteneur n'est pas un bac à sable. Utilisez un compte dédié
-  si cela compte pour vous.
+  si cela compte pour vous. L'installeur Linux présélectionne `ssh` quand un serveur SSH tourne ;
+  choisissez `local` à l'étape 4 si vous voulez que le conteneur soit la limite.
 - **Bonnes bases :** ports liés au loopback, comparaison du token en temps constant, tickets WebSocket à
   courte durée de vie, MCP sur le loopback, conteneur non root. Les plugins sont du code de confiance,
   pas un bac à sable.

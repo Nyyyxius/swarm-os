@@ -1,6 +1,7 @@
 # swarm-os — Installation & deployment (EN)
 
-swarm-os orchestrates teams of autonomous Claude Code sessions. **One container =
+swarm-os orchestrates teams of autonomous agent CLI sessions (Claude Code,
+Codex, Gemini CLI, OpenCode). **One container =
 one project.** This guide takes a fresh host to a running, accessible instance.
 
 ---
@@ -166,7 +167,8 @@ token.
 docker pull ghcr.io/nyyyxius/swarm-os:latest      # or a pinned :X.Y.Z tag
 ```
 
-The image is built for `linux/amd64` only. If you pull from a private mirror or
+Images up to 0.10.4 are built for `linux/amd64` only; later releases also ship
+`linux/arm64`. If you pull from a private mirror or
 fork of your own instead, `docker login` to that registry first; nothing in
 swarm-os needs it otherwise.
 
@@ -191,9 +193,10 @@ Edit `.env` — at minimum:
 - `CLAUDE_DIR` — your `~/.claude` (default is fine on a standard layout).
 - `SWARM_OS_PROJECT_NAME` — a label for the UI / logs / Discord.
 - `SWARM_OS_GITHUB_TOKEN` — optional. Update detection works without it; a
-  token only raises GitHub's API rate limit (§7.4).
+  token only raises GitHub's API rate limit (§7.4). Releases up to 0.10.4 still
+  need it for detection.
 
-The same file, next to `examples/docker-compose.dist.yml`, is
+A near-identical copy, next to `examples/docker-compose.dist.yml`, is
 [`examples/.env.example`](../../examples/.env.example).
 
 Optional, and only relevant if you use a provider other than Claude (§1):
@@ -526,7 +529,8 @@ run waits out a **warning window** (300 s by default).
 
 swarm-os reads the **GitHub Releases** of `Nyyyxius/swarm-os` to know a newer
 version exists. The repository is public, so the check works **without a
-token**: nothing to configure.
+token**: nothing to configure. (This holds from the release after 0.10.4;
+0.10.4 and earlier need `SWARM_OS_GITHUB_TOKEN` to detect updates.)
 
 The check runs in the background at most once every 6 hours per instance, when
 a browser tab is open. Unauthenticated, GitHub allows 60 API requests per hour
@@ -556,19 +560,9 @@ transport, agents inherit the server's environment and can read it
 
 ### 7.5 Publishing a release (maintainer)
 
-The checker reads *published GitHub releases*, and the release is cut by the
-`release-image` workflow when a `v*` **tag reaches GitHub**:
-
-```sh
-# bump package.json, commit ("Release: vX.Y.Z"), tag, then:
-git push origin master --follow-tags
-```
-
-A tag that only exists locally publishes nothing. `--follow-tags` is what makes
-the release effective: without it the commit lands, the workflow never fires,
-and no instance will ever see the new version. A manual `workflow_dispatch` run
-publishes `:<short-sha>` only — it does **not** move `:latest` and cuts no
-release.
+The checker reads *published GitHub releases*; a release exists only once a
+`v*` tag has reached GitHub and the `release-image` workflow has run. The
+procedure is in [CONTRIBUTING.md](https://github.com/Nyyyxius/swarm-os/blob/master/CONTRIBUTING.md#release-procedure-maintainers).
 
 ---
 
@@ -593,8 +587,8 @@ release.
   the image is public, so this usually means a mistyped reference or tag, or a
   stale `docker login` for `ghcr.io` with an expired token: `docker logout
   ghcr.io` and pull again. A private mirror needs its own `docker login`.
-- **`no matching manifest for linux/arm64`** — the image is published for
-  `linux/amd64` only.
+- **`no matching manifest for linux/arm64`** — images up to 0.10.4 are
+  published for `linux/amd64` only; later releases also ship `linux/arm64`.
 - **A provider is greyed out when creating a team** — hover it: the reason comes
   from a live probe. `not on PATH` means the CLI is missing *on the host that
   runs the agents* (§1); install it and it lights up within 60 s, no restart.

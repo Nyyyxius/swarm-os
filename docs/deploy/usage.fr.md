@@ -104,8 +104,7 @@ Exemple complet, contrat de sortie détaillé et variante `uv run --with
 requests` : [examples/crons/](../../examples/crons/).
 
 `SWARM_OS_SCHEDULE_ENABLED` (actif par défaut) et `SWARM_OS_SCHEDULE_TZ` (UTC
-par défaut) ne changent pas — ce sont désormais l'interrupteur général et la
-timezone de tous les crons. Planification désactivée : les crons ne tictaquent
+par défaut) sont l'interrupteur général et la timezone de tous les crons. Planification désactivée : les crons ne tictaquent
 plus (l'écran le dit), mais RUN NOW fonctionne toujours.
 
 **Note de migration.** La cadence par rôle a disparu : les champs `schedule` /
@@ -128,7 +127,10 @@ Tout l'état vit dans le volume `/data` (`DATA_PATH` côté hôte) :
 - `logs/` — logs par session. `backups/` — snapshots SQLite.
 - `.claude-runtime/` — la copie inscriptible de ton `~/.claude`.
 
-Comportement :
+Comportement (les variables entre parenthèses sont lues par le serveur mais
+pas transmises par le compose fourni : pour en changer une, ajoute-la à
+`environment:` du service ; même chose pour les deux `SWARM_OS_SCHEDULE_*`
+ci-dessus) :
 
 - **Sauvegardes** — snapshots SQLite à chaud toutes les 6 h, 14 conservés
   (`SWARM_OS_BACKUP_INTERVAL_MS`, `SWARM_OS_BACKUP_KEEP`).
@@ -161,7 +163,7 @@ modèle toutes seules ; seules les nouvelles prennent le défaut le plus récent
 
 ## Mettre à jour
 
-**RÉGLAGES ▸ SYSTEM UPDATE** affiche la version en cours et la dernière
+**SETTINGS ▸ SYSTEM UPDATE** affiche la version en cours et la dernière
 release publiée, lue dans les releases GitHub publiques sans aucun token.
 `SWARM_OS_GITHUB_TOKEN` est optionnel et ne fait que relever la limite de débit
 de GitHub — voir install.fr.md §7.4.

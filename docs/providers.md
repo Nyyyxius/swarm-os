@@ -191,16 +191,18 @@ through the same `notifySignal` path as the inbox signal, so it follows each
 provider's submit rule (`inkSubmitDance`) and works for all four. `SWARM_OS_AUTO_COMPACT_BYTES` (volume-driven) remains
 as a secondary backstop.
 
+The UI carries the same statement per provider, so it is visible in the
+team-creation dialog rather than discovered while wondering why a team looks
+silent.
+
 The per-call tool overhead is trimmed as well (`docs/outils-par-role.md`, in
 French): claude sessions keep on-demand tool loading (ToolSearch) except on
 haiku (`SWARM_OS_CLAUDE_TOOL_SEARCH=off|on|auto`); a role can pin the exact
 built-in tools of its lead and of its workers (`leadTools` / `workerTools`,
 passed as `--tools`) and narrow the team-comms tools they see (`leadMcpTools` /
-`workerMcpTools`); and workers never see the lead-only team-comms tools.
-
-The UI carries the same statement per provider, so it is visible in the
-team-creation dialog rather than discovered while wondering why a team looks
-silent.
+`workerMcpTools`); and workers never see the lead-only team-comms tools. `SWARM_OS_CLAUDE_TOOL_SEARCH` is read by the server but not
+passed by the shipped compose file: add it to the service's `environment:` to
+use it.
 
 ### `permissionModes` — one entry means "not a choice"
 

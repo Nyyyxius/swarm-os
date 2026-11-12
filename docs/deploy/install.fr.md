@@ -1,6 +1,7 @@
 # swarm-os — Installation & déploiement (FR)
 
-swarm-os orchestre des équipes de sessions Claude Code autonomes. **Un conteneur =
+swarm-os orchestre des équipes de sessions autonomes de CLI d'agents (Claude
+Code, Codex, Gemini CLI, OpenCode). **Un conteneur =
 un projet.** Ce guide mène d'un hôte vierge à une instance fonctionnelle et
 accessible.
 
@@ -172,7 +173,8 @@ token.
 docker pull ghcr.io/nyyyxius/swarm-os:latest      # ou un tag figé :X.Y.Z
 ```
 
-L'image n'est construite que pour `linux/amd64`. Si tu pulles depuis un miroir
+Les images jusqu'à la 0.10.4 ne sont construites que pour `linux/amd64` ; les
+releases suivantes fournissent aussi `linux/arm64`. Si tu pulles depuis un miroir
 ou un fork privé à toi, fais d'abord un `docker login` sur ce registry ; rien
 dans swarm-os n'en a besoin sinon.
 
@@ -199,9 +201,10 @@ cp .env.example .env
 - `SWARM_OS_PROJECT_NAME` — un libellé pour l'UI / les logs / Discord.
 - `SWARM_OS_GITHUB_TOKEN` — optionnel. La détection des mises à jour marche
   sans lui ; un token ne fait que relever la limite de débit de l'API GitHub
-  (§7.4).
+  (§7.4). Les releases jusqu'à la 0.10.4 en ont encore besoin pour la
+  détection.
 
-Le même fichier, à côté de `examples/docker-compose.dist.yml`, est
+Une copie quasi identique, à côté de `examples/docker-compose.dist.yml`, est
 [`examples/.env.example`](../../examples/.env.example).
 
 Optionnel, et utile uniquement si tu utilises un provider autre que Claude (§1) :
@@ -469,7 +472,7 @@ depuis l'UI marche si le déploiement est éligible (§7.2).
 ./install.sh        # pull + recrée le conteneur ; /data (DB, tokens, équipes) persiste
 ```
 
-### 7.2 En un clic, depuis RÉGLAGES ▸ SYSTEM UPDATE
+### 7.2 En un clic, depuis SETTINGS ▸ SYSTEM UPDATE
 
 Le panneau affiche la version en cours, la dernière release publiée, et une
 ligne qui dit si ce déploiement peut se mettre à jour lui-même. Il n'offre
@@ -540,7 +543,9 @@ session et le run attend une **fenêtre d'avertissement** (300 s par défaut).
 
 swarm-os lit les **GitHub Releases** de `Nyyyxius/swarm-os` pour savoir qu'une
 version plus récente existe. Le dépôt est public, donc le check marche **sans
-token** : rien à configurer.
+token** : rien à configurer. (Vrai à partir de la release qui suit la 0.10.4 ;
+la 0.10.4 et les précédentes ont besoin de `SWARM_OS_GITHUB_TOKEN` pour
+détecter les mises à jour.)
 
 Le check tourne en arrière-plan au plus une fois toutes les 6 heures par
 instance, quand un onglet est ouvert. Sans authentification, GitHub accepte 60
@@ -571,19 +576,11 @@ aucun scope.
 
 ### 7.5 Publier une release (mainteneur)
 
-Le checker lit les *releases GitHub publiées*, et la release est créée par le
-workflow `release-image` quand un tag `v*` **arrive sur GitHub** :
-
-```sh
-# bump package.json, commit ("Release: vX.Y.Z"), tag, puis :
-git push origin master --follow-tags
-```
-
-Un tag qui n'existe qu'en local ne publie rien. C'est `--follow-tags` qui rend
-la release effective : sans lui le commit part, le workflow ne se déclenche
-jamais, et aucune instance ne verra la nouvelle version. Un `workflow_dispatch`
-manuel publie seulement `:<short-sha>` — il ne déplace **pas** `:latest` et ne
-crée aucune release.
+Le checker lit les *releases GitHub publiées* ; une release n'existe qu'une
+fois qu'un tag `v*` est arrivé sur GitHub et que le workflow `release-image` a
+tourné. La procédure est dans
+[CONTRIBUTING.md](https://github.com/Nyyyxius/swarm-os/blob/master/CONTRIBUTING.md#release-procedure-maintainers)
+(en anglais).
 
 ---
 
@@ -609,8 +606,9 @@ crée aucune release.
   tapé, ou un ancien `docker login` sur `ghcr.io` avec un token expiré :
   `docker logout ghcr.io` puis pull à nouveau. Un miroir privé demande son
   propre `docker login`.
-- **`no matching manifest for linux/arm64`** — l'image n'est publiée que pour
-  `linux/amd64`.
+- **`no matching manifest for linux/arm64`** — les images jusqu'à la 0.10.4 ne
+  sont publiées que pour `linux/amd64` ; les releases suivantes fournissent
+  aussi `linux/arm64`.
 - **Un provider est grisé à la création d'une équipe** — survole-le : la raison
   vient d'une sonde en direct. `not on PATH` signifie que le CLI manque *sur
   l'hôte qui exécute les agents* (§1) ; installe-le et il s'allume en moins de

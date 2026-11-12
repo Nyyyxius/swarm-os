@@ -19,7 +19,7 @@ that message each other, and lets you watch, type into and steer every agent fro
   swarm-os ships no API key; the model calls go through those CLIs.
 - **Teams that keep running.** Teams, roles, messages and schedules live in SQLite and come back after a
   restart. Crons hand scheduled work to running teams; Discord tells you when an agent needs you.
-- **Mixed providers.** Pick the CLI per team and per agent: a Claude lead with Gemini workers is fine.
+- **Mixed providers.** Pick the CLI per team and per agent: a Claude lead with Codex workers is fine.
 - **Supervision from anywhere.** A live terminal for every agent, cost and context gauges, approvals,
   all in a mobile-friendly web app you reach over Tailscale or your own proxy.
 
@@ -66,7 +66,7 @@ Several design documents are still in French; English versions are not written y
 
 You need:
 
-- a Linux x86_64 host with Docker and Compose v2 (the installer can install Docker);
+- a Linux x86_64 host (arm64 from the release after 0.10.4) with Docker and Compose v2 (the installer can install Docker);
 - a Claude Code account with the `claude` CLI logged in on that host (the installer walks you through it);
 - roughly 2–4 vCPU and 4–8 GB of RAM per active team.
 
@@ -89,11 +89,13 @@ and has no provider step. Both write `.env`, start the container and print the U
 To read the script before running it, see the [install guide](docs/deploy/install.en.md).
 
 Then open `http://127.0.0.1:8787`, paste the token into the panel that opens, and create a team with
-**New Orchestrator**.
+**New Orchestrator**. On a remote server the port is bound to loopback: tunnel it first with
+`ssh -L 8787:127.0.0.1:8787 user@host`, or see [Remote access](#remote-access).
 
 Platform status: Linux is the tested path. Windows works through Docker Desktop with Claude only (use
-WSL 2 and `install.sh` for the other providers). macOS is not tested. The published image is amd64 only
-for now; on arm64, build the image from a clone of this repository.
+WSL 2 and `install.sh` for the other providers). macOS is not tested. Images up to 0.10.4 are
+`linux/amd64` only; later releases also ship `linux/arm64`. Until then, on arm64, build the image from a
+clone of this repository.
 
 ## How it works
 
@@ -122,7 +124,7 @@ Each agent talks to its team through MCP tools (`team.send_message`, `team.read_
 | Instance | One container, one project (the `/workspace` mount), one operator. |
 | Team | Also called an orchestrator: one lead that plans and decides, plus workers that execute. |
 | Role | A reusable team template: prompts, provider, model, effort, budget; crons target a role. |
-| Mailbox | The persistent message queue between agents of a team. |
+| Mailbox | The message queue between agents of a team (in memory, written through to SQLite). |
 | Transport | Where the agent CLIs run: `local` (in the container) or `ssh` (on the host). |
 
 ## Agent providers
@@ -130,11 +132,12 @@ Each agent talks to its team through MCP tools (`team.send_message`, `team.read_
 | CLI | Auth | Limits |
 |---|---|---|
 | `claude` (Anthropic) | `claude` OAuth login on the host | Only CLI in the image; works under both transports. |
-| `codex` (OpenAI) | `codex login` on the host | `ssh` transport only; never reports a "waiting" state. |
+| `codex` (OpenAI) | `codex login` on the host | `ssh` transport only. |
 | `gemini` (Google) | Google login or API key on the host | `ssh` only; no effort setting, no context gauge; never tested against a live model. |
 | `opencode` (OpenRouter) | OpenRouter key in SETTINGS ▸ OPENROUTER | `ssh` only; no effort setting; the OpenRouter hop is not proven end to end. |
 
-Model lists refresh from [models.dev](https://models.dev) every 6 h. Details: [docs/providers.md](docs/providers.md).
+`codex`, `gemini` and `opencode` never report a "waiting" state. Model lists refresh from
+[models.dev](https://models.dev) every 6 h. Details: [docs/providers.md](docs/providers.md).
 
 ## Configuration
 
@@ -148,7 +151,7 @@ The installer writes `.env`; you rarely edit it by hand. The variables that matt
 | `DATA_PATH` | Host directory for state: database, tokens, logs, backups. |
 | `CLAUDE_DIR` | Your logged-in `~/.claude`, mounted read-only. |
 | `SWARM_OS_PORT` | Host port of the UI (default `8787`, bound to `127.0.0.1`). |
-| `SWARM_OS_AGENT_TRANSPORT` | `local` (default) or `ssh`. |
+| `SWARM_OS_AGENT_TRANSPORT` | `local` (the compose default) or `ssh` (what `install.sh` preselects when an SSH server is running). |
 | `SWARM_OS_DISCORD_WEBHOOK_URL` | Optional Discord notifications. |
 
 Everything else is documented in [.env.example](.env.example).
@@ -172,6 +175,8 @@ swarm-os gives AI agents a shell. Read [SECURITY.md](SECURITY.md) before exposin
   The container limits what they reach on the host.
 - **`ssh` transport:** agents run **on the host, as your user account**, with everything that account can
   do. The container is not a sandbox in this mode. Use a dedicated account if that matters to you.
+  The Linux installer preselects `ssh` when an SSH server is running; choose `local` at step 4 if you
+  want the container as the boundary.
 - **Good defaults:** ports bound to loopback, constant-time token checks, short-lived WebSocket tickets,
   MCP on loopback, non-root container. Plugins are trusted code, not sandboxed.
 

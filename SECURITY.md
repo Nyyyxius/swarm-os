@@ -64,8 +64,8 @@ files and `.env.example`. Note that `install.sh` offers `ssh` as its first,
 | | `local` | `ssh` |
 |---|---|---|
 | Where agents run | Inside the container, as child processes of the server (`node-pty`). | On the host, over `ssh -tt <user>@host.docker.internal`, as `bash -lc '… exec <cli> …'`. |
-| As which user | The container user: uid 1000 (`node`) by default, or `SWARM_OS_RUN_UID`. Never root. | The host account named in `SWARM_OS_SSH_TARGET`, with its normal login environment (`~/.profile`). |
-| Environment the agent gets | The server's **entire** environment plus per-session variables. That includes `SWARM_OS_GITHUB_TOKEN`, `SWARM_OS_OPENROUTER_API_KEY`, `SWARM_OS_DISCORD_WEBHOOK_URL` and `SWARM_OS_TOKEN` if you set them in `.env`. | The host account's login environment plus per-session variables. The container's environment is not forwarded. |
+| As which user | The container user: uid 1000 (`node`) by default, or `SWARM_OS_RUN_UID`. Not root unless you set uid 0 by hand (only `setup.sh` refuses it). | The host account named in `SWARM_OS_SSH_TARGET`, with its normal login environment (`~/.profile`). |
+| Environment the agent gets | The server's **entire** environment plus per-session variables. That includes `SWARM_OS_GITHUB_TOKEN`, `SWARM_OS_OPENROUTER_API_KEY`, `SWARM_OS_DISCORD_WEBHOOK_URL` if you set them in `.env` (and `SWARM_OS_TOKEN`, if you added it to the service's `environment:` yourself; the shipped compose file does not pass it). | The host account's login environment plus per-session variables. The container's environment is not forwarded. |
 | What it can read | Everything mounted in the container: `/workspace` (read-write), `/data` (read-write, incl. `token`, `hook-token`, `ide-token`, the SQLite database, the copy of your Claude credentials in `/data/.claude-runtime`), `/claude-source` (your `~/.claude`, read-only). The image itself. Not the rest of the host filesystem. | Everything that host account can read: its whole home directory (`~/.ssh`, other projects, shell history, cloud CLIs' credentials, browser profiles), plus every file readable by that user elsewhere on the host. When the account also owns `DATA_PATH` (the usual setup, since it is the run-as account) that includes the auth token and the database. |
 | What it can change or destroy | `/workspace` and `/data`. Inside the container's own writable layer, anything uid 1000 can write. | Anything that host account can change: its home, every repository it owns, its crontab and `authorized_keys`. With passwordless `sudo` or membership of the `docker` group, the whole host (both are root-equivalent). |
 | Network | Unrestricted outbound. Reaches whatever the Docker bridge reaches, including host services that listen on a non-loopback interface. | Whatever that host account can reach, including services bound to the host loopback. |
@@ -100,8 +100,8 @@ layer off:
 | `gemini` | `--yolo` | Every tool call auto-approved. Every other mode is mapped to this one. |
 | `opencode` | `--auto` plus `"permission": "allow"` in its config | Its permission dialog is unreachable. Every other mode is mapped to this one. |
 
-Only `claude` can run in a prompting mode (`default`, `plan`, `acceptEdits`).
-In those modes a permission prompt blocks the agent until a human answers, and
+Only `claude` has modes other than bypass (`default`, `plan`, `acceptEdits`,
+`auto`, `dontAsk`). In the ones that ask (`default`, `plan`, `acceptEdits`) a permission prompt blocks the agent until a human answers, and
 the [approvals module](#protections-that-exist) turns it into an actionable
 notification. codex, gemini and opencode always run without prompts.
 
@@ -124,7 +124,8 @@ the agent's OS user can do: under `local`, the container and its mounts; under
 ## The auth token
 
 - **What it is.** One static secret, a random UUID generated at first boot and
-  stored in `/data/token` (mode 0600), unless you set `SWARM_OS_TOKEN`. There
+  stored in `/data/token` (mode 0600), unless you set `SWARM_OS_TOKEN` (the shipped compose file does not pass that
+  variable; add it to the service's `environment:` to use it). There
   are no user accounts, roles or scopes, and no built-in rotation: to rotate,
   stop the container, delete `/data/token` (or change `SWARM_OS_TOKEN`) and
   start it again.
@@ -193,7 +194,10 @@ from the Plugins screen (BUILT-IN section).
   [docs/deploy/install.en.md §6](docs/deploy/install.en.md#6-remote-access)).
 - Unauthenticated routes: `/health`, `/info` (version and image), the static
   web app, `/hooks/*` (checked against `hook-token`) and `/ide/*` (checked by
-  VS Code against `ide-token`). Everything else requires the token.
+  VS Code against `ide-token`) and `/public/plugins/<name>/*` (inbound
+  webhooks of enabled plugins; each plugin verifies its own signatures).
+  `/health` also exposes the project name and session counts. Everything else
+  requires the token.
 - The MCP server agents use to talk to each other (port 8788) is hard-wired to
   `127.0.0.1` inside the container and never published by Docker. Each request
   must carry a per-session secret in its path; a wrong secret gets a 404. Under
@@ -283,7 +287,9 @@ host. What the installers do today:
 5. **Keep the SSH key dedicated.** Let the installer generate it in
    `~/.swarm-os/ssh` and make sure `HOST_SSH_DIR` points there, never at
    `~/.ssh`. You can restrict its `authorized_keys` line yourself, for example
-   with `from="172.16.0.0/12"` (the Docker bridge range on your host) and
+   with a `from="…"` clause matching the Docker bridge network of your host
+   (check `docker network inspect`; it is often inside `172.16.0.0/12` but can
+   be `192.168.0.0/16`) and
    `no-agent-forwarding,no-X11-forwarding`; keep port forwarding allowed, since
    the transport uses `ssh -R`.
 6. **Use human approvals where it matters.** Create the role (or the team) with

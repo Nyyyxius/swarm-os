@@ -34,6 +34,7 @@ pnpm install --frozen-lockfile
 ```sh
 SWARM_OS_DATA_DIR="$PWD/.dev-data" \
 SWARM_OS_WORKSPACE_ROOT="$PWD" \
+SWARM_OS_CLAUDE_SOURCE_DIR="$HOME/.claude" \
 pnpm dev
 ```
 
@@ -53,8 +54,10 @@ overrides above; use absolute paths, because the server process runs from
 | `SWARM_OS_DISCORD_WEBHOOK_URL` | unset | Discord notifications (no-op when absent) |
 | `SWARM_OS_PUBLIC_URL` | unset | Base URL used in Discord deep links |
 
-Paste the token from `<dataDir>/token` into the token panel of the UI. Outside a
-container the server uses your own `~/.claude` directly. The full list of
+Paste the token from `<dataDir>/token` into the token panel of the UI. Agents get
+their Claude credentials from `SWARM_OS_CLAUDE_SOURCE_DIR` (default
+`/claude-source`, the container mount), so point it at your logged-in
+`~/.claude` as above. The full list of
 variables lives in [`.env.example`](.env.example) and
 [docs/deploy/install.en.md](docs/deploy/install.en.md).
 
@@ -84,7 +87,7 @@ with `SWARM_OS_IMAGE=swarm-os:dev`.
 
 Run these before opening a pull request. The `CI` workflow
 ([`.github/workflows/ci.yml`](.github/workflows/ci.yml)) runs lint, typecheck,
-tests and build on every pull request; a red CI blocks the merge.
+tests and build on every pull request; get it green before asking for review.
 
 ```sh
 pnpm lint                                   # eslint . (flat config in eslint.config.js)
@@ -138,8 +141,8 @@ CLI release, not part of the regular checks.
 swarm-os is a pnpm monorepo. One running instance manages one project: a
 **Spawner** runs N **orchestrators** (teams), each made of **1 lead + N
 workers**. Every agent is a real CLI process (`claude`, `codex`, `gemini`,
-`opencode`) driven in a PTY; agents talk to each other through an in-memory
-mailbox exposed as MCP tools over a loopback HTTP server.
+`opencode`) driven in a PTY; agents talk to each other through a mailbox
+(in memory, written through to SQLite) exposed as MCP tools over a loopback HTTP server.
 
 ```
 packages/
@@ -258,6 +261,9 @@ Releases are cut from `master` by pushing a `v*` tag; the
    ```
 
    A tag that stays local publishes nothing.
+   Push the tag by name. Do not use `--follow-tags` or `--tags`: a clone can
+   hold older tags that were never published, and pushing them would run the
+   release workflow on old trees and move `:latest` backwards.
 3. On the tag push, `release-image` builds the image (baking the version and
    commit into `/info`), pushes `ghcr.io/nyyyxius/swarm-os:X.Y.Z` and moves
    `:latest`, then creates the GitHub Release with auto-generated notes. That

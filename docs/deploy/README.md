@@ -97,14 +97,10 @@ On another machine, run the installer again and log in to Claude Code there.
 ## Publishing a release (maintainer)
 
 Push a `vX.Y.Z` git tag: the `release-image` workflow builds and pushes the
-image to GHCR **and cuts the GitHub Release the update checker reads**.
+image to GHCR **and cuts the GitHub Release the update checker reads**. The
+full procedure is in
+[CONTRIBUTING.md](https://github.com/Nyyyxius/swarm-os/blob/master/CONTRIBUTING.md#release-procedure-maintainers).
 `scripts/push-image.sh vX.Y.Z` can push an image from your own machine, but it
 cuts no GitHub Release, so no instance will be told about it.
-
-> A release is only effective once the tag reaches GitHub:
-> `git push origin master --follow-tags`. A tag that stays local publishes
-> nothing — the workflow never fires and no instance sees the version. A manual
-> `workflow_dispatch` run publishes `:<short-sha>` only: it does not move
-> `:latest` and cuts no release.
 
 The Software is licensed under the MIT license (see `LICENSE`).

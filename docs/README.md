@@ -62,7 +62,7 @@ differ in details.
 - [CONTRIBUTING.md](../CONTRIBUTING.md): dev setup, tests, architecture map,
   conventions and the release procedure.
 - [CHANGELOG.md](../CHANGELOG.md): changes per version.
-- [SECURITY.md](../SECURITY.md): how to report a vulnerability.
+- [SECURITY.md](../SECURITY.md): the trust model and how to report a vulnerability.
 
 ## Design history
 
