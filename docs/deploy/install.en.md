@@ -65,10 +65,17 @@ belongs to" in §3. That account is the one that must have logged in.
 Before anything else, on the host:
 
 ```sh
-npm i -g @anthropic-ai/claude-code     # install the CLI
-claude                                  # complete the OAuth login once
-ls ~/.claude/.credentials.json          # this file MUST exist afterwards
+curl -fsSL https://claude.ai/install.sh | bash   # native CLI (Linux, macOS, WSL)
+claude                                             # complete the OAuth login once
+ls ~/.claude/.credentials.json                     # this file MUST exist afterwards
 ```
+
+The native installer picks the build for the machine (x64/arm64, glibc/musl),
+puts it in `~/.local/bin/claude` and keeps it up to date — no Node.js needed.
+Make sure `~/.local/bin` is on the account's **login-shell** PATH. On Alpine
+(musl), first `apk add libgcc libstdc++ ripgrep` and set `USE_BUILTIN_RIPGREP=0`.
+On native Windows, use `irm https://claude.ai/install.ps1 | iex` in PowerShell.
+`./install.sh` and `./setup.sh` offer to run the right command for you.
 
 Without `~/.claude/.credentials.json`, no agent can start — a spawned session
 hangs on the first-run theme picker.

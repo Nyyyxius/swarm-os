@@ -6,7 +6,7 @@
 #   builder  → installs full pnpm workspace + native build toolchain, runs
 #              `pnpm -r build`, then `pnpm deploy --prod` to flatten the
 #              server's runtime tree into a self-contained directory.
-#   runtime  → minimal node:24-bookworm-slim + claude CLI + curl + tini,
+#   runtime  → minimal node:24-bookworm-slim + native claude CLI + curl + tini,
 #              runs as USER node, exposes only port 8787.
 #
 # Build:    docker build -t swarm-os:phase5 .
@@ -147,9 +147,29 @@ RUN set -eux; \
 # H1: "2.1.142 (Claude Code)"). Bumping requires re-running `pnpm verify:claude`
 # to confirm the flag contract is unchanged (--effort, --permission-mode,
 # --mcp-config, settings.json hooks).
+#
+# NATIVE build, not the npm package: the self-contained binary for this image's
+# platform (glibc, TARGETARCH) fetched from Anthropic's release bucket and
+# checked against the version's manifest.json SHA-256 — the same source and
+# check as claude.ai/install.sh. We don't pipe that script: it always resolves
+# the newest installer and sets up a per-user launcher under $HOME, while the
+# image wants one pinned, root-owned binary on PATH for the `node` user.
+# DISABLE_AUTOUPDATER keeps it on the pin (and quiet — node can't write it).
 ARG CLAUDE_CODE_VERSION=2.1.142
-RUN npm install -g --no-audit --no-fund "@anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}" \
- && claude --version
+RUN set -eux; \
+    case "${TARGETARCH:-amd64}" in \
+      amd64) CCARCH=x64 ;; \
+      arm64) CCARCH=arm64 ;; \
+      *) echo "unsupported TARGETARCH=${TARGETARCH}" >&2; exit 1 ;; \
+    esac; \
+    base="https://downloads.claude.ai/claude-code-releases/${CLAUDE_CODE_VERSION}"; \
+    sum="$(curl -fsSL "${base}/manifest.json" \
+      | python3 -I -c 'import json,sys; print(json.load(sys.stdin)["platforms"][sys.argv[1]]["checksum"])' "linux-${CCARCH}")"; \
+    curl -fsSL "${base}/linux-${CCARCH}/claude" -o /usr/local/bin/claude; \
+    echo "${sum}  /usr/local/bin/claude" | sha256sum -c -; \
+    chmod 0755 /usr/local/bin/claude; \
+    DISABLE_AUTOUPDATER=1 claude --version
+ENV DISABLE_AUTOUPDATER=1
 
 # graphify — code-knowledge-graph CLI (Graphify integration, modules/codegraph).
 # Baked in so the server's codegraph janitor can run `graphify update` fully

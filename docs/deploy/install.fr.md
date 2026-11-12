@@ -68,10 +68,18 @@ porte l'instance » au §3. C'est ce compte-là qui doit avoir fait le login.
 Avant tout, sur l'hôte :
 
 ```sh
-npm i -g @anthropic-ai/claude-code     # installe le CLI
-claude                                  # effectue le login OAuth une fois
-ls ~/.claude/.credentials.json          # ce fichier DOIT exister ensuite
+curl -fsSL https://claude.ai/install.sh | bash   # CLI natif (Linux, macOS, WSL)
+claude                                             # effectue le login OAuth une fois
+ls ~/.claude/.credentials.json                     # ce fichier DOIT exister ensuite
 ```
+
+L'installeur natif choisit le build adapté à la machine (x64/arm64, glibc/musl),
+le place dans `~/.local/bin/claude` et le tient à jour — pas besoin de Node.js.
+Vérifie que `~/.local/bin` est dans le PATH du **shell de login** du compte. Sur
+Alpine (musl), d'abord `apk add libgcc libstdc++ ripgrep` et
+`USE_BUILTIN_RIPGREP=0`. Sous Windows natif : `irm https://claude.ai/install.ps1 | iex`
+dans PowerShell. `./install.sh` et `./setup.sh` proposent de lancer la bonne
+commande pour toi.
 
 Sans `~/.claude/.credentials.json`, aucun agent ne démarre — une session lancée se
 fige sur le sélecteur de thème du premier lancement.

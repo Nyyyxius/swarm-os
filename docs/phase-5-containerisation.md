@@ -40,7 +40,10 @@ Stage `runtime` (`node:24-bookworm-slim`) :
   par le hook Notification de Phase 4 (JSON-escape stdin — limite §11
   de Phase 4). Pas de toolchain native (les `.node` compilés voyagent
   depuis `builder`).
-- `npm install -g @anthropic-ai/claude-code@${CLAUDE_CODE_VERSION}`,
+- CLI Claude Code **natif** (plus le paquet npm) : le binaire
+  `linux-${TARGETARCH}` de `downloads.claude.ai/claude-code-releases/${CLAUDE_CODE_VERSION}`,
+  vérifié par SHA-256 contre le `manifest.json` de la version, posé dans
+  `/usr/local/bin/claude` ; `DISABLE_AUTOUPDATER=1` le garde sur le pin.
   `CLAUDE_CODE_VERSION=2.1.142` par défaut (`ARG`). **Bumper** cette
   version exige de **rejouer `pnpm verify:claude` AVANT** + un spawn
   PTY réel (cf. §8).

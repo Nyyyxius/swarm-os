@@ -171,6 +171,49 @@ choose() {
 # ── Small host helpers ────────────────────────────────────────────────────────
 have() { command -v "$1" >/dev/null 2>&1; }
 
+# The NATIVE Claude Code installer, picked for this environment — not the npm
+# package, which Anthropic now ships only as a thin wrapper around the same
+# native binary (and which needs Node.js on the host for nothing). The native
+# build lands in ~/.local/bin/claude and keeps itself up to date.
+#   Linux / macOS / WSL      → claude.ai/install.sh (detects arch + glibc/musl)
+#   Windows (Git Bash, MSYS) → claude.ai/install.ps1 through PowerShell
+#   no curl/wget at all      → npm as a last resort
+claude_install_cmd() {
+  case "$(uname -s 2>/dev/null)" in
+    MINGW*|MSYS*|CYGWIN*)
+      printf '%s' 'powershell -NoProfile -ExecutionPolicy Bypass -Command "irm https://claude.ai/install.ps1 | iex"'
+      return 0 ;;
+  esac
+  if have curl; then
+    printf '%s' 'curl -fsSL https://claude.ai/install.sh | bash'
+  elif have wget; then
+    printf '%s' 'wget -qO- https://claude.ai/install.sh | bash'
+  elif have npm; then
+    printf '%s' 'npm i -g @anthropic-ai/claude-code'
+  else
+    return 1
+  fi
+}
+
+# musl (Alpine) is supported by the native build, but it links against the
+# system libgcc/libstdc++ and wants the system ripgrep.
+claude_install_musl_hint() {
+  [ "$(uname -s 2>/dev/null)" = Linux ] || return 1
+  if [ -f /etc/alpine-release ] || ldd --version 2>&1 | grep -qi musl; then
+    printf '%s' 'musl libc detected: apk add libgcc libstdc++ ripgrep, and set USE_BUILTIN_RIPGREP=0'
+    return 0
+  fi
+  return 1
+}
+
+# The installer drops the binary in ~/.local/bin, which this already-running
+# shell may not have on PATH yet.
+claude_path_refresh() {
+  have claude && return 0
+  case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) PATH="$HOME/.local/bin:$PATH"; export PATH ;; esac
+  have claude
+}
+
 # A reference with a path segment can be pulled; a bare `name:tag` is a locally
 # built image — the same rule the update surface applies (`IMAGE IS LOCALLY BUILT`).
 image_is_registry() { case "$1" in */*) return 0 ;; *) return 1 ;; esac; }
@@ -277,10 +320,13 @@ CLAUDE_JSON_HOST="${CLAUDE_JSON:-$HOME/.claude.json}"
 check_claude() {
   if ! have claude; then
     warn "The Claude Code CLI is not on PATH."
-    if have npm; then
-      run_confirmed "install the CLI globally" npm i -g @anthropic-ai/claude-code || true
+    local cmd hint
+    if cmd="$(claude_install_cmd)"; then
+      hint="$(claude_install_musl_hint)" && note "$hint"
+      run_confirmed "install the native Claude Code CLI for this environment" bash -c "$cmd" || true
+      claude_path_refresh || note "installed in ~/.local/bin — add it to PATH (and to your login shell's profile)"
     else
-      note "npm is missing too — install Node.js 20+ first: https://nodejs.org/en/download"
+      note "neither curl, wget nor npm is available — see https://docs.claude.com/en/docs/claude-code/setup"
     fi
   fi
   have claude && ok "claude CLI: $(claude --version 2>/dev/null | head -1)"

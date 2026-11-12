@@ -260,7 +260,7 @@ unavailable, which is the correct outcome rather than something to work around.
 
 | provider | install on the host | authenticate | swarm-os side |
 |---|---|---|---|
-| claude | `npm i -g @anthropic-ai/claude-code` | `claude` (OAuth once) → `~/.claude/.credentials.json` | `SWARM_OS_HOST_CLAUDE_DIR` |
+| claude | `curl -fsSL https://claude.ai/install.sh \| bash` (native; Windows: `install.ps1`) | `claude` (OAuth once) → `~/.claude/.credentials.json` | `SWARM_OS_HOST_CLAUDE_DIR` |
 | codex | `npm i -g @openai/codex` | `codex login` → `~/.codex/auth.json` | `SWARM_OS_HOST_CODEX_DIR` |
 | gemini | `npm i -g @google/gemini-cli` | `gemini` (OAuth once) → `~/.gemini/oauth_creds.json`, **or** an API key | `SWARM_OS_HOST_GEMINI_DIR` + `SWARM_OS_GEMINI_AUTH_TYPE` |
 | opencode | `npm i -g opencode-ai` | *no CLI login* — the OpenRouter key is passed per process | Settings ▸ OPENROUTER |
