@@ -1,0 +1,75 @@
+name: Bug report
+description: Something does not work as documented.
+labels: ["bug"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for taking the time to report a bug. Please do **not** report security
+        vulnerabilities here: use the private form linked from the "New issue" page
+        (see SECURITY.md). Remove tokens, host names and private paths from anything you paste.
+  - type: textarea
+    id: what-happened
+    attributes:
+      label: What happened?
+      description: What you did, what you expected, and what happened instead.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Steps to reproduce
+      placeholder: |
+        1. Create a team with role ...
+        2. ...
+    validations:
+      required: true
+  - type: input
+    id: version
+    attributes:
+      label: swarm-os version
+      description: Shown in the UI settings, or returned by `/info` on the server.
+      placeholder: "0.10.4"
+    validations:
+      required: true
+  - type: dropdown
+    id: install
+    attributes:
+      label: How is it installed?
+      options:
+        - Published image via install.sh / bootstrap.sh
+        - Published image via install.ps1 (Windows)
+        - Image built from source
+        - Local dev (pnpm dev)
+        - Other
+    validations:
+      required: true
+  - type: dropdown
+    id: transport
+    attributes:
+      label: Agent transport
+      options:
+        - local
+        - ssh
+        - Not sure
+  - type: checkboxes
+    id: providers
+    attributes:
+      label: Agent providers involved
+      options:
+        - label: claude
+        - label: codex
+        - label: gemini
+        - label: opencode
+  - type: input
+    id: host
+    attributes:
+      label: Host
+      description: OS and architecture, Docker version, and the agent CLI version if relevant.
+      placeholder: "Ubuntu 24.04 x86_64, Docker 27, Claude Code 2.1.x"
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs
+      description: Relevant output of `docker logs <container>` or the browser console. Redact tokens.
+      render: text

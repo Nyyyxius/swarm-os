@@ -1,0 +1,7 @@
+# Blank issues stay enabled: the project is young and questions or ideas that
+# fit neither form are welcome. Security reports never go in a public issue.
+blank_issues_enabled: true
+contact_links:
+  - name: Report a security vulnerability
+    url: https://github.com/Nyyyxius/swarm-os/security/advisories/new
+    about: Please report vulnerabilities privately through GitHub, not in a public issue. See SECURITY.md.
