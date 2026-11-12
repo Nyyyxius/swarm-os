@@ -109,7 +109,7 @@ export function validateConfig(
   const out: Record<string, unknown> = {};
   for (const [key, prop] of Object.entries(schema.properties)) {
     const present = Object.prototype.hasOwnProperty.call(input, key);
-    let value = present ? input[key] : undefined;
+    const value = present ? input[key] : undefined;
 
     if (value === undefined || value === null) {
       if (prop.default !== undefined) {

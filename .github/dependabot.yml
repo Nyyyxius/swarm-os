@@ -1,0 +1,46 @@
+# Dependabot version updates.
+#
+# Security updates are separate: enable "Dependabot security updates" in the
+# repository settings (Settings > Code security) and Dependabot opens a PR as
+# soon as an advisory lands, regardless of the weekly schedule below.
+version: 2
+updates:
+  # pnpm workspace (root + packages/*). One lockfile, so one entry at the root.
+  - package-ecosystem: npm
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    open-pull-requests-limit: 5
+    groups:
+      # Minor and patch bumps land as a single weekly PR per dependency type.
+      # Major bumps stay individual PRs: each one needs its own review.
+      npm-production-minor-patch:
+        dependency-type: production
+        update-types: [minor, patch]
+      npm-development-minor-patch:
+        dependency-type: development
+        update-types: [minor, patch]
+    commit-message:
+      prefix: chore(deps)
+      prefix-development: chore(deps-dev)
+
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    groups:
+      github-actions:
+        patterns: ['*']
+    commit-message:
+      prefix: ci
+
+  # Base image of the Dockerfile (node:24-bookworm-slim).
+  - package-ecosystem: docker
+    directory: /
+    schedule:
+      interval: weekly
+      day: monday
+    commit-message:
+      prefix: chore(docker)

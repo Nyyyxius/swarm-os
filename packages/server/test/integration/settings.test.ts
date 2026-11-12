@@ -26,12 +26,17 @@ function url(path: string): string {
   return `http://127.0.0.1:${stack.mainPort}${path}`;
 }
 
-async function getSettings(): Promise<{ status: number; body: any }> {
+// The parsed JSON is indexed freely by the assertions; typing it would mean
+// restating the settings DTO in the test file (same pattern as crons.test.ts).
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
+type JsonBody = any;
+
+async function getSettings(): Promise<{ status: number; body: JsonBody }> {
   const res = await fetch(url('/settings'), { headers: authHeaders(stack.config.token) });
   return { status: res.status, body: await res.json() };
 }
 
-async function patchSettings(body: unknown): Promise<{ status: number; body: any }> {
+async function patchSettings(body: unknown): Promise<{ status: number; body: JsonBody }> {
   const res = await fetch(url('/settings'), {
     method: 'PATCH',
     headers: authHeaders(stack.config.token),

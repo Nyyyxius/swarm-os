@@ -55,8 +55,6 @@ const log = withModule('plugins.installer');
 
 /** `npm install` / `npm pack` / `git clone` wall-clock cap (plan §Installation). */
 const EXEC_TIMEOUT_MS = 180_000;
-/** Keep `last_error` legible — truncate captured stderr. */
-const STDERR_MAX = 600;
 
 // ---------------------------------------------------------------------------
 // Sources + errors

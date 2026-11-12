@@ -337,7 +337,7 @@ export function parseNote(raw: string, fallbackName: string): ParsedNote {
   const now = Date.now();
   let fm = '';
   let body = raw;
-  const m = /^﻿?---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(raw);
+  const m = /^\uFEFF?---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/.exec(raw);
   if (m) {
     fm = m[1] ?? '';
     body = m[2] ?? '';

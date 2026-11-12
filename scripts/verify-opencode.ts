@@ -38,7 +38,7 @@
  */
 
 import { spawnSync, spawn, type SpawnSyncReturns, type ChildProcess } from 'node:child_process';
-import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, appendFileSync } from 'node:fs';
+import { mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from 'node:fs';
 import { join, dirname, resolve } from 'node:path';
 import { fileURLToPath } from 'node:url';
 import { tmpdir } from 'node:os';
@@ -122,11 +122,13 @@ function trim(s: string | undefined, max = 4000): string {
 
 /** Strip ANSI/OSC so we can grep a PTY capture for human-visible text. */
 function stripAnsi(s: string): string {
+  /* eslint-disable no-control-regex -- ESC/BEL are the subject matter here */
   return s
     .replace(/\][^]*(|\\)/g, '')
     .replace(/\[[0-9;?]*[a-zA-Z]/g, '')
     .replace(/[()][AB0-2]/g, '')
     .replace(/[=>]/g, '');
+  /* eslint-enable no-control-regex */
 }
 
 /**
@@ -686,7 +688,6 @@ defineCheck(() => {
   const hasTuiDefault = /opencode \[project\][\s\S]*?\[default\]/.test(helpText);
   const hasPromptFlag = /--prompt\s+prompt to use/.test(helpText);
   const hasRun = /opencode run \[message\.\.\]/.test(helpText);
-  const hasServe = /opencode serve/.test(helpText);
   const hasAuto = /--auto\s+auto-approve permissions/.test(helpText);
 
   const subcommands = helpText

@@ -35,7 +35,7 @@
  *   R6  how many rollout files a single CODEX_HOME accumulates
  */
 
-import { spawn, execFileSync } from 'node:child_process';
+import { execFileSync } from 'node:child_process';
 import { createRequire } from 'node:module';
 import {
   mkdirSync,

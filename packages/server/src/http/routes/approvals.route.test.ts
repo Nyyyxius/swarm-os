@@ -105,6 +105,9 @@ afterEach(async () => {
   fs.rmSync(dir, { recursive: true, force: true });
 });
 
+// The assertions index the route's JSON freely; restating every response DTO
+// here would only duplicate `modules/approvals` (same pattern as call-usage).
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function post(base: string, id: string, body: unknown): Promise<{ status: number; json: any }> {
   const res = await fetch(`${base}/api/approvals/${id}/resolve`, {
     method: 'POST',

@@ -307,7 +307,7 @@ export function RolesPage({ open, onClose, onOpenCrons, approvalsVisible = true 
           )}
           {!loading && !error && roles.length === 0 && (
             <div className="field-help" style={{ padding: '14px 20px' }}>
-              No roles yet — click "+ NEW ROLE" below.
+              No roles yet — click &quot;+ NEW ROLE&quot; below.
             </div>
           )}
           {roles.map((r) => (

@@ -55,7 +55,7 @@ export interface PortalOptions {
   fetchImpl?: typeof fetch;
 }
 
-function withTimeout<T>(
+function withTimeout(
   fetchImpl: typeof fetch,
   url: string,
   init: RequestInit,
