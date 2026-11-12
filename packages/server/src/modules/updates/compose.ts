@@ -64,7 +64,7 @@ export interface ComposeInvocation {
  * The compose invocation prefix: `docker <these args> <subcommand> …`.
  *
  * `--project-name` comes from the container's label and NEVER from
- * `docker compose ls`, because `swarm-os-test` and `swarm-os-stiix` share the
+ * `docker compose ls`, because `swarm-os-test` and `swarm-os-prod` share the
  * project name `swarm-os` on this very host — picking by project name would
  * aim the update at the wrong deployment.
  */

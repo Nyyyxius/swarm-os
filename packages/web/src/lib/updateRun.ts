@@ -146,7 +146,7 @@ export function warningRows(
  *
  *   3 teams warned — all leads have read it. Applying in 01:12.
  *   3 teams warned — 2 leads have not answered yet. Applying in 01:12.
- *   3 teams warned — 1 lead (stiix-infra) has not read it yet (busy for
+ *   3 teams warned — 1 lead (my-project) has not read it yet (busy for
  *   4m31). Applying anyway in 01:12.
  *   No team is active — nothing to interrupt. Applying in 01:12.
  *

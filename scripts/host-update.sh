@@ -26,10 +26,10 @@
 #  * `com.docker.compose.project.config_files` may hold SEVERAL comma-separated
 #    paths → one `-f` each, in order.
 #  * `--project-name` always comes from the container's OWN label, never from
-#    `docker compose ls`: `swarm-os-test` and `swarm-os-stiix` share the project
+#    `docker compose ls`: `swarm-os-test` and `swarm-os-prod` share the project
 #    name `swarm-os`.
 #  * NEVER `--remove-orphans`. Verified with `--dry-run`: compose reports
-#    `Found orphan containers ([swarm-os-stiix])` and the flag would DELETE that
+#    `Found orphan containers ([swarm-os-prod])` and the flag would DELETE that
 #    unrelated production deployment.
 #  * NEVER `--pull always`: it re-resolves the tag at `up` time, defeating the
 #    "the tag we wrote IS the tag that runs" property this whole design buys.

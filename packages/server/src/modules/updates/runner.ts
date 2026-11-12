@@ -651,7 +651,7 @@ export class UpdateRunner {
     );
 
     // Persist the records WHENEVER they land, even after we have moved on: the
-    // post-update screen ("stiix-infra — notice left but never read") is built
+    // post-update screen ("my-project — notice left but never read") is built
     // from this column, and a slow lead must not cost us the record.
     void outcomes.then(
       (records) => this.persistWarned(runId, records),

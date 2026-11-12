@@ -25,14 +25,14 @@
  * That watcher used to be a single `fs.watch(scope.path, { recursive: true })`.
  * On Linux that expands to ONE inotify watch per directory of the tree and
  * accepts no exclusions — so it watched every directory the scan deliberately
- * ignores. Measured on a real deployment (`stiix`, workspace `~/projets/fyrel`):
+ * ignores. Measured on a real deployment (one mid-sized monorepo workspace):
  * 21 518 directories, of which 19 415 (90 %) were `node_modules`, 1 394 (6,5 %)
  * `.git` internals and only 709 (3,3 %) actual code. With ~8 scopes over that
  * tree the server process held **165 502 inotify watches — 89 % of the host's
  * `fs.inotify.max_user_watches` (184 930)**, of which ~5 700 were useful. The
  * fallout was not theoretical: a SECOND swarm-os instance on the same host
- * (`trader`) could no longer arm the watcher behind its trading kill-switch
- * (`ENOSPC: System limit for number of file watchers reached`) — a safety
+ * could no longer arm a file watcher one of its plugins relies on as a kill
+ * switch (`ENOSPC: System limit for number of file watchers reached`) — a safety
  * mechanism taken down by an unrelated redeploy.
  *
  * So the watcher is now EXPLICIT and BOUNDED: we walk the scope ourselves with

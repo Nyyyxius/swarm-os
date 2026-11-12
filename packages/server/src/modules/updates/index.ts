@@ -161,8 +161,8 @@ export interface UpdateServiceOptions {
  *
  * A registry reference always has a path component: `ghcr.io/o/r:t` (explicit
  * host) or `owner/name` (implicit Docker Hub). A single segment —
- * `swarm-os:latest`, which is what `docker-compose.test.yml` and
- * `docker-compose.stiix.yml` actually use — is a LOCALLY BUILT image with
+ * `swarm-os:latest`, which is what a deployment built from a local clone
+ * uses — is a LOCALLY BUILT image with
  * nothing behind it to pull. That is precisely `image_not_registry`.
  */
 export function isRegistryRef(image: string): boolean {
