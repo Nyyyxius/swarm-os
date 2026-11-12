@@ -1,7 +1,7 @@
 # Outils par rôle et chargement à la demande (v0.10.2)
 
 Chaque appel d'un agent Claude Code renvoie au modèle la **définition de tous
-ses outils**. Mesuré le 2026-09-26 sur l'instance STIIX (claude 2.1.283) :
+ses outils**. Mesuré le 2026-09-26 sur l'instance `my-project` (claude 2.1.283) :
 
 | Premier appel d'une session | Contexte |
 |---|---|

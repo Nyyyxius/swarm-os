@@ -19,9 +19,9 @@
 
 **Résultats du spike P0 (mesurés en local, graphify 0.9.32, host, sur copies — rien déployé)** — verdict **GO** :
 - Install `uv tool install graphifyy` → binaires `graphify` + **`graphify-mcp`**, **100 % offline**, ~25 grammaires tree-sitter embarquées (bakeable dans l'image).
-- Perf : `storyforge` (63 fichiers 1re-partie ; corpus vu par graphify = 213 fichiers dont docs/Dart) → **4,9 s, 0 token** (3272 nœuds / 5186 arêtes / 193 communautés). Un plugin (9 fichiers) → **0,55 s**.
+- Perf : `my-project` (63 fichiers 1re-partie ; corpus vu par graphify = 213 fichiers dont docs/Dart) → **4,9 s, 0 token** (3272 nœuds / 5186 arêtes / 193 communautés). Un plugin (9 fichiers) → **0,55 s**.
 - **Exclusion (C1) validée** : plugin avec **1834** fichiers `node_modules` → via `.graphifyignore`, **0** occurrence de `node_modules` dans `graph.json`.
-- Sortie `graphify-out/` : `graph.json` (~3,4 Mo pour storyforge), `GRAPH_REPORT.md` (hubs/communautés/stats), `graph.html` (~2,9 Mo viz D3), `cache/`, `manifest.json` ; total ~9,4 Mo.
+- Sortie `graphify-out/` : `graph.json` (~3,4 Mo pour my-project), `GRAPH_REPORT.md` (hubs/communautés/stats), `graph.html` (~2,9 Mo viz D3), `cache/`, `manifest.json` ; total ~9,4 Mo.
 - Requêtes **offline** OK : `graphify explain <nœud>` → nœud + liens typés (`imports_from`, `contains`) + **citations fichier:ligne** ; `graphify path A B` → plus court chemin.
 
 **⚠️ 3 corrections empiriques vs les §2/§6 rédigés depuis des sources secondaires** (le spike les a invalidées) :
@@ -100,7 +100,7 @@ Bénéfice principal côté agents : au lieu de charger des fichiers bruts pour 
 
 Un **scope** = une unité indexable indépendante, avec son propre `graphify-out/`. Deux familles :
 
-1. **Projets du workspace** : chaque **sous-dossier de 1er niveau** de `config.workspaceRoot` (`/workspace` en conteneur = host `~/projets/test`). Ex. `discord-agent/`, `storyforge/`, `credtest/`… (les `.md` à la racine du workspace ne sont pas du code → ignorés par C3).
+1. **Projets du workspace** : chaque **sous-dossier de 1er niveau** de `config.workspaceRoot` (`/workspace` en conteneur = host `~/projets/test`). Ex. `discord-agent/`, `my-project/`, `credtest/`… (les `.md` à la racine du workspace ne sont pas du code → ignorés par C3).
    - *Alternative discutée* (Q4) : au lieu de « tous les sous-dossiers », se limiter aux **cwd réellement utilisés** par les orchestrateurs/leads (un « projet » n'a pas d'entité 1re classe dans swarm-os — c'est un `cwd` sous le workspace, cf. `http/routes/orchestrators.ts` + `http/validation.ts`). Par défaut je propose **par sous-dossier de 1er niveau contenant du code**, plus simple et prévisible.
 2. **Plugins installés** : chaque `<dataDir>/plugins/<nom>` listé par `pluginStore.list()` (`modules/plugins/store.ts:285`). On indexe le code 1re partie (`index.js` + `lib/` + tout `.ts/.js` hors deps) et on **exclut `node_modules/`**.
 
@@ -210,7 +210,7 @@ Une **surface « CODE GRAPH »** : soit un **2e onglet** sur la page `#/memory`,
 
 Exécution séquentielle, 1 worker par phase, branche dédiée `feat/codegraph`, verts exigés (build tsc server + web, tests ciblés + suite, seul flake toléré = `persistence.test.ts` ENOENT préexistant), rapport au lead à chaque phase, je vérifie chaque phase (recette §RECETTE des docs sœurs). **Pas de déploiement sans l'aval explicite de @eleodas01.**
 
-- **P0 — Spike de faisabilité** (pas de code produit final) : installer Graphify dans l'image, lancer `graphify update` **à la main** sur 1 projet workspace (ex. `storyforge`) + 1 plugin (ex. `novelai`), vérifier `graph.json` + `GRAPH_REPORT.md`, valider l'exclusion `node_modules`, **mesurer le temps** et la taille de sortie. Valider AVANT de bâtir l'infra. Livrable = note de faisabilité + décision go/no-go sur le packaging.
+- **P0 — Spike de faisabilité** (pas de code produit final) : installer Graphify dans l'image, lancer `graphify update` **à la main** sur 1 projet workspace (ex. `my-project`) + 1 plugin (ex. `novelai`), vérifier `graph.json` + `GRAPH_REPORT.md`, valider l'exclusion `node_modules`, **mesurer le temps** et la taille de sortie. Valider AVANT de bâtir l'infra. Livrable = note de faisabilité + décision go/no-go sur le packaging.
 - **P1 — Indexeur cœur + store** : `modules/codegraph/` (découverte scopes + porte C3 « code détecté » + `.graphifyignore` géré + runner `execFile` + probe + `GraphStore` + stockage `/data/codegraph`) ; **janitor + watcher débouncé** ; instanciation `index.ts` (try/catch, optionnel) ; config knobs. Tests. **À ce stade le graphe existe et se maintient, invisible pour les agents.**
 - **P2 — Outils MCP + préambule** : `codegraph.list/query/path/explain` (délègue à la CLI), enregistrement `mcp/server.ts:234`, `ToolContext.graph`, directive préambule lead/worker + `TEAM_TOOL_LOGICAL_NAMES`. Tests. **Les agents peuvent interroger le graphe (gain tokens).**
 - **P3 — Intégration mémoire (C4)** : note mémoire `reference` auto-gérée par scope, dérivée du `GRAPH_REPORT.md` (wikilinks), réécrite à chaque re-index, `managed:true`, supprimée si scope désactivé. REST `createGraphRouter` + events `code.graph.*`. **Le code graph entre dans la mémoire Obsidian + temps réel web.**

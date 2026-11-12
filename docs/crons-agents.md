@@ -430,7 +430,7 @@ création) + ce plan.
 - Docs : section « Crons » dans `docs/deploy/usage.en.md` + `usage.fr.md`
   (remplace « Scheduler (cron per role) ») ; note de migration dans le
   changelog ; balayage des références restantes à `modules/schedule`
-  (`docs/auto-amelioration.md:74`, commentaires `schema.sql:50-52`,
+  (`docs/internal/designs/auto-amelioration.md:74`, commentaires `schema.sql:50-52`,
   `db/index.ts:880`, `roles/index.ts:246-247`).
 
 ---

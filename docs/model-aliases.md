@@ -6,7 +6,7 @@ Quand un nouveau modèle sort (ex. `claude-opus-5-5`, 2026-09-22), les nouveaux 
 doivent le prendre **sans intervention humaine**. Aujourd'hui ce n'est vrai que pour le défaut
 provider (`ModelCatalogue.defaultModel` → famille opus uniquement). Tout id **choisi** est figé :
 
-| Où l'id se fige | Exemple (stiix, 2026-09-23) |
+| Où l'id se fige | Exemple (`my-project`, 2026-09-23) |
 |---|---|
 | `roles.default_model` | `claude-opus-5` ×2, `claude-sonnet-5` ×3, `claude-opus-4-8[1m]` ×1 |
 | `orchestrators.default_model` (hérité par chaque worker) | `claude-opus-4-8` ×10, `claude-sonnet-5` ×3, … |
@@ -105,7 +105,7 @@ Décisions utilisateur (2026-09-23) :
 - Plugin `discord-agent` : il réapplique `leadModel` à son rôle à chaque boot et écraserait donc la
   migration. Son défaut passe à `opus[1m]`. La valeur **sauvegardée** dans sa config d'instance est
   à basculer via `PUT /plugins/discord-agent/config` : fait sur test le 2026-09-23, reste à faire
-  sur stiix.
+  sur `my-project`.
 - Alternative écartée : tout déléguer au CLI (aucune résolution serveur). Plus simple, mais
   `sessions.model` afficherait `opus` au lieu de l'id réellement exécuté, et le prix live serait perdu.
 

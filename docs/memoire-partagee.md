@@ -2,7 +2,7 @@
 
 > Recherche & analyse — 2026-07-31. Établi à partir d'une cartographie du code
 > de ce repo (`packages/server`, `packages/web`, `packages/plugin-sdk`) et du
-> comparatif `docs/comparatif-hermes-agent.md`.
+> comparatif `docs/internal/analyses/comparatif-hermes-agent.md`.
 >
 > **But** : combler le seul vrai manque « plateforme » de SwarmOS face à Hermes
 > Agent — la **mémoire longue partagée** — par un graphe de connaissances façon
@@ -13,7 +13,7 @@
 
 ## 1. Le gap à combler
 
-`docs/comparatif-hermes-agent.md` (§3) : mémoire longue = **« Aucune côté
+`docs/internal/analyses/comparatif-hermes-agent.md` (§3) : mémoire longue = **« Aucune côté
 plateforme (déléguée au CLI : `CLAUDE.md`, mémoire Claude Code) »** vs Hermes
 = « Mémoire 3 niveaux persistante, profils Honcho, recherche FTS5 ».
 
