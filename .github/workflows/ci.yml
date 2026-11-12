@@ -1,0 +1,84 @@
+name: CI
+
+# Lint, typecheck, tests and build on every pull request and every push to
+# master. The release image is built separately by release-image.yml (on tags).
+#
+# Toolchain versions come from the repo, not from this file:
+#   - Node 24: the Dockerfile builds and runs on node:24-bookworm-slim
+#     (package.json `engines` only sets the floor, >=22).
+#   - pnpm: pnpm/action-setup reads `packageManager` from package.json.
+
+on:
+  pull_request:
+  push:
+    branches: [master]
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+env:
+  NODE_VERSION: '24'
+
+jobs:
+  check:
+    name: Lint, typecheck, build
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      # Native modules (node-pty, better-sqlite3) compile here; the runner image
+      # already ships python3, make and g++.
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      - name: Lint
+        run: pnpm lint
+
+      - name: Typecheck
+        run: pnpm typecheck
+
+      - name: Build
+        run: pnpm build
+
+  test:
+    name: Tests
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: pnpm
+
+      - name: Install
+        run: pnpm install --frozen-lockfile
+
+      # The three Vitest projects are declared in vitest.config.ts. They run as
+      # separate steps so a failure names its project.
+      - name: Test (web)
+        run: pnpm exec vitest run --project web
+
+      - name: Test (examples)
+        run: pnpm exec vitest run --project examples
+
+      # Server unit + integration tests. Its config already runs files serially
+      # (fileParallelism: false) in forked workers, so the integration tests
+      # that open real HTTP/WebSocket listeners never race each other here.
+      - name: Test (server)
+        run: pnpm exec vitest run --project server

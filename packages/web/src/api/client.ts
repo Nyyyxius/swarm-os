@@ -1070,7 +1070,8 @@ export type SystemCheckStatus =
   | 'never_checked'
   | 'ok'
   | 'no_releases'
-  | 'no_token'
+  /** GitHub's API rate limit is spent; `error` says until when. */
+  | 'rate_limited'
   | 'unauthorized'
   | 'not_found'
   | 'error';

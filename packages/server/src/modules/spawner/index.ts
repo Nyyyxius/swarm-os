@@ -224,7 +224,7 @@ export interface SpawnerDeps {
    */
   approvals?: ApprovalStore;
   /**
-   * The skills subsystem (docs/plan-skills-importables.md). Held on the Spawner
+   * The skills subsystem (docs/internal/skills/plan-skills-importables.md). Held on the Spawner
    * like `taskboard`: `spawner.skills` feeds the MCP `skills.*` tools and the
    * per-spawn preamble resolver. Absent ⇒ `skills.*` answer SKILLS_UNAVAILABLE
    * and no skill is injected.
@@ -302,7 +302,7 @@ export class Spawner {
   readonly taskboard: TaskboardStore | null;
 
   /**
-   * The skills subsystem (docs/plan-skills-importables.md), or `null` when none
+   * The skills subsystem (docs/internal/skills/plan-skills-importables.md), or `null` when none
    * was wired. Reached by the MCP `skills.*` tools via `ToolContext` and by the
    * per-spawn preamble resolver.
    */

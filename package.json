@@ -4,11 +4,20 @@
   "private": true,
   "license": "MIT",
   "type": "module",
-  "description": "Plateforme web pour orchestrer des equipes de sessions Claude Code en mode autonome.",
+  "description": "Self-hosted web console that runs persistent teams of AI coding agents (Claude Code, Codex, Gemini, opencode) and lets you supervise them from a browser or phone.",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/Nyyyxius/swarm-os.git"
+  },
+  "homepage": "https://github.com/Nyyyxius/swarm-os#readme",
+  "bugs": {
+    "url": "https://github.com/Nyyyxius/swarm-os/issues"
+  },
   "scripts": {
     "dev": "concurrently -n server,web -c blue,magenta \"pnpm --filter server dev\" \"pnpm --filter web dev\"",
     "build": "pnpm -r build",
     "lint": "eslint .",
+    "typecheck": "pnpm -r typecheck",
     "format": "prettier --write .",
     "test": "vitest run",
     "test:watch": "vitest",
@@ -21,18 +30,18 @@
     "models:sync": "pnpm --filter server exec tsx ../../scripts/sync-models.ts"
   },
   "devDependencies": {
-    "@eslint/js": "^9.18.0",
-    "@types/node": "^22.10.0",
-    "@vitest/coverage-v8": "^4.1.6",
-    "concurrently": "^9.1.0",
-    "eslint": "^9.18.0",
-    "eslint-plugin-react": "^7.37.4",
-    "eslint-plugin-react-hooks": "^5.1.0",
-    "globals": "^15.14.0",
-    "prettier": "^3.4.2",
-    "typescript": "^5.7.3",
-    "typescript-eslint": "^8.21.0",
-    "vitest": "^4.1.6"
+    "@eslint/js": "^9.39.5",
+    "@types/node": "^22.20.5",
+    "@vitest/coverage-v8": "^4.1.12",
+    "concurrently": "^9.2.5",
+    "eslint": "^9.39.5",
+    "eslint-plugin-react": "^7.37.5",
+    "eslint-plugin-react-hooks": "^5.2.0",
+    "globals": "^15.15.0",
+    "prettier": "^3.10.0",
+    "typescript": "^5.9.3",
+    "typescript-eslint": "^8.72.2",
+    "vitest": "^4.1.12"
   },
   "packageManager": "pnpm@11.1.2",
   "engines": {

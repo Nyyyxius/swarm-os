@@ -336,7 +336,7 @@ stable identity across redeploys:
 
 ```ts
 const wanted = {
-  name: 'trader-open',            // prefix with your plugin name
+  name: 'my-plugin-open',         // prefix with your plugin name
   roleId,                         // the TARGET is a role, not a session
   schedule: '30 9 * * 1-5',       // exactly 5 fields, server timezone
   action: 'message' as const,

@@ -3,17 +3,17 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/setup.sh | bash
 #
-# The repository is public: the script and its compose files need no token. The
-# IMAGE is private, so pulling it needs a classic GitHub PAT with
-# `read:packages` — the script asks for it (and reuses it to read releases).
-# Exporting it means you give it once: SWARM_OS_PAT, SWARM_OS_GITHUB_TOKEN,
-# GITHUB_TOKEN and GH_TOKEN are all read from the environment.
-# `| bash -s -- --token <pat>` works too, but leaves the token in your shell
-# history and in `ps` output.
+# The repository and the image are public: the script, its compose files and
+# `docker pull` need no token. A read-only GitHub token is optional and only
+# useful for a private fork (`repo`) or a private image mirror (`read:packages`);
+# it is never asked for — press `e` on the GitHub access screen, or export
+# SWARM_OS_PAT or SWARM_OS_GITHUB_TOKEN (an ambient GITHUB_TOKEN / GH_TOKEN is
+# NOT read: it is some other tool's credential). `| bash -s -- --token <pat>`
+# works too, but leaves the token in your shell history and in `ps` output.
 #
 # One file, no kit, no clone. It takes a bare host to a running swarm-os:
-# checks the prerequisites, asks for a GitHub token when the private image (or
-# a private fork of the repository) needs one, lets you pick the install directory / project
+# checks the prerequisites, checks the repository and the image are in reach
+# (and takes a token only for a private fork or mirror), lets you pick the install directory / project
 # workspace / state directory (suggesting the ones that actually exist on this
 # host), verifies the port is free, writes `.env`, pulls the image, starts the
 # container, waits for the boot gate and hands you the access token.
@@ -54,7 +54,12 @@ KIT_SSH="examples/docker-compose.ssh.yml"
 
 # ── Answers (globals the screens fill in) ─────────────────────────────────────
 DIR="${SWARM_OS_DIR:-$HOME/swarm-os}"
-TOKEN="${SWARM_OS_PAT:-${SWARM_OS_GITHUB_TOKEN:-${GITHUB_TOKEN:-${GH_TOKEN:-}}}}"
+# Explicit variables only — never an ambient GITHUB_TOKEN / GH_TOKEN (CI, the gh
+# CLI): those would be used silently and could end up in this deployment's .env.
+TOKEN="${SWARM_OS_PAT:-${SWARM_OS_GITHUB_TOKEN:-}}"
+TOKEN_SOURCE=""          # where TOKEN came from, said on the access screen
+if [ -n "${SWARM_OS_PAT:-}" ]; then TOKEN_SOURCE="SWARM_OS_PAT"
+elif [ -n "${SWARM_OS_GITHUB_TOKEN:-}" ]; then TOKEN_SOURCE="SWARM_OS_GITHUB_TOKEN"; fi
 GHCR_TOKEN=""            # may differ from TOKEN: read:packages vs repo (private fork)
 GHCR_USER=""
 SWARM_OS_PROJECT_NAME=""
@@ -1112,7 +1117,7 @@ screen_welcome() {
   ui_out "This installer takes you from a bare host to a running instance:"
   ui_gap
   ui_dim "  1.  checks Docker, Compose and this host's outbound network"
-  ui_dim "  2.  asks for a GitHub token, and only if this host actually needs one"
+  ui_dim "  2.  checks the repository and the public image are in reach (no token)"
   ui_dim "  3.  asks which host account it runs as — its uid, and the Claude Code"
   ui_dim "      login every agent inherits from it"
   ui_dim "  4.  lets you pick the install directory, the workspace and the port"
@@ -1265,22 +1270,55 @@ fix_prereqs() {
 }
 
 # ── GitHub access ─────────────────────────────────────────────────────────────
-# What the token is FOR, in order: reading two compose files out of the
-# repository (public — only a private fork needs it), and pulling a private
-# image out of GHCR. Those are two different
-# permissions and a token can carry one without the other, so both are probed
-# and reported separately instead of failing later with `pull access denied`.
+# Two things must be in reach: two compose files out of the repository, and the
+# image. Both are public, so neither needs a token; a token only matters for a
+# private fork (`repo`) or a private image mirror (`read:packages`), and a token
+# can carry one permission without the other. Both are probed and reported
+# separately instead of failing later with `pull access denied`.
 KIT_ACCESS=""      # ok | 401 | 403 | 404 | 000
+KIT_TOKEN_REFUSED=0  # 1 = the token got 401/403 and the anonymous retry decided
 GHCR_ACCESS=""     # ok | denied | skipped
+GHCR_ERR=""        # what docker said when GHCR_ACCESS=denied
+
+# Explain a failed pull from what docker actually said, one line per hint, on
+# stdout (the callers render it). Matching order matters: a missing platform
+# also says "not found", and GHCR answers "denied" both for a refused login and
+# for a package that does not exist (or is not public).
+pull_diagnosis() { # pull_diagnosis <image> <docker output>
+  local img="$1" out="$2" registry="${1%%/*}"
+  case "$out" in
+    *"Cannot connect to the Docker daemon"*|*"Docker daemon socket"*|*"docker daemon"*"running"*)
+      echo "the Docker daemon is not running, or this user may not use it (docker group)." ;;
+    *"no matching manifest"*|*"no match for platform"*|*"does not provide the specified platform"*)
+      echo "$img has no build for this machine's architecture ($(uname -m))."
+      echo "build it from source: git clone https://github.com/${REPO}.git, then ./install.sh there and pick \"Build it here\"." ;;
+    *"no such host"*|*"i/o timeout"*|*"dial tcp"*|*"connection refused"*|*"network is unreachable"*|*"TLS handshake"*|*"Client.Timeout"*)
+      echo "$registry could not be reached — check outbound network, DNS and any proxy." ;;
+    *denied*|*unauthorized*|*"authentication required"*|*forbidden*)
+      echo "$registry refused it. The published image is public and needs no login, so: the reference is wrong or the package does not exist (GHCR answers \"denied\" for both), a stale \`docker login\` is being sent (try: docker logout $registry), or it is a private mirror (give a token with \`read:packages\`)." ;;
+    *"manifest unknown"*|*"not found"*)
+      echo "$registry does not know this tag — check the image reference (default: $IMAGE_DEFAULT)." ;;
+    *)
+      echo "see docker's message above." ;;
+  esac
+}
 
 probe_kit() {
   local code
+  KIT_TOKEN_REFUSED=0
   if [ -n "$TOKEN" ]; then
     code="$(curl -sS -o /dev/null -w '%{http_code}' -m 20 \
       -H "Authorization: Bearer ${TOKEN}" \
       -H "Accept: application/vnd.github.raw" \
       -H "X-GitHub-Api-Version: 2022-11-28" \
       "https://api.github.com/repos/${REPO}/contents/${KIT_DIST}?ref=${REF}" 2>/dev/null)" || code="000"
+    # A stale or wrong token must not block a public repository.
+    case "$code" in
+      401|403)
+        KIT_TOKEN_REFUSED=1
+        code="$(curl -sS -o /dev/null -w '%{http_code}' -m 20 \
+          "https://raw.githubusercontent.com/${REPO}/${REF}/${KIT_DIST}" 2>/dev/null)" || code="000" ;;
+    esac
   else
     code="$(curl -sS -o /dev/null -w '%{http_code}' -m 20 \
       "https://raw.githubusercontent.com/${REPO}/${REF}/${KIT_DIST}" 2>/dev/null)" || code="000"
@@ -1294,14 +1332,16 @@ probe_ghcr() {
   case "$SWARM_OS_IMAGE" in */*) : ;; *) return 0 ;; esac
   have docker || return 0
   docker info >/dev/null 2>&1 || return 0
-  # Already authenticated, or a public image: nothing to ask for.
-  if docker manifest inspect "$SWARM_OS_IMAGE" >/dev/null 2>&1; then GHCR_ACCESS=ok; return 0; fi
+  # A public image (or an already authenticated mirror): nothing to ask for.
+  if GHCR_ERR="$(docker manifest inspect "$SWARM_OS_IMAGE" 2>&1 >/dev/null)"; then GHCR_ACCESS=ok; GHCR_ERR=""; return 0; fi
   if [ -n "$GHCR_TOKEN" ]; then
     [ -n "$GHCR_USER" ] || GHCR_USER="$(curl -sS -m 15 -H "Authorization: Bearer ${GHCR_TOKEN}" \
       https://api.github.com/user 2>/dev/null | sed -n 's/.*"login"[[:space:]]*:[[:space:]]*"\([^"]*\)".*/\1/p' | head -1)"
     [ -n "$GHCR_USER" ] || GHCR_USER="${USER:-x}"
     if printf '%s' "$GHCR_TOKEN" | docker login "$registry" -u "$GHCR_USER" --password-stdin >/dev/null 2>&1; then
-      docker manifest inspect "$SWARM_OS_IMAGE" >/dev/null 2>&1 && { GHCR_ACCESS=ok; return 0; }
+      GHCR_ERR="$(docker manifest inspect "$SWARM_OS_IMAGE" 2>&1 >/dev/null)" && { GHCR_ACCESS=ok; GHCR_ERR=""; return 0; }
+    else
+      GHCR_ERR="docker login to $registry was refused for this token (unauthorized)"
     fi
   fi
   GHCR_ACCESS=denied
@@ -1309,14 +1349,19 @@ probe_ghcr() {
 
 screen_token() {
   STEP_NO=2
-  local probed=0
+  local probed=0 edit=0 line
   while :; do
-    ui_head "GitHub access" "the image is private — one read-only token pulls it and reads releases"
-    ui_wrapdim "Classic PAT with the \`read:packages\` scope (add \`repo\` only for a private fork of ${REPO})."
-    ui_wrapdim "Leave it empty to try without one — the probe below says whether that is enough on this host."
-    ui_gap
-    ui_input TOKEN "token" "$TOKEN" v_token 1
-    [ "$UI_BACK" = 1 ] && return 0
+    ui_head "GitHub access" "the repository and the image are public — no token needed"
+    ui_wrapdim "A read-only token is only for a private fork of ${REPO} (\`repo\`) or a private image mirror (\`read:packages\`): press e to give one."
+    if [ "$edit" = 1 ]; then
+      ui_gap
+      ui_input TOKEN "token (empty = none)" "$TOKEN" v_token 1
+      [ "$UI_BACK" = 1 ] && return 0
+      TOKEN_SOURCE=""
+    elif [ -n "$TOKEN" ] && [ -n "$TOKEN_SOURCE" ]; then
+      # Never use a token the operator cannot see: say where it came from.
+      ui_warn "using the token from \$${TOKEN_SOURCE} (set, hidden) — press e to change or clear it"
+    fi
 
     ui_gap
     ui_out "${C_DIM}checking…${C_RESET}"
@@ -1327,6 +1372,7 @@ screen_token() {
     printf '\033[%d;1H\033[K' "$((UI_ROW-1))"
     UI_ROW=$((UI_ROW-1))
 
+    [ "$KIT_TOKEN_REFUSED" = 1 ] && ui_warn "GitHub refused the token; the public repository was read without it"
     case "$KIT_ACCESS" in
       ok)  ui_ok "compose files readable from ${REPO}@${REF}" ;;
       401|403) ui_no "GitHub refused the token (HTTP $KIT_ACCESS)"
@@ -1339,17 +1385,18 @@ screen_token() {
     case "$GHCR_ACCESS" in
       ok)      ui_ok "image ${SWARM_OS_IMAGE} can be pulled${GHCR_USER:+ (as $GHCR_USER)}" ;;
       denied)  ui_warn "the image cannot be pulled yet"
-               ui_wrapdim "the token needs \`read:packages\`, and the maintainer must have granted your account access to the package" ;;
+               [ -n "$GHCR_ERR" ] && ui_wrapdim "docker: $(printf '%s' "$GHCR_ERR" | tail -n 1)"
+               while IFS= read -r line; do ui_wrapdim "$line"; done <<< "$(pull_diagnosis "$SWARM_OS_IMAGE" "$GHCR_ERR")" ;;
       skipped) ui_dim "image access not checked (docker unavailable)" ;;
     esac
     ui_gap
 
     if [ "$KIT_ACCESS" = ok ] && [ "$GHCR_ACCESS" != denied ]; then
       ui_out "${C_GREEN}Both are in reach.${C_RESET}"
-      ui_foot "$G_RET continue   e edit the token   esc back   ^C quit"
+      ui_foot "$G_RET continue   e token (private fork/mirror)   esc back   ^C quit"
     else
-      ui_wrap "e tries another token, g gives a separate one for the image, enter carries on — the deploy stops with a clear error if it cannot pull."
-      ui_foot "e edit   g image token   $G_RET continue   esc back"
+      ui_wrap "enter carries on — the deploy stops with a clear error if it cannot pull. For a private fork or mirror, e gives a token, g a separate one for the image."
+      ui_foot "$G_RET continue   e token   g image token   esc back"
     fi
 
     # One key loop for both outcomes. `enter` only leaves the screen when the
@@ -1361,12 +1408,12 @@ screen_token() {
       case "$KEYTYPE" in
         enter|right)
           if [ "$KIT_ACCESS" = ok ]; then return 0; fi
-          ui_foot "the compose files cannot be fetched — a token that can read ${REPO} is required   e edit   esc back" ;;
+          ui_foot "the compose files cannot be fetched (see above)   e token   esc back" ;;
         esc|left) UI_BACK=1; return 0 ;;
         int|eof) ui_abort ;;
         char)
           case "$KEY" in
-            e|E) again=1 ;;
+            e|E) edit=1; again=1 ;;
             g|G) UI_ROW=$((UI_ROW + 1))
                  ui_input GHCR_TOKEN "image token (read:packages)" "" v_token 1
                  GHCR_USER=""; again=1 ;;
@@ -2181,8 +2228,8 @@ screen_access() {
 screen_extras() {
   STEP_NO=11
   ui_head "Notifications, updates, limits" "all optional — enter walks past every one of them"
-  ui_dim "Update detection reads the GitHub releases of swarm-os: any read-only PAT"
-  ui_dim "does (the image one too). Empty is a healthy state: it means \"never tell me\"."
+  ui_dim "Update detection reads the GitHub releases of swarm-os and needs no token."
+  ui_dim "A read-only token is optional: it only raises the GitHub API rate limit."
   ui_gap
   SWARM_OS_GITHUB_TOKEN="${SWARM_OS_GITHUB_TOKEN:-$TOKEN}"
   ui_input SWARM_OS_GITHUB_TOKEN "release-check token" "$SWARM_OS_GITHUB_TOKEN" v_token 1
@@ -2361,7 +2408,8 @@ write_env() {
   ekv SWARM_OS_DISCORD_WEBHOOK_URL "$SWARM_OS_DISCORD_WEBHOOK_URL"
   etx ""
   etx "# ── Update detection ─────────────────────────────────────────────────────────"
-  etx "# Read-only GitHub PAT, any scope (the read:packages one works). Empty = never announce releases."
+  etx "# Optional read-only GitHub token. Update detection works without it (public repo);"
+  etx "# a token only raises the GitHub API rate limit."
   ekv SWARM_OS_GITHUB_TOKEN "$SWARM_OS_GITHUB_TOKEN"
   etx ""
   etx "# ── Envelopes ────────────────────────────────────────────────────────────────"
@@ -2394,6 +2442,12 @@ fetch_one() {
       -H "Accept: application/vnd.github.raw" \
       -H "X-GitHub-Api-Version: 2022-11-28" \
       "https://api.github.com/repos/${REPO}/contents/${path}?ref=${REF}" 2>/dev/null)" || code="000"
+    # A stale or wrong token must not block a public repository.
+    case "$code" in
+      401|403)
+        code="$(curl -sS -w '%{http_code}' -o "$dest.part" -m 40 --retry 2 --retry-delay 1 \
+          "https://raw.githubusercontent.com/${REPO}/${REF}/${path}" 2>/dev/null)" || code="000" ;;
+    esac
   else
     code="$(curl -sS -w '%{http_code}' -o "$dest.part" -m 40 --retry 2 --retry-delay 1 \
       "https://raw.githubusercontent.com/${REPO}/${REF}/${path}" 2>/dev/null)" || code="000"
@@ -2569,11 +2623,17 @@ pull_image() {
        die "$SWARM_OS_IMAGE has no registry path and is not in the local image store." ;;
   esac
   say "Pulling $SWARM_OS_IMAGE"
+  # Attached to the terminal so docker's progress bars show (a pipe would hide
+  # them and make a multi-GB pull look hung). Only on failure is the pull run
+  # again, captured, to get docker's error text: the failures worth
+  # diagnosing fail again at once, and a rerun that succeeds is a success.
+  local out
   if docker pull "$SWARM_OS_IMAGE"; then good "image ready"; return 0; fi
+  if out="$(docker pull "$SWARM_OS_IMAGE" 2>&1)"; then good "image ready"; return 0; fi
 
   # The access probe on the token screen ran against whatever image was selected
-  # THEN; the answer can have changed since, and the registry login is the one
-  # recovery worth attempting without sending the operator back to the start.
+  # THEN; the answer can have changed since. A token given for a private mirror
+  # makes a registry login the one recovery worth attempting here.
   local registry="${SWARM_OS_IMAGE%%/*}" tok="${GHCR_TOKEN:-${TOKEN:-}}"
   if [ -n "$tok" ]; then
     [ -n "$GHCR_USER" ] || GHCR_USER="$(curl -sS -m 15 -H "Authorization: Bearer ${tok}" \
@@ -2584,15 +2644,17 @@ pull_image() {
       if printf '%s' "$tok" | docker login "$registry" -u "$GHCR_USER" --password-stdin >/dev/null 2>&1; then
         good "logged in"
         if docker pull "$SWARM_OS_IMAGE"; then good "image ready"; return 0; fi
+        # Diagnose THIS failure, not the anonymous one before the login.
+        if out="$(docker pull "$SWARM_OS_IMAGE" 2>&1)"; then good "image ready"; return 0; fi
       else
         bad "docker login was refused by $registry"
       fi
     fi
   fi
   bad "the pull failed."
-  dimly "the GHCR package is private: it needs a \`docker login\` with a PAT carrying"
-  dimly "read:packages, on an account the maintainer has granted access to."
-  dimly "  echo <PAT> | docker login ${SWARM_OS_IMAGE%%/*} -u <github-user> --password-stdin"
+  local line
+  [ -n "$out" ] && printf '%s\n' "$out" | tail -n 4 | while IFS= read -r line; do dimly "docker: $line"; done
+  while IFS= read -r line; do dimly "$line"; done <<< "$(pull_diagnosis "$SWARM_OS_IMAGE" "$out")"
   die "could not pull the image — nothing was started."
 }
 
@@ -2770,7 +2832,7 @@ main() {
       --dir)            DIR="$(expand_path "$2")"; shift 2 ;;
       --user)           RUN_USER_ARG="$2"; shift 2 ;;
       --port)           SWARM_OS_PORT="$2"; shift 2 ;;
-      --token)          TOKEN="$2"; shift 2 ;;
+      --token)          TOKEN="$2"; TOKEN_SOURCE=""; shift 2 ;;
       --ref)            REF="$2"; shift 2 ;;
       --repo)           REPO="$2"; shift 2 ;;
       --image)          SWARM_OS_IMAGE="$2"; shift 2 ;;

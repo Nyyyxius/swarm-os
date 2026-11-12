@@ -1,7 +1,7 @@
 // Phase C — Step 10 (Étape C.10) — `RolesPage` v2 fullscreen overlay.
 //
 // Replaces the previous Tailwind list+modal page with the v2 prototype layout
-// (cf. `prototypes/v2/modals.jsx:119-218` and `docs/redesign-desktop/10_roles-page-overlay.md`):
+// (cf. `prototypes/v2/modals.jsx:119-218` and `docs/internal/ui-redesign/redesign-desktop/10_roles-page-overlay.md`):
 //
 //   ┌──────────────────────────────────────────────────────────────────┐
 //   │  TopBar (kept visible above the overlay — `.roles-overlay` is    │
@@ -307,7 +307,7 @@ export function RolesPage({ open, onClose, onOpenCrons, approvalsVisible = true 
           )}
           {!loading && !error && roles.length === 0 && (
             <div className="field-help" style={{ padding: '14px 20px' }}>
-              No roles yet — click "+ NEW ROLE" below.
+              No roles yet — click &quot;+ NEW ROLE&quot; below.
             </div>
           )}
           {roles.map((r) => (

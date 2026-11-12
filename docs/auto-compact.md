@@ -719,7 +719,7 @@ tour, et le travail en cours ne reprend jamais tant qu'un humain n'a pas tapé
   le signal d'inbox** : `session.signalPostCompact({ inbox })` écrit **une**
   ligne via `notifySignal` (mêmes règles que `signalInbox` : cadence Ink texte
   puis `\r` seul à +150 ms, **aucun `\r` de tête** — correctif 2.1.277,
-  `docs/correctif-signal-cr-invisible.md` ; écriture unique `\r…\r` pour un
+  `docs/internal/post-mortems/correctif-signal-cr-invisible.md` ; écriture unique `\r…\r` pour un
   provider sans danse Ink, opencode) et consomme le drapeau. Refus sans écrire
   ni consommer si `dialogPending`, `_contextResetFiring`, `_noticeFiring` ou
   `_signalFiring` : réessai à la frontière suivante. Texte : constante exportée

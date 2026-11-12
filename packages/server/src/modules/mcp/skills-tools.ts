@@ -1,5 +1,5 @@
 /**
- * Skills MCP tools (docs/plan-skills-importables.md §7) — `skills.list`,
+ * Skills MCP tools (docs/internal/skills/plan-skills-importables.md §7) — `skills.list`,
  * `skills.show`, `skills.activate`, `skills.deactivate`. Mounted on the same
  * team-comms server as the other tool groups. `activate`/`deactivate` are
  * lead-only and scope to the team (`orch`, default), a session, or the role.

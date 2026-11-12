@@ -642,7 +642,7 @@ describe('Session.signalPostCompact — D9', () => {
     expect(session.signalPostCompact({ inbox: false })).toBe(true);
     expect(session.postCompactNudgeOwed).toBe(false);
     // Claude Code ≥ 2.1.277 cancels a submit whose buffer holds a bare CR
-    // (docs/correctif-signal-cr-invisible.md): the text goes alone, first.
+    // (docs/internal/post-mortems/correctif-signal-cr-invisible.md): the text goes alone, first.
     expect(pty.writes[before]).toBe(POST_COMPACT_NUDGE_TEXT);
     await sleep(200);
     expect(pty.writes[before + 1]).toBe('\r');

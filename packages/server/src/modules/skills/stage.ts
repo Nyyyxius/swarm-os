@@ -1,13 +1,13 @@
 /**
  * Skill staging — fetch a skill from a source into an isolated staging dir.
  *
- * Data-first (docs/plan-skills-importables.md §0): unlike the plugin installer
+ * Data-first (docs/internal/skills/plan-skills-importables.md §0): unlike the plugin installer
  * this runs NO `npm install` and NO `import()` — it only fetches/extracts files
  * (via the shared `install-core` primitives) and computes a provenance checksum.
  * Sources: `dir`, `upload` (.tgz), `npm`, `git` (+ optional `subdir`) and
  * `market` (Lot 4). A `market` ref is NOT staged here — the installer resolves
  * it to git coordinates (`market.ts`) and delegates to `stageGit`, so market
- * inherits the exact same data-first clone path (docs/skills-lot4-contract.md).
+ * inherits the exact same data-first clone path (docs/internal/skills/skills-lot4-contract.md).
  */
 
 import * as fs from 'node:fs';

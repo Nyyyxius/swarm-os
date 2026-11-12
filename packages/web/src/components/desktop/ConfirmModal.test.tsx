@@ -2,7 +2,7 @@
 //
 // Phase C — Step 14 : smoke tests for `ConfirmModal`.
 //
-// Contract documented in `docs/redesign-desktop/14_confirm-modal.md` §9.2.
+// Contract documented in `docs/internal/ui-redesign/redesign-desktop/14_confirm-modal.md` §9.2.
 // Pure UI component — no network, no global store.
 
 import { describe, it, expect, vi } from 'vitest';

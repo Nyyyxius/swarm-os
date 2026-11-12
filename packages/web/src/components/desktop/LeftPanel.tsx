@@ -4,7 +4,7 @@
 // HEALTH + per-orchestrator sparklines) and adapts the canonical
 // `OrchestratorView[]` (passed down from `DesktopShell`'s single
 // `useOrchestrators` poll) into the row models. Cf.
-// `docs/redesign-desktop/05_leftpanel-data-binding.md`.
+// `docs/internal/ui-redesign/redesign-desktop/05_leftpanel-data-binding.md`.
 
 import { useMemo } from 'react';
 import Sparkline from './Sparkline';
@@ -134,7 +134,7 @@ export default function LeftPanel({
     <aside className="panel-left">
       {/* ============ MESSAGE FLOW ============ */}
       <div className="pl-section">
-        <h3>MESSAGE FLOW <span className="tag">// LIVE</span></h3>
+        <h3>MESSAGE FLOW <span className="tag">{'// LIVE'}</span></h3>
         <div className="big-number">
           {flow.total.toLocaleString()}
           <span className="delta">+{flow.perMinute}/min</span>

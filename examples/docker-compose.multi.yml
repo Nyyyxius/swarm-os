@@ -9,18 +9,18 @@
 #
 # Usage:
 #   1. Edit host paths + env vars below.
-#   2. (Optional) export FYREL_DISCORD_WEBHOOK + GRAP_DISCORD_WEBHOOK in
+#   2. (Optional) export MY_PROJECT_DISCORD_WEBHOOK + MY_OTHER_PROJECT_DISCORD_WEBHOOK in
 #      your shell or a .env file.
 #   3. docker compose -f examples/docker-compose.multi.yml up -d
 #
 # Reach each instance from the host (or via Tailscale on its loopback):
-#   - fyrel: http://127.0.0.1:8787
-#   - grap : http://127.0.0.1:8797
+#   - my-project      : http://127.0.0.1:8787
+#   - my-other-project: http://127.0.0.1:8797
 
 services:
-  swarm-fyrel-cc-app:
+  swarm-my-project:
     image: swarm-os:latest
-    container_name: swarm-fyrel-cc-app
+    container_name: swarm-my-project
     init: true
     restart: unless-stopped
     # PTY comfort, NOT corruption insurance: `spawner.shutdownAll()` is
@@ -30,19 +30,19 @@ services:
     ports:
       - "127.0.0.1:8787:8787"
     volumes:
-      - ${HOME}/dev/fyrel-cc-app:/workspace
+      - ${HOME}/dev/my-project:/workspace
       - ${HOME}/.claude:/claude-source:ro
       # optional: lift theme/auth state from host (silences first-spawn
       # theme picker — see docker-compose.single.yml for details).
       - ${HOME}/.claude.json:/claude-source.json:ro
-      - ${HOME}/.swarm-os/fyrel-cc-app:/data
+      - ${HOME}/.swarm-os/my-project:/data
     environment:
-      SWARM_OS_PROJECT_NAME: fyrel-cc-app
-      SWARM_OS_DISCORD_WEBHOOK_URL: ${FYREL_DISCORD_WEBHOOK:-}
-      SWARM_OS_PUBLIC_URL: ${FYREL_PUBLIC_URL:-https://swarm.tail-xyz.ts.net:8787}
-      # Update detection: read-only GitHub PAT (any scope — read:packages works). Both
-      # services read the SAME variable — one token, one repository. Not naming
-      # it here would leave the check on `no_token` whatever the .env holds.
+      SWARM_OS_PROJECT_NAME: my-project
+      SWARM_OS_DISCORD_WEBHOOK_URL: ${MY_PROJECT_DISCORD_WEBHOOK:-}
+      SWARM_OS_PUBLIC_URL: ${MY_PROJECT_PUBLIC_URL:-https://swarm.tail-xyz.ts.net:8787}
+      # Update detection: OPTIONAL GitHub token (releases are read anonymously; a
+      # token only raises the API rate limit). Both services read the SAME
+      # variable — one token, one repository.
       SWARM_OS_GITHUB_TOKEN: ${SWARM_OS_GITHUB_TOKEN:-}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/health"]
@@ -51,9 +51,9 @@ services:
       retries: 3
       start_period: 10s
 
-  swarm-grap-server:
+  swarm-my-other-project:
     image: swarm-os:latest
-    container_name: swarm-grap-server
+    container_name: swarm-my-other-project
     init: true
     restart: unless-stopped
     # Same rationale as the service above — PTY comfort, not corruption.
@@ -62,17 +62,17 @@ services:
       # Distinct host port; the in-container port stays at 8787. Plan §13.
       - "127.0.0.1:8797:8787"
     volumes:
-      - ${HOME}/dev/grap-server:/workspace
+      - ${HOME}/dev/my-other-project:/workspace
       - ${HOME}/.claude:/claude-source:ro
       # optional: lift theme/auth state from host (silences first-spawn
       # theme picker — see docker-compose.single.yml for details).
       - ${HOME}/.claude.json:/claude-source.json:ro
-      - ${HOME}/.swarm-os/grap-server:/data
+      - ${HOME}/.swarm-os/my-other-project:/data
     environment:
-      SWARM_OS_PROJECT_NAME: grap-server
-      SWARM_OS_DISCORD_WEBHOOK_URL: ${GRAP_DISCORD_WEBHOOK:-}
-      SWARM_OS_PUBLIC_URL: ${GRAP_PUBLIC_URL:-https://swarm.tail-xyz.ts.net:8797}
-      # Same read-only PAT as the service above (see its comment).
+      SWARM_OS_PROJECT_NAME: my-other-project
+      SWARM_OS_DISCORD_WEBHOOK_URL: ${MY_OTHER_PROJECT_DISCORD_WEBHOOK:-}
+      SWARM_OS_PUBLIC_URL: ${MY_OTHER_PROJECT_PUBLIC_URL:-https://swarm.tail-xyz.ts.net:8797}
+      # Same optional token as the service above (see its comment).
       SWARM_OS_GITHUB_TOKEN: ${SWARM_OS_GITHUB_TOKEN:-}
     healthcheck:
       test: ["CMD", "curl", "-fsS", "http://127.0.0.1:8787/health"]

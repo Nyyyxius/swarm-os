@@ -3,7 +3,7 @@
 // Panneau de commandes (⌘K) — port TS de `prototypes/v2/launcher.jsx`.
 // Remplace les 9 boutons de destination de la topbar : une destination
 // future coûte une ligne dans LAUNCHER_GROUPS, plus un bouton de chrome.
-// Cf. `docs/redesign-desktop/20_command-launcher.md`.
+// Cf. `docs/internal/ui-redesign/redesign-desktop/20_command-launcher.md`.
 
 import { useEffect, useMemo, useRef, useState, type KeyboardEvent } from 'react';
 import { createPortal } from 'react-dom';

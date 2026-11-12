@@ -24,7 +24,7 @@ import { EFFORTS, PERMS } from './desktop/constants';
  * Warm-black amber layout (`.modal`, `.field*`, `.seg-radio`, `.btn*`) from
  * `desktop-theme.css` (Step 1). Props signature and payload shape are
  * preserved so `OrchestratorList.tsx` and `DesktopShell.tsx` (Step 9 caller)
- * keep working without changes. Spec: docs/redesign-desktop/09_new-orchestrator-dialog.md
+ * keep working without changes. Spec: docs/internal/ui-redesign/redesign-desktop/09_new-orchestrator-dialog.md
  *
  * Auto-fill policy (compromise — spec §3.1) : on role change, MODEL/EFFORT/
  * PERMISSION are always overwritten (technical defaults), but LEAD PROMPT
@@ -284,7 +284,7 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
       <div className="modal wide" onClick={(e) => e.stopPropagation()}>
         <div className="modal-head">
           <div className="modal-title">
-            + NEW ORCHESTRATOR <span className="sub">// spin up a new team</span>
+            + NEW ORCHESTRATOR <span className="sub">{'// spin up a new team'}</span>
           </div>
           <button className="pr-close" onClick={onClose} aria-label="Close">×</button>
         </div>
@@ -356,7 +356,7 @@ export function NewOrchestratorDialog({ open, onClose, onCreate }: Props) {
 
           <div className="field">
             <label htmlFor="orch-preamble">
-              LEAD PREAMBLE <span style={{ color: 'var(--text-mute)' }}>// optional</span>
+              LEAD PREAMBLE <span style={{ color: 'var(--text-mute)' }}>{'// optional'}</span>
             </label>
             <textarea
               id="orch-preamble"

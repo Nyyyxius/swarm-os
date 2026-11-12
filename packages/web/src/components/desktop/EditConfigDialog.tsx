@@ -3,7 +3,7 @@
 // Phase C — Step 13 : preview-disabled port of the v2 EditConfigDialog
 // (`prototypes/v2/modals.jsx:374-426`).
 //
-// v1 contract (cf. `docs/redesign-desktop/13_spawn-worker-edit-config.md`
+// v1 contract (cf. `docs/internal/ui-redesign/redesign-desktop/13_spawn-worker-edit-config.md`
 // §6) : the dialog is fully interactive (MODEL dropdown, EFFORT
 // `.seg-radio`, PERMISSION MODE dropdown with the inline
 // bypassPermissions warning) but the ROTATE+RESTART button is **always
@@ -42,7 +42,6 @@ interface Props {
   team: OrchestratorView | null;
   onClose: () => void;
   /** Reserved for v2 once PATCH /orchestrators/:id lands. Unused v1. */
-  // eslint-disable-next-line @typescript-eslint/no-unused-vars
   onSave?: (patch: {
     model: string;
     effort: Effort;
@@ -114,7 +113,7 @@ export default function EditConfigDialog({ open, team, onClose }: Props) {
       >
         <div className="modal-head">
           <div className="modal-title" id="edit-config-title">
-            ROTATE CONFIG <span className="sub">// {team.name}</span>
+            ROTATE CONFIG <span className="sub">{'// '}{team.name}</span>
           </div>
           <button className="pr-close" onClick={onClose} aria-label="Close">×</button>
         </div>

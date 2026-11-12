@@ -5,7 +5,7 @@
 // ABOUT (project_name, version, uptime live, started_at, sessions_active),
 // EVENTS (pip WS state).
 //
-// Notes d'implémentation (cf. docs/redesign-desktop/11_settings-drawer.md) :
+// Notes d'implémentation (cf. docs/internal/ui-redesign/redesign-desktop/11_settings-drawer.md) :
 //  - On utilise `setToken` / `getToken` de `api/client.ts` (clé
 //    `'swarm-os.token'`) — **pas** de manipulation directe de
 //    `localStorage`. Toute évolution future de la clé reste centralisée.

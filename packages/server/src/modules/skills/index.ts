@@ -1,6 +1,6 @@
 /**
  * SkillsSubsystem — the façade the REST routes, MCP tools and the Orchestrator
- * reach (docs/plan-skills-importables.md §7). Held on the Spawner as
+ * reach (docs/internal/skills/plan-skills-importables.md §7). Held on the Spawner as
  * `spawner.skills`, exactly like `memory` / `taskboard` / `graph`.
  *
  * Owns: the registry (`SkillStore`), import/re-import (`SkillInstaller`), the
@@ -196,7 +196,7 @@ export class SkillsSubsystem {
   /**
    * Browse the configured market registry (`market.ts`). Graceful: resolves to
    * `{available:false}` when no endpoint is configured and never throws, so a
-   * browse UI degrades instead of erroring (docs/skills-lot4-contract.md).
+   * browse UI degrades instead of erroring (docs/internal/skills/skills-lot4-contract.md).
    */
   marketSearch(query: string): Promise<MarketSearchResult> {
     return this.installer.marketSearch(query);
@@ -347,7 +347,7 @@ export class SkillsSubsystem {
 
   /**
    * The effective fragments for a session — merge of role, orch and session
-   * scopes (docs/plan-skills-importables.md §2.1). Called at EACH spawn; also
+   * scopes (docs/internal/skills/plan-skills-importables.md §2.1). Called at EACH spawn; also
    * stages any durable assets into the workspace (idempotent).
    */
   resolveForSession(

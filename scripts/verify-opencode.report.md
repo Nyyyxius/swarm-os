@@ -150,7 +150,7 @@ Exit: 0  ·  Duration: 6213ms
 Evidence:
 ```
 debug paths:
-home       /home/ubuntu
+home       ~
 data       /tmp/swarm-os-spike/opencode/xdg/data/opencode
 bin        /tmp/swarm-os-spike/opencode/xdg/cache/opencode/bin
 log        /tmp/swarm-os-spike/opencode/xdg/data/opencode/log

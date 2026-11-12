@@ -13,6 +13,8 @@ import { execFile, spawnSync } from 'node:child_process';
 import { probeGraphify, runUpdate, parseCounts } from './graphify.js';
 
 const execFileMock = execFile as unknown as Mock;
+/** Node's `execFile` completion callback, as the mocks below invoke it. */
+type ExecFileCallback = (err: Error | null, stdout: string, stderr: string) => void;
 const spawnSyncMock = spawnSync as unknown as Mock;
 
 let dir: string;
@@ -73,7 +75,7 @@ describe('runUpdate', () => {
   it('prepares the index dir, seeds the build config, and passes GRAPHIFY_OUT', async () => {
     let capturedEnv: NodeJS.ProcessEnv | undefined;
     let capturedArgs: string[] | undefined;
-    execFileMock.mockImplementation((_bin: string, args: string[], opts: { env: NodeJS.ProcessEnv }, cb: Function) => {
+    execFileMock.mockImplementation((_bin: string, args: string[], opts: { env: NodeJS.ProcessEnv }, cb: ExecFileCallback) => {
       capturedArgs = args;
       capturedEnv = opts.env;
       cb(null, '[graphify watch] Rebuilt: 8 nodes, 6 edges, 3 communities', '');
@@ -101,7 +103,7 @@ describe('runUpdate', () => {
 
   it('uses the extract verb when engine=extract (opt-in stub)', async () => {
     let capturedArgs: string[] | undefined;
-    execFileMock.mockImplementation((_bin: string, args: string[], _opts: unknown, cb: Function) => {
+    execFileMock.mockImplementation((_bin: string, args: string[], _opts: unknown, cb: ExecFileCallback) => {
       capturedArgs = args;
       cb(null, 'Rebuilt: 1 nodes, 0 edges', '');
     });
@@ -110,7 +112,7 @@ describe('runUpdate', () => {
   });
 
   it('never throws — a CLI error comes back as { ok:false }', async () => {
-    execFileMock.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: Function) => {
+    execFileMock.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: ExecFileCallback) => {
       cb(Object.assign(new Error('boom'), { killed: false }), '', 'graphify exploded');
     });
     const res = await runUpdate({ bin: 'graphify', sourceDir: '/ws/app', indexDir: path.join(dir, 'idx'), engine: 'ast', timeoutMs: 1000 });
@@ -119,7 +121,7 @@ describe('runUpdate', () => {
   });
 
   it('flags a timeout (SIGTERM) on the result', async () => {
-    execFileMock.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: Function) => {
+    execFileMock.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: ExecFileCallback) => {
       cb(Object.assign(new Error('timeout'), { killed: true, signal: 'SIGTERM' }), '', '');
     });
     const res = await runUpdate({ bin: 'graphify', sourceDir: '/ws/app', indexDir: path.join(dir, 'idx'), engine: 'ast', timeoutMs: 1 });
@@ -128,7 +130,7 @@ describe('runUpdate', () => {
   });
 
   it('adds extraExcludes as name/ patterns in the seeded build config', async () => {
-    execFileMock.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: Function) => cb(null, 'Rebuilt: 0 nodes, 0 edges', ''));
+    execFileMock.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: ExecFileCallback) => cb(null, 'Rebuilt: 0 nodes, 0 edges', ''));
     const indexDir = path.join(dir, 'idx');
     await runUpdate({ bin: 'graphify', sourceDir: '/ws', indexDir, engine: 'ast', timeoutMs: 1000, extraExcludes: ['app', 'lib'] });
     const cfg = JSON.parse(fs.readFileSync(path.join(indexDir, 'graphify-out', '.graphify_build.json'), 'utf8'));
@@ -141,7 +143,7 @@ describe('runUpdate', () => {
     const outDir = path.join(dir, 'idx', 'graphify-out');
     fs.mkdirSync(outDir, { recursive: true });
     fs.writeFileSync(path.join(outDir, '.graphify_build.json'), JSON.stringify({ someGraphifyKey: 42, excludes: ['old/'] }));
-    execFileMock.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: Function) => cb(null, 'Rebuilt: 0 nodes, 0 edges', ''));
+    execFileMock.mockImplementation((_bin: string, _args: string[], _opts: unknown, cb: ExecFileCallback) => cb(null, 'Rebuilt: 0 nodes, 0 edges', ''));
     await runUpdate({ bin: 'graphify', sourceDir: '/ws/app', indexDir: path.join(dir, 'idx'), engine: 'ast', timeoutMs: 1000 });
     const cfg = JSON.parse(fs.readFileSync(path.join(outDir, '.graphify_build.json'), 'utf8'));
     expect(cfg.someGraphifyKey).toBe(42); // preserved

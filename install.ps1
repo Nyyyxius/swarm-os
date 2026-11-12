@@ -5,7 +5,7 @@ The Windows twin of install.sh. Same two modes, chosen by what it finds:
 
   WIZARD -- no `.env` yet, or -Reconfigure. Walks through the steps of
             docs/deploy/install.en.md: host prerequisites (Docker Desktop,
-            Claude Code CLI + login), project paths, image + registry login,
+            Claude Code CLI + login), project paths, image (public, no login),
             remote access, notifications, update detection. Writes `.env`, then
             deploys.
   DEPLOY -- `.env` is already there: pull, `compose up -d`, wait for /health,
@@ -63,10 +63,12 @@ $script:DefaultImage = 'ghcr.io/nyyyxius/swarm-os:latest'
 $script:LocalImage   = 'swarm-os:local'
 $script:ReleasesApi  = "https://api.github.com/repos/$($script:Repo)/releases/latest"
 
-# The kit -- the same list bootstrap.sh fetches.
+# The kit -- bootstrap.sh's KIT list plus README.md, docs/plugins.md and
+# docs/builtin-features.md (this script is often the only thing a Windows user
+# downloads, so the kit it fetches carries the main docs too).
 $script:Kit = @(
-  'install.sh', 'install.ps1', 'bootstrap.sh', 'README.md',
-  'docs/plugins.md', 'docs/builtin-features.md', 'docs/providers.md', 'docs/comparatif-hermes-agent.md',
+  'install.sh', 'install.ps1', 'bootstrap.sh', 'README.md', 'SECURITY.md',
+  'docs/plugins.md', 'docs/builtin-features.md', 'docs/providers.md',
   '.env.example', 'LICENSE',
   'examples/.env.example', 'examples/docker-compose.dist.yml', 'examples/docker-compose.ssh.yml',
   'examples/docker-compose.multi.yml',
@@ -200,6 +202,66 @@ function Test-Native([scriptblock]$Cmd) {
   return ($LASTEXITCODE -eq 0)
 }
 
+# What to do when there is no image to pull: build one from a full clone. The
+# fetched kit has no Dockerfile, so "build it here" starts there.
+function Write-BuildFromSourceHint {
+  Note 'to build the image yourself, clone the full repository and run the installer from it:'
+  Note "  git clone https://github.com/$($script:Repo).git; cd swarm-os; .\install.ps1   (then pick 'Build it here')"
+}
+
+# `docker pull` attached to the console (so its progress shows -- piping it
+# would hide the bars and make a multi-GB pull look hung). Only when it fails
+# is it run again with its output captured into $script:PullErr for
+# Explain-PullFailure: refused / unknown tag / platform / network fail again
+# at once, and a rerun that succeeds is simply a success.
+$script:PullErr = @()
+function Invoke-PullAttached([string]$Img) {
+  $script:PullErr = @()
+  # Start-Process, not `& docker`: inside a function `&` would feed docker's
+  # stdout into this function's return value (and redirect it, hiding the bars).
+  $p = Start-Process -FilePath 'docker' -ArgumentList @('pull', $Img) -NoNewWindow -Wait -PassThru
+  if ($p.ExitCode -eq 0) { return $true }
+  $script:PullErr = @(& docker pull $Img 2>&1 | ForEach-Object { "$_" })
+  return ($LASTEXITCODE -eq 0)
+}
+
+# Set by Explain-PullFailure: daemon | platform | network | refused | tag | other
+$script:PullFailureKind = ''
+
+# Explain a failed `docker pull` from what docker actually said, rather than
+# guessing. Matching order matters: a missing platform also says "not found",
+# and GHCR answers "denied" both for a refused login and for a package that
+# does not exist (or is not public).
+function Explain-PullFailure([string]$Img, [string[]]$Out) {
+  $registry = $Img.Split('/')[0]
+  $tail = @($Out | Where-Object { $_ -and $_.Trim() } | Select-Object -Last 4)
+  foreach ($l in $tail) { Note "docker: $l" }
+  $all = ($Out -join "`n")
+  if ($all -match 'docker daemon|docker_engine|dockerDesktopLinuxEngine|pipe/docker') {
+    $script:PullFailureKind = 'daemon'
+    Note 'the Docker engine is not reachable -- is Docker Desktop running?'
+  } elseif ($all -match 'no matching manifest|no match for platform|does not provide the specified platform') {
+    $script:PullFailureKind = 'platform'
+    Note "$Img has no build for this machine's architecture ($env:PROCESSOR_ARCHITECTURE)."
+    Write-BuildFromSourceHint
+  } elseif ($all -match 'no such host|i/o timeout|dial tcp|connection refused|network is unreachable|TLS handshake|Client\.Timeout') {
+    $script:PullFailureKind = 'network'
+    Note "$registry could not be reached -- check outbound network, DNS and any proxy."
+  } elseif ($all -match 'denied|unauthorized|authentication required|forbidden') {
+    $script:PullFailureKind = 'refused'
+    Note "$registry refused the pull. The published image is public and needs no login, so either:"
+    Note '  - the reference is wrong, or the package does not exist (GHCR answers "denied" for both);'
+    Note "  - a stale ``docker login`` for $registry is being sent -- try: docker logout $registry"
+    Note "  - it is a private mirror: log in first (docker login $registry), then re-run."
+  } elseif ($all -match 'manifest unknown|not found') {
+    $script:PullFailureKind = 'tag'
+    Note "$registry does not know this tag -- check the reference (e.g. $($script:DefaultImage))."
+  } else {
+    $script:PullFailureKind = 'other'
+    Note "see docker's message above."
+  }
+}
+
 function Write-TextNoBom([string]$Path, [string]$Text) {
   [System.IO.File]::WriteAllText($Path, $Text, (New-Object System.Text.UTF8Encoding($false)))
 }
@@ -304,6 +366,17 @@ function Get-Kit([string]$Target, [string]$GitRef, [string]$Pat) {
     } catch {
       if ($_.Exception.Response) { try { $code = [int]$_.Exception.Response.StatusCode } catch { } }
     }
+    # A stale or wrong token must not block a public repository: retry the
+    # file anonymously before giving up.
+    if ($Pat -and ($code -eq 401 -or $code -eq 403)) {
+      $code = 0
+      try {
+        $r = Invoke-WebRequest -Uri "https://raw.githubusercontent.com/$($script:Repo)/$GitRef/$path" -UseBasicParsing -OutFile "$dest.part" -PassThru -TimeoutSec 30 -ErrorAction Stop
+        $code = [int]$r.StatusCode
+      } catch {
+        if ($_.Exception.Response) { try { $code = [int]$_.Exception.Response.StatusCode } catch { } }
+      }
+    }
     if ($code -eq 200 -and (Test-Path -LiteralPath "$dest.part") -and (New-Object System.IO.FileInfo("$dest.part")).Length -gt 0) {
       Move-Item -Force "$dest.part" $dest
       Note $path
@@ -317,7 +390,7 @@ function Get-Kit([string]$Target, [string]$GitRef, [string]$Pat) {
     Warn "could not fetch: $($failed -join ' ')"
     if ($fetched -gt 0) {
       Note "GitHub answers fine -- $fetched other files came down from $($script:Repo)@$GitRef"
-      Die "those paths do not exist at $GitRef. Pick a ref that has them (-Ref master), or ask the maintainer for a newer tag."
+      Die "those paths do not exist at $GitRef. Pick a ref that has them (-Ref master), or use a newer tag."
     }
     $all = $failed -join ' '
     if ($all -match '\((401|403)\)') { Die "GitHub refused the token. It needs read access to $($script:Repo) -- or drop it: the public repo needs none." }
@@ -532,7 +605,11 @@ function Wiz-Image {
   )
 
   if ($script:ImageSource -eq 'local') {
-    if (-not (Test-Path -LiteralPath (Join-Path $script:RepoRoot 'Dockerfile'))) { Die 'no Dockerfile here -- a local build needs the full source tree.' }
+    if (-not (Test-Path -LiteralPath (Join-Path $script:RepoRoot 'Dockerfile'))) {
+      Warn 'no Dockerfile here -- this is the deploy kit, not the source tree, so it cannot build the image.'
+      Write-BuildFromSourceHint
+      Die "nothing to build from in $($script:RepoRoot)."
+    }
     $script:C['SWARM_OS_IMAGE'] = $script:LocalImage
     Note "the image will be built as $($script:LocalImage) at the deploy step"
     Note 'update it with git pull + .\install.ps1'
@@ -553,24 +630,33 @@ function Wiz-Image {
     return
   }
 
-  # Probe the pull now rather than at deploy: a private package failing to pull
-  # is a login problem, and the login is a question, not an error message.
-  Say "Checking access to $img ..."
-  if (Test-Native { docker pull $img }) { Ok 'image pulled'; return }
+  # Probe the pull now rather than at deploy, so a bad reference or a missing
+  # architecture is caught while the operator can still change the answer.
+  Say "Pulling $img ..."
+  if (Invoke-PullAttached $img) { Ok 'image pulled'; return }
+  Warn "Could not pull $img."
+  Explain-PullFailure $img $script:PullErr
+
+  # A private mirror is the one case a login fixes. Offered only for an image
+  # that is NOT the public default, so the default flow never asks for one.
   $registry = $img.Split('/')[0]
-  Warn 'Could not pull it. The GHCR package is private: it needs a `docker login` with a'
-  Note 'GitHub PAT carrying the read:packages scope, on an account the maintainer has granted access.'
-  if ($script:Interactive -and (Ask-YN "Log in to $registry now?" 'y')) {
-    $ghUser = Ask 'GitHub username' $env:USERNAME
-    $pat = Ask-Secret 'GitHub PAT (read:packages)'
-    if ($pat) {
-      $pat | & docker login $registry -u $ghUser --password-stdin
-      if ($LASTEXITCODE -eq 0) { Ok "logged in to $registry" } else { Warn 'docker login failed.' }
-      $pat = $null
-      if (Test-Native { docker pull $img }) { Ok 'image pulled' }
-      else { Warn "still cannot pull $img -- the deploy step will try again." }
+  if ($script:PullFailureKind -eq 'refused' -and $img -ne $script:DefaultImage -and $script:Interactive -and
+      (Ask-YN "Is $registry a private registry you can log in to? Log in now?" 'n')) {
+    $regUser = Ask "Username for $registry" $env:USERNAME
+    $regPw = Ask-Secret "Password or token for $registry"
+    if ($regPw) {
+      $regPw | & docker login $registry -u $regUser --password-stdin
+      $loggedIn = ($LASTEXITCODE -eq 0)
+      $regPw = $null
+      if ($loggedIn) {
+        Ok "logged in to $registry"
+        if (Invoke-PullAttached $img) { Ok 'image pulled'; return }
+        Warn "Still cannot pull $img."
+        Explain-PullFailure $img $script:PullErr
+      } else { Warn "docker login to $registry failed." }
     }
   }
+  Note 'the deploy step will try the pull again.'
 }
 
 # =============================================================================
@@ -659,19 +745,19 @@ function Wiz-Notifications {
 
   $script:C['SWARM_OS_DISCORD_WEBHOOK_URL'] = Ask 'Discord webhook URL for idle / team-ended notifications (empty = off)' (Cfg 'SWARM_OS_DISCORD_WEBHOOK_URL' '')
 
-  Note 'Update detection reads the GitHub Releases of the public swarm-os repo.'
-  Note 'Any read-only GitHub PAT does -- the read:packages one used by docker login too.'
-  Note 'Empty is healthy: it simply means "never tell me about releases".'
+  Note 'Update detection reads the GitHub Releases of the public swarm-os repo and'
+  Note 'needs no token. A read-only GitHub token is optional: it only raises the'
+  Note 'GitHub API rate limit. Leave it empty unless you hit that limit.'
   $pat = ''
   $known = Cfg 'SWARM_OS_GITHUB_TOKEN' ''
   if ($known -and (Ask-YN 'A GitHub token is already configured -- keep it for update detection?' 'y')) { $pat = $known }
-  if (-not $pat) { $pat = Ask-Secret 'GitHub PAT for update detection' }
+  if (-not $pat) { $pat = Ask-Secret 'Optional GitHub token for update detection (empty = none)' }
   if ($pat) {
     $code = Get-HttpStatus $script:ReleasesApi @{ Authorization = "Bearer $pat" }
     switch ($code) {
       200 { Ok 'token can read the releases (latest release visible)' }
       404 { Warn 'the API answered 404 -- the token is valid but cannot see this repository (wrong scope or no access).' }
-      { $_ -in 401, 403 } { Warn "the API refused the token (HTTP $code). Update detection will stay on no_token." }
+      { $_ -in 401, 403 } { Warn "the API refused the token (HTTP $code). Fix it, or clear it to detect updates without one." }
       default { Warn "could not reach api.github.com (HTTP $code) -- keeping the token anyway." }
     }
   }
@@ -780,7 +866,8 @@ function Write-Env {
   kv 'SWARM_OS_PUBLIC_URL'; kv 'SWARM_OS_DISCORD_WEBHOOK_URL'
   $L.Add('')
   $L.Add('# -- Update detection --')
-  $L.Add('# Read-only GitHub PAT, any scope (the read:packages one works). Empty = never announce releases.')
+  $L.Add('# Optional read-only GitHub token. Update detection works without it (public repo);')
+  $L.Add('# a token only raises the GitHub API rate limit.')
   kv 'SWARM_OS_GITHUB_TOKEN'
   $L.Add('')
   $L.Add('# -- Envelopes --')
@@ -849,17 +936,20 @@ function Build-OrPull {
   $img = Cfg 'SWARM_OS_IMAGE'
   if (Test-RegistryImage $img) {
     Say "Pulling $img"
-    & docker pull $img
-    if ($LASTEXITCODE -ne 0) {
-      Warn 'Pull failed. For a private registry, log in first:'
-      Note "docker login $($img.Split('/')[0]) -u <github-user>   (password: a PAT with read:packages)"
+    if (-not (Invoke-PullAttached $img)) {
+      Warn 'Pull failed.'
+      Explain-PullFailure $img $script:PullErr
       Die 'could not pull the image.'
     }
     return
   }
   # No registry path -> a locally built tag. Build it if it is not there yet.
   if ((Test-Native { docker image inspect $img }) -and $script:ImageSource -ne 'local') { Ok "using the local image $img"; return }
-  if (-not (Test-Path -LiteralPath (Join-Path $script:RepoRoot 'Dockerfile'))) { Die "$img is not in a registry and there is no Dockerfile here." }
+  if (-not (Test-Path -LiteralPath (Join-Path $script:RepoRoot 'Dockerfile'))) {
+    Warn "$img is not in a registry and there is no Dockerfile here (the deploy kit has none)."
+    Write-BuildFromSourceHint
+    Die 'nothing to build from.'
+  }
   Say "Building $img from source (this takes a few minutes) ..."
   & docker build -t $img $script:RepoRoot
   if ($LASTEXITCODE -ne 0) { Die 'the image build failed.' }

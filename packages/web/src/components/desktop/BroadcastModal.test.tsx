@@ -3,7 +3,7 @@
 // Phase C — Step 12 : smoke tests for `BroadcastModal`.
 //
 // We focus on the contract documented in
-// `docs/redesign-desktop/12_broadcast-modal.md` :
+// `docs/internal/ui-redesign/redesign-desktop/12_broadcast-modal.md` :
 //  - `open={false}` renders nothing.
 //  - Active-team filter (`endedAt === null` AND status ∈ {running, starting}).
 //  - SEND button disabled when text is empty.

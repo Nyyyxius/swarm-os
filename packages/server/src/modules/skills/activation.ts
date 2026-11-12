@@ -1,5 +1,5 @@
 /**
- * Skill activation — the two channels of docs/plan-skills-importables.md §2,
+ * Skill activation — the two channels of docs/internal/skills/plan-skills-importables.md §2,
  * generalised to the three scopes (role < orch < session, Lot 2).
  *
  *  - DURABLE: `resolveMergedFragments` merges the active skills of the role,

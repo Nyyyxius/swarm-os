@@ -249,17 +249,42 @@ describe('UpdateSection — verdict', () => {
     expect(link.getAttribute('rel')).toMatch(/noreferrer/);
   });
 
-  it('explains a check that produced no verdict (no_token)', async () => {
+  it('explains a check that produced no verdict (rate_limited)', async () => {
     vi.spyOn(api, 'getUpdates').mockResolvedValue(
-      mkState({ system: mkSystem({ checkStatus: 'no_token', latest: null }) }),
+      mkState({
+        system: mkSystem({
+          checkStatus: 'rate_limited',
+          latest: null,
+          error:
+            'GitHub API rate limit reached; resets at 10:42. Set SWARM_OS_GITHUB_TOKEN to raise it.',
+        }),
+      }),
     );
 
     const { container } = render(<UpdateSection />);
 
-    expect(await screen.findByText(/SWARM_OS_GITHUB_TOKEN/)).toBeInTheDocument();
+    // The server's sentence carries the reset time, so it is shown as is.
+    expect(await screen.findByText(/resets at 10:42/)).toBeInTheDocument();
     // `available === false` is also what "the check never produced an answer"
     // looks like. Green there would be the UI inventing an all-clear.
     expect(container.querySelector('.dot')?.className).not.toMatch(/\bok\b/);
+  });
+
+  it('shows the rejected-token note next to a valid verdict', async () => {
+    vi.spyOn(api, 'getUpdates').mockResolvedValue(
+      mkState({
+        system: mkSystem({
+          checkStatus: 'ok',
+          error: 'SWARM_OS_GITHUB_TOKEN was rejected by GitHub (401); releases were read without it.',
+        }),
+      }),
+    );
+
+    const { container } = render(<UpdateSection />);
+
+    expect(await screen.findByText(/was rejected by GitHub/)).toBeInTheDocument();
+    // The check itself succeeded, so the dot stays green.
+    expect(container.querySelector('.dot')?.className).toMatch(/\bok\b/);
   });
 
   it('keeps the green dot for a check that actually succeeded', async () => {

@@ -5,7 +5,7 @@
 #
 #   WIZARD — no `.env` yet, or `--reconfigure`. Walks through every step of
 #            `docs/deploy/install.en.md`: host prerequisites, Claude Code
-#            credentials, project paths, image + registry login, agent
+#            credentials, project paths, image (public, no login), agent
 #            transport (incl. generating and authorising an SSH key), the other
 #            agent CLIs, remote access, notifications, update detection. Writes
 #            `.env`, then deploys.
@@ -44,6 +44,7 @@ COMPOSE_SSH="examples/docker-compose.ssh.yml"
 DEFAULT_IMAGE="ghcr.io/nyyyxius/swarm-os:latest"
 LOCAL_IMAGE="swarm-os:local"
 RELEASES_API="https://api.github.com/repos/Nyyyxius/swarm-os/releases/latest"
+SOURCE_REPO_URL="https://github.com/Nyyyxius/swarm-os.git"
 
 ENV_FILE="$REPO_ROOT/.env"
 MODE=""            # "" (auto) | wizard | deploy
@@ -217,6 +218,64 @@ claude_path_refresh() {
 # A reference with a path segment can be pulled; a bare `name:tag` is a locally
 # built image — the same rule the update surface applies (`IMAGE IS LOCALLY BUILT`).
 image_is_registry() { case "$1" in */*) return 0 ;; *) return 1 ;; esac; }
+
+# What to do when there is no image to pull: build one from a full clone. The
+# kit bootstrap.sh fetches has no Dockerfile, so "build it here" starts there.
+build_from_source_hint() {
+  note "to build the image yourself, clone the full repository and run the installer from it:"
+  note "  git clone $SOURCE_REPO_URL && cd swarm-os && ./install.sh   (then pick \"Build it here\")"
+}
+
+# `docker pull` attached to the terminal (so its progress bars show — piping it
+# would hide them and make a multi-GB pull look hung). Only when it fails is it
+# run again with its output captured into PULL_ERR, for explain_pull_failure:
+# the failures worth diagnosing (refused, unknown tag, platform, network)
+# fail again in a second, and a rerun that succeeds is simply a success.
+PULL_ERR=""
+pull_attached() { # pull_attached <image>
+  PULL_ERR=""
+  docker pull "$1" && return 0
+  PULL_ERR="$(docker pull "$1" 2>&1)" && return 0
+  return 1
+}
+
+# Set by explain_pull_failure: daemon | platform | network | refused | tag | other
+PULL_FAILURE_KIND=""
+
+# Explain a failed `docker pull` from what docker actually said, rather than
+# guessing. Matching order matters: a missing platform also says "not found",
+# and GHCR answers "denied" both for a refused login and for a package that
+# does not exist (or is not public).
+explain_pull_failure() { # explain_pull_failure <image> <docker output>
+  local img="$1" out="$2" registry="${1%%/*}"
+  if [ -n "$out" ]; then
+    printf '%s\n' "$out" | tail -n 4 | sed 's/^/     docker: /' >&2
+  fi
+  case "$out" in
+    *"Cannot connect to the Docker daemon"*|*"Docker daemon socket"*|*"docker daemon"*"running"*)
+      PULL_FAILURE_KIND=daemon
+      note "the Docker daemon is not running, or this user may not use it (docker group)." ;;
+    *"no matching manifest"*|*"no match for platform"*|*"does not provide the specified platform"*)
+      PULL_FAILURE_KIND=platform
+      note "$img has no build for this machine's architecture ($(uname -m))."
+      build_from_source_hint ;;
+    *"no such host"*|*"i/o timeout"*|*"dial tcp"*|*"connection refused"*|*"network is unreachable"*|*"TLS handshake"*|*"Client.Timeout"*)
+      PULL_FAILURE_KIND=network
+      note "$registry could not be reached — check outbound network, DNS and any proxy." ;;
+    *denied*|*unauthorized*|*"authentication required"*|*forbidden*)
+      PULL_FAILURE_KIND=refused
+      note "$registry refused the pull. The published image is public and needs no login, so either:"
+      note "  - the reference is wrong, or the package does not exist (GHCR answers \"denied\" for both);"
+      note "  - a stale \`docker login\` for $registry is being sent — try: docker logout $registry"
+      note "  - it is a private mirror: log in first (docker login $registry), then re-run." ;;
+    *"manifest unknown"*|*"not found"*)
+      PULL_FAILURE_KIND=tag
+      note "$registry does not know this tag — check the reference (e.g. $DEFAULT_IMAGE)." ;;
+    *)
+      PULL_FAILURE_KIND=other
+      note "see docker's message above." ;;
+  esac
+}
 
 expand_path() { # ~ and $HOME, then absolute
   local p="$1"
@@ -452,7 +511,11 @@ wiz_step_image() {
   IMAGE_SOURCE="$src"
 
   if [ "$IMAGE_SOURCE" = local ]; then
-    [ -f "$REPO_ROOT/Dockerfile" ] || die "no Dockerfile here — a local build needs the full source tree."
+    if [ ! -f "$REPO_ROOT/Dockerfile" ]; then
+      warn "no Dockerfile here — this is the deploy kit, not the source tree, so it cannot build the image."
+      build_from_source_hint
+      die "nothing to build from in $REPO_ROOT."
+    fi
     SWARM_OS_IMAGE="$LOCAL_IMAGE"
     note "the image will be built as $LOCAL_IMAGE at the deploy step"
     note "SETTINGS ▸ SYSTEM UPDATE will report IMAGE IS LOCALLY BUILT — update with git pull + ./install.sh"
@@ -477,27 +540,38 @@ wiz_step_image() {
     return 0
   fi
 
-  # Probe the pull now rather than at deploy: a private package failing to pull
-  # is a login problem, and the login is a question, not an error message.
-  say "Checking access to $SWARM_OS_IMAGE ..."
-  if docker pull "$SWARM_OS_IMAGE" >/dev/null 2>&1; then
+  # Probe the pull now rather than at deploy, so a bad reference or a missing
+  # architecture is caught while the operator can still change the answer.
+  say "Pulling $SWARM_OS_IMAGE ..."
+  if pull_attached "$SWARM_OS_IMAGE"; then
     ok "image pulled"
     return 0
   fi
-  warn "Could not pull it. The GHCR package is private: it needs a \`docker login\` with a"
-  note "GitHub PAT carrying the read:packages scope, on an account the maintainer has granted access."
-  if [ "$INTERACTIVE" = 1 ] && ask_yn "Log in to ${SWARM_OS_IMAGE%%/*} now?" y; then
-    local gh_user gh_pat
-    ask gh_user "GitHub username" "${USER:-}"
-    ask_secret gh_pat "GitHub PAT (read:packages)"
-    if [ -n "$gh_pat" ]; then
-      printf '%s' "$gh_pat" | docker login "${SWARM_OS_IMAGE%%/*}" -u "$gh_user" --password-stdin \
-        && ok "logged in to ${SWARM_OS_IMAGE%%/*}" \
-        || warn "docker login failed."
-      unset gh_pat
-      docker pull "$SWARM_OS_IMAGE" >/dev/null 2>&1 && ok "image pulled" || warn "still cannot pull $SWARM_OS_IMAGE — the deploy step will try again."
+  warn "Could not pull $SWARM_OS_IMAGE."
+  explain_pull_failure "$SWARM_OS_IMAGE" "$PULL_ERR"
+
+  # A private mirror is the one case a login fixes. Offered only for an image
+  # that is NOT the public default, so the default flow never asks for one.
+  local registry="${SWARM_OS_IMAGE%%/*}"
+  if [ "$PULL_FAILURE_KIND" = refused ] && [ "$SWARM_OS_IMAGE" != "$DEFAULT_IMAGE" ] \
+     && [ "$INTERACTIVE" = 1 ] && ask_yn "Is $registry a private registry you can log in to? Log in now?" n; then
+    local reg_user reg_pw
+    ask reg_user "Username for $registry" "${USER:-}"
+    ask_secret reg_pw "Password or token for $registry"
+    if [ -n "$reg_pw" ]; then
+      if printf '%s' "$reg_pw" | docker login "$registry" -u "$reg_user" --password-stdin; then
+        ok "logged in to $registry"
+        unset reg_pw
+        if pull_attached "$SWARM_OS_IMAGE"; then ok "image pulled"; return 0; fi
+        warn "Still cannot pull $SWARM_OS_IMAGE."
+        explain_pull_failure "$SWARM_OS_IMAGE" "$PULL_ERR"
+      else
+        warn "docker login to $registry failed."
+      fi
+      unset reg_pw
     fi
   fi
+  note "the deploy step will try the pull again."
 }
 
 # ═══════════════════════════════════════════════════════════════════════════════
@@ -774,32 +848,31 @@ wiz_step_notifications() {
 
   ask SWARM_OS_DISCORD_WEBHOOK_URL "Discord webhook URL for idle / team-ended notifications (empty = off)" "${SWARM_OS_DISCORD_WEBHOOK_URL:-}"
 
-  printf '     %sUpdate detection reads the GitHub Releases of the public swarm-os repo.%s\n' "$C_DIM" "$C_RESET"
-  printf '     %sAny read-only GitHub PAT does — the read:packages one used by docker login too.%s\n' "$C_DIM" "$C_RESET"
-  printf '     %sEmpty is healthy:%s\n' "$C_DIM" "$C_RESET"
-  printf '     %sit simply means "never tell me about releases".%s\n' "$C_DIM" "$C_RESET"
+  printf '     %sUpdate detection reads the GitHub Releases of the public swarm-os repo and%s\n' "$C_DIM" "$C_RESET"
+  printf '     %sneeds no token. A read-only GitHub token is optional: it only raises the%s\n' "$C_DIM" "$C_RESET"
+  printf '     %sGitHub API rate limit. Leave it empty unless you hit that limit.%s\n' "$C_DIM" "$C_RESET"
   local pat=""
   if [ -n "${SWARM_OS_GITHUB_TOKEN:-}" ]; then
-    # bootstrap.sh exports the token it was given (private fork/mirror): the
-    # same read-only PAT that reads the repository reads its releases. Do not
-    # make the operator find it twice.
-    if ask_yn "A GitHub token is already in the environment — use it for update detection?" y; then
+    # Set explicitly: by the existing .env, or exported by bootstrap.sh from
+    # SWARM_OS_PAT / SWARM_OS_GITHUB_TOKEN / --token (never from an ambient
+    # GITHUB_TOKEN or GH_TOKEN). "no" means no token is written.
+    if ask_yn "A GitHub token is already configured — keep it for update detection?" y; then
       pat="$SWARM_OS_GITHUB_TOKEN"
     fi
   fi
-  [ -n "$pat" ] || ask_secret pat "GitHub PAT for update detection"
+  [ -n "$pat" ] || ask_secret pat "Optional GitHub token for update detection (empty = none)"
   if [ -n "$pat" ]; then
     local code
     code="$(curl -s -o /dev/null -w '%{http_code}' -H "Authorization: Bearer $pat" "$RELEASES_API" || printf '000')"
     case "$code" in
       200) ok "token can read the releases (latest release visible)" ;;
       404) warn "the API answered 404 — the token is valid but cannot see this repository (wrong scope or no access)." ;;
-      401|403) warn "the API refused the token (HTTP $code). Update detection will stay on no_token." ;;
+      401|403) warn "the API refused the token (HTTP $code). Fix it, or clear it to detect updates without one." ;;
       *) warn "could not reach api.github.com (HTTP $code) — keeping the token anyway." ;;
     esac
     SWARM_OS_GITHUB_TOKEN="$pat"
   else
-    SWARM_OS_GITHUB_TOKEN="${SWARM_OS_GITHUB_TOKEN:-}"
+    SWARM_OS_GITHUB_TOKEN=""
   fi
 }
 
@@ -932,7 +1005,8 @@ write_env() {
   env_kv  SWARM_OS_DISCORD_WEBHOOK_URL "${SWARM_OS_DISCORD_WEBHOOK_URL:-}"
   env_txt ""
   env_txt "# ── Update detection ─────────────────────────────────────────────────────────"
-  env_txt "# Read-only GitHub PAT, any scope (the read:packages one works). Empty = never announce releases."
+  env_txt "# Optional read-only GitHub token. Update detection works without it (public repo);"
+  env_txt "# a token only raises the GitHub API rate limit."
   env_kv  SWARM_OS_GITHUB_TOKEN "${SWARM_OS_GITHUB_TOKEN:-}"
   env_txt ""
   env_txt "# ── Envelopes ────────────────────────────────────────────────────────────────"
@@ -985,10 +1059,9 @@ load_env() {
 build_or_pull() {
   if image_is_registry "$SWARM_OS_IMAGE"; then
     say "Pulling $SWARM_OS_IMAGE"
-    if ! docker pull "$SWARM_OS_IMAGE"; then
-      warn "Pull failed. For a private registry, log in first:"
-      note "echo <YOUR_GITHUB_PAT> | docker login ${SWARM_OS_IMAGE%%/*} -u <github-user> --password-stdin"
-      note "(the PAT needs the read:packages scope)"
+    if ! pull_attached "$SWARM_OS_IMAGE"; then
+      warn "Pull failed."
+      explain_pull_failure "$SWARM_OS_IMAGE" "$PULL_ERR"
       die "could not pull the image."
     fi
     return 0
@@ -1149,7 +1222,7 @@ main() {
   if [ ! -f "$REPO_ROOT/$COMPOSE_DIST" ]; then
     warn "no $COMPOSE_DIST next to this script (looked in $REPO_ROOT)."
     note "run ./install.sh from the kit directory, or fetch the kit first:"
-    note "  curl -fsSL -H \"Authorization: Bearer <PAT>\" <raw-url>/bootstrap.sh | bash"
+    note "  curl -fsSL https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/bootstrap.sh | bash"
     die "kit incomplete."
   fi
 

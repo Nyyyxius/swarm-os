@@ -86,7 +86,7 @@ export interface ToolContext {
    */
   graph?: GraphStore;
   /**
-   * Skills subsystem (docs/plan-skills-importables.md). Optional so pre-skills
+   * Skills subsystem (docs/internal/skills/plan-skills-importables.md). Optional so pre-skills
    * test paths still build a context; production `McpServer` threads it from the
    * Spawner. When absent the `skills.*` tools answer SKILLS_UNAVAILABLE.
    */

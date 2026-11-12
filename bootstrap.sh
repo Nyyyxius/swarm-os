@@ -11,10 +11,10 @@
 #
 #   curl -fsSL https://raw.githubusercontent.com/Nyyyxius/swarm-os/master/bootstrap.sh | bash
 #
-# A token is only needed to fetch from a PRIVATE fork or mirror (SWARM_OS_REPO):
-# give it in the environment (SWARM_OS_PAT) or with --token. When one is given it
-# is also handed to the installer as the update detection token. The image itself
-# is a separate matter: the installer asks for its `docker login`.
+# A token is only for a PRIVATE fork or mirror (SWARM_OS_REPO): --token, or
+# SWARM_OS_PAT / SWARM_OS_GITHUB_TOKEN (an ambient GITHUB_TOKEN / GH_TOKEN is
+# NOT read). It is offered to the installer for update detection, which you may
+# decline. The image is public: it is pulled anonymously, no `docker login`.
 #
 # Re-running it is the update path for the kit itself: files are refreshed, your
 # `.env` is never touched, and the installer picks up where it left off.
@@ -30,7 +30,9 @@ set -euo pipefail
 REPO="${SWARM_OS_REPO:-Nyyyxius/swarm-os}"
 REF="${SWARM_OS_REF:-master}"
 DIR="${SWARM_OS_DIR:-$HOME/swarm-os}"
-TOKEN="${SWARM_OS_PAT:-${SWARM_OS_GITHUB_TOKEN:-${GITHUB_TOKEN:-${GH_TOKEN:-}}}}"
+# Explicit variables only: an ambient GITHUB_TOKEN / GH_TOKEN (CI, gh CLI) is
+# somebody else's credential, and must not end up in this deployment's .env.
+TOKEN="${SWARM_OS_PAT:-${SWARM_OS_GITHUB_TOKEN:-}}"
 FETCH_ONLY=0
 
 # The kit — exactly what `docs/deploy/README.md` says to hand over. Anything not
@@ -50,6 +52,8 @@ docs/deploy/install.en.md
 docs/deploy/install.fr.md
 docs/deploy/usage.en.md
 docs/deploy/usage.fr.md
+docs/providers.md
+SECURITY.md
 "
 
 if [ -t 1 ] && [ -z "${NO_COLOR:-}" ]; then
@@ -114,6 +118,13 @@ fetch_one() {
       -H "Authorization: Bearer ${TOKEN}" \
       -H "Accept: application/vnd.github.raw" \
       -H "X-GitHub-Api-Version: 2022-11-28" "$url" || printf '000')"
+    # A stale or wrong token must not block a public repository: retry the
+    # file anonymously before giving up.
+    case "$code" in
+      401|403)
+        url="https://raw.githubusercontent.com/${REPO}/${REF}/${path}"
+        code="$(curl -sS -w '%{http_code}' -o "$dest.part" --retry 2 --retry-delay 1 "$url" || printf '000')" ;;
+    esac
   else
     url="https://raw.githubusercontent.com/${REPO}/${REF}/${path}"
     code="$(curl -sS -w '%{http_code}' -o "$dest.part" --retry 2 --retry-delay 1 "$url" || printf '000')"
@@ -146,7 +157,7 @@ if [ -n "$failed" ]; then
   # to regenerate a token that works fine.
   if [ "$fetched" -gt 0 ]; then
     note "GitHub answers fine — ${fetched} other files came down from ${REPO}@${REF}"
-    die "those paths do not exist at ${REF}. Pick a ref that has them (--ref master), or ask the maintainer for a newer tag."
+    die "those paths do not exist at ${REF}. Pick a ref that has them (--ref master), or use a newer tag."
   fi
   case "$failed" in
     *"(401)"*|*"(403)"*) die "GitHub refused the token. It needs read access to ${REPO} (classic: scope \`repo\`; fine-grained: Contents: Read) — or drop it: the public repo needs none." ;;

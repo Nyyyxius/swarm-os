@@ -2,7 +2,7 @@
 
 > Recherche & analyse — 2026-08-01. Établi à partir d'une cartographie du code
 > de ce repo (`packages/server`, `packages/web`) et du comparatif
-> `docs/comparatif-hermes-agent.md` (§2). Calqué sur la feature **mémoire
+> `docs/internal/analyses/comparatif-hermes-agent.md` (§2). Calqué sur la feature **mémoire
 > partagée** déjà livrée (`docs/memoire-partagee.md`), qui sert de patron éprouvé
 > à chaque couche.
 >
@@ -15,7 +15,7 @@
 
 ## 1. Le gap à combler (recadré après vérification du code)
 
-`docs/comparatif-hermes-agent.md` (§2) : coordination d'état = **« Mailbox
+`docs/internal/analyses/comparatif-hermes-agent.md` (§2) : coordination d'état = **« Mailbox
 volatile + état SQLite des sessions »** vs Hermes = **« Kanban SQLite (cartes,
 assignee, dépendances, audit log, reprise après crash) »**.
 
@@ -319,7 +319,7 @@ patron overlay de la mémoire) :
   de scheduling ; mise en évidence de l'âge/SLA des cartes ; templates de cartes par
   rôle ; tableau mobile.
 
-## 11. Décisions (confirmées par @eleodas01 le 2026-08-01)
+## 11. Décisions (confirmées le 2026-08-01)
 
 - ✅ **Portée** : **par équipe** (primaire) + **lecture cross-équipe réservée aux
   leads**. **Pas** de tableau global unique.

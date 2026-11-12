@@ -157,24 +157,23 @@ const SELF_UPDATE_COPY: Record<SelfUpdateStatus, { label: string; fallback: stri
   registry_auth_missing: {
     label: 'REGISTRY LOGIN MISSING',
     fallback:
-      'The host is not authenticated against the registry. Run `docker login ghcr.io` there with a read:packages token.',
+      'The host cannot pull the image. Check the image reference; the published image is public and needs no login, so only a private mirror requires `docker login` on the host.',
   },
 };
 
 /**
- * Why the last check produced no verdict. `ok` and `error` are absent on
- * purpose: `ok` has nothing to explain, `error` carries the server's own
- * message in `system.error`.
+ * Why the last check produced no verdict. `ok`, `error` and `rate_limited`
+ * are absent on purpose: `ok` has nothing to explain, the other two carry the
+ * server's own sentence in `system.error` (for `rate_limited`, when the limit
+ * resets and whether a token would raise it).
  */
 const CHECK_COPY: Partial<Record<SystemCheckStatus, string>> = {
   never_checked: 'no check has completed yet — the first one runs in the background.',
   no_releases: 'the repository has no published release to compare against.',
-  no_token:
-    'no SWARM_OS_GITHUB_TOKEN in the deployment .env — set one (any read-only PAT, e.g. the read:packages one) to read releases.',
   unauthorized:
-    'GitHub rejected the token (401) — SWARM_OS_GITHUB_TOKEN is expired or revoked.',
+    'GitHub rejected SWARM_OS_GITHUB_TOKEN — it is expired, revoked or lacks access. Remove it to check without a token, or replace it.',
   not_found:
-    'the releases endpoint answered 404 — the repository is invisible to this token, or was renamed.',
+    'the releases endpoint answered 404 — the repository was renamed, or is private and not visible to this instance.',
 };
 
 /** Server error bodies are `{ error }`; prefer that sentence over the status. */
@@ -893,6 +892,20 @@ export function UpdateSection({ focus = false }: UpdateSectionProps) {
                 last check failed :: {system.error}
               </div>
             )}
+            {system.checkStatus === 'rate_limited' && (
+              <div className="field-help" style={{ color: 'var(--warn)' }}>
+                {system.error ??
+                  'GitHub API rate limit reached — the next check retries on its own.'}
+              </div>
+            )}
+            {(system.checkStatus === 'ok' || system.checkStatus === 'no_releases') &&
+              system.error && (
+                // The verdict is valid; the note says the configured token was
+                // rejected and the check ran without it.
+                <div className="field-help" style={{ color: 'var(--warn)' }}>
+                  {system.error}
+                </div>
+              )}
             {system.dismissedVersion && (
               <div className="field-help">
                 v{system.dismissedVersion} is hidden.{' '}

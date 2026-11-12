@@ -1,7 +1,7 @@
 // S12 — Unit tests for `classifyBubble`.
 //
 // Table-driven coverage of the four `BubbleKind` buckets plus the priority
-// edge cases listed in `docs/update_system/12_mapping_from.md` §5.
+// edge cases listed in `docs/internal/ui-redesign/update_system/12_mapping_from.md` §5.
 
 import { describe, it, expect } from 'vitest';
 import type { MailMessageView } from '../api/client';

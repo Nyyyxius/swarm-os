@@ -74,9 +74,11 @@ export function readLogTail(
 function stripAnsi(s: string): string {
   // CSI / OSC / ESC followed by various terminators.
   const ansi =
+    // eslint-disable-next-line no-control-regex -- ESC/BEL are the subject matter here
     /\x1B(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1B]*(?:\x07|\x1B\\)|[@-_])/g;
   let out = s.replace(ansi, '');
   // Strip leftover C0 controls except CR/LF/TAB. Keep \n so .split('\n') works.
+  // eslint-disable-next-line no-control-regex -- control chars are the subject matter here
   out = out.replace(/[\x00-\x08\x0B-\x0C\x0E-\x1F\x7F]/g, '');
   return out;
 }

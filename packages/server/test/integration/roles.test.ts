@@ -20,6 +20,9 @@ afterEach(async () => {
   await stack.teardown();
 });
 
+// The parsed JSON is indexed freely by the assertions; typing it would mean
+// restating every response DTO in the test file (same pattern as crons.test.ts).
+// eslint-disable-next-line @typescript-eslint/no-explicit-any
 async function postRole(body: unknown): Promise<{ status: number; body: any }> {
   const res = await fetch(`http://127.0.0.1:${stack.mainPort}/roles`, {
     method: 'POST',

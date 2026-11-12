@@ -406,7 +406,7 @@ void modelCatalogue.resolve();
 // has no constructor arguments, so the position is free.
 const pluginToolRegistry = new PluginToolRegistry();
 
-// ---- Skills library (docs/plan-skills-importables.md) ----------------------
+// ---- Skills library (docs/internal/skills/plan-skills-importables.md) ----------------------
 // PER INSTANCE registry. The store OWNS its `skills` table on the raw Db handle
 // (like MemoryStore/TaskboardStore/ApprovalStore) — no schema.sql / INLINE_SCHEMA
 // touch. Wrapped so a skills-subsystem failure never stops the boot: the
@@ -474,7 +474,7 @@ const spawner = new Spawner(config, {
 });
 
 // Give the skills subsystem a live-orchestrator lookup so the REST + MCP scope
-// activation paths can fire the HOT channel (docs/plan-skills-importables.md §2.2).
+// activation paths can fire the HOT channel (docs/internal/skills/plan-skills-importables.md §2.2).
 skillsSubsystem?.setOrchestratorLookup((id) => spawner.get(id) ?? null);
 
 // Lot 16 — give the board a way to price a card's assignee. Late-wired for the
@@ -517,7 +517,7 @@ const ide = new IdeSupervisor(config);
 // descriptor can capture them; NOT started here. `featureRegistry.startEnabled()`
 // arms them iff monitoring is enabled, and a hot enable/disable drives them
 // through the descriptor. Both are lost-on-restart by design (rings are in
-// memory) — see docs/update_system/09_metrics_messages.md §7.3.
+// memory) — see docs/internal/ui-redesign/update_system/09_metrics_messages.md §7.3.
 //   - aggregator: 60-pt global ring + 8-pt per-orch rings, ticked every 60 s
 //     (`GET /metrics/messages`).
 //   - busMetrics: 60-slot ring (1 s/slot) backing latency / throughput /
@@ -957,7 +957,7 @@ try {
 }
 
 // Give the skills subsystem a plugin-state lookup so `requires.plugins` resolves
-// to installed+enabled + warnings (docs/plan-skills-importables.md §9). Late-
+// to installed+enabled + warnings (docs/internal/skills/plan-skills-importables.md §9). Late-
 // bound because PluginStore is built after the skills subsystem. Best-effort:
 // when the plugin registry is absent, every required plugin reads as missing.
 skillsSubsystem?.setPluginLookup((name) => {
@@ -1080,9 +1080,10 @@ const updates = new UpdateService({
 });
 log.info({
   event: 'boot.updates',
-  // Value never logged — only whether a PAT exists, which is the one thing an
-  // operator debugging "why is there no update badge" needs to know. Asked via
-  // the module's own reader so the env var is named in exactly one place.
+  // Value never logged — only whether a token is set. Detection works without
+  // one; a token only raises GitHub's rate limit, which is what an operator
+  // debugging a `rate_limited` check needs to know. Asked via the module's own
+  // reader so the env var is named in exactly one place.
   githubToken: githubTokenFromEnv() ? 'configured' : 'unset',
   runsPersisted: updateStore !== undefined,
 });

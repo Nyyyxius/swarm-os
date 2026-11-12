@@ -9,7 +9,12 @@
 #   runtime  → minimal node:24-bookworm-slim + native claude CLI + curl + tini,
 #              runs as USER node, exposes only port 8787.
 #
-# Build:    docker build -t swarm-os:phase5 .
+# Build:    docker build -t swarm-os:local .
+# Arch:     multi-arch. Every architecture-specific download in the runtime
+#           stage (VS Code CLI, Claude Code native build + checksum, uv) is
+#           picked from TARGETARCH, and the native modules are compiled in the
+#           builder for the target platform. CI publishes linux/amd64 and
+#           linux/arm64 (`docker buildx build --platform linux/amd64,linux/arm64`).
 # Run:      see examples/docker-compose.{single,multi}.yml
 #
 # Plan refs: §6 (Phase 5), §13 (containerisation + env table), §14 (security).

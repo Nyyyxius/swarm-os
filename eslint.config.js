@@ -6,7 +6,7 @@ import globals from 'globals';
 
 export default [
   {
-    ignores: ['**/node_modules/**', '**/dist/**', '**/.vite/**', 'pnpm-lock.yaml'],
+    ignores: ['**/node_modules/**', '**/.claude/**', '**/dist/**', '**/.vite/**', 'pnpm-lock.yaml'],
   },
   js.configs.recommended,
   ...tseslint.configs.recommended,

@@ -58,7 +58,7 @@ describe('orderKeyBetween', () => {
   });
 
   it('keeps ordering when repeatedly inserting between adjacent keys', () => {
-    let a = orderKeyBetween('', '');
+    const a = orderKeyBetween('', '');
     let b = orderKeyBetween(a, '');
     for (let i = 0; i < 40; i++) {
       const m = orderKeyBetween(a, b);

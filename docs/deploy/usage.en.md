@@ -15,8 +15,15 @@ How to operate a running instance. For install/remote access see
   default model and effort, and an optional Discord connector.
 - **Crons** — scheduled wake-ups, targeting a **role**. A role can carry any
   number of them; see [Crons](#crons) below.
-- All sessions run in `bypassPermissions`. **Isolation comes from the container,
-  not the runtime — never run swarm-os outside Docker.**
+- **Permissions** — agents run with their permission prompts off by default
+  (`bypassPermissions` for claude; codex, gemini and opencode always run without
+  prompts). What they can reach depends on the transport: under `local` they are
+  confined to the container and its mounts; under `ssh` they run **on the host**
+  as the SSH account, and the container isolates nothing. Read
+  [SECURITY.md](../../SECURITY.md) before choosing.
+- **Human approvals** — a claude team in a prompting mode (`default`, `plan`,
+  `acceptEdits`, set per role or per team) turns each permission prompt into an
+  approval you grant or refuse from the UI or Discord.
 
 ---
 
@@ -83,14 +90,16 @@ server token, no provider key**), an explicit interpreter (`python3`, `bash` or
 > the cron wakes — a recurring execution with no session supervision.
 
 Anyone holding the `X-Auth-Token` can therefore run arbitrary code **in the
-container**. That is the power the token already grants (a `bypassPermissions`
-team on `/workspace` runs arbitrary code too), but it is worth saying out loud.
+container** — and under the `ssh` transport the container holds a key that logs
+into the host. That is the power the token already grants (a `bypassPermissions`
+team runs arbitrary code too, and so does a plugin), but it is worth saying out
+loud. See [SECURITY.md](../../SECURITY.md#the-auth-token).
 
 Worked example, the full output contract and the `uv run --with requests`
 variant: [examples/crons/](../../examples/crons/).
 
 `SWARM_OS_SCHEDULE_ENABLED` (default on) and `SWARM_OS_SCHEDULE_TZ` (default
-UTC) are unchanged — they are now the master switch and timezone for all crons.
+UTC) are the master switch and timezone for all crons.
 With scheduling off, crons stop ticking (the screen says so) but RUN NOW still
 works.
 
@@ -114,7 +123,10 @@ All state lives in the `/data` volume (`DATA_PATH` on the host):
 - `logs/` — per-session logs. `backups/` — SQLite snapshots.
 - `.claude-runtime/` — the writable copy of your `~/.claude`.
 
-Behaviour:
+Behaviour (the variables in parentheses are read by the server but not passed
+by the shipped compose file: to change one, add it to the service's
+`environment:`; the same goes for the two `SWARM_OS_SCHEDULE_*` variables
+above):
 
 - **Backups** — hot SQLite snapshots every 6 h, keeping 14
   (`SWARM_OS_BACKUP_INTERVAL_MS`, `SWARM_OS_BACKUP_KEEP`).
@@ -145,9 +157,10 @@ a newer default.
 
 ## Updating
 
-**SETTINGS ▸ SYSTEM UPDATE** shows the running version and, when a
-`SWARM_OS_GITHUB_TOKEN` is configured, the newest published release. Without
-that token nothing is ever announced — see install.en.md §7.4.
+**SETTINGS ▸ SYSTEM UPDATE** shows the running version and the newest
+published release, read from the public GitHub releases with no token needed.
+`SWARM_OS_GITHUB_TOKEN` is optional and only raises GitHub's rate limit — see
+install.en.md §7.4.
 
 If the deployment qualifies (SSH transport + a registry `SWARM_OS_IMAGE`), the
 same panel applies the update itself: it rewrites the `SWARM_OS_IMAGE=` line of
