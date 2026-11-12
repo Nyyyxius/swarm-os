@@ -30,11 +30,12 @@ archives
 prototypes
 swarm-os-dist.zip
 coverage
-*.pem
-*.key
-id_rsa*
-id_ed25519*
-id_ecdsa*
+# `**/` because .dockerignore patterns are not recursive, unlike .gitignore.
+**/*.pem
+**/*.key
+**/id_rsa*
+**/id_ed25519*
+**/id_ecdsa*
 *.log
 *.env
 .env

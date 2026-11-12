@@ -1080,9 +1080,10 @@ const updates = new UpdateService({
 });
 log.info({
   event: 'boot.updates',
-  // Value never logged — only whether a PAT exists, which is the one thing an
-  // operator debugging "why is there no update badge" needs to know. Asked via
-  // the module's own reader so the env var is named in exactly one place.
+  // Value never logged — only whether a token is set. Detection works without
+  // one; a token only raises GitHub's rate limit, which is what an operator
+  // debugging a `rate_limited` check needs to know. Asked via the module's own
+  // reader so the env var is named in exactly one place.
   githubToken: githubTokenFromEnv() ? 'configured' : 'unset',
   runsPersisted: updateStore !== undefined,
 });

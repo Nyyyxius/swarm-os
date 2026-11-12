@@ -3,7 +3,7 @@
  *
  * WHY this file exists: `IGNORED_DIR_NAMES` was consumed by exact name equality
  * (`set.has(ent.name)`) in the walk and in discovery. Exact equality is a
- * guess-from-the-name heuristic, and it broke in production: the `trader`
+ * guess-from-the-name heuristic, and it broke in production: one
  * deployment keeps its Python virtualenv in `.venv-intraday`, which matches no
  * entry of the set. Discovery promoted it to a full-blown codegraph scope,
  * graphify tried to index it (`codegraph.graphify run_failed, sourceDir:
@@ -67,7 +67,7 @@ import { IGNORED_DIR_NAMES } from './constants.js';
  * Losing `venv_old` / `node_modules.bak` from layer 1 is not a regression we
  * merely tolerate — for virtualenvs it is covered by layer 2, which is strictly
  * better than the name guess: the directory that motivated this whole fix,
- * `/home/ubuntu/projets/trader/v2/.venv-intraday`, was verified in production to
+ * that deployment's `.venv-intraday`, was verified in production to
  * contain a `pyvenv.cfg`, so the STRUCTURAL check catches it (and every
  * `venv_old`, `env-prod`, `myproj-py3.11`) on its own. For a parked
  * `node_modules.bak` there is no normative marker, so it becomes an ordinary

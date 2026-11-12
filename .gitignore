@@ -41,6 +41,11 @@ swarm-os-dist.zip
 *.sqlite-*
 *.jsonl
 *.bak
+# ...but never test fixtures: a fixture silently left out of a commit passes
+# locally and fails in CI.
+!**/fixtures/**
+!**/__fixtures__/**
+!**/test/**
 
 # Keys and certificates
 *.pem
