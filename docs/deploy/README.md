@@ -70,4 +70,4 @@ releases for update detection).
 `docker-compose.stiix.yml` / `docker-compose.test.yml` (they hold your paths,
 tailnet name and SSH keys). The recipient sets up their **own** Claude Code login.
 
-The Software is licensed under `LICENSE` (proprietary, all rights reserved).
+The Software is licensed under the MIT license (see `LICENSE`).

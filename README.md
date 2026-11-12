@@ -1,5 +1,5 @@
 <!-- swarm-os — agent-readable README. Plain Markdown only (no mermaid/HTML). -->
-<!-- License: proprietary, all rights reserved — see LICENSE. -->
+<!-- License: MIT — see LICENSE. -->
 
 # swarm-os
 
@@ -386,5 +386,6 @@ Full posture in `plan.md` §14 and `docs/phase-5-containerisation.md` §7.
 
 ## License
 
-Proprietary — all rights reserved. See `LICENSE`. The image bundles third-party
-tools (Claude Code CLI, VS Code CLI, npm deps), each under its own license.
+[MIT](LICENSE). The image bundles third-party tools (Claude Code CLI, VS Code
+CLI, npm deps), each under its own license; the MIT license covers swarm-os
+itself, not those tools.

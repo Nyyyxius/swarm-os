@@ -2,6 +2,7 @@
   "name": "@swarm-os/plugin-sdk",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "description": "Types-only SDK for authoring swarm-os plugins — the public SwarmPluginApi contract, with no runtime dependency on the server.",
   "type": "module",
   "main": "dist/index.js",
