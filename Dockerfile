@@ -22,7 +22,7 @@
 # ---------------------------------------------------------------------------
 # Stage 1 — builder
 # ---------------------------------------------------------------------------
-FROM node:24-bookworm-slim AS builder
+FROM node:25-bookworm-slim AS builder
 
 # Native deps for node-pty + better-sqlite3 (compiled at install time).
 # git is needed because some npm packages reference git URLs.
@@ -90,7 +90,7 @@ RUN pnpm --filter=server deploy --prod --legacy /deploy/server
 # ---------------------------------------------------------------------------
 # Stage 2 — runtime
 # ---------------------------------------------------------------------------
-FROM node:24-bookworm-slim AS runtime
+FROM node:25-bookworm-slim AS runtime
 
 # Runtime essentials:
 #   - tini   → proper PID 1 / zombie reaper (also `init: true` in compose).
