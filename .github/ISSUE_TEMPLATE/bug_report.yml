@@ -29,7 +29,7 @@ body:
     attributes:
       label: swarm-os version
       description: Shown in the UI settings, or returned by `/info` on the server.
-      placeholder: "0.10.4"
+      placeholder: "0.11.0"
     validations:
       required: true
   - type: dropdown

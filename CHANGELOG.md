@@ -18,6 +18,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+## [0.11.0] - 2026-11-13
+
 ### Added
 
 - Public container image: `ghcr.io/nyyyxius/swarm-os` can be pulled
@@ -231,7 +233,8 @@ First versioned release: the MVP plus everything built on it until then.
 - Third-party deployment kit: `install.sh`, `.env`-driven compose file,
   bilingual install and usage guides, and image publishing to GHCR.
 
-[Unreleased]: https://github.com/Nyyyxius/swarm-os/compare/v0.10.4...HEAD
+[Unreleased]: https://github.com/Nyyyxius/swarm-os/compare/v0.11.0...HEAD
+[0.11.0]: https://github.com/Nyyyxius/swarm-os/compare/v0.10.4...v0.11.0
 [0.10.4]: https://github.com/Nyyyxius/swarm-os/compare/v0.10.3...v0.10.4
 [0.10.3]: https://github.com/Nyyyxius/swarm-os/compare/7a3440e...v0.10.3
 [0.10.1]: https://github.com/Nyyyxius/swarm-os/compare/87b63cc...7a3440e
